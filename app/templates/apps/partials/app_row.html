@@ -1,0 +1,33 @@
+<tr id="app-{{ app.id }}">
+  <td class="px-4 py-3">
+    <a href="{{ app.job.url }}" target="_blank" class="text-blue-600 hover:underline font-medium">
+      {{ app.job.title }}
+    </a>
+  </td>
+  <td class="px-4 py-3 text-gray-600">{{ app.job.company }}</td>
+  <td class="px-4 py-3">
+    <select
+      hx-post="/apps/{{ app.id }}/status"
+      hx-target="#app-{{ app.id }}"
+      hx-swap="outerHTML"
+      hx-include="[name='status']"
+      name="status"
+      class="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">
+      {% for s in ['not_applied', 'applied', 'interviewing', 'offered', 'rejected', 'withdrawn'] %}
+        <option value="{{ s }}" {% if app.status.value == s %}selected{% endif %}>
+          {{ s | replace("_", " ") | title }}
+        </option>
+      {% endfor %}
+    </select>
+  </td>
+  <td class="px-4 py-3">
+    {% if app.documents %}
+      <span class="text-xs text-green-600">{{ app.documents | length }} doc(s)</span>
+    {% else %}
+      <span class="text-xs text-gray-400">—</span>
+    {% endif %}
+  </td>
+  <td class="px-4 py-3 text-gray-500 text-xs">
+    {{ app.applied_at.strftime('%Y-%m-%d') if app.applied_at else '—' }}
+  </td>
+</tr>

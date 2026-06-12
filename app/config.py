@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"
+    DOCS_OUTPUT_DIR: str = "/storage"
     MIN_MATCH_SCORE: int = 70
     FETCH_INTERVAL_HOURS: int = 5
     MIN_KEYWORD_SKILLS: int = 2

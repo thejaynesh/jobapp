@@ -1,0 +1,34 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\pagestyle{empty}
+
+\begin{document}
+
+\begin{flushright}
+{{ profile.name | latex_escape }}\\
+{{ profile.contact.email | latex_escape }}\\
+{{ profile.contact.phone | latex_escape }}
+\end{flushright}
+
+\vspace{1em}
+
+\begin{flushleft}
+Hiring Manager\\
+{{ job_company | latex_escape }}
+\end{flushleft}
+
+\vspace{1em}
+
+Dear Hiring Manager,
+
+\vspace{0.5em}
+
+{{ cover_letter_body | latex_escape }}
+
+\vspace{1em}
+
+Sincerely,\\[2em]
+{{ profile.name | latex_escape }}
+
+\end{document}

@@ -16,6 +16,8 @@ def fetch_jobs(self) -> dict:
             "fetch_jobs complete — fetched=%d inserted=%d merged=%d skipped=%d",
             result["fetched"], result["inserted"], result["merged"], result["skipped"],
         )
+        from app.tasks.match import match_jobs
+        match_jobs.delay()
         return result
     except Exception as exc:
         logger.error("fetch_jobs task raised unexpectedly: %s", exc)

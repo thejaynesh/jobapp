@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Jobs — JobApp{% endblock %}
+{% block content %}
+<div class="flex justify-between items-center mb-6">
+  <h1 class="text-2xl font-bold text-gray-800">Jobs</h1>
+  <span class="text-sm text-gray-500">{{ jobs|length }} shown</span>
+</div>
+
+<form class="flex gap-3 mb-6" method="get" action="/jobs">
+  <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
+    class="border border-gray-300 rounded px-3 py-2 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+  <select name="status" class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none">
+    <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
+    <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
+    <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
+    <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
+  </select>
+  <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Filter</button>
+</form>
+
+<div id="job-list" class="space-y-4">
+{% if jobs %}
+  {% for job in jobs %}
+    {% include "jobs/partials/job_card.html" %}
+  {% endfor %}
+{% else %}
+  <div class="text-center py-16 text-gray-400">
+    <p class="text-lg">No jobs found.</p>
+    <p class="text-sm mt-1">Jobs are fetched every 5 hours. Check back soon.</p>
+  </div>
+{% endif %}
+</div>
+{% endblock %}
