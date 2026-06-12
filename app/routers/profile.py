@@ -199,3 +199,54 @@ def save_templates(
         "profile/partials/templates_tab.html",
         {"request": request, "profile": profile.data, "saved": True},
     )
+
+
+@router.post("/narrative/generate-questions", response_class=HTMLResponse)
+def narrative_generate_questions(request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import generate_questions
+    from app.config import settings
+    profile = generate_questions(
+        db,
+        api_key=settings.NVIDIA_NIM_API_KEY,
+        base_url=settings.NVIDIA_NIM_BASE_URL,
+        model=settings.NVIDIA_NIM_MODEL,
+    )
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/narrative.html",
+        {"request": request, "profile": profile.data},
+    )
+
+
+@router.post("/narrative/answer/{index}", response_class=HTMLResponse)
+def save_narrative_answer_route(
+    request: Request,
+    index: int,
+    answer: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import save_narrative_answer
+    profile = save_narrative_answer(db, index=index, answer=answer)
+    db.commit()
+    item = profile.data["narrative"]["answers"][index]
+    return templates.TemplateResponse(
+        "profile/partials/narrative_answer.html",
+        {"request": request, "item": item, "index": index, "saved": True},
+    )
+
+
+@router.post("/narrative/regenerate-summary", response_class=HTMLResponse)
+def regenerate_summary(request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import generate_summary
+    from app.config import settings
+    profile = generate_summary(
+        db,
+        api_key=settings.NVIDIA_NIM_API_KEY,
+        base_url=settings.NVIDIA_NIM_BASE_URL,
+        model=settings.NVIDIA_NIM_MODEL,
+    )
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/narrative.html",
+        {"request": request, "profile": profile.data},
+    )

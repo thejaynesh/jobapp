@@ -1,1 +1,60 @@
-<p>stub</p>
+<div id="narrative-panel" class="space-y-6">
+
+  {% if not profile.narrative.answers %}
+  <div class="text-center py-12">
+    <p class="text-gray-500 mb-4">No questions yet. Generate questions to get started.</p>
+    <button hx-post="/profile/narrative/generate-questions"
+            hx-target="#narrative-panel" hx-swap="outerHTML"
+            hx-indicator="#gen-spinner"
+            class="bg-blue-600 text-white px-5 py-2 rounded hover:bg-blue-700">
+      Generate Questions
+    </button>
+    <span id="gen-spinner" class="htmx-indicator ml-2 text-gray-400 text-sm">Generating...</span>
+  </div>
+
+  {% else %}
+  <div class="flex justify-between items-center">
+    <h2 class="text-lg font-semibold">Narrative Questions</h2>
+    <button hx-post="/profile/narrative/generate-questions"
+            hx-target="#narrative-panel" hx-swap="outerHTML"
+            hx-confirm="This will reset all answers. Continue?"
+            class="text-sm text-gray-500 hover:text-blue-600">Regenerate Questions</button>
+  </div>
+
+  <div class="space-y-4" id="answers-list">
+    {% for item in profile.narrative.answers %}
+    {% set loop_index = loop.index0 %}
+    <div class="border border-gray-100 rounded p-4 bg-white" id="answer-{{ loop_index }}">
+      <p class="text-sm font-medium text-gray-700 mb-2">{{ loop_index + 1 }}. {{ item.question }}</p>
+      <form hx-post="/profile/narrative/answer/{{ loop_index }}"
+            hx-target="#answer-{{ loop_index }}" hx-swap="outerHTML">
+        <textarea name="answer" rows="3"
+                  class="w-full border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-300">{{ item.answer }}</textarea>
+        <button type="submit" class="mt-2 text-xs text-blue-600 hover:underline">Save answer</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="border-t border-gray-200 pt-6">
+    <div class="flex justify-between items-center mb-3">
+      <h3 class="font-semibold text-gray-700">Voice Summary</h3>
+      <button hx-post="/profile/narrative/regenerate-summary"
+              hx-target="#narrative-panel" hx-swap="outerHTML"
+              hx-indicator="#summary-spinner"
+              class="text-sm text-blue-600 hover:underline">
+        Regenerate Summary
+        <span id="summary-spinner" class="htmx-indicator text-gray-400">...</span>
+      </button>
+    </div>
+    {% if profile.narrative.summary %}
+    <p class="text-gray-700 text-sm bg-blue-50 border border-blue-100 rounded p-4 leading-relaxed">
+      {{ profile.narrative.summary }}
+    </p>
+    {% else %}
+    <p class="text-gray-400 text-sm">Answer the questions above, then click Regenerate Summary.</p>
+    {% endif %}
+  </div>
+
+  {% endif %}
+</div>

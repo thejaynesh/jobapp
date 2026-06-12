@@ -81,3 +81,39 @@ def test_save_templates(client):
     })
     assert response.status_code == 200
     assert b"documentclass" in response.content
+
+
+def test_save_narrative_answer_route(client, db):
+    from app.services.profile_service import save_section, get_or_create_profile
+    get_or_create_profile(db)
+    save_section(db, "narrative", {
+        "answers": [{"question": "How do you solve problems?", "answer": ""}],
+        "summary": "",
+    })
+    db.commit()
+    response = client.post("/profile/narrative/answer/0", data={"answer": "I break it down."})
+    assert response.status_code == 200
+    assert b"I break it down." in response.content
+
+
+def test_generate_questions_route(client):
+    from unittest.mock import patch
+    mock_qs = "1. How do you solve problems?\n2. What energizes you?"
+    with patch("app.services.profile_service.chat_completion", return_value=mock_qs):
+        response = client.post("/profile/narrative/generate-questions")
+    assert response.status_code == 200
+
+
+def test_regenerate_summary_route(client, db):
+    from unittest.mock import patch
+    from app.services.profile_service import save_section, get_or_create_profile
+    get_or_create_profile(db)
+    save_section(db, "narrative", {
+        "answers": [{"question": "Q", "answer": "I love hard problems."}],
+        "summary": "",
+    })
+    db.commit()
+    with patch("app.services.profile_service.chat_completion", return_value="Jay loves hard problems."):
+        response = client.post("/profile/narrative/regenerate-summary")
+    assert response.status_code == 200
+    assert b"Jay loves hard problems." in response.content
