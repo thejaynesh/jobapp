@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+venv/
+*.egg-info/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+storage/
+alembic/versions/*.py
+!alembic/versions/.gitkeep
+!alembic/versions/0001_initial.py
