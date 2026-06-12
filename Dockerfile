@@ -14,7 +14,8 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir ".[dev]"
 
 # Install playwright chromium for scraping
-RUN playwright install chromium --with-deps
+RUN playwright install-deps chromium || true
+RUN playwright install chromium
 
 COPY . .
 
