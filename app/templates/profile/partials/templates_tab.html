@@ -1,0 +1,18 @@
+<form hx-post="/profile/templates" hx-target="this" hx-swap="outerHTML" class="space-y-6">
+  {% if saved %}<p class="text-green-600 text-sm success-flash">Saved.</p>{% endif %}
+  <div>
+    <label class="block text-sm font-medium text-gray-700 mb-1">
+      LaTeX Resume Template
+      <span class="text-gray-400 text-xs font-normal ml-1">— LLM fills in tailored sections</span>
+    </label>
+    <textarea name="latex_template" rows="20" class="w-full border border-gray-300 rounded px-3 py-2 text-sm latex-editor">{{ profile.latex_template }}</textarea>
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700 mb-1">
+      Cover Letter Base Template
+      <span class="text-gray-400 text-xs font-normal ml-1">— LLM rewrites with job-specific content</span>
+    </label>
+    <textarea name="cover_letter_template" rows="10" class="w-full border border-gray-300 rounded px-3 py-2 text-sm">{{ profile.cover_letter_template }}</textarea>
+  </div>
+  <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Save Templates</button>
+</form>

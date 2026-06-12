@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.database import get_db
+from app.routers import profile as profile_router
 
 
 @asynccontextmanager
@@ -16,6 +17,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="JobApp", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.include_router(profile_router.router)
 
 
 @app.get("/health")

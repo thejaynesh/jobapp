@@ -1,0 +1,201 @@
+from fastapi import APIRouter, Depends, Form, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.services.profile_service import get_or_create_profile
+
+router = APIRouter(prefix="/profile", tags=["profile"])
+templates = Jinja2Templates(directory="app/templates")
+
+TABS = ["personal", "experience", "projects", "skills", "education", "templates", "narrative"]
+
+
+@router.get("", response_class=HTMLResponse)
+def get_profile(request: Request, tab: str = "personal", db: Session = Depends(get_db)):
+    if tab not in TABS:
+        tab = "personal"
+    profile = get_or_create_profile(db)
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/index.html",
+        {"request": request, "profile": profile.data, "active_tab": tab},
+    )
+
+
+@router.post("/personal", response_class=HTMLResponse)
+def save_personal(
+    request: Request,
+    name: str = Form(""),
+    email: str = Form(""),
+    phone: str = Form(""),
+    linkedin: str = Form(""),
+    github: str = Form(""),
+    location: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import save_section
+    profile = save_section(db, "personal", {
+        "name": name, "email": email, "phone": phone,
+        "linkedin": linkedin, "github": github, "location": location,
+    })
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/personal.html",
+        {"request": request, "profile": profile.data, "saved": True},
+    )
+
+
+@router.post("/experience/add", response_class=HTMLResponse)
+def add_experience(request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import add_list_item
+    profile = add_list_item(db, "experience", {
+        "company": "", "role": "", "start_date": "", "end_date": "",
+        "bullets": [], "tech": [],
+    })
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/experience.html",
+        {"request": request, "profile": profile.data},
+    )
+
+
+@router.post("/experience/{item_id}", response_class=HTMLResponse)
+def save_experience_item(
+    request: Request, item_id: str,
+    company: str = Form(""), role: str = Form(""),
+    start_date: str = Form(""), end_date: str = Form(""),
+    bullets: str = Form(""), tech: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import update_list_item
+    profile = update_list_item(db, "experience", item_id, {
+        "company": company, "role": role,
+        "start_date": start_date, "end_date": end_date,
+        "bullets": [b.strip() for b in bullets.splitlines() if b.strip()],
+        "tech": [t.strip() for t in tech.split(",") if t.strip()],
+    })
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/experience.html",
+        {"request": request, "profile": profile.data, "saved_id": item_id},
+    )
+
+
+@router.delete("/experience/{item_id}", response_class=HTMLResponse)
+def delete_experience_item(request: Request, item_id: str, db: Session = Depends(get_db)):
+    from app.services.profile_service import remove_list_item
+    profile = remove_list_item(db, "experience", item_id)
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/experience.html",
+        {"request": request, "profile": profile.data},
+    )
+
+
+# Projects
+@router.post("/projects/add", response_class=HTMLResponse)
+def add_project(request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import add_list_item
+    profile = add_list_item(db, "projects", {"name": "", "description": "", "tech": [], "bullets": [], "url": ""})
+    db.commit()
+    return templates.TemplateResponse("profile/partials/projects.html", {"request": request, "profile": profile.data})
+
+
+@router.post("/projects/{item_id}", response_class=HTMLResponse)
+def save_project_item(
+    request: Request, item_id: str,
+    name: str = Form(""), description: str = Form(""),
+    tech: str = Form(""), bullets: str = Form(""), url: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import update_list_item
+    profile = update_list_item(db, "projects", item_id, {
+        "name": name, "description": description, "url": url,
+        "tech": [t.strip() for t in tech.split(",") if t.strip()],
+        "bullets": [b.strip() for b in bullets.splitlines() if b.strip()],
+    })
+    db.commit()
+    return templates.TemplateResponse("profile/partials/projects.html", {"request": request, "profile": profile.data, "saved_id": item_id})
+
+
+@router.delete("/projects/{item_id}", response_class=HTMLResponse)
+def delete_project_item(request: Request, item_id: str, db: Session = Depends(get_db)):
+    from app.services.profile_service import remove_list_item
+    profile = remove_list_item(db, "projects", item_id)
+    db.commit()
+    return templates.TemplateResponse("profile/partials/projects.html", {"request": request, "profile": profile.data})
+
+
+# Skills
+@router.post("/skills", response_class=HTMLResponse)
+def save_skills(
+    request: Request,
+    languages: str = Form(""), frameworks: str = Form(""),
+    tools: str = Form(""), clouds: str = Form(""),
+    target_roles: str = Form(""), target_locations: str = Form(""),
+    excluded_companies: str = Form(""), min_match_score: int = Form(70),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import save_section
+    save_section(db, "skills", {
+        "languages": [x.strip() for x in languages.split(",") if x.strip()],
+        "frameworks": [x.strip() for x in frameworks.split(",") if x.strip()],
+        "tools": [x.strip() for x in tools.split(",") if x.strip()],
+        "clouds": [x.strip() for x in clouds.split(",") if x.strip()],
+    })
+    save_section(db, "target_roles", [x.strip() for x in target_roles.splitlines() if x.strip()])
+    save_section(db, "target_locations", [x.strip() for x in target_locations.split(",") if x.strip()])
+    save_section(db, "excluded_companies", [x.strip() for x in excluded_companies.splitlines() if x.strip()])
+    profile = save_section(db, "min_match_score", min_match_score)
+    db.commit()
+    return templates.TemplateResponse("profile/partials/skills.html", {"request": request, "profile": profile.data, "saved": True})
+
+
+# Education
+@router.post("/education/add", response_class=HTMLResponse)
+def add_education(request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import add_list_item
+    profile = add_list_item(db, "education", {"school": "", "degree": "", "start_date": "", "end_date": "", "gpa": ""})
+    db.commit()
+    return templates.TemplateResponse("profile/partials/education.html", {"request": request, "profile": profile.data})
+
+
+@router.post("/education/{item_id}", response_class=HTMLResponse)
+def save_education_item(
+    request: Request, item_id: str,
+    school: str = Form(""), degree: str = Form(""),
+    start_date: str = Form(""), end_date: str = Form(""), gpa: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import update_list_item
+    profile = update_list_item(db, "education", item_id, {"school": school, "degree": degree, "start_date": start_date, "end_date": end_date, "gpa": gpa})
+    db.commit()
+    return templates.TemplateResponse("profile/partials/education.html", {"request": request, "profile": profile.data, "saved_id": item_id})
+
+
+@router.delete("/education/{item_id}", response_class=HTMLResponse)
+def delete_education_item(request: Request, item_id: str, db: Session = Depends(get_db)):
+    from app.services.profile_service import remove_list_item
+    profile = remove_list_item(db, "education", item_id)
+    db.commit()
+    return templates.TemplateResponse("profile/partials/education.html", {"request": request, "profile": profile.data})
+
+
+# Templates
+@router.post("/templates", response_class=HTMLResponse)
+def save_templates(
+    request: Request,
+    latex_template: str = Form(""),
+    cover_letter_template: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    from app.services.profile_service import save_section
+    save_section(db, "latex_template", latex_template)
+    profile = save_section(db, "cover_letter_template", cover_letter_template)
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/templates_tab.html",
+        {"request": request, "profile": profile.data, "saved": True},
+    )

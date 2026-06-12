@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Profile — JobApp{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Profile</h1>
+
+<div class="flex gap-1 border-b border-gray-200 mb-6">
+  {% for tab in ["personal", "experience", "projects", "skills", "education", "templates", "narrative"] %}
+  <a href="/profile?tab={{ tab }}"
+     class="px-4 py-2 text-sm capitalize {{ 'tab-active' if active_tab == tab else 'text-gray-500 hover:text-gray-700' }}">
+    {{ tab }}
+  </a>
+  {% endfor %}
+</div>
+
+<div id="tab-content">
+  {% if active_tab == "personal" %}
+    {% include "profile/partials/personal.html" %}
+  {% elif active_tab == "experience" %}
+    {% include "profile/partials/experience.html" %}
+  {% elif active_tab == "projects" %}
+    {% include "profile/partials/projects.html" %}
+  {% elif active_tab == "skills" %}
+    {% include "profile/partials/skills.html" %}
+  {% elif active_tab == "education" %}
+    {% include "profile/partials/education.html" %}
+  {% elif active_tab == "templates" %}
+    {% include "profile/partials/templates_tab.html" %}
+  {% elif active_tab == "narrative" %}
+    {% include "profile/partials/narrative.html" %}
+  {% endif %}
+</div>
+{% endblock %}

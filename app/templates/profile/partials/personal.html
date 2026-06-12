@@ -1,0 +1,38 @@
+<form hx-post="/profile/personal" hx-target="this" hx-swap="outerHTML" class="space-y-4 max-w-xl">
+  {% if saved %}
+  <p class="text-green-600 text-sm success-flash">Saved.</p>
+  {% endif %}
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Name</label>
+    <input type="text" name="name" value="{{ profile.personal.name }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Email</label>
+    <input type="email" name="email" value="{{ profile.personal.email }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Phone</label>
+    <input type="text" name="phone" value="{{ profile.personal.phone }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">LinkedIn URL</label>
+    <input type="text" name="linkedin" value="{{ profile.personal.linkedin }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">GitHub URL</label>
+    <input type="text" name="github" value="{{ profile.personal.github }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Location</label>
+    <input type="text" name="location" value="{{ profile.personal.location }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
+    Save <span class="htmx-indicator ml-1">...</span>
+  </button>
+</form>

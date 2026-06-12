@@ -1,0 +1,37 @@
+<form hx-post="/profile/skills" hx-target="this" hx-swap="outerHTML" class="space-y-5 max-w-xl">
+  {% if saved %}<p class="text-green-600 text-sm success-flash">Saved.</p>{% endif %}
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Languages <span class="text-gray-400 text-xs">(comma-separated)</span></label>
+    <input type="text" name="languages" value="{{ profile.skills.languages | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Frameworks</label>
+    <input type="text" name="frameworks" value="{{ profile.skills.frameworks | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Tools</label>
+    <input type="text" name="tools" value="{{ profile.skills.tools | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Clouds</label>
+    <input type="text" name="clouds" value="{{ profile.skills.clouds | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <hr class="border-gray-200">
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Target Roles <span class="text-gray-400 text-xs">(one per line)</span></label>
+    <textarea name="target_roles" rows="3" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">{{ profile.target_roles | join('\n') }}</textarea>
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Target Locations <span class="text-gray-400 text-xs">(comma-separated)</span></label>
+    <input type="text" name="target_locations" value="{{ profile.target_locations | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Excluded Companies <span class="text-gray-400 text-xs">(one per line)</span></label>
+    <textarea name="excluded_companies" rows="2" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">{{ profile.excluded_companies | join('\n') }}</textarea>
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Min Match Score (0–100)</label>
+    <input type="number" name="min_match_score" value="{{ profile.min_match_score }}" min="0" max="100" class="mt-1 w-24 border border-gray-300 rounded px-3 py-2 text-sm">
+  </div>
+  <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Save</button>
+</form>
