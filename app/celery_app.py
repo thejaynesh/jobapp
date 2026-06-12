@@ -1,11 +1,13 @@
 from celery import Celery
+from celery.schedules import schedule as celery_schedule
+
 from app.config import settings
 
 celery_app = Celery(
     "jobapp",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=[],  # task modules registered here as plans build them
+    include=["app.tasks.fetch"],
 )
 
 celery_app.conf.update(
@@ -18,7 +20,12 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
 )
 
-celery_app.conf.beat_schedule = {}
+celery_app.conf.beat_schedule = {
+    "fetch-jobs-every-5-hours": {
+        "task": "app.tasks.fetch.fetch_jobs",
+        "schedule": celery_schedule(settings.FETCH_INTERVAL_HOURS * 3600),
+    },
+}
 
 
 @celery_app.task

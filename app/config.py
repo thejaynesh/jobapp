@@ -15,6 +15,16 @@ class Settings(BaseSettings):
 
     HUNTER_IO_API_KEY: str = ""
 
+    # Job source API keys
+    ADZUNA_APP_ID: str = ""
+    ADZUNA_APP_KEY: str = ""
+    JSEARCH_API_KEY: str = ""
+    LINKEDIN_SESSION_COOKIE: str = ""
+    HANDSHAKE_SESSION_COOKIE: str = ""
+    GREENHOUSE_COMPANY_SLUGS: str = ""
+    LEVER_COMPANY_SLUGS: str = ""
+    ASHBY_COMPANY_SLUGS: str = ""
+
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"
     MIN_MATCH_SCORE: int = 70
