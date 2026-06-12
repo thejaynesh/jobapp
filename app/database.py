@@ -11,6 +11,7 @@ engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+# Write routes must call db.commit() explicitly — this generator never commits.
 def get_db():
     db = SessionLocal()
     try:

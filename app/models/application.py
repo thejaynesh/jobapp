@@ -2,7 +2,7 @@ import uuid
 import enum
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, Text, DateTime, Integer, Enum as SAEnum, ForeignKey, func
+from sqlalchemy import String, Boolean, Text, DateTime, Integer, Enum as SAEnum, ForeignKey, func, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -42,9 +42,9 @@ class Application(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    outreach_contacts: Mapped[list] = mapped_column(JSONB, default=list)
+    outreach_contacts: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
 
-    job = relationship("Job", backref="application")
+    job = relationship("Job", backref="applications")
     documents: Mapped[list["ApplicationDocument"]] = relationship(
         "ApplicationDocument", back_populates="application"
     )

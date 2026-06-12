@@ -55,6 +55,9 @@ def test_job_dedupe_hash_unique(db):
         fetched_at=datetime.now(timezone.utc),
         dedupe_hash="samehash",
     )
+    db.add(job1)
+    db.flush()
+
     job2 = Job(
         source="linkedin",
         title="SWE",
@@ -64,9 +67,9 @@ def test_job_dedupe_hash_unique(db):
         fetched_at=datetime.now(timezone.utc),
         dedupe_hash="samehash",
     )
-    db.add(job1)
-    db.flush()
     db.add(job2)
 
     with pytest.raises(IntegrityError):
+        nested = db.begin_nested()
         db.flush()
+        nested.commit()

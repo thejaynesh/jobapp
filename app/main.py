@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends
 from fastapi.responses import RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -15,8 +14,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="JobApp", lifespan=lifespan)
-
-templates = Jinja2Templates(directory="app/templates")
 
 
 @app.get("/health")
