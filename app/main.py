@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -14,6 +15,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="JobApp", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
 @app.get("/health")

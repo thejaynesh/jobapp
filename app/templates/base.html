@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}JobApp{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/tailwind.min.css">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <script src="/static/js/tailwind.min.js"></script>
+    <script src="/static/js/htmx.min.js" defer></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <nav class="bg-white border-b border-gray-200 px-6 py-3 flex gap-6 items-center">
+        <span class="font-bold text-blue-600 text-lg">JobApp</span>
+        <a href="/profile" class="text-gray-600 hover:text-blue-600 text-sm">Profile</a>
+        <a href="/jobs" class="text-gray-600 hover:text-blue-600 text-sm">Jobs</a>
+        <a href="/apps" class="text-gray-600 hover:text-blue-600 text-sm">Applications</a>
+        <a href="/settings" class="text-gray-600 hover:text-blue-600 text-sm">Settings</a>
+    </nav>
+    <main class="max-w-5xl mx-auto px-6 py-8">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
