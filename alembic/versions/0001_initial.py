@@ -86,7 +86,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=True,
         ),
-        sa.Column("outreach_contacts", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("outreach_contacts", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default='[]'),
         sa.ForeignKeyConstraint(["job_id"], ["jobs.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -103,7 +103,7 @@ def upgrade() -> None:
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("path", sa.String(), nullable=False),
         sa.Column("generation_feedback", sa.Text(), nullable=True),
-        sa.Column("is_current", sa.Boolean(), nullable=True),
+        sa.Column("is_current", sa.Boolean(), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

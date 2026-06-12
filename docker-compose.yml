@@ -56,7 +56,8 @@ services:
       - .:/app
     env_file: .env
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
 
   nginx:
     image: nginx:alpine
