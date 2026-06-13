@@ -17,7 +17,7 @@ def fetch(
     num_pages: int = 1,
 ) -> list[dict]:
     headers = {"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": _HOST}
-    params = {"query": f"{query} in {location}", "num_pages": num_pages}
+    params = {"query": f"{query} in {location}", "num_pages": num_pages, "date_posted": "today"}
     try:
         resp = httpx.get(_BASE, headers=headers, params=params, timeout=15)
         resp.raise_for_status()

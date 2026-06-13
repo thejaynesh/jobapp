@@ -25,6 +25,7 @@ def fetch(
         "where": location,
         "results_per_page": results_per_page,
         "content-type": "application/json",
+        "max_days_old": 1,
     }
     try:
         resp = httpx.get(url, params=params, timeout=15)

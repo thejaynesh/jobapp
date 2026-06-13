@@ -1,5 +1,6 @@
 import logging
 import re
+from datetime import datetime, timezone, timedelta
 
 import httpx
 
@@ -8,6 +9,7 @@ from app.services.sources.base import parse_experience_level
 logger = logging.getLogger(__name__)
 
 _BASE = "https://jobs.ashbyhq.com/api/non-user-facing/posting-board/job-board/jobs"
+_CUTOFF_HOURS = 25
 
 
 def _strip_html(html: str) -> str:
@@ -15,6 +17,7 @@ def _strip_html(html: str) -> str:
 
 
 def fetch(company_slugs: list[str]) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_CUTOFF_HOURS)
     jobs = []
     for slug in company_slugs:
         params = {"organizationHostedJobsPageName": slug}
@@ -27,6 +30,14 @@ def fetch(company_slugs: list[str]) -> list[dict]:
             continue
 
         for item in data.get("jobPostings", []):
+            published_raw = item.get("publishedDate", "")
+            if published_raw:
+                try:
+                    published = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+                    if published < cutoff:
+                        continue
+                except Exception:
+                    pass
             title = item.get("title", "")
             desc = _strip_html(item.get("descriptionHtml", ""))
             loc = item.get("locationName", "")
