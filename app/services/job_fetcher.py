@@ -153,6 +153,19 @@ def fetch_and_save_jobs(db: Session) -> dict:
     counts["fetched"] = len(raw_jobs)
     now = datetime.now(timezone.utc)
 
+    def _parse_posted_at(raw) -> datetime | None:
+        if raw is None:
+            return None
+        if isinstance(raw, (int, float)):
+            try:
+                return datetime.fromtimestamp(raw, tz=timezone.utc)
+            except Exception:
+                return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
     for job_data in raw_jobs:
         try:
             url = job_data.get("url", "")
@@ -191,6 +204,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
                 experience_level=job_data.get("experience_level", "mid"),
                 status=JobStatus.new,
                 fetched_at=now,
+                posted_at=_parse_posted_at(job_data.get("posted_at")),
                 dedupe_hash=dedupe_hash,
             )
             db.add(new_job)

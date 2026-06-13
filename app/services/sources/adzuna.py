@@ -51,5 +51,6 @@ def fetch(
             "url": job_url,
             "description": desc,
             "experience_level": parse_experience_level(title, desc),
+            "posted_at": item.get("created"),
         })
     return jobs

@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from openai import OpenAI
 
 from app.config import settings
+from app.models.application import Application
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
 
@@ -171,6 +172,8 @@ def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: s
 
     if score >= min_score:
         job.status = JobStatus.matched
+        if not job.applications:
+            db.add(Application(job_id=job.id))
     else:
         job.status = JobStatus.filtered_out
 

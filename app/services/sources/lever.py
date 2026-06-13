@@ -40,5 +40,6 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "url": item.get("hostedUrl", ""),
                 "description": desc,
                 "experience_level": parse_experience_level(title, desc),
+                "posted_at": created_at / 1000 if created_at else None,
             })
     return jobs

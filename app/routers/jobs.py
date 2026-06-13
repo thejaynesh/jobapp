@@ -15,10 +15,11 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 templates = Jinja2Templates(directory="app/templates")
 
 _FILTERABLE_STATUSES = [JobStatus.matched, JobStatus.filtered_out, JobStatus.docs_generated]
+_PAGE_SIZE = 50
 
 
 @router.get("", response_class=HTMLResponse)
-def get_jobs(request: Request, status: str = "", q: str = "", db: Session = Depends(get_db)):
+def get_jobs(request: Request, status: str = "", q: str = "", page: int = 0, db: Session = Depends(get_db)):
     query = db.query(Job).filter(Job.status.in_(_FILTERABLE_STATUSES))
     if status:
         try:
@@ -29,10 +30,21 @@ def get_jobs(request: Request, status: str = "", q: str = "", db: Session = Depe
         query = query.filter(
             (Job.title.ilike(f"%{q}%")) | (Job.company.ilike(f"%{q}%"))
         )
-    jobs = query.order_by(Job.llm_score.desc().nullslast()).all()
+    total = query.count()
+    jobs = query.order_by(Job.llm_score.desc().nullslast()).offset(page * _PAGE_SIZE).limit(_PAGE_SIZE).all()
     return templates.TemplateResponse(
         "jobs/index.html",
-        {"request": request, "jobs": jobs, "status_filter": status, "q": q},
+        {
+            "request": request,
+            "jobs": jobs,
+            "status_filter": status,
+            "q": q,
+            "page": page,
+            "total": total,
+            "page_size": _PAGE_SIZE,
+            "has_prev": page > 0,
+            "has_next": (page + 1) * _PAGE_SIZE < total,
+        },
     )
 
 

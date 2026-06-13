@@ -43,5 +43,6 @@ def fetch(
             "url": item.get("job_apply_link", ""),
             "description": desc,
             "experience_level": parse_experience_level(title, desc),
+            "posted_at": item.get("job_posted_at_datetime_utc"),
         })
     return jobs

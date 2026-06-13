@@ -43,4 +43,7 @@ class Job(Base):
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    posted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     dedupe_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)

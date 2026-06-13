@@ -45,5 +45,6 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "url": item.get("absolute_url", ""),
                 "description": desc,
                 "experience_level": parse_experience_level(title, desc),
+                "posted_at": item.get("updated_at"),
             })
     return jobs
