@@ -259,3 +259,119 @@ class TestSettingsRouter:
             response = client.get("/settings")
         assert response.status_code == 200
         assert "70" in response.text  # default value shown
+
+
+# ---------------------------------------------------------------------------
+# App detail page tests
+# ---------------------------------------------------------------------------
+
+class TestAppDetailRouter:
+    def _make_app_obj(self):
+        from app.models.application import ApplicationStatus, DocType
+        app_obj = MagicMock()
+        app_obj.id = uuid.uuid4()
+        app_obj.status = ApplicationStatus.not_applied
+        app_obj.notes = "some notes"
+        app_obj.applied_at = None
+        app_obj.created_at = None
+        app_obj.outreach_contacts = []
+        app_obj.job = MagicMock()
+        app_obj.job.id = uuid.uuid4()
+        app_obj.job.title = "Backend Engineer"
+        app_obj.job.company = "Acme"
+        app_obj.job.url = "https://example.com"
+        app_obj.job.location = "Remote"
+        app_obj.job.is_remote = True
+        app_obj.job.description = "We need a backend engineer."
+        app_obj.documents = []
+        return app_obj
+
+    def _make_client(self, mock_db):
+        from app.routers.apps import router
+        from app.database import get_db
+        fastapp = FastAPI()
+        fastapp.include_router(router)
+        fastapp.dependency_overrides[get_db] = lambda: mock_db
+        return TestClient(fastapp)
+
+    def test_get_detail_returns_200(self):
+        app_obj = self._make_app_obj()
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = app_obj
+        client = self._make_client(mock_db)
+        response = client.get(f"/apps/{app_obj.id}")
+        assert response.status_code == 200
+
+    def test_get_detail_shows_job_title(self):
+        app_obj = self._make_app_obj()
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = app_obj
+        client = self._make_client(mock_db)
+        response = client.get(f"/apps/{app_obj.id}")
+        assert "Backend Engineer" in response.text
+
+    def test_get_detail_returns_404_for_missing(self):
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+        client = self._make_client(mock_db)
+        response = client.get(f"/apps/{uuid.uuid4()}")
+        assert response.status_code == 404
+
+    def test_save_notes_returns_200(self):
+        app_obj = self._make_app_obj()
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = app_obj
+        client = self._make_client(mock_db)
+        response = client.post(f"/apps/{app_obj.id}/notes", data={"notes": "Updated notes"})
+        assert response.status_code == 200
+
+    def test_save_notes_persists_value(self):
+        app_obj = self._make_app_obj()
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = app_obj
+        client = self._make_client(mock_db)
+        client.post(f"/apps/{app_obj.id}/notes", data={"notes": "my note"})
+        assert app_obj.notes == "my note"
+
+    def test_save_notes_returns_404_for_missing(self):
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+        client = self._make_client(mock_db)
+        response = client.post(f"/apps/{uuid.uuid4()}/notes", data={"notes": "x"})
+        assert response.status_code == 404
+
+    def test_regenerate_queues_task(self):
+        app_obj = self._make_app_obj()
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = app_obj
+        client = self._make_client(mock_db)
+        with patch("app.routers.apps.generate_docs") as mock_task:
+            mock_task.delay = MagicMock()
+            response = client.post(f"/apps/{app_obj.id}/regenerate", data={"feedback": "be more concise"})
+        assert response.status_code == 202
+
+    def test_regenerate_returns_404_for_missing(self):
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+        client = self._make_client(mock_db)
+        with patch("app.routers.apps.generate_docs"):
+            response = client.post(f"/apps/{uuid.uuid4()}/regenerate", data={"feedback": ""})
+        assert response.status_code == 404
+
+    def test_download_doc_returns_404_for_missing(self):
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+        client = self._make_client(mock_db)
+        response = client.get(f"/apps/docs/{uuid.uuid4()}/download")
+        assert response.status_code == 404
+
+    def test_download_doc_returns_404_when_file_missing(self):
+        from app.models.application import DocType
+        doc = MagicMock()
+        doc.path = "/storage/resumes/nonexistent.pdf"
+        doc.doc_type = DocType.resume
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = doc
+        client = self._make_client(mock_db)
+        response = client.get(f"/apps/docs/{uuid.uuid4()}/download")
+        assert response.status_code == 404

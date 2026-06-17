@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}{{ app.job.title }} at {{ app.job.company }} — JobApp{% endblock %}
+{% block content %}
+
+<div class="mb-4 text-sm text-gray-500">
+  <a href="/apps" class="hover:text-blue-600">Applications</a>
+  <span class="mx-2">&rsaquo;</span>
+  <span class="text-gray-700">{{ app.job.title }} at {{ app.job.company }}</span>
+</div>
+
+<div class="flex justify-between items-start mb-6">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-800">{{ app.job.title }}</h1>
+    <p class="text-gray-500 mt-1">
+      {{ app.job.company }}
+      {% if app.job.location %}&bull; {{ app.job.location }}{% endif %}
+      {% if app.job.is_remote %}<span class="ml-2 bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded">Remote</span>{% endif %}
+    </p>
+  </div>
+  <div class="flex items-center gap-3">
+    <select
+      hx-post="/apps/{{ app.id }}/status"
+      hx-target="#status-badge"
+      hx-swap="outerHTML"
+      hx-include="this"
+      name="status"
+      class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      {% for s in ['not_applied', 'applied', 'interviewing', 'offered', 'rejected', 'withdrawn'] %}
+        <option value="{{ s }}" {% if app.status.value == s %}selected{% endif %}>
+          {{ s | replace("_", " ") | title }}
+        </option>
+      {% endfor %}
+    </select>
+    <a href="{{ app.job.url }}" target="_blank"
+       class="text-sm text-blue-600 hover:underline">View posting &rarr;</a>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+  <!-- Left column: documents + regenerate -->
+  <div class="lg:col-span-2 space-y-6">
+
+    <!-- Resume section -->
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-3">Resume</h2>
+      {% if resumes %}
+        {% set current_resume = resumes[0] %}
+        <div class="flex items-center gap-3 mb-3">
+          <a href="/apps/docs/{{ current_resume.id }}/download"
+             class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">
+            Download v{{ current_resume.version }}
+          </a>
+          <span class="text-xs text-gray-400">Current version</span>
+        </div>
+        {% if resumes | length > 1 %}
+        <details class="mt-2">
+          <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">
+            Version history ({{ resumes | length }} versions)
+          </summary>
+          <ul class="mt-2 space-y-1">
+            {% for doc in resumes %}
+            <li class="flex items-center gap-3 text-xs text-gray-600">
+              <a href="/apps/docs/{{ doc.id }}/download" class="text-blue-600 hover:underline">
+                v{{ doc.version }}
+              </a>
+              <span class="text-gray-400">{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '' }}</span>
+              {% if doc.generation_feedback %}
+                <span class="italic text-gray-400">&ldquo;{{ doc.generation_feedback[:60] }}{% if doc.generation_feedback|length > 60 %}…{% endif %}&rdquo;</span>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+        {% endif %}
+      {% else %}
+        <p class="text-sm text-gray-400">No resume generated yet.</p>
+      {% endif %}
+
+      <form
+        hx-post="/apps/{{ app.id }}/regenerate"
+        hx-swap="none"
+        class="mt-4 space-y-2">
+        <label class="block text-xs font-medium text-gray-600">Regenerate with feedback</label>
+        <textarea name="feedback" rows="2" placeholder="e.g. emphasize leadership experience, less formal tone..."
+          class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"></textarea>
+        <button type="submit"
+          class="bg-gray-100 text-gray-700 px-4 py-1.5 rounded text-sm hover:bg-gray-200 border border-gray-300">
+          Regenerate
+        </button>
+      </form>
+    </div>
+
+    <!-- Cover letter section -->
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-3">Cover Letter</h2>
+      {% if cover_letters %}
+        {% set current_cl = cover_letters[0] %}
+        <div class="flex items-center gap-3 mb-3">
+          <a href="/apps/docs/{{ current_cl.id }}/download"
+             class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">
+            Download v{{ current_cl.version }}
+          </a>
+          <span class="text-xs text-gray-400">Current version</span>
+        </div>
+        {% if cover_letters | length > 1 %}
+        <details class="mt-2">
+          <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">
+            Version history ({{ cover_letters | length }} versions)
+          </summary>
+          <ul class="mt-2 space-y-1">
+            {% for doc in cover_letters %}
+            <li class="flex items-center gap-3 text-xs text-gray-600">
+              <a href="/apps/docs/{{ doc.id }}/download" class="text-blue-600 hover:underline">
+                v{{ doc.version }}
+              </a>
+              <span class="text-gray-400">{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '' }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+        {% endif %}
+      {% else %}
+        <p class="text-sm text-gray-400">No cover letter generated yet.</p>
+      {% endif %}
+    </div>
+
+    <!-- Job description -->
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <details>
+        <summary class="text-base font-semibold text-gray-800 cursor-pointer">Job Description</summary>
+        <div class="mt-3 text-sm text-gray-600 whitespace-pre-wrap leading-relaxed max-h-96 overflow-y-auto">
+          {{ app.job.description or "No description available." }}
+        </div>
+      </details>
+    </div>
+
+  </div>
+
+  <!-- Right column: outreach + notes -->
+  <div class="space-y-6">
+
+    <!-- Outreach contacts -->
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <div class="flex justify-between items-center mb-3">
+        <h2 class="text-base font-semibold text-gray-800">Outreach</h2>
+        <form hx-post="/api/apps/{{ app.id }}/outreach" hx-swap="none">
+          <button type="submit"
+            class="text-xs bg-gray-100 border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-200">
+            Find contacts
+          </button>
+        </form>
+      </div>
+
+      {% if app.outreach_contacts %}
+        <div class="space-y-4">
+          {% for contact in app.outreach_contacts %}
+          <div class="border border-gray-100 rounded p-3 text-sm">
+            <p class="font-medium text-gray-800">{{ contact.name or "Unknown" }}</p>
+            <p class="text-xs text-gray-500 mb-2">{{ contact.title or "" }}</p>
+            {% if contact.email %}
+              <p class="text-xs text-gray-600 mb-1">
+                <span class="font-medium">Email:</span>
+                <a href="mailto:{{ contact.email }}" class="text-blue-600 hover:underline">{{ contact.email }}</a>
+              </p>
+            {% endif %}
+            {% if contact.message %}
+              <div class="mt-2">
+                <p class="text-xs font-medium text-gray-600 mb-1">Draft message</p>
+                <div class="bg-gray-50 rounded p-2 text-xs text-gray-700 leading-relaxed">
+                  {{ contact.message }}
+                </div>
+                <button
+                  onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent.trim()); this.textContent='Copied!';"
+                  class="mt-1 text-xs text-blue-600 hover:underline">
+                  Copy
+                </button>
+              </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-sm text-gray-400">No contacts found yet. Click "Find contacts" to search.</p>
+      {% endif %}
+    </div>
+
+    <!-- Notes -->
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-3">Notes</h2>
+      <form
+        hx-post="/apps/{{ app.id }}/notes"
+        hx-trigger="change delay:800ms"
+        hx-target="#notes-status"
+        hx-swap="innerHTML">
+        <textarea name="notes" rows="5"
+          placeholder="Add notes about this application..."
+          class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none">{{ app.notes or "" }}</textarea>
+        <div id="notes-status" class="mt-1 h-4"></div>
+      </form>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}
