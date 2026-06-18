@@ -1,9 +1,10 @@
 import json
 import logging
 import re
+import time
 from difflib import SequenceMatcher
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from app.config import settings
 from app.models.application import Application
@@ -140,28 +141,47 @@ def chat_completion(messages: list[dict], api_key: str, base_url: str, model: st
     return response.choices[0].message.content or ""
 
 
+_RETRY_DELAYS = [5, 15]  # seconds between attempts on 429
+
+
 def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: str) -> dict:
-    try:
-        messages = _build_match_prompt(job, profile_data)
-        raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
-        return _parse_llm_response(raw)
-    except Exception as exc:
-        logger.error("llm_score_job failed for job %s: %s", getattr(job, "id", "?"), exc)
-        return {"score": 0, "reasoning": f"LLM error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
+    messages = _build_match_prompt(job, profile_data)
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate([0] + _RETRY_DELAYS):
+        if delay:
+            logger.warning("llm_score_job rate-limited, retrying in %ds (attempt %d)", delay, attempt + 1)
+            time.sleep(delay)
+        try:
+            raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
+            return _parse_llm_response(raw)
+        except RateLimitError as exc:
+            last_exc = exc
+        except Exception as exc:
+            logger.error("llm_score_job failed for job %s: %s", getattr(job, "id", "?"), exc)
+            return {"score": 0, "reasoning": f"LLM error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
+    # All retries exhausted on rate limit — propagate so caller can keep job as `new`
+    logger.error("llm_score_job rate-limited after %d attempts for job %s", len(_RETRY_DELAYS) + 1, getattr(job, "id", "?"))
+    raise last_exc
 
 
-def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: str) -> None:
+def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: str) -> str:
+    """Returns 'matched', 'filtered_out', or 'rate_limited'."""
     passes, kw_score = keyword_filter(job, profile_data)
 
     if not passes:
         job.status = JobStatus.filtered_out
         job.keyword_score = 0.0
         job.llm_score = None
-        return
+        return "filtered_out"
 
     job.keyword_score = round(kw_score, 4)
 
-    llm_result = llm_score_job(job, profile_data, api_key, base_url, model)
+    try:
+        llm_result = llm_score_job(job, profile_data, api_key, base_url, model)
+    except RateLimitError:
+        # Leave status as `new` so the next cycle retries this job
+        return "rate_limited"
+
     score = llm_result["score"]
     min_score = profile_data.get("min_match_score", getattr(settings, "MIN_MATCH_SCORE", 70))
 
@@ -174,8 +194,10 @@ def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: s
         job.status = JobStatus.matched
         if not job.applications:
             db.add(Application(job_id=job.id))
+        return "matched"
     else:
         job.status = JobStatus.filtered_out
+        return "filtered_out"
 
 
 def match_all_new_jobs(db) -> dict[str, int]:
@@ -191,15 +213,18 @@ def match_all_new_jobs(db) -> dict[str, int]:
     processed = 0
     matched = 0
     filtered_out = 0
+    rate_limited = 0
     errors = 0
 
     for job in new_jobs:
         try:
-            match_job(db, job, profile_data, api_key, base_url, model)
+            result = match_job(db, job, profile_data, api_key, base_url, model)
             db.commit()
             processed += 1
-            if job.status == JobStatus.matched:
+            if result == "matched":
                 matched += 1
+            elif result == "rate_limited":
+                rate_limited += 1
             else:
                 filtered_out += 1
         except Exception as exc:
@@ -208,7 +233,7 @@ def match_all_new_jobs(db) -> dict[str, int]:
             errors += 1
 
     logger.info(
-        "match_all_new_jobs done — processed=%d matched=%d filtered_out=%d errors=%d",
-        processed, matched, filtered_out, errors,
+        "match_all_new_jobs done — processed=%d matched=%d filtered_out=%d rate_limited=%d errors=%d",
+        processed, matched, filtered_out, rate_limited, errors,
     )
-    return {"processed": processed, "matched": matched, "filtered_out": filtered_out, "errors": errors}
+    return {"processed": processed, "matched": matched, "filtered_out": filtered_out, "rate_limited": rate_limited, "errors": errors}

@@ -294,7 +294,8 @@ class TestMatchJob:
         from app.models.job import JobStatus
         mock_job.title = "Marketing Manager"
         db = MagicMock()
-        match_job(db, mock_job, profile_data, "key", "url", "model")
+        result = match_job(db, mock_job, profile_data, "key", "url", "model")
+        assert result == "filtered_out"
         assert mock_job.status == JobStatus.filtered_out
         assert mock_job.keyword_score == 0.0
         assert mock_job.llm_score is None
@@ -305,7 +306,8 @@ class TestMatchJob:
         db = MagicMock()
         llm_result = {"score": 85, "reasoning": "Great fit.", "matched_skills": ["Python"], "missing_skills": [], "seniority_fit": True}
         with patch("app.services.matcher.llm_score_job", return_value=llm_result):
-            match_job(db, mock_job, profile_data, "key", "url", "model")
+            result = match_job(db, mock_job, profile_data, "key", "url", "model")
+        assert result == "matched"
         assert mock_job.status == JobStatus.matched
         assert mock_job.llm_score == 85
         assert mock_job.llm_reasoning == "Great fit."
@@ -316,7 +318,8 @@ class TestMatchJob:
         db = MagicMock()
         llm_result = {"score": 30, "reasoning": "Weak.", "matched_skills": [], "missing_skills": ["Rust"], "seniority_fit": False}
         with patch("app.services.matcher.llm_score_job", return_value=llm_result):
-            match_job(db, mock_job, profile_data, "key", "url", "model")
+            result = match_job(db, mock_job, profile_data, "key", "url", "model")
+        assert result == "filtered_out"
         assert mock_job.status == JobStatus.filtered_out
         assert mock_job.llm_score == 30
 
@@ -333,7 +336,6 @@ class TestMatchJob:
         from app.services.matcher import match_job
         from app.models.job import JobStatus
         db = MagicMock()
-        # profile_data has min_match_score=70; score=65 → filtered_out
         llm_result = {"score": 65, "reasoning": "Below threshold.", "matched_skills": [], "missing_skills": [], "seniority_fit": True}
         with patch("app.services.matcher.llm_score_job", return_value=llm_result):
             match_job(db, mock_job, profile_data, "key", "url", "model")
@@ -352,6 +354,56 @@ class TestMatchJob:
                 match_job(db, mock_job, profile_no_min, "key", "url", "model")
         assert mock_job.status == JobStatus.matched
 
+    def test_rate_limit_leaves_job_as_new(self, mock_job, profile_data):
+        from app.services.matcher import match_job
+        from app.models.job import JobStatus
+        from openai import RateLimitError
+        mock_job.status = JobStatus.new
+        db = MagicMock()
+        exc = RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+        with patch("app.services.matcher.llm_score_job", side_effect=exc):
+            result = match_job(db, mock_job, profile_data, "key", "url", "model")
+        assert result == "rate_limited"
+        assert mock_job.status == JobStatus.new
+
+
+class TestLlmScoreJobRateLimit:
+    def test_retries_on_429_and_raises(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job
+        from openai import RateLimitError
+        exc = RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+        with patch("app.services.matcher.chat_completion", side_effect=exc):
+            with patch("app.services.matcher.time.sleep"):
+                with pytest.raises(RateLimitError):
+                    llm_score_job(mock_job, profile_data, "key", "url", "model")
+
+    def test_retries_correct_number_of_times(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job, _RETRY_DELAYS
+        from openai import RateLimitError
+        exc = RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+        with patch("app.services.matcher.chat_completion", side_effect=exc) as mock_cc:
+            with patch("app.services.matcher.time.sleep"):
+                with pytest.raises(RateLimitError):
+                    llm_score_job(mock_job, profile_data, "key", "url", "model")
+        assert mock_cc.call_count == len(_RETRY_DELAYS) + 1
+
+    def test_succeeds_on_retry_after_429(self, mock_job, profile_data):
+        import json as json_mod
+        from app.services.matcher import llm_score_job
+        from openai import RateLimitError
+        exc = RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
+        success = json_mod.dumps({"score": 80, "reasoning": "ok", "matched_skills": [], "missing_skills": [], "seniority_fit": True})
+        with patch("app.services.matcher.chat_completion", side_effect=[exc, success]):
+            with patch("app.services.matcher.time.sleep"):
+                result = llm_score_job(mock_job, profile_data, "key", "url", "model")
+        assert result["score"] == 80
+
+    def test_non_rate_limit_error_returns_zero_score(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job
+        with patch("app.services.matcher.chat_completion", side_effect=Exception("network error")):
+            result = llm_score_job(mock_job, profile_data, "key", "url", "model")
+        assert result["score"] == 0
+
 
 class TestMatchAllNewJobs:
     def _make_mock_profile(self, profile_data):
@@ -367,7 +419,7 @@ class TestMatchAllNewJobs:
         mock_profile = self._make_mock_profile(profile_data)
         db.query.return_value.filter.return_value.all.return_value = [job1, job2]
         db.query.return_value.first.return_value = mock_profile
-        with patch("app.services.matcher.match_job"):
+        with patch("app.services.matcher.match_job", return_value="matched"):
             result = match_all_new_jobs(db)
         assert result["processed"] == 2
 
@@ -389,9 +441,21 @@ class TestMatchAllNewJobs:
         mock_profile = self._make_mock_profile(profile_data)
         db.query.return_value.filter.return_value.all.return_value = [job1]
         db.query.return_value.first.return_value = mock_profile
-        with patch("app.services.matcher.match_job"):
+        with patch("app.services.matcher.match_job", return_value="matched"):
             match_all_new_jobs(db)
         db.commit.assert_called()
+
+    def test_counts_rate_limited_separately(self, profile_data):
+        from app.services.matcher import match_all_new_jobs
+        db = MagicMock()
+        mock_profile = self._make_mock_profile(profile_data)
+        db.query.return_value.filter.return_value.all.return_value = [MagicMock(), MagicMock()]
+        db.query.return_value.first.return_value = mock_profile
+        with patch("app.services.matcher.match_job", return_value="rate_limited"):
+            result = match_all_new_jobs(db)
+        assert result["rate_limited"] == 2
+        assert result["filtered_out"] == 0
+        assert result["matched"] == 0
 
 
 # ---------------------------------------------------------------------------
