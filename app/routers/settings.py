@@ -26,9 +26,10 @@ def get_settings(request: Request, db: Session = Depends(get_db)):
     profile = get_or_create_profile(db)
     db.commit()
     current = {**_DEFAULTS, **profile.data.get("settings", {})}
+    last_fetch = profile.data.get("last_fetch")
     return templates.TemplateResponse(
         "settings/index.html",
-        {"request": request, "settings": current, "saved": False},
+        {"request": request, "settings": current, "saved": False, "last_fetch": last_fetch},
     )
 
 
@@ -49,7 +50,8 @@ def save_settings(
     }
     profile.data = new_data
     db.commit()
+    last_fetch = profile.data.get("last_fetch")
     return templates.TemplateResponse(
         "settings/index.html",
-        {"request": request, "settings": new_data["settings"], "saved": True},
+        {"request": request, "settings": new_data["settings"], "saved": True, "last_fetch": last_fetch},
     )

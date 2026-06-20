@@ -16,121 +16,192 @@ def _get_slugs(raw: str) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> list[dict]:
+def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None) -> None:
+    """Accumulate per-source fetch stats."""
+    entry = stats.setdefault(source, {"count": 0, "errors": []})
+    entry["count"] += len(jobs)
+    if error:
+        entry["errors"].append(error)
+
+
+def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list[dict], dict]:
     """
-    Call all enabled Tier 1 (httpx) and Tier 2 (Playwright) adapters.
-    Each adapter wraps errors internally and returns []. Never raises.
+    Call all enabled adapters and return (all_jobs, source_stats).
+    source_stats: {source: {"count": N, "errors": [...], "enabled": bool}}
     """
     all_jobs: list[dict] = []
+    stats: dict = {}
 
-    # Tier 1: httpx adapters
+    # --- Tier 1: httpx adapters ---
+
     if cfg.ADZUNA_APP_ID and cfg.ADZUNA_APP_KEY:
         from app.services.sources.adzuna import fetch as adzuna_fetch
+        stats.setdefault("adzuna", {"count": 0, "errors": [], "enabled": True})
         for role in roles:
             for loc in locations:
                 try:
-                    all_jobs.extend(adzuna_fetch(
-                        app_id=cfg.ADZUNA_APP_ID, app_key=cfg.ADZUNA_APP_KEY,
-                        query=role, location=loc,
-                    ))
+                    jobs = adzuna_fetch(app_id=cfg.ADZUNA_APP_ID, app_key=cfg.ADZUNA_APP_KEY,
+                                       query=role, location=loc)
+                    _record(stats, "adzuna", jobs)
+                    all_jobs.extend(jobs)
                 except Exception as exc:
-                    logger.error("Adzuna error for '%s'/'%s': %s", role, loc, exc)
+                    _record(stats, "adzuna", [], f"{role}/{loc}: {exc}")
+    else:
+        stats["adzuna"] = {"count": 0, "errors": [], "enabled": False}
 
     if cfg.JSEARCH_API_KEY:
         from app.services.sources.jsearch import fetch as jsearch_fetch
+        stats.setdefault("jsearch", {"count": 0, "errors": [], "enabled": True})
         for role in roles:
             for loc in locations:
                 try:
-                    all_jobs.extend(jsearch_fetch(
-                        api_key=cfg.JSEARCH_API_KEY, query=role, location=loc,
-                    ))
+                    jobs = jsearch_fetch(api_key=cfg.JSEARCH_API_KEY, query=role, location=loc)
+                    _record(stats, "jsearch", jobs)
+                    all_jobs.extend(jobs)
                 except Exception as exc:
-                    logger.error("JSearch error for '%s'/'%s': %s", role, loc, exc)
+                    _record(stats, "jsearch", [], f"{role}/{loc}: {exc}")
+    else:
+        stats["jsearch"] = {"count": 0, "errors": [], "enabled": False}
 
     greenhouse_slugs = _get_slugs(cfg.GREENHOUSE_COMPANY_SLUGS)
     if greenhouse_slugs:
         from app.services.sources.greenhouse import fetch as gh_fetch
         try:
-            all_jobs.extend(gh_fetch(company_slugs=greenhouse_slugs))
+            jobs = gh_fetch(company_slugs=greenhouse_slugs)
+            _record(stats, "greenhouse", jobs)
+            all_jobs.extend(jobs)
         except Exception as exc:
-            logger.error("Greenhouse error: %s", exc)
+            _record(stats, "greenhouse", [], str(exc))
+        stats.setdefault("greenhouse", {"count": 0, "errors": [], "enabled": True})
+        stats["greenhouse"]["enabled"] = True
+    else:
+        stats["greenhouse"] = {"count": 0, "errors": [], "enabled": False}
 
     lever_slugs = _get_slugs(cfg.LEVER_COMPANY_SLUGS)
     if lever_slugs:
         from app.services.sources.lever import fetch as lever_fetch
         try:
-            all_jobs.extend(lever_fetch(company_slugs=lever_slugs))
+            jobs = lever_fetch(company_slugs=lever_slugs)
+            _record(stats, "lever", jobs)
+            all_jobs.extend(jobs)
         except Exception as exc:
-            logger.error("Lever error: %s", exc)
+            _record(stats, "lever", [], str(exc))
+        stats.setdefault("lever", {"count": 0, "errors": [], "enabled": True})
+        stats["lever"]["enabled"] = True
+    else:
+        stats["lever"] = {"count": 0, "errors": [], "enabled": False}
 
     ashby_slugs = _get_slugs(cfg.ASHBY_COMPANY_SLUGS)
     if ashby_slugs:
         from app.services.sources.ashby import fetch as ashby_fetch
         try:
-            all_jobs.extend(ashby_fetch(company_slugs=ashby_slugs))
+            jobs = ashby_fetch(company_slugs=ashby_slugs)
+            _record(stats, "ashby", jobs)
+            all_jobs.extend(jobs)
         except Exception as exc:
-            logger.error("Ashby error: %s", exc)
+            _record(stats, "ashby", [], str(exc))
+        stats.setdefault("ashby", {"count": 0, "errors": [], "enabled": True})
+        stats["ashby"]["enabled"] = True
+    else:
+        stats["ashby"] = {"count": 0, "errors": [], "enabled": False}
 
-    # Tier 2: Playwright scrapers (async, run in new event loop)
-    async def _run_playwright() -> list[dict]:
+    # --- Tier 2: Playwright scrapers ---
+
+    async def _run_playwright() -> tuple[list[dict], dict]:
         pw_jobs: list[dict] = []
+        pw_stats: dict = {}
 
         if cfg.LINKEDIN_SESSION_COOKIE:
             from app.services.sources.linkedin import fetch as li_fetch
+            pw_stats.setdefault("linkedin", {"count": 0, "errors": [], "enabled": True})
             for role in roles:
                 for loc in locations:
                     try:
-                        pw_jobs.extend(await li_fetch(
-                            session_cookie=cfg.LINKEDIN_SESSION_COOKIE,
-                            query=role, location=loc,
-                        ))
+                        jobs = await li_fetch(session_cookie=cfg.LINKEDIN_SESSION_COOKIE,
+                                              query=role, location=loc)
+                        _record(pw_stats, "linkedin", jobs)
+                        pw_jobs.extend(jobs)
                     except Exception as exc:
-                        logger.error("LinkedIn error: %s", exc)
+                        _record(pw_stats, "linkedin", [], f"{role}/{loc}: {exc}")
+        else:
+            pw_stats["linkedin"] = {"count": 0, "errors": [], "enabled": False}
 
+        from app.services.sources.indeed import fetch as indeed_fetch
+        pw_stats.setdefault("indeed", {"count": 0, "errors": [], "enabled": True})
         for role in roles:
             for loc in locations:
-                from app.services.sources.indeed import fetch as indeed_fetch
                 try:
-                    pw_jobs.extend(await indeed_fetch(query=role, location=loc))
+                    jobs = await indeed_fetch(query=role, location=loc)
+                    _record(pw_stats, "indeed", jobs)
+                    pw_jobs.extend(jobs)
                 except Exception as exc:
-                    logger.error("Indeed error: %s", exc)
+                    _record(pw_stats, "indeed", [], f"{role}/{loc}: {exc}")
 
-                from app.services.sources.wellfound import fetch as wf_fetch
+        from app.services.sources.wellfound import fetch as wf_fetch
+        pw_stats.setdefault("wellfound", {"count": 0, "errors": [], "enabled": True})
+        for role in roles:
+            for loc in locations:
                 try:
-                    pw_jobs.extend(await wf_fetch(query=role, location=loc))
+                    jobs = await wf_fetch(query=role, location=loc)
+                    _record(pw_stats, "wellfound", jobs)
+                    pw_jobs.extend(jobs)
                 except Exception as exc:
-                    logger.error("Wellfound error: %s", exc)
+                    _record(pw_stats, "wellfound", [], f"{role}/{loc}: {exc}")
 
-                from app.services.sources.dice import fetch as dice_fetch
+        from app.services.sources.dice import fetch as dice_fetch
+        pw_stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
+        for role in roles:
+            for loc in locations:
                 try:
-                    pw_jobs.extend(await dice_fetch(query=role, location=loc))
+                    jobs = await dice_fetch(query=role, location=loc)
+                    _record(pw_stats, "dice", jobs)
+                    pw_jobs.extend(jobs)
                 except Exception as exc:
-                    logger.error("Dice error: %s", exc)
+                    _record(pw_stats, "dice", [], f"{role}/{loc}: {exc}")
 
         if getattr(cfg, "HANDSHAKE_SESSION_COOKIE", ""):
             from app.services.sources.handshake import fetch as hs_fetch
+            pw_stats.setdefault("handshake", {"count": 0, "errors": [], "enabled": True})
             for role in roles:
                 try:
-                    pw_jobs.extend(await hs_fetch(
-                        session_cookie=cfg.HANDSHAKE_SESSION_COOKIE,
-                        query=role, location="",
-                    ))
+                    jobs = await hs_fetch(session_cookie=cfg.HANDSHAKE_SESSION_COOKIE,
+                                          query=role, location="")
+                    _record(pw_stats, "handshake", jobs)
+                    pw_jobs.extend(jobs)
                 except Exception as exc:
-                    logger.error("Handshake error: %s", exc)
+                    _record(pw_stats, "handshake", [], f"{role}: {exc}")
+        else:
+            pw_stats["handshake"] = {"count": 0, "errors": [], "enabled": False}
 
-        return pw_jobs
+        return pw_jobs, pw_stats
 
     try:
-        pw_results = asyncio.run(_run_playwright())
-        all_jobs.extend(pw_results)
+        pw_jobs, pw_stats = asyncio.run(_run_playwright())
+        all_jobs.extend(pw_jobs)
+        stats.update(pw_stats)
     except Exception as exc:
         logger.error("Playwright scrapers fatal error: %s", exc)
+        for src in ("linkedin", "indeed", "wellfound", "dice", "handshake"):
+            stats.setdefault(src, {"count": 0, "errors": [str(exc)], "enabled": True})
 
-    return all_jobs
+    # Log summary
+    logger.info("=== fetch summary ===")
+    for source, s in stats.items():
+        status = "disabled" if not s["enabled"] else (
+            f"OK {s['count']} jobs" if not s["errors"] else
+            f"PARTIAL {s['count']} jobs, {len(s['errors'])} error(s)"
+            if s["count"] > 0 else
+            f"FAILED {len(s['errors'])} error(s)"
+        )
+        logger.info("  %-12s %s", source, status)
+        for err in s["errors"]:
+            logger.warning("    └─ %s", err)
+
+    return all_jobs, stats
 
 
 def fetch_and_save_jobs(db: Session) -> dict:
-    counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0}
+    counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "sources": {}}
 
     profile = db.query(Profile).first()
     if not profile:
@@ -145,13 +216,28 @@ def fetch_and_save_jobs(db: Session) -> dict:
         return counts
 
     try:
-        raw_jobs = _run_all_adapters(roles, locations, settings)
+        raw_jobs, source_stats = _run_all_adapters(roles, locations, settings)
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts
 
     counts["fetched"] = len(raw_jobs)
+    counts["sources"] = source_stats
     now = datetime.now(timezone.utc)
+
+    # Persist last fetch stats on the profile so UI can show them
+    import copy
+    updated_data = copy.deepcopy(profile.data)
+    updated_data["last_fetch"] = {
+        "at": now.isoformat(),
+        "fetched": len(raw_jobs),
+        "sources": {
+            src: {"count": s["count"], "enabled": s["enabled"],
+                  "errors": s["errors"][:3]}  # cap at 3 errors stored
+            for src, s in source_stats.items()
+        },
+    }
+    profile.data = updated_data
 
     def _parse_posted_at(raw) -> datetime | None:
         if raw is None:
@@ -186,7 +272,6 @@ def fetch_and_save_jobs(db: Session) -> dict:
                 if source_job_id and existing.source_job_id == source_job_id and existing.source == source:
                     counts["skipped"] += 1
                     continue
-                # Hash-only match = cross-post: merge
                 merge_or_skip(db, existing, url, description, layer=3)
                 counts["merged"] += 1
                 continue
@@ -220,4 +305,8 @@ def fetch_and_save_jobs(db: Session) -> dict:
         logger.error("job_fetcher: DB commit failed: %s", exc)
         db.rollback()
 
+    logger.info(
+        "job_fetcher done — fetched=%d inserted=%d merged=%d skipped=%d",
+        counts["fetched"], counts["inserted"], counts["merged"], counts["skipped"],
+    )
     return counts

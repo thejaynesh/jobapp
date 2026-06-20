@@ -30,4 +30,57 @@
   </div>
   <button type="submit" class="bg-blue-600 text-white px-6 py-2 rounded text-sm hover:bg-blue-700">Save settings</button>
 </form>
+
+{% if last_fetch %}
+<div class="mt-10">
+  <h2 class="text-lg font-semibold text-gray-800 mb-1">Last fetch — source health</h2>
+  <p class="text-xs text-gray-400 mb-4">
+    Run at {{ last_fetch.at }} &bull; {{ last_fetch.fetched }} total jobs fetched
+  </p>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="text-left px-4 py-2">Source</th>
+          <th class="text-left px-4 py-2">Status</th>
+          <th class="text-right px-4 py-2">Jobs</th>
+          <th class="text-left px-4 py-2">Errors</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100 bg-white">
+        {% for src, info in last_fetch.sources.items() %}
+        <tr>
+          <td class="px-4 py-2 font-medium text-gray-700">{{ src }}</td>
+          <td class="px-4 py-2">
+            {% if not info.enabled %}
+              <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">Disabled</span>
+            {% elif info.errors | length == 0 %}
+              <span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">OK</span>
+            {% elif info.count > 0 %}
+              <span class="text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Partial</span>
+            {% else %}
+              <span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600">Failed</span>
+            {% endif %}
+          </td>
+          <td class="px-4 py-2 text-right text-gray-600">
+            {% if info.enabled %}{{ info.count }}{% else %}—{% endif %}
+          </td>
+          <td class="px-4 py-2 text-xs text-red-500 max-w-xs truncate">
+            {% if info.errors %}
+              {% for err in info.errors %}
+                <div class="truncate" title="{{ err }}">{{ err }}</div>
+              {% endfor %}
+            {% else %}
+              <span class="text-gray-300">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="mt-10 text-sm text-gray-400">No fetch data yet — run a job fetch to see source health here.</div>
+{% endif %}
 {% endblock %}
