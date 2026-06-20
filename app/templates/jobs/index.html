@@ -1,22 +1,64 @@
 {% extends "base.html" %}
 {% block title %}Jobs — JobApp{% endblock %}
 {% block content %}
-<div class="flex justify-between items-center mb-6">
+<div class="flex justify-between items-center mb-4">
   <h1 class="text-2xl font-bold text-gray-800">Jobs</h1>
   <span class="text-sm text-gray-500">{{ total }} total &bull; showing {{ jobs|length }}</span>
 </div>
 
-<form class="flex gap-3 mb-6" method="get" action="/jobs">
+<form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm space-y-3">
   <input type="hidden" name="page" value="0">
-  <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
-    class="border border-gray-300 rounded px-3 py-2 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-  <select name="status" class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none">
-    <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
-    <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
-    <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
-    <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
-  </select>
-  <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Filter</button>
+
+  <!-- Row 1: search + status + source -->
+  <div class="flex flex-wrap gap-2">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
+      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-48 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+    <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
+      <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
+      <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
+      <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
+    </select>
+
+    <select name="source" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not source_filter %}selected{% endif %}>All sources</option>
+      {% for s in sources %}
+        <option value="{{ s }}" {% if source_filter == s %}selected{% endif %}>{{ s | title }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <!-- Row 2: min score + remote + sort + buttons -->
+  <div class="flex flex-wrap gap-2 items-center">
+    <select name="min_score" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not min_score_filter %}selected{% endif %}>Any score</option>
+      <option value="60" {% if min_score_filter == "60" %}selected{% endif %}>Score ≥ 60</option>
+      <option value="70" {% if min_score_filter == "70" %}selected{% endif %}>Score ≥ 70</option>
+      <option value="80" {% if min_score_filter == "80" %}selected{% endif %}>Score ≥ 80</option>
+      <option value="90" {% if min_score_filter == "90" %}selected{% endif %}>Score ≥ 90</option>
+    </select>
+
+    <label class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none">
+      <input type="checkbox" name="remote" value="1" {% if remote_filter == "1" %}checked{% endif %}
+        class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+      Remote only
+    </label>
+
+    <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ml-auto">
+      <option value="score_desc" {% if sort == "score_desc" %}selected{% endif %}>Score: high → low</option>
+      <option value="score_asc" {% if sort == "score_asc" %}selected{% endif %}>Score: low → high</option>
+      <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>
+      <option value="posted_asc" {% if sort == "posted_asc" %}selected{% endif %}>Oldest posted</option>
+      <option value="company_asc" {% if sort == "company_asc" %}selected{% endif %}>Company A → Z</option>
+    </select>
+
+    <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
+
+    {% if status_filter or q or source_filter or remote_filter or min_score_filter %}
+    <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear filters</a>
+    {% endif %}
+  </div>
 </form>
 
 <div id="job-list" class="space-y-4">
@@ -27,24 +69,25 @@
 {% else %}
   <div class="text-center py-16 text-gray-400">
     <p class="text-lg">No jobs found.</p>
-    <p class="text-sm mt-1">Jobs are fetched every 5 hours. Check back soon.</p>
+    <p class="text-sm mt-1">Try adjusting your filters, or jobs will appear after the next fetch.</p>
   </div>
 {% endif %}
 </div>
 
 {% if has_prev or has_next %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ q ~ "&source=" ~ source_filter ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
-  <a href="/jobs?page={{ page - 1 }}&status={{ status_filter }}&q={{ q }}"
+  <a href="/jobs?page={{ page - 1 }}&{{ qs }}"
      class="px-4 py-2 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50">
     &larr; Previous
   </a>
   {% else %}
   <span></span>
   {% endif %}
-  <span class="text-sm text-gray-500">Page {{ page + 1 }} of {{ ((total - 1) // page_size + 1) }}</span>
+  <span class="text-sm text-gray-500">Page {{ page + 1 }} of {{ [1, ((total - 1) // page_size + 1)] | max }}</span>
   {% if has_next %}
-  <a href="/jobs?page={{ page + 1 }}&status={{ status_filter }}&q={{ q }}"
+  <a href="/jobs?page={{ page + 1 }}&{{ qs }}"
      class="px-4 py-2 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50">
     Next &rarr;
   </a>

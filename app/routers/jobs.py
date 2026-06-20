@@ -16,11 +16,31 @@ templates = Jinja2Templates(directory="app/templates")
 
 _FILTERABLE_STATUSES = [JobStatus.matched, JobStatus.filtered_out, JobStatus.docs_generated]
 _PAGE_SIZE = 50
+_SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice"]
+
+_SORT_OPTIONS = {
+    "score_desc": Job.llm_score.desc().nullslast(),
+    "score_asc": Job.llm_score.asc().nullsfirst(),
+    "posted_desc": Job.posted_at.desc().nullslast(),
+    "posted_asc": Job.posted_at.asc().nullslast(),
+    "company_asc": Job.company.asc(),
+}
 
 
 @router.get("", response_class=HTMLResponse)
-def get_jobs(request: Request, status: str = "", q: str = "", page: int = 0, db: Session = Depends(get_db)):
+def get_jobs(
+    request: Request,
+    status: str = "",
+    q: str = "",
+    source: str = "",
+    remote: str = "",
+    min_score: str = "",
+    sort: str = "score_desc",
+    page: int = 0,
+    db: Session = Depends(get_db),
+):
     query = db.query(Job).filter(Job.status.in_(_FILTERABLE_STATUSES))
+
     if status:
         try:
             query = query.filter(Job.status == JobStatus(status))
@@ -30,8 +50,20 @@ def get_jobs(request: Request, status: str = "", q: str = "", page: int = 0, db:
         query = query.filter(
             (Job.title.ilike(f"%{q}%")) | (Job.company.ilike(f"%{q}%"))
         )
+    if source:
+        query = query.filter(Job.source == source)
+    if remote == "1":
+        query = query.filter(Job.is_remote == True)  # noqa: E712
+    if min_score:
+        try:
+            query = query.filter(Job.llm_score >= int(min_score))
+        except ValueError:
+            pass
+
+    order = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["score_desc"])
     total = query.count()
-    jobs = query.order_by(Job.llm_score.desc().nullslast()).offset(page * _PAGE_SIZE).limit(_PAGE_SIZE).all()
+    jobs = query.order_by(order).offset(page * _PAGE_SIZE).limit(_PAGE_SIZE).all()
+
     return templates.TemplateResponse(
         "jobs/index.html",
         {
@@ -39,11 +71,16 @@ def get_jobs(request: Request, status: str = "", q: str = "", page: int = 0, db:
             "jobs": jobs,
             "status_filter": status,
             "q": q,
+            "source_filter": source,
+            "remote_filter": remote,
+            "min_score_filter": min_score,
+            "sort": sort,
             "page": page,
             "total": total,
             "page_size": _PAGE_SIZE,
             "has_prev": page > 0,
             "has_next": (page + 1) * _PAGE_SIZE < total,
+            "sources": _SOURCES,
         },
     )
 
