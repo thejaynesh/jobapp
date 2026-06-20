@@ -141,13 +141,23 @@ def chat_completion(messages: list[dict], api_key: str, base_url: str, model: st
     return response.choices[0].message.content or ""
 
 
-_RETRY_DELAYS = [5, 15]  # seconds between attempts on 429
+def _rpm_interval() -> float:
+    """Minimum seconds to wait between LLM calls to stay under the RPM limit."""
+    rpm = getattr(settings, "NVIDIA_NIM_RPM", 40)
+    return 60.0 / max(rpm, 1)
+
+
+def _retry_delays() -> list[int]:
+    """Wait durations on 429: one short pause then a full minute window reset."""
+    interval = _rpm_interval()
+    return [int(interval * 2), 65]
 
 
 def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: str) -> dict:
     messages = _build_match_prompt(job, profile_data)
+    delays = _retry_delays()
     last_exc: Exception | None = None
-    for attempt, delay in enumerate([0] + _RETRY_DELAYS):
+    for attempt, delay in enumerate([0] + delays):
         if delay:
             logger.warning("llm_score_job rate-limited, retrying in %ds (attempt %d)", delay, attempt + 1)
             time.sleep(delay)
@@ -160,7 +170,7 @@ def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: s
             logger.error("llm_score_job failed for job %s: %s", getattr(job, "id", "?"), exc)
             return {"score": 0, "reasoning": f"LLM error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
     # All retries exhausted on rate limit — propagate so caller can keep job as `new`
-    logger.error("llm_score_job rate-limited after %d attempts for job %s", len(_RETRY_DELAYS) + 1, getattr(job, "id", "?"))
+    logger.error("llm_score_job rate-limited after %d attempts for job %s", len(delays) + 1, getattr(job, "id", "?"))
     raise last_exc
 
 
@@ -204,6 +214,7 @@ def match_all_new_jobs(db) -> dict[str, int]:
     api_key = settings.NVIDIA_NIM_API_KEY
     base_url = settings.NVIDIA_NIM_BASE_URL
     model = settings.NVIDIA_NIM_MODEL
+    pace_interval = _rpm_interval()
 
     profile = db.query(Profile).first()
     profile_data = profile.data if profile else {}
@@ -227,6 +238,9 @@ def match_all_new_jobs(db) -> dict[str, int]:
                 rate_limited += 1
             else:
                 filtered_out += 1
+            # Pace only when the LLM was actually called or attempted
+            if result in ("matched", "rate_limited") or job.llm_score is not None:
+                time.sleep(pace_interval)
         except Exception as exc:
             logger.error("match_all_new_jobs error on job %s: %s", getattr(job, "id", "?"), exc)
             db.rollback()

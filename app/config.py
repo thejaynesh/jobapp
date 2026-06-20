@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     NVIDIA_NIM_API_KEY: str
     NVIDIA_NIM_BASE_URL: str
     NVIDIA_NIM_MODEL: str = "meta/llama-3.1-70b-instruct"
+    NVIDIA_NIM_RPM: int = 40  # requests per minute allowed by the API
 
     HUNTER_IO_API_KEY: str = ""
 

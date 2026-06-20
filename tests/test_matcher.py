@@ -378,14 +378,14 @@ class TestLlmScoreJobRateLimit:
                     llm_score_job(mock_job, profile_data, "key", "url", "model")
 
     def test_retries_correct_number_of_times(self, mock_job, profile_data):
-        from app.services.matcher import llm_score_job, _RETRY_DELAYS
+        from app.services.matcher import llm_score_job, _retry_delays
         from openai import RateLimitError
         exc = RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
         with patch("app.services.matcher.chat_completion", side_effect=exc) as mock_cc:
             with patch("app.services.matcher.time.sleep"):
                 with pytest.raises(RateLimitError):
                     llm_score_job(mock_job, profile_data, "key", "url", "model")
-        assert mock_cc.call_count == len(_RETRY_DELAYS) + 1
+        assert mock_cc.call_count == len(_retry_delays()) + 1
 
     def test_succeeds_on_retry_after_429(self, mock_job, profile_data):
         import json as json_mod
@@ -452,10 +452,40 @@ class TestMatchAllNewJobs:
         db.query.return_value.filter.return_value.all.return_value = [MagicMock(), MagicMock()]
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job", return_value="rate_limited"):
-            result = match_all_new_jobs(db)
+            with patch("app.services.matcher.time.sleep"):
+                result = match_all_new_jobs(db)
         assert result["rate_limited"] == 2
         assert result["filtered_out"] == 0
         assert result["matched"] == 0
+
+    def test_sleeps_between_llm_calls(self, profile_data):
+        from app.services.matcher import match_all_new_jobs
+        db = MagicMock()
+        mock_profile = self._make_mock_profile(profile_data)
+        # Two jobs that reach the LLM (llm_score is set)
+        job1, job2 = MagicMock(), MagicMock()
+        job1.llm_score = 85
+        job2.llm_score = 42
+        db.query.return_value.filter.return_value.all.return_value = [job1, job2]
+        db.query.return_value.first.return_value = mock_profile
+        with patch("app.services.matcher.match_job", return_value="matched"):
+            with patch("app.services.matcher.time.sleep") as mock_sleep:
+                match_all_new_jobs(db)
+        assert mock_sleep.call_count == 2
+
+    def test_no_sleep_for_keyword_filtered_jobs(self, profile_data):
+        from app.services.matcher import match_all_new_jobs
+        db = MagicMock()
+        mock_profile = self._make_mock_profile(profile_data)
+        # Job that was keyword-filtered (llm_score stays None)
+        job = MagicMock()
+        job.llm_score = None
+        db.query.return_value.filter.return_value.all.return_value = [job]
+        db.query.return_value.first.return_value = mock_profile
+        with patch("app.services.matcher.match_job", return_value="filtered_out"):
+            with patch("app.services.matcher.time.sleep") as mock_sleep:
+                match_all_new_jobs(db)
+        mock_sleep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
