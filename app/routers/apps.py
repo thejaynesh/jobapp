@@ -79,7 +79,7 @@ def update_app_status(
         raise HTTPException(status_code=422, detail=f"Invalid status: {status}")
     db.commit()
     return templates.TemplateResponse(
-        "apps/partials/app_row.html",
+        "apps/partials/app_card.html",
         {"request": request, "app": app_obj},
     )
 

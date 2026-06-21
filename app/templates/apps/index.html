@@ -7,21 +7,25 @@
 </div>
 
 {% if apps %}
-
-<!-- Mobile: card list -->
-<div class="md:hidden space-y-3">
+<div class="space-y-3">
   {% for app in apps %}
-  <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-    <a href="/apps/{{ app.id }}" class="text-blue-600 font-medium hover:underline block leading-snug">
-      {{ app.job.title }}
-    </a>
-    <p class="text-sm text-gray-500 mt-0.5">{{ app.job.company }}</p>
-    <div class="flex items-center justify-between mt-3">
+  <div id="app-card-{{ app.id }}" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+    <div class="flex justify-between items-start gap-2">
+      <div class="min-w-0">
+        <a href="/apps/{{ app.id }}" class="text-blue-600 font-medium hover:underline block break-words leading-snug">
+          {{ app.job.title }}
+        </a>
+        <p class="text-sm text-gray-500 mt-0.5 break-words">{{ app.job.company }}</p>
+      </div>
+      <span class="text-xs text-gray-400 shrink-0 mt-0.5">
+        {% if app.documents %}{{ app.documents | length }} doc(s){% endif %}
+      </span>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 mt-3">
       <select
         hx-post="/apps/{{ app.id }}/status"
-        hx-target="#mapp-{{ app.id }}"
+        hx-target="#app-card-{{ app.id }}"
         hx-swap="outerHTML"
-        hx-include="[name='status']"
         name="status"
         class="border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">
         {% for s in ['not_applied', 'applied', 'interviewing', 'offered', 'rejected', 'withdrawn'] %}
@@ -30,34 +34,13 @@
           </option>
         {% endfor %}
       </select>
-      <span class="text-xs text-gray-400">
-        {% if app.documents %}{{ app.documents | length }} doc(s){% else %}No docs{% endif %}
-      </span>
+      {% if app.applied_at %}
+      <span class="text-xs text-gray-400">{{ app.applied_at.strftime('%b %d') }}</span>
+      {% endif %}
     </div>
   </div>
   {% endfor %}
 </div>
-
-<!-- Desktop: table -->
-<div class="hidden md:block bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm">
-  <table class="w-full text-sm">
-    <thead class="bg-gray-50 border-b border-gray-200">
-      <tr>
-        <th class="px-4 py-3 text-left text-gray-600 font-medium">Job</th>
-        <th class="px-4 py-3 text-left text-gray-600 font-medium">Company</th>
-        <th class="px-4 py-3 text-left text-gray-600 font-medium">Status</th>
-        <th class="px-4 py-3 text-left text-gray-600 font-medium">Docs</th>
-        <th class="px-4 py-3 text-left text-gray-600 font-medium">Applied</th>
-      </tr>
-    </thead>
-    <tbody class="divide-y divide-gray-100" id="apps-table">
-      {% for app in apps %}
-        {% include "apps/partials/app_row.html" %}
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
 {% else %}
 <div class="text-center py-16 text-gray-400">
   <p class="text-lg">No applications yet.</p>
