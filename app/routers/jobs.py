@@ -16,7 +16,7 @@ templates = Jinja2Templates(directory="app/templates")
 
 _FILTERABLE_STATUSES = [JobStatus.matched, JobStatus.filtered_out, JobStatus.docs_generated]
 _PAGE_SIZE = 50
-_SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice"]
+_SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice", "remotive", "arbeitnow"]
 
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),

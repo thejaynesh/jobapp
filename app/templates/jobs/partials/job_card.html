@@ -52,6 +52,11 @@
         {% elif job.source == 'lever' %}bg-violet-50 text-violet-700
         {% elif job.source == 'ashby' %}bg-pink-50 text-pink-700
         {% elif job.source == 'handshake' %}bg-yellow-50 text-yellow-700
+        {% elif job.source == 'remotive' %}bg-teal-50 text-teal-700
+        {% elif job.source == 'arbeitnow' %}bg-indigo-50 text-indigo-700
+        {% elif job.source == 'indeed' %}bg-cyan-50 text-cyan-700
+        {% elif job.source == 'wellfound' %}bg-rose-50 text-rose-700
+        {% elif job.source == 'dice' %}bg-amber-50 text-amber-700
         {% else %}bg-gray-50 text-gray-500{% endif %}">
         {{ job.source }}
       </span>
