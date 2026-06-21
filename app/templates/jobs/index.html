@@ -9,19 +9,19 @@
 <form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm space-y-3">
   <input type="hidden" name="page" value="0">
 
-  <!-- Row 1: search + status + source -->
+  <!-- Row 1: search (full width on mobile), then status + source -->
   <div class="flex flex-wrap gap-2">
     <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
-      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-48 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-0 w-full focus:outline-none focus:ring-2 focus:ring-blue-500">
 
-    <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+    <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
       <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
       <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
       <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
       <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
     </select>
 
-    <select name="source" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+    <select name="source" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
       <option value="" {% if not source_filter %}selected{% endif %}>All sources</option>
       {% for s in sources %}
         <option value="{{ s }}" {% if source_filter == s %}selected{% endif %}>{{ s | title }}</option>
@@ -31,7 +31,7 @@
 
   <!-- Row 2: min score + remote + sort + buttons -->
   <div class="flex flex-wrap gap-2 items-center">
-    <select name="min_score" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+    <select name="min_score" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
       <option value="" {% if not min_score_filter %}selected{% endif %}>Any score</option>
       <option value="60" {% if min_score_filter == "60" %}selected{% endif %}>Score ≥ 60</option>
       <option value="70" {% if min_score_filter == "70" %}selected{% endif %}>Score ≥ 70</option>
@@ -45,7 +45,7 @@
       Remote only
     </label>
 
-    <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ml-auto">
+    <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
       <option value="score_desc" {% if sort == "score_desc" %}selected{% endif %}>Score: high → low</option>
       <option value="score_asc" {% if sort == "score_asc" %}selected{% endif %}>Score: low → high</option>
       <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>
@@ -56,7 +56,7 @@
     <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
     {% if status_filter or q or source_filter or remote_filter or min_score_filter %}
-    <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear filters</a>
+    <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
     {% endif %}
   </div>
 </form>
@@ -80,7 +80,7 @@
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"
      class="px-4 py-2 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50">
-    &larr; Previous
+    &larr; Prev
   </a>
   {% else %}
   <span></span>

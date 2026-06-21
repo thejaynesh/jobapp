@@ -1,22 +1,22 @@
-<div id="job-{{ job.id }}" class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
-  <div class="flex justify-between items-start">
-    <div>
-      <a href="{{ job.url }}" target="_blank" class="text-lg font-semibold text-blue-600 hover:underline">
+<div id="job-{{ job.id }}" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+  <div class="flex justify-between items-start gap-3">
+    <div class="min-w-0">
+      <a href="{{ job.url }}" target="_blank" class="text-base font-semibold text-blue-600 hover:underline break-words">
         {{ job.title }}
       </a>
-      <p class="text-gray-600 text-sm mt-0.5">{{ job.company }} &bull; {{ job.location or "Unknown" }}
-        {% if job.is_remote %}<span class="ml-2 bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded">Remote</span>{% endif %}
+      <p class="text-gray-600 text-sm mt-0.5 break-words">{{ job.company }} &bull; {{ job.location or "Unknown" }}
+        {% if job.is_remote %}<span class="ml-1 bg-green-100 text-green-700 text-xs px-1.5 py-0.5 rounded">Remote</span>{% endif %}
       </p>
       <p class="text-xs text-gray-400 mt-0.5">
         Posted: {{ (job.posted_at or job.fetched_at).strftime("%b %d, %Y") }}
       </p>
     </div>
-    <div class="text-right">
+    <div class="text-right shrink-0">
       {% if job.llm_score is not none %}
         <span class="text-2xl font-bold {% if job.llm_score >= 75 %}text-green-600{% elif job.llm_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
           {{ job.llm_score }}
         </span>
-        <p class="text-xs text-gray-400">LLM score</p>
+        <p class="text-xs text-gray-400">score</p>
       {% endif %}
     </div>
   </div>
@@ -34,8 +34,8 @@
     {% endfor %}
   </div>
 
-  <div class="flex items-center justify-between mt-4">
-    <div class="flex items-center gap-2">
+  <div class="flex flex-wrap items-center justify-between gap-2 mt-4">
+    <div class="flex flex-wrap items-center gap-2">
       <span class="text-xs px-2 py-1 rounded font-medium
         {% if job.status.value == 'matched' %}bg-green-100 text-green-700
         {% elif job.status.value == 'filtered_out' %}bg-gray-100 text-gray-500
@@ -57,14 +57,14 @@
       </span>
       {% endif %}
     </div>
-    <div class="flex gap-2">
+    <div class="flex flex-wrap gap-2">
       {% if job.status.value in ['matched', 'filtered_out'] %}
       <button
         hx-post="/jobs/{{ job.id }}/override"
         hx-target="#job-{{ job.id }}"
         hx-swap="outerHTML"
         class="text-xs text-gray-500 hover:text-blue-600 underline">
-        {% if job.status.value == 'matched' %}Mark filtered{% else %}Override to matched{% endif %}
+        {% if job.status.value == 'matched' %}Mark filtered{% else %}Mark matched{% endif %}
       </button>
       {% endif %}
       {% if job.status.value == 'matched' %}
