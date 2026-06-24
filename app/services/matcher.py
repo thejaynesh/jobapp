@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 MIN_KEYWORD_SKILLS = 2  # overridden by settings.MIN_KEYWORD_SKILLS if present
 
 
+_STOP = frozenset({
+    "a", "an", "the", "and", "or", "of", "in", "at", "for", "to", "with",
+    "as", "is", "be", "are", "was", "were", "it", "on", "by", "from",
+})
+
+
 def _normalize(text: str) -> str:
     return text.lower().strip()
 
@@ -29,19 +35,37 @@ def _flatten_skills(skills_data: dict) -> list[str]:
 
 def _title_matches_roles(title: str, target_roles: list[str]) -> bool:
     title_lower = _normalize(title)
+    title_words = set(re.findall(r'\b[a-z]+\b', title_lower)) - _STOP
     for role in target_roles:
         role_lower = _normalize(role)
-        if role_lower in title_lower or title_lower in role_lower:
+        role_words = set(re.findall(r'\b[a-z]+\b', role_lower)) - _STOP
+        # Match if any meaningful word overlaps (e.g. "engineer" in both)
+        if role_words and (role_words & title_words):
             return True
-        ratio = SequenceMatcher(None, title_lower, role_lower).ratio()
-        if ratio >= 0.6:
+        # Fallback sequence ratio for short/abbreviated titles
+        if SequenceMatcher(None, title_lower, role_lower).ratio() >= 0.7:
             return True
     return False
 
 
 def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
     desc_lower = description.lower()
-    return sum(1 for skill in skills_flat if skill.lower() in desc_lower)
+    count = 0
+    for skill in skills_flat:
+        s = skill.lower()
+        if " " in s:
+            # Multi-word skills: simple substring is fine
+            if s in desc_lower:
+                count += 1
+        elif re.match(r'^\w+$', s):
+            # Pure alphanumeric: word boundaries prevent false positives (java ≠ javascript)
+            if re.search(r'\b' + re.escape(s) + r'\b', desc_lower):
+                count += 1
+        else:
+            # Special chars (c++, c#, node.js): use lookaround instead of \b
+            if re.search(r'(?<![a-z0-9])' + re.escape(s) + r'(?![a-z0-9])', desc_lower):
+                count += 1
+    return count
 
 
 def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
@@ -72,20 +96,41 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
     skills_flat = _flatten_skills(profile_data.get("skills", {}))
     roles = profile_data.get("target_roles", [])
     experience = profile_data.get("experience", [])
+    remote_pref = profile_data.get("remote_preference", "any")
+    salary_min = profile_data.get("salary_min")
+    education = profile_data.get("education", [])
+
+    total_years = sum(float(e.get("years", 0) or 0) for e in experience)
 
     exp_lines = "\n".join(
         f"- {e.get('title', '')} at {e.get('company', '')} ({e.get('years', 'N/A')} years)"
         for e in experience
     )
 
+    edu_lines = "\n".join(
+        f"- {e.get('degree', '')} in {e.get('field', '')} from {e.get('school', '')}"
+        for e in education
+    ) if education else ""
+
+    extras = []
+    if total_years:
+        extras.append(f"Total experience: {total_years:.0f} years")
+    if remote_pref and remote_pref != "any":
+        extras.append(f"Work preference: {remote_pref}")
+    if salary_min:
+        extras.append(f"Minimum salary: ${salary_min:,}")
+    extras_str = "\n".join(extras)
+
     system_content = (
         "You are a job-match evaluator. Given a candidate profile and a job description, "
         "return a JSON object with exactly these fields:\n"
-        "  score (0-100 integer),\n"
-        "  reasoning (1-2 sentence string),\n"
-        "  matched_skills (list of strings),\n"
-        "  missing_skills (list of strings),\n"
-        "  seniority_fit (boolean).\n"
+        "  score (0-100 integer — how well this job fits the candidate),\n"
+        "  reasoning (1-2 sentence string explaining the score),\n"
+        "  matched_skills (list of skills from the candidate that appear in the job),\n"
+        "  missing_skills (list of skills the job requires that the candidate lacks),\n"
+        "  seniority_fit (boolean — true if the job seniority matches the candidate's experience level).\n"
+        "Penalize heavily if required years of experience greatly exceed the candidate's total. "
+        "Reward remote-friendly jobs when the candidate prefers remote. "
         "Return ONLY the JSON object, no markdown, no explanation."
     )
 
@@ -94,10 +139,14 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         f"Summary: {summary}\n"
         f"Target roles: {', '.join(roles)}\n"
         f"Skills: {', '.join(skills_flat)}\n"
-        f"Experience:\n{exp_lines}\n\n"
-        f"Job title: {job.title}\n"
+        f"Experience:\n{exp_lines}\n"
+        + (f"Education:\n{edu_lines}\n" if edu_lines else "")
+        + (f"{extras_str}\n" if extras_str else "")
+        + f"\nJob title: {job.title}\n"
         f"Company: {job.company}\n"
-        f"Description:\n{job.description or ''}"
+        f"Location: {job.location or 'Unknown'} (remote: {job.is_remote})\n"
+        f"Experience level: {job.experience_level or 'unknown'}\n"
+        f"Description:\n{(job.description or '')[:3000]}"
     )
 
     return [
@@ -193,6 +242,10 @@ def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: s
         return "rate_limited"
 
     score = llm_result["score"]
+    # Seniority mismatch: penalize but don't hard-block (role might still be worth applying)
+    if not llm_result.get("seniority_fit", True):
+        score = max(0, score - 15)
+
     min_score = profile_data.get("min_match_score", getattr(settings, "MIN_MATCH_SCORE", 70))
 
     job.llm_score = score

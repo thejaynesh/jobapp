@@ -57,6 +57,8 @@
         {% elif job.source == 'indeed' %}bg-cyan-50 text-cyan-700
         {% elif job.source == 'wellfound' %}bg-rose-50 text-rose-700
         {% elif job.source == 'dice' %}bg-amber-50 text-amber-700
+        {% elif job.source == 'remoteok' %}bg-lime-50 text-lime-700
+        {% elif job.source == 'weworkremotely' %}bg-fuchsia-50 text-fuchsia-700
         {% else %}bg-gray-50 text-gray-500{% endif %}">
         {{ job.source }}
       </span>

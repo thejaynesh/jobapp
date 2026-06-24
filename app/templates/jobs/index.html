@@ -27,6 +27,13 @@
         <option value="{{ s }}" {% if source_filter == s %}selected{% endif %}>{{ s | title }}</option>
       {% endfor %}
     </select>
+
+    <select name="exp_level" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not exp_level_filter %}selected{% endif %}>All levels</option>
+      {% for lvl in exp_levels %}
+        <option value="{{ lvl }}" {% if exp_level_filter == lvl %}selected{% endif %}>{{ lvl | title }}</option>
+      {% endfor %}
+    </select>
   </div>
 
   <!-- Row 2: min score + remote + sort + buttons -->
@@ -75,7 +82,7 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ q ~ "&source=" ~ source_filter ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&sort=" ~ sort %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ q ~ "&source=" ~ source_filter ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"

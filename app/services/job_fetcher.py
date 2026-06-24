@@ -152,6 +152,28 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
             except Exception as exc:
                 _record(stats, "arbeitnow", [], f"{role}/{loc}: {exc}")
 
+    # --- RemoteOK: free public API for remote tech jobs ---
+    from app.services.sources.remoteok import fetch as remoteok_fetch
+    stats.setdefault("remoteok", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = remoteok_fetch(query=role)
+            _record(stats, "remoteok", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "remoteok", [], f"{role}: {exc}")
+
+    # --- We Work Remotely: RSS feed for remote tech jobs ---
+    from app.services.sources.weworkremotely import fetch as wwr_fetch
+    stats.setdefault("weworkremotely", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = wwr_fetch(query=role)
+            _record(stats, "weworkremotely", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "weworkremotely", [], f"{role}: {exc}")
+
     # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
 
     async def _run_playwright() -> tuple[list[dict], dict]:
