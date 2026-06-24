@@ -17,3 +17,4 @@ alembic/versions/*.py
 !alembic/versions/0002_add_posted_at.py
 !alembic/versions/0003_add_job_indexes.py
 !alembic/versions/0004_application_generation_status.py
+!alembic/versions/0005_seed_profile_jaynesh.py
