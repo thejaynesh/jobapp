@@ -56,27 +56,66 @@ def _make_jinja_env() -> Environment:
 # Context builders
 # ---------------------------------------------------------------------------
 
-def build_resume_context(profile_data: dict, tailored_bullets: list[dict] | None) -> dict:
-    experience = [dict(exp) for exp in profile_data.get("experience", [])]
-    if tailored_bullets:
-        bullet_map = {(e["company"], e["title"]): e["bullets"] for e in tailored_bullets}
-        for exp in experience:
-            key = (exp.get("company", ""), exp.get("title", ""))
-            if key in bullet_map:
-                exp["bullets"] = bullet_map[key]
+def _normalize_profile_for_template(profile_data: dict) -> dict:
+    """Map stored profile format → shape LaTeX templates expect."""
+    personal = profile_data.get("personal") or {}
     return {
-        "profile": profile_data,
-        "narrative_summary": profile_data.get("narrative", {}).get("summary", ""),
-        "skills": profile_data.get("skills", {}),
-        "experience": experience,
-        "education": profile_data.get("education", []),
-        "projects": profile_data.get("projects", []),
+        "name": personal.get("name") or "",
+        "contact": {
+            "email": personal.get("email") or "",
+            "phone": personal.get("phone") or "",
+            "location": personal.get("location") or "",
+            "linkedin": personal.get("linkedin") or "",
+            "github": personal.get("github") or "",
+        },
+    }
+
+
+def _normalize_experience(experience_list: list, tailored_bullets: list[dict] | None) -> list:
+    """Normalize experience items and apply tailored bullets."""
+    bullet_map = {}
+    if tailored_bullets:
+        for e in tailored_bullets:
+            bullet_map[(e.get("company", ""), e.get("title", ""))] = e.get("bullets", [])
+
+    result = []
+    for exp in experience_list:
+        e = dict(exp)
+        # stored as "role", templates expect "title"
+        if not e.get("title"):
+            e["title"] = e.get("role") or ""
+        key = (e.get("company", ""), e.get("title", ""))
+        if key in bullet_map:
+            e["bullets"] = bullet_map[key]
+        result.append(e)
+    return result
+
+
+def _normalize_education(education_list: list) -> list:
+    """Normalize education items: add graduation_year from end_date."""
+    result = []
+    for edu in education_list:
+        e = dict(edu)
+        if not e.get("graduation_year"):
+            e["graduation_year"] = e.get("end_date") or ""
+        result.append(e)
+    return result
+
+
+def build_resume_context(profile_data: dict, tailored_bullets: list[dict] | None) -> dict:
+    return {
+        "profile": _normalize_profile_for_template(profile_data),
+        "narrative_summary": (profile_data.get("narrative") or {}).get("summary", ""),
+        "skills": profile_data.get("skills") or {},
+        "experience": _normalize_experience(profile_data.get("experience") or [], tailored_bullets),
+        "education": _normalize_education(profile_data.get("education") or []),
+        "projects": profile_data.get("projects") or [],
     }
 
 
 def build_cover_letter_context(profile_data: dict, job_company: str, job_title: str, body: str) -> dict:
     return {
-        "profile": profile_data,
+        "profile": _normalize_profile_for_template(profile_data),
         "job_company": job_company,
         "job_title": job_title,
         "cover_letter_body": body,

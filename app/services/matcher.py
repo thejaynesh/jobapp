@@ -91,7 +91,8 @@ def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
 
 
 def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
-    name = profile_data.get("name", "Candidate")
+    personal = profile_data.get("personal") or {}
+    name = personal.get("name") or profile_data.get("name") or "Candidate"
     summary = profile_data.get("narrative", {}).get("summary", "")
     skills_flat = _flatten_skills(profile_data.get("skills", {}))
     roles = profile_data.get("target_roles", [])
