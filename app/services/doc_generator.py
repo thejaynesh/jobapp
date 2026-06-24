@@ -73,6 +73,12 @@ def _make_jinja_env() -> Environment:
 # Context builders
 # ---------------------------------------------------------------------------
 
+def _ensure_url(value: str) -> str:
+    if value and not value.startswith(("http://", "https://")):
+        return "https://" + value
+    return value
+
+
 def _normalize_profile_for_template(profile_data: dict) -> dict:
     """Map stored profile format → shape LaTeX templates expect."""
     personal = profile_data.get("personal") or {}
@@ -82,8 +88,8 @@ def _normalize_profile_for_template(profile_data: dict) -> dict:
             "email": personal.get("email") or "",
             "phone": personal.get("phone") or "",
             "location": personal.get("location") or "",
-            "linkedin": personal.get("linkedin") or "",
-            "github": personal.get("github") or "",
+            "linkedin": _ensure_url(personal.get("linkedin") or ""),
+            "github": _ensure_url(personal.get("github") or ""),
         },
     }
 
@@ -93,7 +99,7 @@ def _normalize_experience(experience_list: list, tailored_bullets: list[dict] | 
     bullet_map = {}
     if tailored_bullets:
         for e in tailored_bullets:
-            bullet_map[(e.get("company", ""), e.get("title", ""))] = e.get("bullets", [])
+            bullet_map[(e.get("company") or "", e.get("title") or "")] = e.get("bullets", [])
 
     result = []
     for exp in experience_list:
@@ -101,7 +107,7 @@ def _normalize_experience(experience_list: list, tailored_bullets: list[dict] | 
         # stored as "role", templates expect "title"
         if not e.get("title"):
             e["title"] = e.get("role") or ""
-        key = (e.get("company", ""), e.get("title", ""))
+        key = (e.get("company") or "", e.get("title") or "")
         if key in bullet_map:
             e["bullets"] = bullet_map[key]
         result.append(e)
@@ -250,7 +256,7 @@ def tailor_resume_bullets(
 ) -> list[dict]:
     experience = profile_data.get("experience", [])
     exp_json = [
-        {"company": e.get("company"), "title": e.get("title"), "bullets": e.get("bullets", [])}
+        {"company": e.get("company"), "title": e.get("title") or e.get("role") or "", "bullets": e.get("bullets", [])}
         for e in experience
     ]
     messages = [
