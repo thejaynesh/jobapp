@@ -37,10 +37,27 @@ _LATEX_MAP = {
 }
 
 
+_UNICODE_MAP = {
+    "—": "---",       # em dash
+    "–": "--",        # en dash
+    "‘": "`",         # left single quote
+    "’": "'",         # right single quote / apostrophe
+    "“": "``",        # left double quote
+    "”": "''",        # right double quote
+    "•": r"\textbullet{}",   # bullet •
+    "…": "...",       # ellipsis …
+    " ": " ",         # non-breaking space
+}
+_UNICODE_RE = re.compile("[" + "".join(_UNICODE_MAP.keys()) + "]")
+
+
 def latex_escape(text) -> str:
     if not isinstance(text, str):
         return ""
-    return _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], text)
+    # Escape LaTeX special chars first, then substitute Unicode sequences
+    # (Unicode subs produce LaTeX commands with \ { } which must not be re-escaped)
+    text = _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], text)
+    return _UNICODE_RE.sub(lambda m: _UNICODE_MAP[m.group()], text)
 
 
 def _make_jinja_env() -> Environment:
@@ -141,13 +158,24 @@ def compile_pdf(tex_source: str, output_path: Path) -> Path:
         tex_file = Path(tmpdir) / "document.tex"
         tex_file.write_text(tex_source, encoding="utf-8")
         result = subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode", "-output-directory", tmpdir, str(tex_file)],
+            [
+                "pdflatex",
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                "-output-directory", tmpdir,
+                str(tex_file),
+            ],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
+            # pdflatex writes errors to stdout (the .log stream), not stderr.
+            # Pull out lines starting with "!" which are the actual errors.
+            log = (result.stdout or "") + (result.stderr or "")
+            error_lines = [l for l in log.splitlines() if l.startswith("!")]
+            detail = "\n".join(error_lines[:5]) if error_lines else log[-800:]
             raise DocGenerationError(
-                f"pdflatex failed (exit {result.returncode}): {result.stderr[-500:]}"
+                f"pdflatex failed (exit {result.returncode}):\n{detail}"
             )
         compiled = Path(tmpdir) / "document.pdf"
         output_path.parent.mkdir(parents=True, exist_ok=True)
