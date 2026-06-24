@@ -186,6 +186,7 @@ def chat_completion(messages: list[dict], api_key: str, base_url: str, model: st
         messages=messages,
         temperature=0.1,
         max_tokens=512,
+        timeout=90,
     )
     return response.choices[0].message.content or ""
 

@@ -67,3 +67,26 @@ def doc_status_html(
         "jobs/partials/doc_gen_btn.html",
         {"request": request, "job": job, "app": app_obj},
     )
+
+
+@router.post("/{job_id}/cancel-generate", response_class=HTMLResponse)
+def cancel_generate(
+    job_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Reset a stuck 'generating' application back to idle so the user can retry."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    app_obj = job.applications[0] if job.applications else None
+    if app_obj:
+        app_obj.generation_status = "idle"
+        app_obj.generation_error = None
+        db.commit()
+
+    return templates.TemplateResponse(
+        "jobs/partials/doc_gen_btn.html",
+        {"request": request, "job": job, "app": app_obj},
+    )

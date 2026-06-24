@@ -1,6 +1,8 @@
 import logging
 import uuid
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.application import Application
@@ -8,7 +10,12 @@ from app.models.application import Application
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="app.tasks.generate.generate_docs", bind=False)
+@celery_app.task(
+    name="app.tasks.generate.generate_docs",
+    bind=False,
+    soft_time_limit=300,
+    time_limit=360,
+)
 def generate_docs(application_id: str, feedback: str | None = None) -> dict:
     db = SessionLocal()
     try:
@@ -24,7 +31,6 @@ def generate_docs(application_id: str, feedback: str | None = None) -> dict:
         from app.services.doc_generator import generate_documents
         generate_documents(db, app, feedback=feedback)
 
-        # Re-fetch after generate_documents commits
         app = db.query(Application).filter(Application.id == uuid.UUID(application_id)).first()
         if app:
             app.generation_status = "done"
@@ -32,16 +38,25 @@ def generate_docs(application_id: str, feedback: str | None = None) -> dict:
 
         return {"status": "ok", "application_id": application_id}
 
+    except SoftTimeLimitExceeded:
+        logger.error("generate_docs timed out for %s", application_id)
+        _mark_failed(db, application_id, "Generation timed out after 5 minutes")
+        return {"status": "timeout"}
+
     except Exception as exc:
         logger.error("generate_docs failed for %s: %s", application_id, exc)
-        try:
-            app = db.query(Application).filter(Application.id == uuid.UUID(application_id)).first()
-            if app:
-                app.generation_status = "failed"
-                app.generation_error = str(exc)[:500]
-                db.commit()
-        except Exception as inner:
-            logger.error("generate_docs: could not save failure state: %s", inner)
+        _mark_failed(db, application_id, str(exc))
         return {"status": "error", "error": str(exc)}
     finally:
         db.close()
+
+
+def _mark_failed(db, application_id: str, error: str) -> None:
+    try:
+        app = db.query(Application).filter(Application.id == uuid.UUID(application_id)).first()
+        if app:
+            app.generation_status = "failed"
+            app.generation_error = error[:500]
+            db.commit()
+    except Exception as exc:
+        logger.error("generate_docs: could not save failure state: %s", exc)
