@@ -64,7 +64,7 @@
       </span>
       {% endif %}
     </div>
-    <div class="flex flex-wrap gap-2">
+    <div class="flex flex-wrap gap-2 items-center">
       {% if job.status.value in ['matched', 'filtered_out'] %}
       <button
         hx-post="/jobs/{{ job.id }}/override"
@@ -74,13 +74,9 @@
         {% if job.status.value == 'matched' %}Mark filtered{% else %}Mark matched{% endif %}
       </button>
       {% endif %}
-      {% if job.status.value == 'matched' %}
-      <button
-        hx-post="/api/jobs/{{ job.id }}/generate-docs"
-        hx-swap="none"
-        class="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">
-        Generate docs
-      </button>
+      {% if job.status.value in ['matched', 'docs_generated'] %}
+        {% set app = job.applications[0] if job.applications else none %}
+        {% include "jobs/partials/doc_gen_btn.html" %}
       {% endif %}
     </div>
   </div>
