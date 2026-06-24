@@ -37,7 +37,9 @@ _LATEX_MAP = {
 }
 
 
-def latex_escape(text: str) -> str:
+def latex_escape(text) -> str:
+    if not isinstance(text, str):
+        return ""
     return _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], text)
 
 

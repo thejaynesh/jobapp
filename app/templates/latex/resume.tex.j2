@@ -13,10 +13,10 @@
 
 % Header
 \begin{center}
-  {\LARGE \textbf{ {{- profile.name | latex_escape -}} }}\\[4pt]
-  {{- profile.contact.email | latex_escape }} \quad | \quad
-  {{- profile.contact.phone | latex_escape }} \quad | \quad
-  {{- profile.contact.location | latex_escape }}
+  {\LARGE \textbf{ {{- profile.name | default("") | latex_escape -}} }}\\[4pt]
+  {{- profile.contact.email | default("") | latex_escape }} \quad | \quad
+  {{- profile.contact.phone | default("") | latex_escape }} \quad | \quad
+  {{- profile.contact.location | default("") | latex_escape }}
   {% if profile.contact.linkedin %} \quad | \quad \href{ {{- profile.contact.linkedin -}} }{LinkedIn}{% endif %}
   {% if profile.contact.github %} \quad | \quad \href{ {{- profile.contact.github -}} }{GitHub}{% endif %}
 \end{center}
@@ -36,8 +36,8 @@
 % Experience
 \section{Experience}
 {% for exp in experience %}
-\textbf{ {{- exp.title | latex_escape -}} } \hfill {{ exp.start_date | default("") | latex_escape }} -- {{ exp.end_date | default("Present") | latex_escape }}\\
-\textit{ {{- exp.company | latex_escape -}} } \hfill {{ exp.location | default("") | latex_escape }}
+\textbf{ {{- exp.title | default("") | latex_escape -}} } \hfill {{ exp.start_date | default("") | latex_escape }} -- {{ exp.end_date | default("Present") | latex_escape }}\\
+\textit{ {{- exp.company | default("") | latex_escape -}} } \hfill {{ exp.location | default("") | latex_escape }}
 \begin{itemize}
 {% for bullet in exp.bullets | default([]) %}
   \item {{ bullet | latex_escape }}
@@ -48,15 +48,15 @@
 % Education
 \section{Education}
 {% for edu in education %}
-\textbf{ {{- edu.degree | latex_escape -}} } \hfill {{ edu.graduation_year | default("") | latex_escape }}\\
-\textit{ {{- edu.school | latex_escape -}} }
+\textbf{ {{- edu.degree | default("") | latex_escape -}} } \hfill {{ edu.graduation_year | default("") | latex_escape }}\\
+\textit{ {{- edu.school | default("") | latex_escape -}} }
 {% endfor %}
 
 {% if projects %}
 % Projects
 \section{Projects}
 {% for proj in projects %}
-\textbf{ {{- proj.name | latex_escape -}} }{% if proj.url %} (\href{ {{- proj.url -}} }{link}){% endif %}\\
+\textbf{ {{- proj.name | default("") | latex_escape -}} }{% if proj.url %} (\href{ {{- proj.url -}} }{link}){% endif %}\\
 {{ proj.description | default("") | latex_escape }}
 {% if proj.bullets | default([]) %}
 \begin{itemize}
