@@ -138,9 +138,11 @@ def _seed_profile_if_empty() -> None:
         if data.get("experience"):
             logger.info("Profile already has experience — skipping seed")
             return
+        from sqlalchemy.orm.attributes import flag_modified
         updated = copy.deepcopy(data)
         updated.update(_PROFILE_SEED)
         profile.data = updated
+        flag_modified(profile, "data")
         db.commit()
         logger.info("Profile seeded with experience, skills, education, and narrative")
     except Exception as exc:
