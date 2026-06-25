@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+import subprocess
 
 from fastapi import FastAPI, Depends
 from fastapi.responses import RedirectResponse
@@ -14,9 +16,22 @@ from app.routers.apps import router as apps_router
 from app.routers.settings import router as settings_router
 from app.routers.outreach import router as outreach_router
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            logger.error("alembic upgrade failed: %s", result.stderr or result.stdout)
+        else:
+            logger.info("alembic upgrade head: %s", result.stdout.strip() or "up to date")
+    except Exception as exc:
+        logger.error("alembic upgrade error: %s", exc)
     yield
 
 
