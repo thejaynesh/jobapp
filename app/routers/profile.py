@@ -250,3 +250,19 @@ def regenerate_summary(request: Request, db: Session = Depends(get_db)):
         "profile/partials/narrative.html",
         {"request": request, "profile": profile.data},
     )
+
+
+from fastapi.responses import JSONResponse
+
+@router.get("/debug/raw", response_class=JSONResponse)
+def debug_profile_raw(db: Session = Depends(get_db)):
+    profile = get_or_create_profile(db)
+    data = profile.data or {}
+    return {
+        "has_experience": bool(data.get("experience")),
+        "experience_count": len(data.get("experience") or []),
+        "skills": data.get("skills"),
+        "education_count": len(data.get("education") or []),
+        "narrative_summary_len": len((data.get("narrative") or {}).get("summary") or ""),
+        "personal_name": (data.get("personal") or {}).get("name"),
+    }
