@@ -256,19 +256,13 @@ def regenerate_summary(request: Request, db: Session = Depends(get_db)):
 
 
 from fastapi.responses import JSONResponse
-from app.main import _PROFILE_SEED
 
 
 @router.get("/seed", response_class=HTMLResponse)
 def seed_profile(db: Session = Depends(get_db)):
-    """Visit this URL to force-seed profile data. Idempotent — won't overwrite existing data."""
-    profile = get_or_create_profile(db)
-    data = profile.data or {}
-    updated = copy.deepcopy(data)
-    updated.update(_PROFILE_SEED)
-    profile.data = updated
-    flag_modified(profile, "data")
-    db.commit()
+    """Visit this URL to force-seed profile data."""
+    from app.services.profile_service import apply_seed
+    apply_seed(db)
     return RedirectResponse(url="/profile?tab=experience", status_code=302)
 
 
