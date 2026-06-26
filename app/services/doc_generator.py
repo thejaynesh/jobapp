@@ -37,8 +37,25 @@ _LATEX_MAP = {
 }
 
 
-def latex_escape(text: str) -> str:
-    return _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], text)
+_UNICODE_MAP = {
+    "—": "---",       # em dash
+    "–": "--",        # en dash
+    "‘": "`",         # left single quote
+    "’": "'",         # right single quote / apostrophe
+    "“": "``",        # left double quote
+    "”": "''",        # right double quote
+    "•": r"\textbullet{}",   # bullet
+    "…": "...",       # ellipsis
+    " ": " ",         # non-breaking space
+}
+_UNICODE_RE = re.compile("[" + "".join(_UNICODE_MAP.keys()) + "]")
+
+
+def latex_escape(text) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], text)
+    return _UNICODE_RE.sub(lambda m: _UNICODE_MAP[m.group()], text)
 
 
 def _make_jinja_env() -> Environment:
@@ -54,27 +71,152 @@ def _make_jinja_env() -> Environment:
 # Context builders
 # ---------------------------------------------------------------------------
 
-def build_resume_context(profile_data: dict, tailored_bullets: list[dict] | None) -> dict:
-    experience = [dict(exp) for exp in profile_data.get("experience", [])]
-    if tailored_bullets:
-        bullet_map = {(e["company"], e["title"]): e["bullets"] for e in tailored_bullets}
-        for exp in experience:
-            key = (exp.get("company", ""), exp.get("title", ""))
-            if key in bullet_map:
-                exp["bullets"] = bullet_map[key]
+def _ensure_url(value: str) -> str:
+    if value and not value.startswith(("http://", "https://")):
+        return "https://" + value
+    return value
+
+
+def _normalize_profile_for_template(profile_data: dict) -> dict:
+    """Map stored profile format → shape LaTeX templates expect."""
+    personal = profile_data.get("personal") or {}
     return {
-        "profile": profile_data,
-        "narrative_summary": profile_data.get("narrative", {}).get("summary", ""),
-        "skills": profile_data.get("skills", {}),
-        "experience": experience,
-        "education": profile_data.get("education", []),
-        "projects": profile_data.get("projects", []),
+        "name": personal.get("name") or "",
+        "contact": {
+            "email": personal.get("email") or "",
+            "phone": personal.get("phone") or "",
+            "location": personal.get("location") or "",
+            "linkedin": _ensure_url(personal.get("linkedin") or ""),
+            "github": _ensure_url(personal.get("github") or ""),
+            "website": _ensure_url(personal.get("website") or ""),
+        },
+    }
+
+
+def _normalize_experience(experience_list: list, tailored_bullets: list[dict] | None) -> list:
+    """Normalize experience items and apply tailored bullets."""
+    bullet_map = {}
+    if tailored_bullets:
+        for e in tailored_bullets:
+            bullet_map[(e.get("company") or "", e.get("title") or "")] = e.get("bullets", [])
+
+    result = []
+    for exp in experience_list:
+        e = dict(exp)
+        # stored as "role", templates expect "title"
+        if not e.get("title"):
+            e["title"] = e.get("role") or ""
+        key = (e.get("company") or "", e.get("title") or "")
+        if key in bullet_map:
+            e["bullets"] = bullet_map[key]
+        result.append(e)
+    return result
+
+
+def _normalize_education(education_list: list) -> list:
+    """Normalize education items: add graduation_year from end_date."""
+    result = []
+    for edu in education_list:
+        e = dict(edu)
+        if not e.get("graduation_year"):
+            e["graduation_year"] = e.get("end_date") or ""
+        result.append(e)
+    return result
+
+
+def _score_project_keywords(project: dict, job_description: str) -> int:
+    """Return number of project tech keywords found in the job description (case-insensitive)."""
+    if not job_description:
+        return 0
+    jd_lower = job_description.lower()
+    tech_terms = project.get("tech") or []
+    name_tokens = re.findall(r'\w+', (project.get("name") or "").lower())
+    all_terms = [t.lower() for t in tech_terms] + name_tokens
+    return sum(1 for t in all_terms if t and len(t) > 1 and t in jd_lower)
+
+
+def select_projects_for_job(
+    profile_data: dict,
+    job_description: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    max_projects: int = 2,
+) -> list[dict]:
+    """
+    Two-layer project selection:
+    1. Keyword match: score each project against the JD; require at least 1 match.
+    2. LLM pick: from keyword-matched candidates, LLM picks the best `max_projects`.
+       If no candidates have keyword matches, fall back to all projects so the resume
+       isn't empty.
+    """
+    all_projects = profile_data.get("projects") or []
+    if not all_projects:
+        return []
+
+    # Layer 1: keyword scoring
+    scored = [(p, _score_project_keywords(p, job_description)) for p in all_projects]
+    candidates = [p for p, score in scored if score > 0]
+    if not candidates:
+        candidates = all_projects  # fallback: no keyword match, give LLM everything
+
+    if len(candidates) <= max_projects:
+        return candidates
+
+    # Layer 2: LLM selection from keyword-matched candidates only
+    candidates_summary = [
+        {"id": p.get("id"), "name": p.get("name"), "description": p.get("description"), "tech": p.get("tech")}
+        for p in candidates
+    ]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a resume advisor. Given a list of projects and a job description, "
+                f"select the {max_projects} most relevant projects for the job. "
+                "Return ONLY a JSON array of the selected project ids, e.g. [\"proj-001\", \"proj-002\"]. "
+                "No explanation, no markdown fences."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Job description (excerpt):\n{job_description[:1500]}\n\n"
+                f"Projects:\n{json.dumps(candidates_summary, indent=2)}"
+            ),
+        },
+    ]
+    try:
+        raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
+        text = raw.strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        selected_ids = set(json.loads(text.strip()))
+        selected = [p for p in candidates if p.get("id") in selected_ids]
+        return selected if selected else candidates[:max_projects]
+    except Exception as exc:
+        logger.error("select_projects_for_job LLM error: %s", exc)
+        return candidates[:max_projects]
+
+
+def build_resume_context(
+    profile_data: dict,
+    tailored_bullets: list[dict] | None,
+    selected_projects: list[dict] | None = None,
+) -> dict:
+    return {
+        "profile": _normalize_profile_for_template(profile_data),
+        "narrative_summary": (profile_data.get("narrative") or {}).get("summary", ""),
+        "skills": profile_data.get("skills") or {},
+        "experience": _normalize_experience(profile_data.get("experience") or [], tailored_bullets),
+        "education": _normalize_education(profile_data.get("education") or []),
+        "projects": selected_projects if selected_projects is not None else (profile_data.get("projects") or []),
     }
 
 
 def build_cover_letter_context(profile_data: dict, job_company: str, job_title: str, body: str) -> dict:
     return {
-        "profile": profile_data,
+        "profile": _normalize_profile_for_template(profile_data),
         "job_company": job_company,
         "job_title": job_title,
         "cover_letter_body": body,
@@ -100,13 +242,22 @@ def compile_pdf(tex_source: str, output_path: Path) -> Path:
         tex_file = Path(tmpdir) / "document.tex"
         tex_file.write_text(tex_source, encoding="utf-8")
         result = subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode", "-output-directory", tmpdir, str(tex_file)],
+            [
+                "pdflatex",
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                "-output-directory", tmpdir,
+                str(tex_file),
+            ],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
+            log = (result.stdout or "") + (result.stderr or "")
+            error_lines = [l for l in log.splitlines() if l.startswith("!")]
+            detail = "\n".join(error_lines[:5]) if error_lines else log[-800:]
             raise DocGenerationError(
-                f"pdflatex failed (exit {result.returncode}): {result.stderr[-500:]}"
+                f"pdflatex failed (exit {result.returncode}):\n{detail}"
             )
         compiled = Path(tmpdir) / "document.pdf"
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,10 +280,14 @@ def generate_cover_letter_body(
 ) -> str:
     skills = profile_data.get("skills", {})
     skills_flat = [s for cat in skills.values() for s in cat]
-    summary = profile_data.get("narrative", {}).get("summary", "")
-    name = profile_data.get("name", "Candidate")
+    summary = (profile_data.get("narrative") or {}).get("summary", "")
+    personal = profile_data.get("personal") or {}
+    name = personal.get("name") or "Candidate"
     experience = profile_data.get("experience", [])
-    exp_summary = "; ".join(f"{e.get('title')} at {e.get('company')}" for e in experience[:3])
+    exp_summary = "; ".join(
+        f"{e.get('role') or e.get('title', '')} at {e.get('company', '')}"
+        for e in experience[:3]
+    )
 
     messages = [
         {
@@ -181,7 +336,7 @@ def tailor_resume_bullets(
 ) -> list[dict]:
     experience = profile_data.get("experience", [])
     exp_json = [
-        {"company": e.get("company"), "title": e.get("title"), "bullets": e.get("bullets", [])}
+        {"company": e.get("company"), "title": e.get("title") or e.get("role") or "", "bullets": e.get("bullets", [])}
         for e in experience
     ]
     messages = [
@@ -259,12 +414,19 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     tailored_bullets = tailor_resume_bullets(
         profile_data, job.title, job.description or "", api_key, base_url, model
     )
+    selected_projects = select_projects_for_job(
+        profile_data, job.description or "", api_key, base_url, model
+    )
     cover_body = generate_cover_letter_body(
         profile_data, job.company, job.title, job.description or "", api_key, base_url, model
     )
 
     # Resume
-    resume_ctx = build_resume_context(profile_data, tailored_bullets if tailored_bullets else None)
+    resume_ctx = build_resume_context(
+        profile_data,
+        tailored_bullets if tailored_bullets else None,
+        selected_projects if selected_projects else None,
+    )
     resume_tex = render_latex("resume.tex.j2", resume_ctx)
     resume_version = _next_version(db, application.id, DocType.resume)
     resume_filename = f"{application.id}_resume_v{resume_version}.pdf"

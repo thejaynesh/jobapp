@@ -32,13 +32,14 @@ def save_personal(
     phone: str = Form(""),
     linkedin: str = Form(""),
     github: str = Form(""),
+    website: str = Form(""),
     location: str = Form(""),
     db: Session = Depends(get_db),
 ):
     from app.services.profile_service import save_section
     profile = save_section(db, "personal", {
         "name": name, "email": email, "phone": phone,
-        "linkedin": linkedin, "github": github, "location": location,
+        "linkedin": linkedin, "github": github, "website": website, "location": location,
     })
     db.commit()
     return templates.TemplateResponse(
