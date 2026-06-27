@@ -135,80 +135,201 @@ def _score_project_keywords(project: dict, job_description: str) -> int:
     return sum(1 for t in all_terms if t and len(t) > 1 and t in jd_lower)
 
 
-def select_projects_for_job(
+def _score_experience_keywords(exp: dict, job_description: str) -> int:
+    """Return number of experience tech/title keywords found in the job description."""
+    if not job_description:
+        return 0
+    jd_lower = job_description.lower()
+    title = exp.get("title") or exp.get("role") or ""
+    terms = [t.lower() for t in (exp.get("tech") or [])]
+    terms += re.findall(r'\w+', title.lower())
+    return sum(1 for t in terms if t and len(t) > 1 and t in jd_lower)
+
+
+def _strip_json_fences(raw: str) -> str:
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _fallback_selection(
+    experiences: list[dict],
+    projects: list[dict],
+    skills: dict,
+    job_description: str,
+    max_experience: int,
+    max_projects: int,
+) -> dict:
+    """Keyword-only selection used when the LLM is unavailable or returns junk."""
+    exp_scored = sorted(
+        experiences, key=lambda e: _score_experience_keywords(e, job_description), reverse=True
+    )
+    kept_exp = [e for e in exp_scored if _score_experience_keywords(e, job_description) > 0]
+    # Always keep at least the top roles so the resume is never empty.
+    if not kept_exp:
+        kept_exp = experiences[:max_experience]
+    kept_exp = kept_exp[:max_experience]
+
+    proj_scored = sorted(
+        projects, key=lambda p: _score_project_keywords(p, job_description), reverse=True
+    )
+    kept_proj = [p for p in proj_scored if _score_project_keywords(p, job_description) > 0]
+    if not kept_proj:
+        kept_proj = projects
+    kept_proj = kept_proj[:max_projects]
+
+    return {"experience": kept_exp, "projects": kept_proj, "skills": skills}
+
+
+def tailor_resume_selection(
     profile_data: dict,
+    job_title: str,
     job_description: str,
     api_key: str,
     base_url: str,
     model: str,
+    max_experience: int = 3,
     max_projects: int = 2,
-) -> list[dict]:
+) -> dict:
     """
-    Two-layer project selection:
-    1. Keyword match: score each project against the JD; require at least 1 match.
-    2. LLM pick: from keyword-matched candidates, LLM picks the best `max_projects`.
-       If no candidates have keyword matches, fall back to all projects so the resume
-       isn't empty.
+    Curate the resume to a single page by selecting only the content relevant to a
+    specific job. Returns {"experience": [...], "projects": [...], "skills": {...}}.
+
+    Two layers, mirroring project selection:
+    1. Keyword grounding: every experience/project is scored against the JD so the
+       LLM is told which items actually overlap (and the fallback path needs no LLM).
+    2. LLM curation: from the REAL items only (referenced by id), the model picks the
+       relevant experiences and projects and trims the skills to what fits the role —
+       dropping tangential entries (e.g. unrelated volunteer roles) to save space.
+
+    Grounding guarantees: only ids/skills present in the profile survive, so the model
+    cannot invent experience, projects, or skills.
     """
-    all_projects = profile_data.get("projects") or []
-    if not all_projects:
-        return []
+    experiences = profile_data.get("experience") or []
+    projects = profile_data.get("projects") or []
+    skills = profile_data.get("skills") or {}
 
-    # Layer 1: keyword scoring
-    scored = [(p, _score_project_keywords(p, job_description)) for p in all_projects]
-    candidates = [p for p, score in scored if score > 0]
-    if not candidates:
-        candidates = all_projects  # fallback: no keyword match, give LLM everything
+    # Nothing to curate / no JD to curate against → keep everything.
+    if not job_description or (not experiences and not projects):
+        return {"experience": experiences, "projects": projects, "skills": skills}
 
-    if len(candidates) <= max_projects:
-        return candidates
+    valid_exp_ids = {e.get("id") for e in experiences if e.get("id")}
+    valid_proj_ids = {p.get("id") for p in projects if p.get("id")}
 
-    # Layer 2: LLM selection from keyword-matched candidates only
-    candidates_summary = [
-        {"id": p.get("id"), "name": p.get("name"), "description": p.get("description"), "tech": p.get("tech")}
-        for p in candidates
+    exp_summary = [
+        {
+            "id": e.get("id"),
+            "title": e.get("title") or e.get("role") or "",
+            "company": e.get("company") or "",
+            "dates": f"{e.get('start_date', '')} - {e.get('end_date', '')}".strip(" -"),
+            "tech": e.get("tech") or [],
+            "keyword_score": _score_experience_keywords(e, job_description),
+        }
+        for e in experiences
     ]
+    proj_summary = [
+        {
+            "id": p.get("id"),
+            "name": p.get("name") or "",
+            "tech": p.get("tech") or [],
+            "keyword_score": _score_project_keywords(p, job_description),
+        }
+        for p in projects
+    ]
+
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a resume advisor. Given a list of projects and a job description, "
-                f"select the {max_projects} most relevant projects for the job. "
-                "Return ONLY a JSON array of the selected project ids, e.g. [\"proj-001\", \"proj-002\"]. "
-                "No explanation, no markdown fences."
+                "You are a resume editor. Your goal is a focused, ONE-PAGE resume tailored "
+                "to a specific job. From the candidate's real items, select only what is "
+                "relevant and trim the rest to save space.\n"
+                "Rules:\n"
+                f"- Pick up to {max_experience} of the most relevant experiences. You MAY drop "
+                "tangential roles (e.g. unrelated volunteer or club positions) entirely, but "
+                "keep substantial professional roles unless clearly irrelevant. Never return zero.\n"
+                f"- Pick up to {max_projects} of the most relevant projects.\n"
+                "- For skills, keep only those relevant to THIS job; preserve the category keys "
+                "and drop skills that don't help for this role. Use only skills from the input.\n"
+                "- 'keyword_score' tells you how many of an item's terms already appear in the job "
+                "description; higher means more obviously relevant, but use judgement.\n"
+                "- Use ONLY ids and skills that appear in the input. Do not invent anything.\n"
+                "Return ONLY JSON of the form: "
+                '{"experience_ids": ["..."], "project_ids": ["..."], '
+                '"skills": {"category": ["skill", ...]}}'
             ),
         },
         {
             "role": "user",
             "content": (
-                f"Job description (excerpt):\n{job_description[:1500]}\n\n"
-                f"Projects:\n{json.dumps(candidates_summary, indent=2)}"
+                f"Job title: {job_title}\n"
+                f"Job description (excerpt):\n{job_description[:2000]}\n\n"
+                f"Experiences:\n{json.dumps(exp_summary, indent=2)}\n\n"
+                f"Projects:\n{json.dumps(proj_summary, indent=2)}\n\n"
+                f"Skills:\n{json.dumps(skills, indent=2)}"
             ),
         },
     ]
+
     try:
         raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
-        text = raw.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        selected_ids = set(json.loads(text.strip()))
-        selected = [p for p in candidates if p.get("id") in selected_ids]
-        return selected if selected else candidates[:max_projects]
+        parsed = json.loads(_strip_json_fences(raw))
+
+        # Ground experience selection against real ids, preserving profile order.
+        sel_exp_ids = {i for i in (parsed.get("experience_ids") or []) if i in valid_exp_ids}
+        selected_exp = [e for e in experiences if e.get("id") in sel_exp_ids]
+        if not selected_exp:
+            selected_exp = experiences[:max_experience]
+
+        # Ground project selection.
+        sel_proj_ids = {i for i in (parsed.get("project_ids") or []) if i in valid_proj_ids}
+        selected_proj = [p for p in projects if p.get("id") in sel_proj_ids]
+        if not selected_proj and projects:
+            selected_proj = _fallback_selection(
+                experiences, projects, skills, job_description, max_experience, max_projects
+            )["projects"]
+        selected_proj = selected_proj[:max_projects]
+
+        # Ground skills: keep only skills that exist in the profile, preserve categories.
+        curated_skills = {}
+        llm_skills = parsed.get("skills") or {}
+        for category, original_items in skills.items():
+            picked = llm_skills.get(category)
+            if isinstance(picked, list) and picked:
+                original_lower = {s.lower(): s for s in original_items}
+                kept = [original_lower[s.lower()] for s in picked if s.lower() in original_lower]
+                curated_skills[category] = kept if kept else original_items
+            else:
+                # Category omitted/empty by the model → keep original to be safe.
+                curated_skills[category] = original_items
+        if not curated_skills:
+            curated_skills = skills
+
+        return {"experience": selected_exp, "projects": selected_proj, "skills": curated_skills}
     except Exception as exc:
-        logger.error("select_projects_for_job LLM error: %s", exc)
-        return candidates[:max_projects]
+        logger.error("tailor_resume_selection LLM error: %s", exc)
+        return _fallback_selection(
+            experiences, projects, skills, job_description, max_experience, max_projects
+        )
 
 
 def build_resume_context(
     profile_data: dict,
     tailored_bullets: list[dict] | None,
+    selected_experience: list[dict] | None = None,
     selected_projects: list[dict] | None = None,
+    selected_skills: dict | None = None,
 ) -> dict:
+    experience_source = (
+        selected_experience if selected_experience is not None
+        else (profile_data.get("experience") or [])
+    )
     return {
         "profile": _normalize_profile_for_template(profile_data),
         "narrative_summary": (profile_data.get("narrative") or {}).get("summary", ""),
-        "skills": profile_data.get("skills") or {},
-        "experience": _normalize_experience(profile_data.get("experience") or [], tailored_bullets),
+        "skills": selected_skills if selected_skills is not None else (profile_data.get("skills") or {}),
+        "experience": _normalize_experience(experience_source, tailored_bullets),
         "education": _normalize_education(profile_data.get("education") or []),
         "projects": selected_projects if selected_projects is not None else (profile_data.get("projects") or []),
     }
@@ -411,11 +532,19 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     profile_data = profile.data if profile else {}
     job = application.job
 
-    tailored_bullets = tailor_resume_bullets(
+    # Curate which experiences, projects, and skills to include so the resume
+    # stays focused (ideally one page) and relevant to this specific job.
+    selection = tailor_resume_selection(
         profile_data, job.title, job.description or "", api_key, base_url, model
     )
-    selected_projects = select_projects_for_job(
-        profile_data, job.description or "", api_key, base_url, model
+    selected_experience = selection["experience"]
+    selected_projects = selection["projects"]
+    selected_skills = selection["skills"]
+
+    # Rewrite bullets only for the experiences we are actually keeping.
+    bullet_profile = {**profile_data, "experience": selected_experience}
+    tailored_bullets = tailor_resume_bullets(
+        bullet_profile, job.title, job.description or "", api_key, base_url, model
     )
     cover_body = generate_cover_letter_body(
         profile_data, job.company, job.title, job.description or "", api_key, base_url, model
@@ -425,7 +554,9 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     resume_ctx = build_resume_context(
         profile_data,
         tailored_bullets if tailored_bullets else None,
-        selected_projects if selected_projects else None,
+        selected_experience=selected_experience,
+        selected_projects=selected_projects,
+        selected_skills=selected_skills,
     )
     resume_tex = render_latex("resume.tex.j2", resume_ctx)
     resume_version = _next_version(db, application.id, DocType.resume)
