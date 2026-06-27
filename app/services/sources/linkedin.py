@@ -1,96 +1,87 @@
 import logging
+import re
 
-from app.services.sources.playwright_base import (
-    CONTEXT_OPTIONS,
-    LAUNCH_OPTIONS,
-    encode,
-    is_remote_location,
-    safe_get_attribute,
-    safe_inner_text,
-)
+import httpx
+
+from app.services.sources.base import parse_experience_level
+from app.services.sources.playwright_base import encode, is_remote_location
 
 logger = logging.getLogger(__name__)
 
-# LinkedIn guest jobs API — no login required, returns stable HTML fragments
 _GUEST_API = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
     "?keywords={query}&location={location}&start=0"
 )
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
-async def _scrape(session_cookie: str, query: str, location: str) -> list[dict]:
-    from playwright.async_api import async_playwright
+def _strip(html: str) -> str:
+    return re.sub(r"<[^>]+>", "", html).strip()
 
+
+def fetch(session_cookie: str, query: str, location: str) -> list[dict]:
+    """Fetch via LinkedIn guest jobs API — no browser required."""
     url = _GUEST_API.format(query=encode(query), location=encode(location))
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(**LAUNCH_OPTIONS)
-        context = await browser.new_context(**CONTEXT_OPTIONS)
-        if session_cookie:
-            await context.add_cookies([{
-                "name": "li_at",
-                "value": session_cookie,
-                "domain": ".linkedin.com",
-                "path": "/",
-            }])
-        page = await context.new_page()
-        try:
-            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
-            await page.wait_for_selector(
-                "li, .base-card, .job-search-card", timeout=10000
-            )
-        except Exception as exc:
-            logger.warning("LinkedIn: page load failed: %s", exc)
-            await browser.close()
-            return []
-
-        cards = await page.query_selector_all(
-            "li.occludable-update, div.base-card, li[class*='job-search']"
-        )
-        if not cards:
-            cards = await page.query_selector_all("li")
-
-        jobs = []
-        for card in cards:
-            title = await safe_inner_text(
-                card,
-                "h3.base-search-card__title",
-                ".job-search-card__title",
-                "h3",
-            )
-            company = await safe_inner_text(
-                card,
-                "h4.base-search-card__subtitle",
-                ".job-search-card__company-name",
-                "h4",
-            )
-            loc = await safe_inner_text(
-                card,
-                "span.job-search-card__location",
-                ".base-search-card__metadata span",
-            )
-            job_url = await safe_get_attribute(card, "a.base-card__full-link", "href")
-            if not job_url:
-                job_url = await safe_get_attribute(card, "a[href*='/jobs/view/']", "href")
-            if not title or not job_url:
-                continue
-            jobs.append({
-                "source": "linkedin",
-                "source_job_id": None,
-                "title": title,
-                "company": company,
-                "location": loc,
-                "is_remote": is_remote_location(loc, title),
-                "url": job_url.split("?")[0],
-                "description": "",
-                "experience_level": "mid",
-            })
-        await browser.close()
-        return jobs
-
-
-async def fetch(session_cookie: str, query: str, location: str) -> list[dict]:
+    headers = dict(_HEADERS)
+    if session_cookie:
+        headers["Cookie"] = f"li_at={session_cookie}"
     try:
-        return await _scrape(session_cookie, query, location)
+        resp = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
+        resp.raise_for_status()
+        html = resp.text
     except Exception as exc:
-        logger.error("LinkedIn scraper error: %s", exc)
+        logger.error("LinkedIn guest API error: %s", exc)
         return []
+
+    # Parse stable class-name patterns from the HTML fragment response
+    job_urls = re.findall(
+        r'href="(https://www\.linkedin\.com/jobs/view/[^"?]+)', html
+    )
+    titles = [
+        _strip(m)
+        for m in re.findall(
+            r'class="base-search-card__title[^"]*"[^>]*>(.*?)</h3>', html, re.DOTALL
+        )
+    ]
+    companies = [
+        _strip(m)
+        for m in re.findall(
+            r'class="base-search-card__subtitle[^"]*"[^>]*>.*?<[^>]+>(.*?)</',
+            html, re.DOTALL,
+        )
+    ]
+    locations = [
+        _strip(m)
+        for m in re.findall(
+            r'class="job-search-card__location[^"]*"[^>]*>(.*?)</span>',
+            html, re.DOTALL,
+        )
+    ]
+
+    jobs = []
+    for i, job_url in enumerate(job_urls):
+        title = titles[i] if i < len(titles) else ""
+        company = companies[i] if i < len(companies) else ""
+        loc = locations[i] if i < len(locations) else ""
+        if not title:
+            continue
+        jobs.append({
+            "source": "linkedin",
+            "source_job_id": None,
+            "title": title,
+            "company": company,
+            "location": loc,
+            "is_remote": is_remote_location(loc, title),
+            "url": job_url,
+            "description": "",
+            "experience_level": "mid",
+        })
+    logger.info("LinkedIn guest API: %d jobs for %s / %s", len(jobs), query, location)
+    return jobs

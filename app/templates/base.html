@@ -20,5 +20,29 @@
     <main class="max-w-5xl mx-auto px-4 py-6 w-full">
         {% block content %}{% endblock %}
     </main>
+
+    <!-- Global error toast for HTMX failures -->
+    <div id="error-toast"
+         class="hidden fixed bottom-4 right-4 z-50 max-w-sm bg-red-600 text-white text-sm rounded shadow-lg px-4 py-3 flex items-start gap-3">
+      <span id="error-toast-msg" class="flex-1"></span>
+      <button onclick="document.getElementById('error-toast').classList.add('hidden')"
+              class="shrink-0 text-white opacity-70 hover:opacity-100 font-bold leading-none">&times;</button>
+    </div>
+
+    <script>
+      document.body.addEventListener("htmx:responseError", function(evt) {
+        var status = evt.detail.xhr.status;
+        var msg = "Request failed (" + status + ")";
+        try {
+          var body = evt.detail.xhr.responseText;
+          var json = JSON.parse(body);
+          if (json.detail) msg = json.detail + " (" + status + ")";
+        } catch(e) {}
+        var toast = document.getElementById("error-toast");
+        document.getElementById("error-toast-msg").textContent = msg;
+        toast.classList.remove("hidden");
+        setTimeout(function(){ toast.classList.add("hidden"); }, 6000);
+      });
+    </script>
 </body>
 </html>

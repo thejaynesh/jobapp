@@ -16,7 +16,8 @@ templates = Jinja2Templates(directory="app/templates")
 
 _FILTERABLE_STATUSES = [JobStatus.matched, JobStatus.filtered_out, JobStatus.docs_generated]
 _PAGE_SIZE = 50
-_SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice"]
+_SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice", "remotive", "arbeitnow", "remoteok", "weworkremotely"]
+_EXP_LEVELS = ["entry", "mid", "senior"]
 
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),
@@ -35,6 +36,7 @@ def get_jobs(
     source: str = "",
     remote: str = "",
     min_score: str = "",
+    exp_level: str = "",
     sort: str = "score_desc",
     page: int = 0,
     db: Session = Depends(get_db),
@@ -54,6 +56,8 @@ def get_jobs(
         query = query.filter(Job.source == source)
     if remote == "1":
         query = query.filter(Job.is_remote == True)  # noqa: E712
+    if exp_level:
+        query = query.filter(Job.experience_level == exp_level)
     if min_score:
         try:
             query = query.filter(Job.llm_score >= int(min_score))
@@ -74,6 +78,7 @@ def get_jobs(
             "source_filter": source,
             "remote_filter": remote,
             "min_score_filter": min_score,
+            "exp_level_filter": exp_level,
             "sort": sort,
             "page": page,
             "total": total,
@@ -81,6 +86,7 @@ def get_jobs(
             "has_prev": page > 0,
             "has_next": (page + 1) * _PAGE_SIZE < total,
             "sources": _SOURCES,
+            "exp_levels": _EXP_LEVELS,
         },
     )
 

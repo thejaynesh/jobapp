@@ -1,14 +1,15 @@
 \documentclass[11pt,letterpaper]{article}
-\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
 \pagestyle{empty}
 
 \begin{document}
 
 \begin{flushright}
-{{ profile.name | latex_escape }}\\
-{{ profile.contact.email | latex_escape }}\\
-{{ profile.contact.phone | latex_escape }}
+{{ profile.name | default("") | latex_escape }}\\
+{{ profile.contact.email | default("") | latex_escape }}\\
+{{ profile.contact.phone | default("") | latex_escape }}
 \end{flushright}
 
 \vspace{1em}

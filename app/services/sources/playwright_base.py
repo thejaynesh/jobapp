@@ -5,7 +5,13 @@ LAUNCH_OPTIONS = {
     "args": [
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-setuid-sandbox",
+        "--disable-extensions",
+        "--disable-background-networking",
         "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
     ],
 }
 

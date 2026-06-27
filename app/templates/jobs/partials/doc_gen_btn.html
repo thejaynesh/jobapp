@@ -1,0 +1,60 @@
+{% set gen_status = app.generation_status if app else "idle" %}
+{% set is_done = job.status.value == "docs_generated" or gen_status == "done" %}
+
+<div id="doc-gen-{{ job.id }}"
+  {% if gen_status == "generating" %}
+  hx-get="/api/jobs/{{ job.id }}/doc-status-html"
+  hx-trigger="every 3s"
+  hx-swap="outerHTML"
+  {% endif %}>
+
+  {% if is_done %}
+    <a href="/apps/{{ app.id }}"
+       class="inline-flex items-center gap-1 text-xs bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700 font-medium">
+      &#10003; Docs ready &mdash; View
+    </a>
+
+  {% elif gen_status == "generating" %}
+    <span class="inline-flex items-center gap-2 text-xs text-blue-600 font-medium">
+      <span class="inline-flex items-center gap-1.5">
+        <svg class="animate-spin h-3 w-3 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        Generating&hellip;
+      </span>
+      <button
+        hx-post="/api/jobs/{{ job.id }}/cancel-generate"
+        hx-target="#doc-gen-{{ job.id }}"
+        hx-swap="outerHTML"
+        class="text-gray-400 hover:text-red-500 underline font-normal">
+        Cancel
+      </button>
+    </span>
+
+  {% elif gen_status == "failed" %}
+    <div class="flex flex-col gap-1">
+      <span class="text-xs text-red-500 font-medium">&#10007; Generation failed</span>
+      {% if app.generation_error %}
+        <span class="text-xs text-gray-400 italic break-words max-w-xs">{{ app.generation_error[:120] }}{% if app.generation_error|length > 120 %}…{% endif %}</span>
+      {% endif %}
+      <button
+        hx-post="/api/jobs/{{ job.id }}/generate-docs"
+        hx-target="#doc-gen-{{ job.id }}"
+        hx-swap="outerHTML"
+        class="text-xs text-blue-600 underline hover:text-blue-800 text-left">
+        Retry
+      </button>
+    </div>
+
+  {% else %}
+    <button
+      hx-post="/api/jobs/{{ job.id }}/generate-docs"
+      hx-target="#doc-gen-{{ job.id }}"
+      hx-swap="outerHTML"
+      class="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">
+      Generate docs
+    </button>
+  {% endif %}
+
+</div>

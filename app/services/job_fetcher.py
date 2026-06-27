@@ -105,37 +105,80 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
     else:
         stats["ashby"] = {"count": 0, "errors": [], "enabled": False}
 
-    # --- Tier 2: Playwright scrapers ---
+    # --- LinkedIn: httpx guest API (no browser needed) ---
+    from app.services.sources.linkedin import fetch as li_fetch
+    stats.setdefault("linkedin", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        for loc in locations:
+            try:
+                jobs = li_fetch(session_cookie=cfg.LINKEDIN_SESSION_COOKIE, query=role, location=loc)
+                _record(stats, "linkedin", jobs)
+                all_jobs.extend(jobs)
+            except Exception as exc:
+                _record(stats, "linkedin", [], f"{role}/{loc}: {exc}")
+
+    # --- Indeed: httpx RSS feed (no browser needed) ---
+    from app.services.sources.indeed import fetch as indeed_fetch
+    stats.setdefault("indeed", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        for loc in locations:
+            try:
+                jobs = indeed_fetch(query=role, location=loc)
+                _record(stats, "indeed", jobs)
+                all_jobs.extend(jobs)
+            except Exception as exc:
+                _record(stats, "indeed", [], f"{role}/{loc}: {exc}")
+
+    # --- Remotive: free public API for remote tech jobs ---
+    from app.services.sources.remotive import fetch as remotive_fetch
+    stats.setdefault("remotive", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = remotive_fetch(query=role)
+            _record(stats, "remotive", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "remotive", [], f"{role}: {exc}")
+
+    # --- Arbeitnow: free public API ---
+    from app.services.sources.arbeitnow import fetch as arbeitnow_fetch
+    stats.setdefault("arbeitnow", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        for loc in locations:
+            try:
+                jobs = arbeitnow_fetch(query=role, location=loc)
+                _record(stats, "arbeitnow", jobs)
+                all_jobs.extend(jobs)
+            except Exception as exc:
+                _record(stats, "arbeitnow", [], f"{role}/{loc}: {exc}")
+
+    # --- RemoteOK: free public API for remote tech jobs ---
+    from app.services.sources.remoteok import fetch as remoteok_fetch
+    stats.setdefault("remoteok", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = remoteok_fetch(query=role)
+            _record(stats, "remoteok", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "remoteok", [], f"{role}: {exc}")
+
+    # --- We Work Remotely: RSS feed for remote tech jobs ---
+    from app.services.sources.weworkremotely import fetch as wwr_fetch
+    stats.setdefault("weworkremotely", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = wwr_fetch(query=role)
+            _record(stats, "weworkremotely", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "weworkremotely", [], f"{role}: {exc}")
+
+    # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
 
     async def _run_playwright() -> tuple[list[dict], dict]:
         pw_jobs: list[dict] = []
         pw_stats: dict = {}
-
-        if cfg.LINKEDIN_SESSION_COOKIE:
-            from app.services.sources.linkedin import fetch as li_fetch
-            pw_stats.setdefault("linkedin", {"count": 0, "errors": [], "enabled": True})
-            for role in roles:
-                for loc in locations:
-                    try:
-                        jobs = await li_fetch(session_cookie=cfg.LINKEDIN_SESSION_COOKIE,
-                                              query=role, location=loc)
-                        _record(pw_stats, "linkedin", jobs)
-                        pw_jobs.extend(jobs)
-                    except Exception as exc:
-                        _record(pw_stats, "linkedin", [], f"{role}/{loc}: {exc}")
-        else:
-            pw_stats["linkedin"] = {"count": 0, "errors": [], "enabled": False}
-
-        from app.services.sources.indeed import fetch as indeed_fetch
-        pw_stats.setdefault("indeed", {"count": 0, "errors": [], "enabled": True})
-        for role in roles:
-            for loc in locations:
-                try:
-                    jobs = await indeed_fetch(query=role, location=loc)
-                    _record(pw_stats, "indeed", jobs)
-                    pw_jobs.extend(jobs)
-                except Exception as exc:
-                    _record(pw_stats, "indeed", [], f"{role}/{loc}: {exc}")
 
         from app.services.sources.wellfound import fetch as wf_fetch
         pw_stats.setdefault("wellfound", {"count": 0, "errors": [], "enabled": True})
@@ -181,7 +224,7 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
         stats.update(pw_stats)
     except Exception as exc:
         logger.error("Playwright scrapers fatal error: %s", exc)
-        for src in ("linkedin", "indeed", "wellfound", "dice", "handshake"):
+        for src in ("wellfound", "dice", "handshake"):
             stats.setdefault(src, {"count": 0, "errors": [str(exc)], "enabled": True})
 
     # Log summary

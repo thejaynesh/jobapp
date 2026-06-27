@@ -52,12 +52,19 @@
         {% elif job.source == 'lever' %}bg-violet-50 text-violet-700
         {% elif job.source == 'ashby' %}bg-pink-50 text-pink-700
         {% elif job.source == 'handshake' %}bg-yellow-50 text-yellow-700
+        {% elif job.source == 'remotive' %}bg-teal-50 text-teal-700
+        {% elif job.source == 'arbeitnow' %}bg-indigo-50 text-indigo-700
+        {% elif job.source == 'indeed' %}bg-cyan-50 text-cyan-700
+        {% elif job.source == 'wellfound' %}bg-rose-50 text-rose-700
+        {% elif job.source == 'dice' %}bg-amber-50 text-amber-700
+        {% elif job.source == 'remoteok' %}bg-lime-50 text-lime-700
+        {% elif job.source == 'weworkremotely' %}bg-fuchsia-50 text-fuchsia-700
         {% else %}bg-gray-50 text-gray-500{% endif %}">
         {{ job.source }}
       </span>
       {% endif %}
     </div>
-    <div class="flex flex-wrap gap-2">
+    <div class="flex flex-wrap gap-2 items-center">
       {% if job.status.value in ['matched', 'filtered_out'] %}
       <button
         hx-post="/jobs/{{ job.id }}/override"
@@ -67,13 +74,9 @@
         {% if job.status.value == 'matched' %}Mark filtered{% else %}Mark matched{% endif %}
       </button>
       {% endif %}
-      {% if job.status.value == 'matched' %}
-      <button
-        hx-post="/api/jobs/{{ job.id }}/generate-docs"
-        hx-swap="none"
-        class="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700">
-        Generate docs
-      </button>
+      {% if job.status.value in ['matched', 'docs_generated'] %}
+        {% set app = job.applications[0] if job.applications else none %}
+        {% include "jobs/partials/doc_gen_btn.html" %}
       {% endif %}
     </div>
   </div>

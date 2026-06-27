@@ -79,15 +79,29 @@
 
       <form
         hx-post="/apps/{{ app.id }}/regenerate"
-        hx-swap="none"
+        hx-target="#regen-status"
+        hx-swap="innerHTML"
         class="mt-4 space-y-2">
         <label class="block text-xs font-medium text-gray-600">Regenerate with feedback</label>
-        <textarea name="feedback" rows="2" placeholder="e.g. emphasize leadership experience, less formal tone..."
+        <textarea name="feedback" rows="2" placeholder="e.g. emphasize leadership, less formal tone..."
           class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"></textarea>
-        <button type="submit"
-          class="bg-gray-100 text-gray-700 px-4 py-1.5 rounded text-sm hover:bg-gray-200 border border-gray-300">
-          Regenerate
-        </button>
+        <div class="flex items-center gap-3">
+          <button type="submit"
+            class="bg-gray-100 text-gray-700 px-4 py-1.5 rounded text-sm hover:bg-gray-200 border border-gray-300">
+            Regenerate
+          </button>
+          <span id="regen-status" class="text-xs text-gray-400">
+            {% if app.generation_status == "generating" %}
+              <span class="text-blue-600">Generating&hellip;</span>
+            {% elif app.generation_status == "failed" %}
+              <span class="text-red-500">Last attempt failed:
+                {{ app.generation_error[:100] if app.generation_error else "unknown error" }}
+              </span>
+            {% elif app.generation_status == "done" %}
+              <span class="text-green-600">&#10003; Done</span>
+            {% endif %}
+          </span>
+        </div>
       </form>
     </div>
 

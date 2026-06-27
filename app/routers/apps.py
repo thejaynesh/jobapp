@@ -98,7 +98,7 @@ def save_notes(
     return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
 
 
-@router.post("/{app_id}/regenerate", status_code=202)
+@router.post("/{app_id}/regenerate", response_class=HTMLResponse)
 def regenerate_docs(
     app_id: uuid.UUID,
     feedback: str = Form(""),
@@ -107,5 +107,8 @@ def regenerate_docs(
     app_obj = db.query(Application).filter(Application.id == app_id).first()
     if not app_obj:
         raise HTTPException(status_code=404, detail="Application not found")
+    app_obj.generation_status = "generating"
+    app_obj.generation_error = None
+    db.commit()
     generate_docs.delay(str(app_obj.id), feedback=feedback or None)
-    return {"queued": 1}
+    return HTMLResponse('<span class="text-blue-600">Queued &mdash; generating&hellip;</span>')

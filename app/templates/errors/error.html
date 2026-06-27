@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Error {{ status_code }} — JobApp{% endblock %}
+{% block content %}
+<div class="max-w-xl mx-auto mt-16 text-center">
+  <div class="text-5xl font-bold text-gray-300 mb-4">{{ status_code }}</div>
+  <h1 class="text-xl font-semibold text-gray-800 mb-2">{{ title }}</h1>
+  <p class="text-gray-500 mb-6">{{ detail }}</p>
+  {% if traceback %}
+  <details class="text-left bg-gray-100 rounded p-4 mb-6">
+    <summary class="text-xs text-gray-500 cursor-pointer mb-2">Technical details</summary>
+    <pre class="text-xs text-red-700 overflow-auto whitespace-pre-wrap">{{ traceback }}</pre>
+  </details>
+  {% endif %}
+  <a href="javascript:history.back()" class="text-blue-600 hover:underline text-sm mr-4">Go back</a>
+  <a href="/" class="text-blue-600 hover:underline text-sm">Home</a>
+</div>
+{% endblock %}
