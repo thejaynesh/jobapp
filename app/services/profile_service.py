@@ -154,7 +154,7 @@ PROFILE_SEED: dict = {
         "Backend Engineer",
         "Android Engineer",
     ],
-    "target_locations": ["San Jose, CA", "San Francisco Bay Area", "Remote"],
+    "target_locations": ["Open to all locations", "Remote", "Relocation OK"],
     "min_match_score": 65,
     "narrative": {
         "answers": [],
