@@ -255,6 +255,25 @@ def _keyword_coverage(resume_ctx: dict, keywords: list[str]) -> tuple[list[str],
     return present, missing
 
 
+def _restore_missing_skills(
+    profile_skills: dict, selected_skills: dict, missing_keywords: list[str]
+) -> dict:
+    """
+    Re-add real profile skills that the curation step trimmed but that the JD
+    scans for. Only skills already in the profile are restored — this never
+    introduces a skill the candidate doesn't claim.
+    """
+    missing_lower = {k.lower() for k in missing_keywords}
+    result = {cat: list(items or []) for cat, items in (selected_skills or {}).items()}
+    for cat, items in (profile_skills or {}).items():
+        for skill in items or []:
+            if skill.lower() in missing_lower:
+                bucket = result.setdefault(cat, [])
+                if skill not in bucket:
+                    bucket.append(skill)
+    return result
+
+
 def _fallback_selection(
     experiences: list[dict],
     projects: list[dict],
@@ -860,7 +879,50 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         tailored_summary=tailored_summary,
     )
 
-    present, missing = _keyword_coverage(resume_ctx, insights.get("keywords") or [])
+    # ATS second pass: when JD keywords are missing from the resume, first restore
+    # any real profile skills that curation trimmed, then give the bullet rewriter
+    # one retry targeting the keywords the candidate can truthfully claim.
+    keywords = insights.get("keywords") or []
+    present, missing = _keyword_coverage(resume_ctx, keywords)
+    if missing:
+        selected_skills = _restore_missing_skills(
+            profile_data.get("skills") or {}, selected_skills, missing
+        )
+        resume_ctx = build_resume_context(
+            profile_data,
+            tailored_bullets if tailored_bullets else None,
+            selected_experience=selected_experience,
+            selected_projects=selected_projects,
+            selected_skills=selected_skills,
+            tailored_summary=tailored_summary,
+        )
+        present, missing = _keyword_coverage(resume_ctx, keywords)
+
+        profile_terms_lower = {t.lower() for t in _profile_terms(profile_data)}
+        retry_keywords = [k for k in missing if k.lower() in profile_terms_lower]
+        if retry_keywords and tailored_bullets:
+            retry_note = (
+                "The previous version omitted these job keywords the candidate "
+                f"genuinely has: {', '.join(retry_keywords)}. Weave each into a bullet "
+                "where the original work truthfully involved it."
+            )
+            retry_feedback = f"{feedback}\n{retry_note}" if feedback else retry_note
+            retried = tailor_resume_bullets(
+                bullet_profile, job.title, job.description or "", api_key, base_url, model,
+                insights=insights, feedback=retry_feedback,
+            )
+            if retried:
+                tailored_bullets = retried
+                resume_ctx = build_resume_context(
+                    profile_data,
+                    tailored_bullets,
+                    selected_experience=selected_experience,
+                    selected_projects=selected_projects,
+                    selected_skills=selected_skills,
+                    tailored_summary=tailored_summary,
+                )
+                present, missing = _keyword_coverage(resume_ctx, keywords)
+
     logger.info(
         "generate_documents %s: ATS keyword coverage %d/%d — missing: %s",
         application.id, len(present), len(present) + len(missing), ", ".join(missing) or "none",

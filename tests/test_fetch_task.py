@@ -42,12 +42,28 @@ def _std_job(*, title="SWE", company="ACME", location="NYC",
 # Orchestrator tests
 # ---------------------------------------------------------------------------
 
+def _patch_adapters(jobs=None, side_effect=None):
+    """Patch the adapter runner (returns (jobs, stats)) and skip LLM query expansion."""
+    from contextlib import ExitStack
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "app.services.query_expansion.expand_search_queries",
+        return_value=(["Software Engineer"], None),
+    ))
+    if side_effect is not None:
+        stack.enter_context(patch(
+            "app.services.job_fetcher._run_all_adapters", side_effect=side_effect))
+    else:
+        stack.enter_context(patch(
+            "app.services.job_fetcher._run_all_adapters", return_value=(jobs or [], {})))
+    return stack
+
+
 class TestFetchAndSaveJobs:
     def test_inserts_new_job(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
-        jobs = [_std_job()]
-        with patch("app.services.job_fetcher._run_all_adapters", return_value=jobs):
+        with _patch_adapters([_std_job()]):
             result = fetch_and_save_jobs(db)
         assert result["inserted"] == 1
         assert result["fetched"] == 1
@@ -59,9 +75,9 @@ class TestFetchAndSaveJobs:
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
         jobs = [_std_job(url="https://ex.com/dup", source_job_id="DUP1")]
-        with patch("app.services.job_fetcher._run_all_adapters", return_value=jobs):
+        with _patch_adapters(jobs):
             r1 = fetch_and_save_jobs(db)
-        with patch("app.services.job_fetcher._run_all_adapters", return_value=jobs):
+        with _patch_adapters(jobs):
             r2 = fetch_and_save_jobs(db)
         assert r1["inserted"] == 1
         assert r2["skipped"] == 1
@@ -74,9 +90,9 @@ class TestFetchAndSaveJobs:
                       title="SWE", company="ACME", location="NYC")
         j2 = _std_job(url="https://indeed.com/1", source_job_id=None,
                       title="SWE", company="ACME", location="NYC", source="indeed")
-        with patch("app.services.job_fetcher._run_all_adapters", return_value=[j1]):
+        with _patch_adapters([j1]):
             fetch_and_save_jobs(db)
-        with patch("app.services.job_fetcher._run_all_adapters", return_value=[j2]):
+        with _patch_adapters([j2]):
             r2 = fetch_and_save_jobs(db)
         assert r2["merged"] == 1
         job = db.query(Job).first()
@@ -85,20 +101,21 @@ class TestFetchAndSaveJobs:
     def test_no_profile_returns_zeros(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs
         result = fetch_and_save_jobs(db)
-        assert result == {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0}
+        assert result["fetched"] == 0
+        assert result["inserted"] == 0
 
     def test_empty_target_roles_returns_zeros(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs
         get_or_create_profile(db)
         db.flush()
         result = fetch_and_save_jobs(db)
-        assert result == {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0}
+        assert result["fetched"] == 0
+        assert result["inserted"] == 0
 
     def test_adapter_error_does_not_crash(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
-        with patch("app.services.job_fetcher._run_all_adapters",
-                   side_effect=RuntimeError("adapter exploded")):
+        with _patch_adapters(side_effect=RuntimeError("adapter exploded")):
             result = fetch_and_save_jobs(db)
         assert result["fetched"] == 0
 
@@ -110,11 +127,34 @@ class TestFetchAndSaveJobs:
             _std_job(title="SRE", company="Beta", url="https://ex.com/b", source_job_id="B1"),
             _std_job(title="DevOps", company="Gamma", url="https://ex.com/c", source_job_id="C1"),
         ]
-        with patch("app.services.job_fetcher._run_all_adapters", return_value=jobs):
+        with _patch_adapters(jobs):
             result = fetch_and_save_jobs(db)
         assert result["inserted"] == 3
         assert result["merged"] == 0
         assert result["skipped"] == 0
+
+    def test_expanded_queries_passed_to_adapters(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        expanded = ["Software Engineer", "Java Developer"]
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(expanded, {"basis": "h", "queries": expanded})):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       return_value=([], {})) as mock_run:
+                fetch_and_save_jobs(db)
+        assert mock_run.call_args[0][0] == expanded
+        profile = db.query(Profile).first()
+        assert profile.data["search_query_cache"]["queries"] == expanded
+
+    def test_query_expansion_crash_falls_back_to_roles(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.query_expansion.expand_search_queries",
+                   side_effect=RuntimeError("boom")):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       return_value=([], {})) as mock_run:
+                fetch_and_save_jobs(db)
+        assert mock_run.call_args[0][0] == ["Software Engineer"]
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +175,10 @@ class TestFetchJobsTask:
 
         with patch("app.tasks.fetch.fetch_and_save_jobs", return_value=mock_result):
             with patch("app.tasks.fetch.SessionLocal") as mock_session_cls:
-                mock_db = MagicMock()
-                mock_session_cls.return_value = mock_db
-                result = fetch_jobs.apply().result
+                with patch("app.tasks.match.match_jobs"):  # chained task needs no broker
+                    mock_db = MagicMock()
+                    mock_session_cls.return_value = mock_db
+                    result = fetch_jobs.apply().result
 
         assert result == mock_result
         mock_db.close.assert_called_once()

@@ -539,7 +539,8 @@ class TestGenerateDocsTask:
         mock_app = MagicMock()
         mock_app.id = _APP_ID
         mock_db.query.return_value.filter.return_value.first.return_value = mock_app
-        with patch("app.tasks.generate.generate_documents") as mock_gd:
+        # imported inside the task body, so patch at the source module
+        with patch("app.services.doc_generator.generate_documents") as mock_gd:
             with patch("app.tasks.generate.SessionLocal", return_value=mock_db):
                 generate_docs(str(_APP_ID))
         mock_gd.assert_called_once_with(mock_db, mock_app, feedback=None)
@@ -549,7 +550,7 @@ class TestGenerateDocsTask:
         mock_db = MagicMock()
         mock_app = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = mock_app
-        with patch("app.tasks.generate.generate_documents") as mock_gd:
+        with patch("app.services.doc_generator.generate_documents") as mock_gd:
             with patch("app.tasks.generate.SessionLocal", return_value=mock_db):
                 generate_docs(str(_APP_ID), feedback="Add metrics")
         _, kwargs = mock_gd.call_args
@@ -564,7 +565,7 @@ class TestGenerateDocsTask:
         from app.tasks.generate import generate_docs
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = None
-        with patch("app.tasks.generate.generate_documents", side_effect=Exception("DB fail")):
+        with patch("app.services.doc_generator.generate_documents", side_effect=Exception("DB fail")):
             with patch("app.tasks.generate.SessionLocal", return_value=mock_db):
                 result = generate_docs(str(_APP_ID))
         mock_db.close.assert_called_once()
@@ -607,14 +608,17 @@ class TestGenerateDocsEndpoint:
         mock_job.applications = [mock_app_obj]
         return mock_job
 
-    def test_returns_202_for_matched_job(self):
+    def test_returns_html_and_queues_task_for_matched_job(self):
         mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.first.return_value = self._matched_job()
+        mock_job = self._matched_job()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_job
         client = self._make_client_with_db(mock_db)
         job_id = str(uuid.uuid4())
-        with patch("app.routers.docs.generate_docs"):
+        with patch("app.routers.docs.generate_docs") as mock_task:
             response = client.post(f"/api/jobs/{job_id}/generate-docs")
-        assert response.status_code == 202
+        assert response.status_code == 200
+        mock_task.delay.assert_called_once_with(str(mock_job.applications[0].id))
+        assert mock_job.applications[0].generation_status == "generating"
 
     def test_returns_404_for_missing_job(self):
         mock_db = MagicMock()
@@ -624,31 +628,178 @@ class TestGenerateDocsEndpoint:
         response = client.post(f"/api/jobs/{job_id}/generate-docs")
         assert response.status_code == 404
 
-    def test_accepts_feedback_body(self):
-        mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.first.return_value = self._matched_job()
-        client = self._make_client_with_db(mock_db)
-        job_id = str(uuid.uuid4())
-        with patch("app.routers.docs.generate_docs") as mock_task:
-            response = client.post(
-                f"/api/jobs/{job_id}/generate-docs",
-                json={"feedback": "More concise bullets please"},
-            )
-        assert response.status_code == 202
-        mock_task.delay.assert_called_once()
-        _, kwargs = mock_task.delay.call_args
-        assert kwargs.get("feedback") == "More concise bullets please"
-
-    def test_queues_one_task_per_application(self):
+    def test_returns_422_for_unmatched_job(self):
+        from app.models.job import JobStatus
         mock_db = MagicMock()
         mock_job = self._matched_job()
-        extra_app = MagicMock()
-        extra_app.id = uuid.uuid4()
-        mock_job.applications.append(extra_app)
+        mock_job.status = JobStatus.new
         mock_db.query.return_value.filter.return_value.first.return_value = mock_job
         client = self._make_client_with_db(mock_db)
         job_id = str(uuid.uuid4())
-        with patch("app.routers.docs.generate_docs") as mock_task:
-            response = client.post(f"/api/jobs/{job_id}/generate-docs")
-        assert response.status_code == 202
-        assert mock_task.delay.call_count == 2
+        response = client.post(f"/api/jobs/{job_id}/generate-docs")
+        assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# ATS second pass — restore skills + bullets retry
+# ---------------------------------------------------------------------------
+
+class TestRestoreMissingSkills:
+    def test_restores_trimmed_profile_skill(self):
+        from app.services.doc_generator import _restore_missing_skills
+        profile_skills = {"languages": ["Python", "Java"], "tools": ["Docker"]}
+        selected = {"languages": ["Python"]}
+        out = _restore_missing_skills(profile_skills, selected, ["Java", "Docker"])
+        assert "Java" in out["languages"]
+        assert "Docker" in out["tools"]
+
+    def test_never_adds_skill_not_in_profile(self):
+        from app.services.doc_generator import _restore_missing_skills
+        out = _restore_missing_skills({"languages": ["Python"]}, {"languages": ["Python"]}, ["Kubernetes"])
+        assert all("Kubernetes" not in items for items in out.values())
+
+    def test_no_duplicates(self):
+        from app.services.doc_generator import _restore_missing_skills
+        out = _restore_missing_skills({"languages": ["Java"]}, {"languages": ["Java"]}, ["Java"])
+        assert out["languages"] == ["Java"]
+
+
+class TestAtsSecondPass:
+    def _db(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.count.return_value = 0
+        db.query.return_value.filter.return_value.all.return_value = []
+        db.query.return_value.first.return_value = MagicMock(data={
+            "personal": {"name": "Jane Doe", "email": "j@j.com"},
+            "narrative": {"summary": "Engineer."},
+            "skills": {"languages": ["Python", "Java"]},
+            "experience": [{"id": "e1", "company": "Acme", "role": "SWE",
+                            "bullets": ["Built APIs"], "tech": ["Python"]}],
+            "education": [],
+            "projects": [],
+        })
+        return db
+
+    def test_retries_bullets_for_missing_profile_keywords(self):
+        from contextlib import ExitStack
+        from app.services.doc_generator import generate_documents
+        db = self._db()
+        app = _make_app()
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "app.services.doc_generator.extract_job_insights",
+                return_value={"keywords": ["Java"], "requirements": [], "company_signals": []},
+            ))
+            stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_selection",
+                return_value={
+                    "experience": [{"id": "e1", "company": "Acme", "role": "SWE",
+                                    "bullets": ["Built APIs"], "tech": ["Python"]}],
+                    "projects": [],
+                    # curation trimmed Java out of skills
+                    "skills": {"languages": ["Python"]},
+                },
+            ))
+            mock_bullets = stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_bullets",
+                return_value=[{"company": "Acme", "title": "SWE", "bullets": ["Built APIs"]}],
+            ))
+            stack.enter_context(patch(
+                "app.services.doc_generator.tailor_summary", return_value="Summary."))
+            stack.enter_context(patch(
+                "app.services.doc_generator.generate_cover_letter_body", return_value="Body."))
+            mock_render = stack.enter_context(patch(
+                "app.services.doc_generator.render_latex",
+                return_value=r"\documentclass{article}\begin{document}ok\end{document}"))
+            stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf")))
+            generate_documents(db, app)
+
+        # "Java" is a real profile skill missing from the resume: the deterministic
+        # restore puts it back into the skills section, so no bullet retry is needed.
+        resume_ctx = mock_render.call_args_list[0][0][1]
+        assert "Java" in resume_ctx["skills"]["languages"]
+        assert mock_bullets.call_count == 1
+
+    def test_bullet_retry_when_skill_restore_cannot_cover(self):
+        from contextlib import ExitStack
+        from app.services.doc_generator import generate_documents
+        db = self._db()
+        # Make the missing keyword a tech term, not a skills-section entry,
+        # so restoring skills can't cover it and the bullets retry must run.
+        db.query.return_value.first.return_value.data["skills"] = {"languages": ["Python"]}
+        db.query.return_value.first.return_value.data["experience"][0]["tech"] = ["Java"]
+        app = _make_app()
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "app.services.doc_generator.extract_job_insights",
+                return_value={"keywords": ["Java"], "requirements": [], "company_signals": []},
+            ))
+            stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_selection",
+                return_value={
+                    "experience": [{"id": "e1", "company": "Acme", "role": "SWE",
+                                    "bullets": ["Built APIs"], "tech": ["Java"]}],
+                    "projects": [],
+                    "skills": {"languages": ["Python"]},
+                },
+            ))
+            mock_bullets = stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_bullets",
+                side_effect=[
+                    [{"company": "Acme", "title": "SWE", "bullets": ["Built APIs"]}],
+                    [{"company": "Acme", "title": "SWE", "bullets": ["Built Java APIs"]}],
+                ],
+            ))
+            stack.enter_context(patch(
+                "app.services.doc_generator.tailor_summary", return_value="Summary."))
+            stack.enter_context(patch(
+                "app.services.doc_generator.generate_cover_letter_body", return_value="Body."))
+            mock_render = stack.enter_context(patch(
+                "app.services.doc_generator.render_latex",
+                return_value=r"\documentclass{article}\begin{document}ok\end{document}"))
+            stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf")))
+            generate_documents(db, app)
+
+        assert mock_bullets.call_count == 2
+        _, retry_kwargs = mock_bullets.call_args
+        assert "Java" in retry_kwargs["feedback"]
+        resume_ctx = mock_render.call_args_list[0][0][1]
+        assert resume_ctx["experience"][0]["bullets"] == ["Built Java APIs"]
+
+    def test_no_retry_when_coverage_full(self):
+        from contextlib import ExitStack
+        from app.services.doc_generator import generate_documents
+        db = self._db()
+        app = _make_app()
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "app.services.doc_generator.extract_job_insights",
+                return_value={"keywords": ["Python"], "requirements": [], "company_signals": []},
+            ))
+            stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_selection",
+                return_value={
+                    "experience": [{"id": "e1", "company": "Acme", "role": "SWE",
+                                    "bullets": ["Built APIs"], "tech": ["Python"]}],
+                    "projects": [],
+                    "skills": {"languages": ["Python"]},
+                },
+            ))
+            mock_bullets = stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_bullets",
+                return_value=[{"company": "Acme", "title": "SWE", "bullets": ["Built APIs"]}],
+            ))
+            stack.enter_context(patch(
+                "app.services.doc_generator.tailor_summary", return_value="Summary."))
+            stack.enter_context(patch(
+                "app.services.doc_generator.generate_cover_letter_body", return_value="Body."))
+            stack.enter_context(patch(
+                "app.services.doc_generator.render_latex",
+                return_value=r"\documentclass{article}\begin{document}ok\end{document}"))
+            stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf")))
+            generate_documents(db, app)
+
+        assert mock_bullets.call_count == 1

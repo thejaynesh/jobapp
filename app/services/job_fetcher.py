@@ -207,6 +207,16 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
         except Exception as exc:
             _record(stats, "jobicy", [], f"{role}: {exc}")
 
+    # --- Hacker News "Who is hiring?": one monthly thread, fetched once ---
+    from app.services.sources.hnhiring import fetch as hn_fetch
+    stats.setdefault("hnhiring", {"count": 0, "errors": [], "enabled": True})
+    try:
+        jobs = hn_fetch(queries=roles)
+        _record(stats, "hnhiring", jobs)
+        all_jobs.extend(jobs)
+    except Exception as exc:
+        _record(stats, "hnhiring", [], str(exc))
+
     # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
 
     async def _run_playwright() -> tuple[list[dict], dict]:
@@ -291,8 +301,23 @@ def fetch_and_save_jobs(db: Session) -> dict:
         logger.warning("job_fetcher: target_roles or target_locations empty.")
         return counts
 
+    # Expand target roles into the fuller set of queries recruiters post under
+    # (cached on the profile; falls back to the raw roles if the LLM is down).
+    from app.services.query_expansion import expand_search_queries
+    query_cache = None
     try:
-        raw_jobs, source_stats = _run_all_adapters(roles, locations, settings)
+        queries, query_cache = expand_search_queries(
+            profile.data, settings.NVIDIA_NIM_API_KEY,
+            settings.NVIDIA_NIM_BASE_URL, settings.NVIDIA_NIM_MODEL,
+        )
+    except Exception as exc:
+        logger.error("job_fetcher: query expansion failed: %s", exc)
+        queries = list(roles)
+    if not queries:
+        queries = list(roles)
+
+    try:
+        raw_jobs, source_stats = _run_all_adapters(queries, locations, settings)
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts
@@ -304,6 +329,8 @@ def fetch_and_save_jobs(db: Session) -> dict:
     # Persist last fetch stats on the profile so UI can show them
     import copy
     updated_data = copy.deepcopy(profile.data)
+    if query_cache:
+        updated_data["search_query_cache"] = query_cache
     updated_data["last_fetch"] = {
         "at": now.isoformat(),
         "fetched": len(raw_jobs),

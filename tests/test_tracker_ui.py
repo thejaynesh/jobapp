@@ -39,23 +39,32 @@ class TestJobsRouter:
         app.dependency_overrides[get_db] = lambda: mock_db
         return TestClient(app)
 
+    @staticmethod
+    def _mock_jobs_query(mock_db, jobs):
+        """Self-chaining query mock supporting filter/count/order_by/offset/limit."""
+        query = MagicMock()
+        query.filter.return_value = query
+        query.count.return_value = len(jobs)
+        query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = jobs
+        mock_db.query.return_value = query
+
     def test_get_jobs_returns_200(self):
         mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [_make_job()]
+        self._mock_jobs_query(mock_db, [_make_job()])
         client = self._make_client(mock_db)
         response = client.get("/jobs")
         assert response.status_code == 200
 
     def test_get_jobs_html_contains_job_title(self):
         mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [_make_job()]
+        self._mock_jobs_query(mock_db, [_make_job()])
         client = self._make_client(mock_db)
         response = client.get("/jobs")
         assert "Backend Engineer" in response.text
 
     def test_get_jobs_filters_by_status(self):
         mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        self._mock_jobs_query(mock_db, [])
         client = self._make_client(mock_db)
         response = client.get("/jobs?status=matched")
         assert response.status_code == 200
@@ -87,16 +96,14 @@ class TestJobsRouter:
 
     def test_get_jobs_no_jobs_shows_empty_state(self):
         mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+        self._mock_jobs_query(mock_db, [])
         client = self._make_client(mock_db)
         response = client.get("/jobs")
         assert response.status_code == 200
 
     def test_get_jobs_shows_company_name(self):
         mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [
-            _make_job(company="GoodCorp")
-        ]
+        self._mock_jobs_query(mock_db, [_make_job(company="GoodCorp")])
         client = self._make_client(mock_db)
         response = client.get("/jobs")
         assert "GoodCorp" in response.text
@@ -348,7 +355,8 @@ class TestAppDetailRouter:
         with patch("app.routers.apps.generate_docs") as mock_task:
             mock_task.delay = MagicMock()
             response = client.post(f"/apps/{app_obj.id}/regenerate", data={"feedback": "be more concise"})
-        assert response.status_code == 202
+        assert response.status_code == 200
+        mock_task.delay.assert_called_once_with(str(app_obj.id), feedback="be more concise")
 
     def test_regenerate_returns_404_for_missing(self):
         mock_db = MagicMock()

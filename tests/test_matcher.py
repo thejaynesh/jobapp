@@ -321,7 +321,8 @@ class TestMatchJob:
             result = match_job(db, mock_job, profile_data, "key", "url", "model")
         assert result == "filtered_out"
         assert mock_job.status == JobStatus.filtered_out
-        assert mock_job.llm_score == 30
+        # 30 raw minus the 15-point seniority-mismatch penalty
+        assert mock_job.llm_score == 15
 
     def test_saves_matched_and_missing_skills(self, mock_job, profile_data):
         from app.services.matcher import match_job

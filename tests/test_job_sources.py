@@ -247,52 +247,61 @@ class TestAshbyAdapter:
 
 
 # ---------------------------------------------------------------------------
-# LinkedIn scraper (playwright, mocked)
+# LinkedIn guest API (httpx, mocked)
 # ---------------------------------------------------------------------------
 
 class TestLinkedInScraper:
-    def test_returns_standard_dicts(self):
-        import asyncio
+    _SEARCH_HTML = """
+    <li>
+      <a href="https://www.linkedin.com/jobs/view/software-engineer-at-stripe-4012345678?refId=abc">link</a>
+      <h3 class="base-search-card__title">Software Engineer</h3>
+      <h4 class="base-search-card__subtitle"><a>Stripe</a></h4>
+      <span class="job-search-card__location">New York, NY</span>
+    </li>
+    """
+    _POSTING_HTML = (
+        '<div class="show-more-less-html__markup">'
+        "Build <b>APIs</b> with Python.<br>Docker required.</div>"
+    )
 
-        async def mock_scrape(*args, **kwargs):
-            return [{
-                "source": "linkedin",
-                "source_job_id": None,
-                "title": "Software Engineer",
-                "company": "Stripe",
-                "location": "New York, NY",
-                "is_remote": False,
-                "url": "https://linkedin.com/jobs/1",
-                "description": "",
-                "experience_level": "mid",
-            }]
+    def _resp(self, text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.text = text
+        resp.raise_for_status = MagicMock()
+        return resp
 
-        with patch("app.services.sources.linkedin._scrape", side_effect=mock_scrape):
-            from app.services.sources.linkedin import fetch
-            results = asyncio.run(fetch(
-                session_cookie="test_cookie",
-                query="Software Engineer",
-                location="New York",
-            ))
-
+    def test_returns_standard_dicts_with_full_description(self):
+        from app.services.sources.linkedin import fetch
+        with patch("httpx.get", side_effect=[self._resp(self._SEARCH_HTML), self._resp(self._POSTING_HTML)]):
+            results = fetch(session_cookie="", query="Software Engineer", location="New York")
         assert len(results) == 1
-        assert results[0]["source"] == "linkedin"
-        assert results[0]["company"] == "Stripe"
+        job = results[0]
+        assert job["source"] == "linkedin"
+        assert job["title"] == "Software Engineer"
+        assert job["company"] == "Stripe"
+        assert job["source_job_id"] == "4012345678"
+        assert "Docker required." in job["description"]
+        assert "<b>" not in job["description"]
 
-    def test_empty_on_playwright_error(self):
-        import asyncio
+    def test_detail_fetch_error_keeps_job_without_description(self):
+        import httpx
+        from app.services.sources.linkedin import fetch
+        with patch("httpx.get", side_effect=[self._resp(self._SEARCH_HTML), httpx.HTTPError("blocked")]):
+            results = fetch(session_cookie="", query="SWE", location="NYC")
+        assert len(results) == 1
+        assert results[0]["description"] == ""
 
-        async def raise_error(*args, **kwargs):
-            raise RuntimeError("Browser crash")
-
-        with patch("app.services.sources.linkedin._scrape", side_effect=raise_error):
-            from app.services.sources import linkedin
-            results = asyncio.run(linkedin.fetch(
-                session_cookie="cookie",
-                query="SWE",
-                location="NYC",
-            ))
+    def test_search_error_returns_empty(self):
+        import httpx
+        from app.services.sources.linkedin import fetch
+        with patch("httpx.get", side_effect=httpx.HTTPError("timeout")):
+            results = fetch(session_cookie="", query="SWE", location="NYC")
         assert results == []
+
+    def test_job_id_extraction(self):
+        from app.services.sources.linkedin import _job_id_from_url
+        assert _job_id_from_url("https://www.linkedin.com/jobs/view/swe-at-acme-4012345678") == "4012345678"
+        assert _job_id_from_url("https://www.linkedin.com/jobs/view/no-id-here") is None
 
 
 # ---------------------------------------------------------------------------
@@ -300,38 +309,44 @@ class TestLinkedInScraper:
 # ---------------------------------------------------------------------------
 
 class TestIndeedScraper:
+    _RSS = """<?xml version="1.0"?>
+    <rss><channel>
+      <item>
+        <title>Backend Engineer - Meta</title>
+        <link>https://www.indeed.com/viewjob?jk=abc123</link>
+        <description>Python and &lt;b&gt;Docker&lt;/b&gt; required.</description>
+      </item>
+    </channel></rss>"""
+
+    def _resp(self, text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.text = text
+        resp.raise_for_status = MagicMock()
+        return resp
+
     def test_returns_standard_dicts(self):
-        import asyncio
-
-        async def mock_scrape(*args, **kwargs):
-            return [{
-                "source": "indeed",
-                "source_job_id": None,
-                "title": "Backend Engineer",
-                "company": "Meta",
-                "location": "Menlo Park, CA",
-                "is_remote": False,
-                "url": "https://indeed.com/viewjob?jk=abc123",
-                "description": "",
-                "experience_level": "mid",
-            }]
-
-        with patch("app.services.sources.indeed._scrape", side_effect=mock_scrape):
-            from app.services.sources.indeed import fetch
-            results = asyncio.run(fetch(query="Backend Engineer", location="Menlo Park"))
-
+        from app.services.sources.indeed import fetch
+        with patch("httpx.get", return_value=self._resp(self._RSS)):
+            results = fetch(query="Backend Engineer", location="Menlo Park, CA")
         assert len(results) == 1
-        assert results[0]["source"] == "indeed"
+        job = results[0]
+        assert job["source"] == "indeed"
+        assert job["title"] == "Backend Engineer"
+        assert job["company"] == "Meta"
+        assert job["url"] == "https://www.indeed.com/viewjob?jk=abc123"
+        assert "Docker" in job["description"]
 
     def test_empty_on_error(self):
-        import asyncio
+        import httpx
+        from app.services.sources.indeed import fetch
+        with patch("httpx.get", side_effect=httpx.HTTPError("Timeout")):
+            results = fetch(query="SWE", location="NYC")
+        assert results == []
 
-        async def raise_error(*args, **kwargs):
-            raise RuntimeError("Timeout")
-
-        with patch("app.services.sources.indeed._scrape", side_effect=raise_error):
-            from app.services.sources import indeed
-            results = asyncio.run(indeed.fetch(query="SWE", location="NYC"))
+    def test_empty_on_bad_xml(self):
+        from app.services.sources.indeed import fetch
+        with patch("httpx.get", return_value=self._resp("not xml at all")):
+            results = fetch(query="SWE", location="NYC")
         assert results == []
 
 
@@ -602,3 +617,88 @@ class TestJobicyAdapter:
         with patch("httpx.get", side_effect=httpx.HTTPError("timeout")):
             results = fetch(query="Engineer")
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Hacker News "Who is hiring?" adapter
+# ---------------------------------------------------------------------------
+
+class TestHNHiringAdapter:
+    def _search_resp(self):
+        resp = MagicMock()
+        resp.json.return_value = {"hits": [
+            {"objectID": "40001", "title": "Ask HN: Who is hiring? (July 2026)"},
+        ]}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def _item_resp(self, children):
+        resp = MagicMock()
+        resp.json.return_value = {"id": 40001, "children": children}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_parses_top_level_comments_as_jobs(self):
+        from app.services.sources.hnhiring import fetch
+        children = [
+            {
+                "id": 40002,
+                "created_at": "2026-07-01T12:00:00Z",
+                "text": "<p>Acme Robotics | Software Engineer | Remote (US) | $150k</p>"
+                        "<p>We build robots. Python and Go stack.</p>",
+            },
+            {"id": 40003, "created_at": "2026-07-01T13:00:00Z", "text": None},  # dead
+        ]
+        with patch("httpx.get", side_effect=[self._search_resp(), self._item_resp(children)]):
+            results = fetch(queries=["Software Engineer"])
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "hnhiring"
+        assert job["company"] == "Acme Robotics"
+        assert job["title"] == "Software Engineer"
+        assert job["is_remote"] is True
+        assert job["url"] == "https://news.ycombinator.com/item?id=40002"
+        assert "Python and Go stack." in job["description"]
+
+    def test_filters_comments_not_matching_queries(self):
+        from app.services.sources.hnhiring import fetch
+        children = [
+            {"id": 1, "created_at": "", "text": "<p>Co | Accountant | NYC</p><p>Finance only.</p>"},
+        ]
+        with patch("httpx.get", side_effect=[self._search_resp(), self._item_resp(children)]):
+            results = fetch(queries=["Kubernetes Wizard"])
+        assert results == []
+
+    def test_unpiped_header_falls_back_to_first_line(self):
+        from app.services.sources.hnhiring import fetch
+        children = [
+            {"id": 2, "created_at": "", "text": "<p>Hiring a backend engineer at Initech, onsite Austin.</p>"},
+        ]
+        with patch("httpx.get", side_effect=[self._search_resp(), self._item_resp(children)]):
+            results = fetch(queries=["Backend Engineer"])
+        assert len(results) == 1
+        assert "backend engineer" in results[0]["title"].lower()
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.hnhiring import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("down")):
+            results = fetch(queries=["Engineer"])
+        assert results == []
+
+    def test_no_thread_found_returns_empty(self):
+        from app.services.sources.hnhiring import fetch
+        resp = MagicMock()
+        resp.json.return_value = {"hits": []}
+        resp.raise_for_status = MagicMock()
+        with patch("httpx.get", return_value=resp):
+            results = fetch(queries=["Engineer"])
+        assert results == []
+
+    def test_location_first_header_still_finds_role_title(self):
+        from app.services.sources.hnhiring import _parse_header
+        company, title = _parse_header(
+            "Blaine, WA | CaseLight Systems Inc. | Remote (US Only) | Founding Systems Engineer | $150k"
+        )
+        assert title == "Founding Systems Engineer"
+        assert company == "CaseLight Systems Inc."
