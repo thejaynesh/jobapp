@@ -101,15 +101,25 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
     salary_min = profile_data.get("salary_min")
     education = profile_data.get("education", [])
 
+    projects = profile_data.get("projects", [])
+
     total_years = sum(float(e.get("years", 0) or 0) for e in experience)
 
     exp_lines = "\n".join(
-        f"- {e.get('title', '')} at {e.get('company', '')} ({e.get('years', 'N/A')} years)"
+        f"- {e.get('title') or e.get('role') or ''} at {e.get('company', '')} ({e.get('years', 'N/A')} years)"
+        + (f" — tech: {', '.join(e.get('tech'))}" if e.get("tech") else "")
         for e in experience
     )
 
+    proj_lines = "\n".join(
+        f"- {p.get('name', '')}: {p.get('description', '')}"
+        + (f" — tech: {', '.join(p.get('tech'))}" if p.get("tech") else "")
+        for p in projects
+    ) if projects else ""
+
     edu_lines = "\n".join(
         f"- {e.get('degree', '')} in {e.get('field', '')} from {e.get('school', '')}"
+        + (f" (expected {e.get('end_date')})" if e.get("end_date") else "")
         for e in education
     ) if education else ""
 
@@ -130,8 +140,18 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         "  matched_skills (list of skills from the candidate that appear in the job),\n"
         "  missing_skills (list of skills the job requires that the candidate lacks),\n"
         "  seniority_fit (boolean — true if the job seniority matches the candidate's experience level).\n"
-        "Penalize heavily if required years of experience greatly exceed the candidate's total. "
-        "Reward remote-friendly jobs when the candidate prefers remote. "
+        "Score with this rubric, then sum:\n"
+        "  - Core skill overlap with the job's REQUIRED (not nice-to-have) skills: 0-40\n"
+        "  - Seniority/years fit: 0-25. Judge required years against the candidate's total; "
+        "count substantial personal/academic projects as evidence of ability but not as years. "
+        "A recent or soon-graduating Master's candidate is a fit for entry/new-grad/junior roles "
+        "and roles asking up to ~3 years; heavily penalize roles demanding 5+ years or 'senior/staff/lead' titles.\n"
+        "  - Domain and role-type fit (backend vs mobile vs data etc., industry): 0-20\n"
+        "  - Location/remote/work-authorization compatibility: 0-15. Reward remote-friendly jobs "
+        "when the candidate prefers remote.\n"
+        "Treat transferable skills generously (e.g. strong Java experience for a Kotlin role), "
+        "but never ignore explicit hard requirements stated in the job (clearances, specific "
+        "degrees, must-have technologies).\n"
         "Return ONLY the JSON object, no markdown, no explanation."
     )
 
@@ -141,13 +161,14 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         f"Target roles: {', '.join(roles)}\n"
         f"Skills: {', '.join(skills_flat)}\n"
         f"Experience:\n{exp_lines}\n"
+        + (f"Projects:\n{proj_lines}\n" if proj_lines else "")
         + (f"Education:\n{edu_lines}\n" if edu_lines else "")
         + (f"{extras_str}\n" if extras_str else "")
         + f"\nJob title: {job.title}\n"
         f"Company: {job.company}\n"
         f"Location: {job.location or 'Unknown'} (remote: {job.is_remote})\n"
         f"Experience level: {job.experience_level or 'unknown'}\n"
-        f"Description:\n{(job.description or '')[:3000]}"
+        f"Description:\n{(job.description or '')[:4000]}"
     )
 
     return [
@@ -180,13 +201,20 @@ def _parse_llm_response(content: str) -> dict:
         return {"score": 0, "reasoning": f"Parse error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
 
 
-def chat_completion(messages: list[dict], api_key: str, base_url: str, model: str) -> str:
+def chat_completion(
+    messages: list[dict],
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float = 0.1,
+    max_tokens: int = 512,
+) -> str:
     client = OpenAI(api_key=api_key, base_url=base_url)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.1,
-        max_tokens=512,
+        temperature=temperature,
+        max_tokens=max_tokens,
         timeout=90,
     )
     return response.choices[0].message.content or ""

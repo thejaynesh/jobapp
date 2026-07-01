@@ -174,6 +174,39 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
         except Exception as exc:
             _record(stats, "weworkremotely", [], f"{role}: {exc}")
 
+    # --- The Muse: free public API, tech categories ---
+    from app.services.sources.themuse import fetch as themuse_fetch
+    stats.setdefault("themuse", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = themuse_fetch(query=role)
+            _record(stats, "themuse", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "themuse", [], f"{role}: {exc}")
+
+    # --- Himalayas: free public API for remote tech jobs ---
+    from app.services.sources.himalayas import fetch as himalayas_fetch
+    stats.setdefault("himalayas", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = himalayas_fetch(query=role)
+            _record(stats, "himalayas", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "himalayas", [], f"{role}: {exc}")
+
+    # --- Jobicy: free public API for remote tech jobs ---
+    from app.services.sources.jobicy import fetch as jobicy_fetch
+    stats.setdefault("jobicy", {"count": 0, "errors": [], "enabled": True})
+    for role in roles:
+        try:
+            jobs = jobicy_fetch(query=role)
+            _record(stats, "jobicy", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "jobicy", [], f"{role}: {exc}")
+
     # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
 
     async def _run_playwright() -> tuple[list[dict], dict]:

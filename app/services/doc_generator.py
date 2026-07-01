@@ -153,6 +153,108 @@ def _strip_json_fences(raw: str) -> str:
     return text.strip()
 
 
+# ---------------------------------------------------------------------------
+# Job insights (shared grounding for summary, bullets, and cover letter)
+# ---------------------------------------------------------------------------
+
+def _profile_terms(profile_data: dict) -> set[str]:
+    terms: set[str] = set()
+    for items in (profile_data.get("skills") or {}).values():
+        terms.update(items or [])
+    for e in profile_data.get("experience") or []:
+        terms.update(e.get("tech") or [])
+    for p in profile_data.get("projects") or []:
+        terms.update(p.get("tech") or [])
+    return {t for t in terms if t}
+
+
+def _fallback_insights(profile_data: dict, job_description: str) -> dict:
+    """Keyword-only insights: profile terms that literally appear in the JD."""
+    jd_lower = (job_description or "").lower()
+    keywords = sorted(
+        {t for t in _profile_terms(profile_data) if t.lower() in jd_lower},
+        key=str.lower,
+    )
+    return {"keywords": keywords[:15], "requirements": [], "company_signals": []}
+
+
+def extract_job_insights(
+    profile_data: dict,
+    job_title: str,
+    job_company: str,
+    job_description: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> dict:
+    """
+    One analysis pass over the JD that grounds all downstream generation:
+      keywords         — ATS terms the resume should contain (skills, tools, methods)
+      requirements     — the job's most important hard requirements, ranked
+      company_signals  — company/product/mission specifics usable in a cover letter hook
+    Falls back to profile-term matching if the LLM is unavailable.
+    """
+    if not job_description:
+        return {"keywords": [], "requirements": [], "company_signals": []}
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You analyze job descriptions for resume targeting. Return ONLY a JSON "
+                "object with these fields:\n"
+                '  "keywords": up to 15 exact terms an ATS would scan for (technologies, '
+                "tools, methodologies), most important first, using the JD's own spelling,\n"
+                '  "requirements": up to 6 of the job\'s most important requirements or '
+                "responsibilities, each a short phrase, most important first,\n"
+                '  "company_signals": up to 4 short phrases about the company, product, '
+                "team, or mission stated in the JD that a cover letter could reference.\n"
+                "Only use information present in the job description. No markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Job title: {job_title}\n"
+                f"Company: {job_company}\n"
+                f"Description:\n{job_description[:4000]}"
+            ),
+        },
+    ]
+    try:
+        raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
+        parsed = json.loads(_strip_json_fences(raw))
+        insights = {
+            "keywords": [str(k).strip() for k in (parsed.get("keywords") or []) if str(k).strip()][:15],
+            "requirements": [str(r).strip() for r in (parsed.get("requirements") or []) if str(r).strip()][:6],
+            "company_signals": [str(c).strip() for c in (parsed.get("company_signals") or []) if str(c).strip()][:4],
+        }
+        if not insights["keywords"]:
+            insights["keywords"] = _fallback_insights(profile_data, job_description)["keywords"]
+        return insights
+    except Exception as exc:
+        logger.error("extract_job_insights LLM error: %s", exc)
+        return _fallback_insights(profile_data, job_description)
+
+
+def _keyword_coverage(resume_ctx: dict, keywords: list[str]) -> tuple[list[str], list[str]]:
+    """Which JD keywords made it into the final resume content (ATS coverage check)."""
+    parts: list[str] = [resume_ctx.get("narrative_summary") or ""]
+    for items in (resume_ctx.get("skills") or {}).values():
+        parts.extend(items or [])
+    for e in resume_ctx.get("experience") or []:
+        parts.append(e.get("title") or "")
+        parts.extend(e.get("bullets") or [])
+    for p in resume_ctx.get("projects") or []:
+        parts.append(p.get("name") or "")
+        parts.append(p.get("description") or "")
+        parts.extend(p.get("bullets") or [])
+    text = " ".join(parts).lower()
+    present = [k for k in keywords if k.lower() in text]
+    missing = [k for k in keywords if k.lower() not in text]
+    return present, missing
+
+
 def _fallback_selection(
     experiences: list[dict],
     projects: list[dict],
@@ -314,12 +416,74 @@ def tailor_resume_selection(
         )
 
 
+def tailor_summary(
+    profile_data: dict,
+    job_title: str,
+    job_company: str,
+    insights: dict | None,
+    api_key: str,
+    base_url: str,
+    model: str,
+    feedback: str | None = None,
+) -> str:
+    """
+    Rewrite the profile's narrative summary so the top of the resume speaks to THIS
+    job instead of being identical on every application. Falls back to the stored
+    summary if the LLM is unavailable or returns junk.
+    """
+    base_summary = (profile_data.get("narrative") or {}).get("summary", "")
+    if not base_summary:
+        return base_summary
+
+    keywords = (insights or {}).get("keywords") or []
+    requirements = (insights or {}).get("requirements") or []
+
+    system_content = (
+        "You rewrite a candidate's resume summary to target a specific job.\n"
+        "Rules:\n"
+        "- 2-3 sentences, first person, no filler ('passionate', 'results-driven', "
+        "'team player') and no addressing the company directly.\n"
+        "- Keep every claim from the original summary truthful; you may drop parts "
+        "irrelevant to this job, but NEVER add experience, employers, or credentials "
+        "that are not in the original.\n"
+        "- Naturally weave in the job's terminology where the original summary "
+        "supports it.\n"
+        "Return ONLY the rewritten summary text."
+    )
+    user_content = (
+        f"Original summary:\n{base_summary}\n\n"
+        f"Target job: {job_title} at {job_company}\n"
+        + (f"Job keywords: {', '.join(keywords)}\n" if keywords else "")
+        + (f"Job requirements: {'; '.join(requirements)}\n" if requirements else "")
+        + (f"\nUser feedback on the previous version (must address): {feedback}\n" if feedback else "")
+    )
+    try:
+        raw = chat_completion(
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            api_key=api_key, base_url=base_url, model=model,
+            temperature=0.4,
+        )
+        summary = raw.strip().strip('"')
+        # Sanity bounds: a summary should be a short paragraph, not empty or an essay.
+        if 40 <= len(summary) <= 800:
+            return summary
+        logger.warning("tailor_summary: rejected output of length %d", len(summary))
+        return base_summary
+    except Exception as exc:
+        logger.error("tailor_summary LLM error: %s", exc)
+        return base_summary
+
+
 def build_resume_context(
     profile_data: dict,
     tailored_bullets: list[dict] | None,
     selected_experience: list[dict] | None = None,
     selected_projects: list[dict] | None = None,
     selected_skills: dict | None = None,
+    tailored_summary: str | None = None,
 ) -> dict:
     experience_source = (
         selected_experience if selected_experience is not None
@@ -327,7 +491,7 @@ def build_resume_context(
     )
     return {
         "profile": _normalize_profile_for_template(profile_data),
-        "narrative_summary": (profile_data.get("narrative") or {}).get("summary", ""),
+        "narrative_summary": tailored_summary or (profile_data.get("narrative") or {}).get("summary", ""),
         "skills": selected_skills if selected_skills is not None else (profile_data.get("skills") or {}),
         "experience": _normalize_experience(experience_source, tailored_bullets),
         "education": _normalize_education(profile_data.get("education") or []),
@@ -390,6 +554,33 @@ def compile_pdf(tex_source: str, output_path: Path) -> Path:
 # LLM tailoring
 # ---------------------------------------------------------------------------
 
+_COVER_LETTER_BANNED = [
+    "I am excited to apply",
+    "I am writing to express",
+    "I believe I would be a great fit",
+    "passionate",
+    "team player",
+    "fast learner",
+    "results-driven",
+    "esteemed",
+    "perfect fit",
+    "aligns perfectly",
+]
+
+
+def _evidence_block(experience: list[dict], projects: list[dict]) -> str:
+    """Concrete accomplishments the letter is allowed to draw from."""
+    lines: list[str] = []
+    for e in experience[:3]:
+        role = e.get("role") or e.get("title") or ""
+        lines.append(f"EXPERIENCE — {role} at {e.get('company', '')}:")
+        lines.extend(f"  - {b}" for b in (e.get("bullets") or [])[:3])
+    for p in projects[:2]:
+        lines.append(f"PROJECT — {p.get('name', '')} ({p.get('description', '')}):")
+        lines.extend(f"  - {b}" for b in (p.get("bullets") or [])[:3])
+    return "\n".join(lines)
+
+
 def generate_cover_letter_body(
     profile_data: dict,
     job_company: str,
@@ -398,43 +589,73 @@ def generate_cover_letter_body(
     api_key: str,
     base_url: str,
     model: str,
+    insights: dict | None = None,
+    feedback: str | None = None,
+    selected_experience: list[dict] | None = None,
+    selected_projects: list[dict] | None = None,
 ) -> str:
     skills = profile_data.get("skills", {})
     skills_flat = [s for cat in skills.values() for s in cat]
     summary = (profile_data.get("narrative") or {}).get("summary", "")
     personal = profile_data.get("personal") or {}
     name = personal.get("name") or "Candidate"
-    experience = profile_data.get("experience", [])
-    exp_summary = "; ".join(
-        f"{e.get('role') or e.get('title', '')} at {e.get('company', '')}"
-        for e in experience[:3]
+    experience = (
+        selected_experience if selected_experience
+        else profile_data.get("experience", [])
+    )
+    projects = (
+        selected_projects if selected_projects
+        else profile_data.get("projects", [])
+    )
+    evidence = _evidence_block(experience, projects)
+    requirements = (insights or {}).get("requirements") or []
+    company_signals = (insights or {}).get("company_signals") or []
+
+    system_content = (
+        "You write cover letter bodies that read like a specific person wrote them for "
+        "a specific job — not a template. Structure (3 paragraphs, 180-250 words total):\n"
+        "1. Hook: name the role, and open with the single strongest reason this candidate "
+        "fits — a concrete accomplishment or a specific connection to what the company is "
+        "building. Never open with a generic statement of interest.\n"
+        "2. Evidence: pick the 2-3 job requirements the candidate can best prove, and back "
+        "each with a specific accomplishment (with its metric) from the evidence list. "
+        "Connect each accomplishment to what the job needs, don't just restate it.\n"
+        "3. Close: one or two sentences on what the candidate would bring to this team, "
+        "then a brief forward-looking line.\n"
+        "Hard rules:\n"
+        "- First person, plain confident tone, contractions are fine.\n"
+        "- Use ONLY accomplishments from the evidence list; never invent employers, "
+        "numbers, or technologies. It's fine to mention at most one honest gap-bridging "
+        "skill (e.g. 'deep Java experience maps directly to Kotlin').\n"
+        f"- Never use these phrases or close variants: {', '.join(_COVER_LETTER_BANNED)}.\n"
+        "- No salutation, no sign-off, no bullet points — body paragraphs only."
+    )
+
+    user_content = (
+        f"Candidate: {name}\n"
+        f"Candidate summary: {summary}\n"
+        f"Skills: {', '.join(skills_flat)}\n\n"
+        f"Evidence list (the ONLY accomplishments you may cite):\n{evidence}\n\n"
+        f"Job: {job_title} at {job_company}\n"
+        + (f"Top job requirements: {'; '.join(requirements)}\n" if requirements else "")
+        + (f"Company signals from the JD: {'; '.join(company_signals)}\n" if company_signals else "")
+        + f"Job description (excerpt):\n{job_description[:2500]}\n"
+        + (f"\nUser feedback on the previous version (must address): {feedback}\n" if feedback else "")
     )
 
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You write professional, concise cover letter bodies (3 paragraphs, ~200 words). "
-                "Write in first person. No salutation or sign-off — body text only. "
-                "Be specific about the candidate's relevant skills and experience."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Candidate: {name}\nSummary: {summary}\n"
-                f"Skills: {', '.join(skills_flat)}\nExperience: {exp_summary}\n\n"
-                f"Job: {job_title} at {job_company}\n"
-                f"Description:\n{job_description[:1500]}"
-            ),
-        },
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
     ]
     try:
-        return chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
+        return chat_completion(
+            messages=messages, api_key=api_key, base_url=base_url, model=model,
+            temperature=0.6, max_tokens=700,
+        ).strip()
     except Exception as exc:
         logger.error("generate_cover_letter_body LLM error: %s", exc)
         return (
-            f"I am excited to apply for the {job_title} position at {job_company}. "
+            f"I am applying for the {job_title} position at {job_company}. "
             f"My background in {', '.join(skills_flat[:3])} aligns well with your requirements. "
             "I look forward to discussing how I can contribute to your team."
         )
@@ -447,6 +668,54 @@ def _parse_bullets_response(content: str) -> list[dict]:
     return json.loads(text.strip())
 
 
+_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers_in(text: str) -> set[str]:
+    return {m.group().replace(",", "") for m in _NUM_RE.finditer(text or "")}
+
+
+def _ground_tailored_bullets(original_entries: list[dict], tailored: list[dict]) -> list[dict]:
+    """
+    Anti-fabrication guard for rewritten bullets. Every number in a rewritten bullet
+    must already exist somewhere in that entry's original bullets; a rewritten bullet
+    that introduces a new metric is replaced with the original bullet at its position
+    (or dropped if there is none). Entries for employers/titles not in the profile are
+    dropped entirely.
+    """
+    orig_map = {
+        (e.get("company") or "", e.get("title") or ""): e.get("bullets") or []
+        for e in original_entries
+    }
+    grounded: list[dict] = []
+    for entry in tailored if isinstance(tailored, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        key = (entry.get("company") or "", entry.get("title") or "")
+        if key not in orig_map:
+            logger.warning("tailor_resume_bullets: dropped invented entry %s", key)
+            continue
+        originals = orig_map[key]
+        allowed_numbers: set[str] = set()
+        for b in originals:
+            allowed_numbers |= _numbers_in(b)
+        bullets: list[str] = []
+        for i, bullet in enumerate(entry.get("bullets") or []):
+            if not isinstance(bullet, str) or not bullet.strip():
+                continue
+            if _numbers_in(bullet) - allowed_numbers:
+                logger.warning(
+                    "tailor_resume_bullets: reverted bullet with fabricated metric for %s", key
+                )
+                if i < len(originals):
+                    bullets.append(originals[i])
+                continue
+            bullets.append(bullet)
+        if bullets:
+            grounded.append({"company": key[0], "title": key[1], "bullets": bullets})
+    return grounded
+
+
 def tailor_resume_bullets(
     profile_data: dict,
     job_title: str,
@@ -454,34 +723,52 @@ def tailor_resume_bullets(
     api_key: str,
     base_url: str,
     model: str,
+    insights: dict | None = None,
+    feedback: str | None = None,
 ) -> list[dict]:
     experience = profile_data.get("experience", [])
     exp_json = [
         {"company": e.get("company"), "title": e.get("title") or e.get("role") or "", "bullets": e.get("bullets", [])}
         for e in experience
     ]
+    keywords = (insights or {}).get("keywords") or []
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a resume writer. Given a candidate's experience entries and a job description, "
-                "rewrite the bullet points to highlight the most relevant accomplishments. "
+                "You are a resume writer tailoring experience bullets to a specific job. "
+                "Rewrite each bullet so the most job-relevant part leads, keeping it truthful.\n"
+                "Rules for every bullet:\n"
+                "- Format: strong action verb + what was accomplished + quantified result. "
+                "Keep every metric, number, and scale figure from the original EXACTLY as "
+                "written — never invent, round, or estimate new numbers.\n"
+                "- Where a bullet genuinely involves one of the job's keywords, use the "
+                "keyword's exact spelling from the list so resume scanners match it. Do NOT "
+                "claim technologies the original bullet doesn't support.\n"
+                "- One line each: at most ~30 words. Cut filler, keep specifics.\n"
+                "- Keep the same companies, titles, and bullet count; only reword and "
+                "re-emphasize.\n"
                 "Return a JSON array with the SAME structure: "
                 '[{"company": str, "title": str, "bullets": [str, ...]}]. '
-                "Keep bullet count the same. Return ONLY the JSON array."
+                "Return ONLY the JSON array."
             ),
         },
         {
             "role": "user",
             "content": (
-                f"Job title: {job_title}\nDescription:\n{job_description[:1500]}\n\n"
-                f"Experience entries:\n{json.dumps(exp_json, indent=2)}"
+                f"Job title: {job_title}\nDescription:\n{job_description[:2500]}\n\n"
+                + (f"Job keywords (use exact spelling where truthful): {', '.join(keywords)}\n\n" if keywords else "")
+                + f"Experience entries:\n{json.dumps(exp_json, indent=2)}"
+                + (f"\n\nUser feedback on the previous version (must address): {feedback}" if feedback else "")
             ),
         },
     ]
     try:
-        raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
-        return _parse_bullets_response(raw)
+        raw = chat_completion(
+            messages=messages, api_key=api_key, base_url=base_url, model=model,
+            temperature=0.3, max_tokens=1200,
+        )
+        return _ground_tailored_bullets(exp_json, _parse_bullets_response(raw))
     except Exception as exc:
         logger.error("tailor_resume_bullets error: %s", exc)
         return []
@@ -532,6 +819,12 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     profile_data = profile.data if profile else {}
     job = application.job
 
+    # One analysis pass over the JD grounds everything downstream: ATS keywords,
+    # ranked requirements, and company specifics for the cover letter.
+    insights = extract_job_insights(
+        profile_data, job.title, job.company, job.description or "", api_key, base_url, model
+    )
+
     # Curate which experiences, projects, and skills to include so the resume
     # stays focused (ideally one page) and relevant to this specific job.
     selection = tailor_resume_selection(
@@ -544,10 +837,17 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # Rewrite bullets only for the experiences we are actually keeping.
     bullet_profile = {**profile_data, "experience": selected_experience}
     tailored_bullets = tailor_resume_bullets(
-        bullet_profile, job.title, job.description or "", api_key, base_url, model
+        bullet_profile, job.title, job.description or "", api_key, base_url, model,
+        insights=insights, feedback=feedback,
+    )
+    tailored_summary = tailor_summary(
+        profile_data, job.title, job.company, insights, api_key, base_url, model,
+        feedback=feedback,
     )
     cover_body = generate_cover_letter_body(
-        profile_data, job.company, job.title, job.description or "", api_key, base_url, model
+        profile_data, job.company, job.title, job.description or "", api_key, base_url, model,
+        insights=insights, feedback=feedback,
+        selected_experience=selected_experience, selected_projects=selected_projects,
     )
 
     # Resume
@@ -557,6 +857,13 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         selected_experience=selected_experience,
         selected_projects=selected_projects,
         selected_skills=selected_skills,
+        tailored_summary=tailored_summary,
+    )
+
+    present, missing = _keyword_coverage(resume_ctx, insights.get("keywords") or [])
+    logger.info(
+        "generate_documents %s: ATS keyword coverage %d/%d — missing: %s",
+        application.id, len(present), len(present) + len(missing), ", ".join(missing) or "none",
     )
     resume_tex = render_latex("resume.tex.j2", resume_ctx)
     resume_version = _next_version(db, application.id, DocType.resume)

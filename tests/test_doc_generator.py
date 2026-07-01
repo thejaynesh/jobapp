@@ -74,8 +74,7 @@ class TestLatexEscape:
 class TestBuildResumeContext:
     def _profile(self):
         return {
-            "name": "Jane Doe",
-            "contact": {"email": "jane@example.com", "phone": "555-1234", "location": "NY"},
+            "personal": {"name": "Jane Doe", "email": "jane@example.com", "phone": "555-1234", "location": "NY"},
             "skills": {"languages": ["Python", "Go"]},
             "experience": [{"title": "SWE", "company": "Acme", "start_date": "2021-01", "bullets": ["Built API"]}],
             "education": [{"degree": "B.S. CS", "school": "MIT", "graduation_year": "2020"}],
@@ -103,8 +102,7 @@ class TestBuildResumeContext:
 class TestBuildCoverLetterContext:
     def _profile(self):
         return {
-            "name": "Jane Doe",
-            "contact": {"email": "jane@example.com", "phone": "555-1234", "location": "NY"},
+            "personal": {"name": "Jane Doe", "email": "jane@example.com", "phone": "555-1234", "location": "NY"},
         }
 
     def test_includes_job_info(self):
@@ -313,6 +311,134 @@ class TestSetOnlyCurrent:
         assert new_doc.is_current is True
 
 
+class TestExtractJobInsights:
+    def _profile(self):
+        return {
+            "skills": {"languages": ["Python", "Go"]},
+            "experience": [{"company": "Acme", "tech": ["Docker"]}],
+            "projects": [{"name": "Proj", "tech": ["FastAPI"]}],
+        }
+
+    def test_parses_llm_response(self):
+        from app.services.doc_generator import extract_job_insights
+        raw = json.dumps({
+            "keywords": ["Python", "Kubernetes"],
+            "requirements": ["3+ years backend", "API design"],
+            "company_signals": ["fintech platform"],
+        })
+        with patch("app.services.doc_generator.chat_completion", return_value=raw):
+            insights = extract_job_insights(
+                self._profile(), "SWE", "Acme", "Python Kubernetes APIs", "k", "u", "m",
+            )
+        assert insights["keywords"] == ["Python", "Kubernetes"]
+        assert insights["requirements"] == ["3+ years backend", "API design"]
+        assert insights["company_signals"] == ["fintech platform"]
+
+    def test_falls_back_to_profile_terms_on_llm_error(self):
+        from app.services.doc_generator import extract_job_insights
+        with patch("app.services.doc_generator.chat_completion", side_effect=Exception("down")):
+            insights = extract_job_insights(
+                self._profile(), "SWE", "Acme",
+                "We need Python and Docker experience.", "k", "u", "m",
+            )
+        assert "Python" in insights["keywords"]
+        assert "Docker" in insights["keywords"]
+        assert "Go" not in insights["keywords"]
+
+    def test_empty_description_returns_empty_insights(self):
+        from app.services.doc_generator import extract_job_insights
+        insights = extract_job_insights(self._profile(), "SWE", "Acme", "", "k", "u", "m")
+        assert insights == {"keywords": [], "requirements": [], "company_signals": []}
+
+
+class TestGroundTailoredBullets:
+    def _originals(self):
+        return [
+            {"company": "Acme", "title": "SWE",
+             "bullets": ["Cut latency by 20% (500ms to 400ms)", "Led team of 3"]},
+        ]
+
+    def test_keeps_bullets_with_original_numbers(self):
+        from app.services.doc_generator import _ground_tailored_bullets
+        tailored = [{"company": "Acme", "title": "SWE",
+                     "bullets": ["Reduced API latency 20%, from 500ms to 400ms", "Led 3-person team"]}]
+        result = _ground_tailored_bullets(self._originals(), tailored)
+        assert result[0]["bullets"] == tailored[0]["bullets"]
+
+    def test_reverts_bullet_with_fabricated_metric(self):
+        from app.services.doc_generator import _ground_tailored_bullets
+        tailored = [{"company": "Acme", "title": "SWE",
+                     "bullets": ["Cut latency by 90%", "Led team of 3"]}]
+        result = _ground_tailored_bullets(self._originals(), tailored)
+        assert result[0]["bullets"][0] == "Cut latency by 20% (500ms to 400ms)"
+        assert result[0]["bullets"][1] == "Led team of 3"
+
+    def test_drops_invented_employer(self):
+        from app.services.doc_generator import _ground_tailored_bullets
+        tailored = [{"company": "Google", "title": "SWE", "bullets": ["Did things"]}]
+        assert _ground_tailored_bullets(self._originals(), tailored) == []
+
+    def test_handles_non_list_input(self):
+        from app.services.doc_generator import _ground_tailored_bullets
+        assert _ground_tailored_bullets(self._originals(), {"not": "a list"}) == []
+
+
+class TestTailorSummary:
+    def _profile(self):
+        return {"narrative": {"summary": "I build backend systems and ship measurable wins."}}
+
+    def test_returns_llm_summary(self):
+        from app.services.doc_generator import tailor_summary
+        rewritten = "I build backend systems in Python and ship measurable wins for API-heavy products."
+        with patch("app.services.doc_generator.chat_completion", return_value=rewritten):
+            out = tailor_summary(self._profile(), "SWE", "Acme", {"keywords": ["Python"]}, "k", "u", "m")
+        assert out == rewritten
+
+    def test_falls_back_on_llm_error(self):
+        from app.services.doc_generator import tailor_summary
+        with patch("app.services.doc_generator.chat_completion", side_effect=Exception("down")):
+            out = tailor_summary(self._profile(), "SWE", "Acme", None, "k", "u", "m")
+        assert out == self._profile()["narrative"]["summary"]
+
+    def test_rejects_degenerate_output(self):
+        from app.services.doc_generator import tailor_summary
+        with patch("app.services.doc_generator.chat_completion", return_value="ok"):
+            out = tailor_summary(self._profile(), "SWE", "Acme", None, "k", "u", "m")
+        assert out == self._profile()["narrative"]["summary"]
+
+    def test_empty_base_summary_skips_llm(self):
+        from app.services.doc_generator import tailor_summary
+        with patch("app.services.doc_generator.chat_completion") as mock_cc:
+            out = tailor_summary({"narrative": {"summary": ""}}, "SWE", "Acme", None, "k", "u", "m")
+        assert out == ""
+        mock_cc.assert_not_called()
+
+
+class TestCoverLetterEvidence:
+    def test_prompt_includes_evidence_and_feedback(self):
+        from app.services.doc_generator import generate_cover_letter_body
+        profile = {
+            "personal": {"name": "Jane"},
+            "narrative": {"summary": "Engineer."},
+            "skills": {"languages": ["Python"]},
+            "experience": [{"role": "SWE", "company": "Acme", "bullets": ["Cut latency 20%"]}],
+            "projects": [{"name": "Proj", "description": "Tool", "bullets": ["Shipped it"]}],
+        }
+        with patch("app.services.doc_generator.chat_completion", return_value="Body.") as mock_cc:
+            generate_cover_letter_body(
+                profile, "GoodCorp", "Backend Engineer", "Desc", "k", "u", "m",
+                insights={"requirements": ["API design"], "company_signals": ["fintech"]},
+                feedback="Shorter please",
+            )
+        args, kwargs = mock_cc.call_args
+        full_text = " ".join(m["content"] for m in kwargs["messages"])
+        assert "Cut latency 20%" in full_text
+        assert "Shipped it" in full_text
+        assert "API design" in full_text
+        assert "fintech" in full_text
+        assert "Shorter please" in full_text
+
+
 def _mock_db_for_generate():
     db = MagicMock()
     db.query.return_value.filter.return_value.count.return_value = 0
@@ -330,16 +456,35 @@ def _mock_db_for_generate():
 
 
 class TestGenerateDocuments:
+    def _patches(self):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        mocks = {
+            "insights": stack.enter_context(patch(
+                "app.services.doc_generator.extract_job_insights",
+                return_value={"keywords": [], "requirements": [], "company_signals": []},
+            )),
+            "bullets": stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_bullets", return_value=[])),
+            "summary": stack.enter_context(patch(
+                "app.services.doc_generator.tailor_summary", return_value="Tailored summary.")),
+            "cover": stack.enter_context(patch(
+                "app.services.doc_generator.generate_cover_letter_body", return_value="Body.")),
+            "render": stack.enter_context(patch(
+                "app.services.doc_generator.render_latex",
+                return_value=r"\documentclass{article}\begin{document}ok\end{document}")),
+            "compile": stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf"))),
+        }
+        return stack, mocks
+
     def test_creates_resume_and_cover_letter_docs(self):
         from app.services.doc_generator import generate_documents
         db = _mock_db_for_generate()
         app = _make_app()
-        with patch("app.services.doc_generator.tailor_resume_bullets", return_value=[]):
-            with patch("app.services.doc_generator.generate_cover_letter_body", return_value="Body."):
-                with patch("app.services.doc_generator.render_latex", return_value=r"\documentclass{article}\begin{document}ok\end{document}"):
-                    with patch("app.services.doc_generator.compile_pdf") as mock_compile:
-                        mock_compile.return_value = Path("/fake/path.pdf")
-                        generate_documents(db, app)
+        stack, _ = self._patches()
+        with stack:
+            generate_documents(db, app)
         assert db.add.call_count == 2
 
     def test_updates_job_status_to_docs_generated(self):
@@ -347,36 +492,39 @@ class TestGenerateDocuments:
         from app.models.job import JobStatus
         db = _mock_db_for_generate()
         app = _make_app()
-        with patch("app.services.doc_generator.tailor_resume_bullets", return_value=[]):
-            with patch("app.services.doc_generator.generate_cover_letter_body", return_value="Body."):
-                with patch("app.services.doc_generator.render_latex", return_value=r"\documentclass{article}\begin{document}ok\end{document}"):
-                    with patch("app.services.doc_generator.compile_pdf") as mock_compile:
-                        mock_compile.return_value = Path("/fake/path.pdf")
-                        generate_documents(db, app)
+        stack, _ = self._patches()
+        with stack:
+            generate_documents(db, app)
         assert app.job.status == JobStatus.docs_generated
 
-    def test_regenerate_passes_feedback_to_tailor(self):
+    def test_regenerate_passes_feedback_to_generators(self):
         from app.services.doc_generator import generate_documents
         db = _mock_db_for_generate()
         app = _make_app()
-        with patch("app.services.doc_generator.tailor_resume_bullets", return_value=[]) as mock_tb:
-            with patch("app.services.doc_generator.generate_cover_letter_body", return_value="Body."):
-                with patch("app.services.doc_generator.render_latex", return_value=r"\documentclass{article}\begin{document}ok\end{document}"):
-                    with patch("app.services.doc_generator.compile_pdf") as mock_compile:
-                        mock_compile.return_value = Path("/fake/path.pdf")
-                        generate_documents(db, app, feedback="Make bullets more concise")
-        assert mock_tb.call_count == 1
+        stack, mocks = self._patches()
+        with stack:
+            generate_documents(db, app, feedback="Make bullets more concise")
+        for name in ("bullets", "summary", "cover"):
+            _, kwargs = mocks[name].call_args
+            assert kwargs.get("feedback") == "Make bullets more concise", name
+
+    def test_uses_tailored_summary_in_resume_context(self):
+        from app.services.doc_generator import generate_documents
+        db = _mock_db_for_generate()
+        app = _make_app()
+        stack, mocks = self._patches()
+        with stack:
+            generate_documents(db, app)
+        resume_ctx = mocks["render"].call_args_list[0][0][1]
+        assert resume_ctx["narrative_summary"] == "Tailored summary."
 
     def test_commits_after_generation(self):
         from app.services.doc_generator import generate_documents
         db = _mock_db_for_generate()
         app = _make_app()
-        with patch("app.services.doc_generator.tailor_resume_bullets", return_value=[]):
-            with patch("app.services.doc_generator.generate_cover_letter_body", return_value="Body."):
-                with patch("app.services.doc_generator.render_latex", return_value=r"\documentclass{article}\begin{document}ok\end{document}"):
-                    with patch("app.services.doc_generator.compile_pdf") as mock_compile:
-                        mock_compile.return_value = Path("/fake/path.pdf")
-                        generate_documents(db, app)
+        stack, _ = self._patches()
+        with stack:
+            generate_documents(db, app)
         db.commit.assert_called_once()
 
 

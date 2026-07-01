@@ -420,3 +420,185 @@ class TestHandshakeScraper:
             from app.services.sources import handshake
             results = asyncio.run(handshake.fetch(session_cookie="s", query="SWE", location=""))
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# The Muse adapter
+# ---------------------------------------------------------------------------
+
+class TestTheMuseAdapter:
+    def _mock_response(self, results: list[dict], page_count: int = 1) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {"results": results, "page_count": page_count}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.themuse import fetch
+        raw = [{
+            "id": 111,
+            "name": "Software Engineer, Backend",
+            "company": {"name": "Spotify"},
+            "locations": [{"name": "New York, NY"}],
+            "levels": [{"name": "Entry Level", "short_name": "entry"}],
+            "refs": {"landing_page": "https://themuse.com/jobs/111"},
+            "contents": "Build music systems.",
+            "publication_date": "2026-06-20T00:00:00Z",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Software Engineer")
+        assert len(results) >= 1
+        job = results[0]
+        assert job["source"] == "themuse"
+        assert job["source_job_id"] == "111"
+        assert job["company"] == "Spotify"
+        assert job["url"] == "https://themuse.com/jobs/111"
+        assert job["experience_level"] == "entry"
+
+    def test_filters_by_query_words(self):
+        from app.services.sources.themuse import fetch
+        raw = [{
+            "id": 112,
+            "name": "Account Executive",
+            "company": {"name": "Co"},
+            "locations": [],
+            "levels": [],
+            "refs": {"landing_page": "https://themuse.com/jobs/112"},
+            "contents": "Sell things.",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Software Engineer")
+        assert results == []
+
+    def test_remote_detection_from_flexible_location(self):
+        from app.services.sources.themuse import fetch
+        raw = [{
+            "id": 113,
+            "name": "Backend Engineer",
+            "company": {"name": "Co"},
+            "locations": [{"name": "Flexible / Remote"}],
+            "levels": [],
+            "refs": {"landing_page": "https://themuse.com/jobs/113"},
+            "contents": "",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Engineer")
+        assert results[0]["is_remote"] is True
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.themuse import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("timeout")):
+            results = fetch(query="Engineer")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Himalayas adapter
+# ---------------------------------------------------------------------------
+
+class TestHimalayasAdapter:
+    def _mock_response(self, jobs: list[dict]) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {"jobs": jobs}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.himalayas import fetch
+        raw = [{
+            "title": "Senior Backend Engineer",
+            "companyName": "Doist",
+            "categories": ["Software Engineering"],
+            "locationRestrictions": ["USA", "Canada"],
+            "applicationLink": "https://himalayas.app/jobs/1/apply",
+            "guid": "https://himalayas.app/jobs/1",
+            "description": "Build APIs.",
+            "pubDate": 1750000000,
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "himalayas"
+        assert job["company"] == "Doist"
+        assert job["is_remote"] is True
+        assert job["location"] == "USA, Canada"
+        assert job["experience_level"] == "senior"
+
+    def test_filters_by_query(self):
+        from app.services.sources.himalayas import fetch
+        raw = [{
+            "title": "Marketing Manager",
+            "companyName": "Co",
+            "categories": ["Marketing"],
+            "guid": "https://himalayas.app/jobs/2",
+            "description": "",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Software Engineer")
+        assert results == []
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.himalayas import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("timeout")):
+            results = fetch(query="Engineer")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Jobicy adapter
+# ---------------------------------------------------------------------------
+
+class TestJobicyAdapter:
+    def _mock_response(self, jobs: list[dict]) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {"jobs": jobs}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.jobicy import fetch
+        raw = [{
+            "id": 555,
+            "url": "https://jobicy.com/jobs/555",
+            "jobTitle": "Full Stack Developer",
+            "companyName": "Remote Co",
+            "jobGeo": "USA",
+            "jobLevel": "Any",
+            "jobExcerpt": "Build web apps.",
+            "jobDescription": "Build web apps with React and Node.",
+            "pubDate": "2026-06-25 10:00:00",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Full Stack Developer")
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "jobicy"
+        assert job["source_job_id"] == "555"
+        assert job["company"] == "Remote Co"
+        assert job["is_remote"] is True
+        assert job["location"] == "USA"
+
+    def test_senior_level_from_job_level_field(self):
+        from app.services.sources.jobicy import fetch
+        raw = [{
+            "id": 556,
+            "url": "https://jobicy.com/jobs/556",
+            "jobTitle": "Backend Developer",
+            "companyName": "Co",
+            "jobGeo": "Anywhere",
+            "jobLevel": "Senior",
+            "jobDescription": "APIs.",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend")
+        assert results[0]["experience_level"] == "senior"
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.jobicy import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("timeout")):
+            results = fetch(query="Engineer")
+        assert results == []
