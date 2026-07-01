@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from openai import OpenAI, RateLimitError
 
 from app.config import settings
+from app.llm.providers import call_provider, matching_fallbacks
 from app.models.application import Application
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
@@ -14,6 +15,10 @@ from app.models.profile import Profile
 logger = logging.getLogger(__name__)
 
 MIN_KEYWORD_SKILLS = 2  # overridden by settings.MIN_KEYWORD_SKILLS if present
+
+
+class LLMUnavailableError(Exception):
+    """All LLM providers failed; the job should stay `new` and retry later."""
 
 
 _STOP = frozenset({
@@ -68,9 +73,41 @@ def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
     return count
 
 
+_SENIOR_TITLE_WORDS = ("senior", "sr", "staff", "principal", "lead", "director", "vp", "head")
+
+
+def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
+    """
+    Junior candidates waste LLM calls (and get penalized anyway) on jobs whose
+    TITLE is explicitly senior-level, so drop them up front. Only title words
+    count — 'senior' in a description is too noisy. Words that appear in the
+    candidate's own target roles are never blocked.
+    """
+    if not getattr(settings, "FILTER_SENIOR_TITLES", True):
+        return False
+    total_years = sum(
+        float(e.get("years", 0) or 0) for e in profile_data.get("experience", [])
+    )
+    if total_years >= getattr(settings, "JUNIOR_MAX_YEARS", 3.0):
+        return False
+
+    role_words = {
+        w for role in profile_data.get("target_roles", [])
+        for w in re.findall(r"[a-z]+", role.lower())
+    }
+    title_lower = title.lower()
+    return any(
+        word not in role_words and re.search(rf"\b{word}\b", title_lower)
+        for word in _SENIOR_TITLE_WORDS
+    )
+
+
 def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
     target_roles = profile_data.get("target_roles", [])
     if not _title_matches_roles(job.title, target_roles):
+        return False, 0.0
+
+    if _blocked_by_seniority(job.title, profile_data):
         return False, 0.0
 
     excluded = [c.lower() for c in profile_data.get("excluded_companies", [])]
@@ -232,6 +269,23 @@ def _retry_delays() -> list[int]:
     return [int(interval * 2), 65]
 
 
+def _score_via_fallbacks(messages: list[dict], job) -> dict | None:
+    """Try the secondary providers (Gemini/Anthropic); None if all fail or none set."""
+    for provider in matching_fallbacks():
+        try:
+            raw = call_provider(provider, messages, temperature=0.1, max_tokens=512)
+            logger.info(
+                "llm_score_job: scored job %s via fallback provider %s",
+                getattr(job, "id", "?"), provider.name,
+            )
+            return _parse_llm_response(raw)
+        except Exception as exc:
+            logger.warning(
+                "llm_score_job: fallback provider %s failed: %s", provider.name, exc
+            )
+    return None
+
+
 def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: str) -> dict:
     messages = _build_match_prompt(job, profile_data)
     delays = _retry_delays()
@@ -247,10 +301,21 @@ def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: s
             last_exc = exc
         except Exception as exc:
             logger.error("llm_score_job failed for job %s: %s", getattr(job, "id", "?"), exc)
-            return {"score": 0, "reasoning": f"LLM error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
-    # All retries exhausted on rate limit — propagate so caller can keep job as `new`
-    logger.error("llm_score_job rate-limited after %d attempts for job %s", len(delays) + 1, getattr(job, "id", "?"))
-    raise last_exc
+            last_exc = exc
+            break
+
+    # Primary provider exhausted — try the configured fallback providers before
+    # giving up, so a NIM outage/rate-limit doesn't stall matching.
+    result = _score_via_fallbacks(messages, job)
+    if result is not None:
+        return result
+
+    if isinstance(last_exc, RateLimitError):
+        logger.error("llm_score_job rate-limited after %d attempts for job %s", len(delays) + 1, getattr(job, "id", "?"))
+        raise last_exc
+    # Propagate instead of returning score 0: a transient LLM failure must not
+    # cause the job to be filtered out — the caller keeps it `new` to retry.
+    raise LLMUnavailableError(str(last_exc)) from last_exc
 
 
 def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: str) -> str:
@@ -267,7 +332,7 @@ def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: s
 
     try:
         llm_result = llm_score_job(job, profile_data, api_key, base_url, model)
-    except RateLimitError:
+    except (RateLimitError, LLMUnavailableError):
         # Leave status as `new` so the next cycle retries this job
         return "rate_limited"
 

@@ -264,11 +264,15 @@ class TestLlmScoreJob:
         assert result["score"] == 88
         assert "Python" in result["matched_skills"]
 
-    def test_returns_zero_on_llm_failure(self, mock_job, profile_data):
-        from app.services.matcher import llm_score_job
+    def test_raises_llm_unavailable_on_failure(self, mock_job, profile_data):
+        # A transient LLM failure must NOT zero-score (and thereby discard) the
+        # job — with no fallback providers configured it propagates so the
+        # caller keeps the job `new` for a retry.
+        from app.services.matcher import llm_score_job, LLMUnavailableError
         with patch("app.services.matcher.chat_completion", side_effect=Exception("LLM unavailable")):
-            result = llm_score_job(mock_job, profile_data, "fake-key", "http://fake", "fake-model")
-        assert result["score"] == 0
+            with patch("app.services.matcher.matching_fallbacks", return_value=[]):
+                with pytest.raises(LLMUnavailableError):
+                    llm_score_job(mock_job, profile_data, "fake-key", "http://fake", "fake-model")
 
     def test_passes_correct_args_to_chat_completion(self, mock_job, profile_data):
         from app.services.matcher import llm_score_job
@@ -352,6 +356,7 @@ class TestMatchJob:
             with patch("app.services.matcher.settings") as mock_settings:
                 mock_settings.MIN_MATCH_SCORE = 75
                 mock_settings.MIN_KEYWORD_SKILLS = 2
+                mock_settings.FILTER_SENIOR_TITLES = False
                 match_job(db, mock_job, profile_no_min, "key", "url", "model")
         assert mock_job.status == JobStatus.matched
 
@@ -399,11 +404,34 @@ class TestLlmScoreJobRateLimit:
                 result = llm_score_job(mock_job, profile_data, "key", "url", "model")
         assert result["score"] == 80
 
-    def test_non_rate_limit_error_returns_zero_score(self, mock_job, profile_data):
-        from app.services.matcher import llm_score_job
+    def test_non_rate_limit_error_raises_llm_unavailable(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job, LLMUnavailableError
         with patch("app.services.matcher.chat_completion", side_effect=Exception("network error")):
-            result = llm_score_job(mock_job, profile_data, "key", "url", "model")
-        assert result["score"] == 0
+            with patch("app.services.matcher.matching_fallbacks", return_value=[]):
+                with pytest.raises(LLMUnavailableError):
+                    llm_score_job(mock_job, profile_data, "key", "url", "model")
+
+    def test_fallback_provider_rescues_primary_failure(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job
+        from app.llm.providers import Provider
+        fallback = Provider(name="gemini", api_key="gk", model="g", base_url="http://g")
+        raw = json.dumps({"score": 77, "reasoning": "ok", "matched_skills": [],
+                          "missing_skills": [], "seniority_fit": True})
+        with patch("app.services.matcher.chat_completion", side_effect=Exception("nim down")):
+            with patch("app.services.matcher.matching_fallbacks", return_value=[fallback]):
+                with patch("app.services.matcher.call_provider", return_value=raw) as mock_cp:
+                    result = llm_score_job(mock_job, profile_data, "key", "url", "model")
+        assert result["score"] == 77
+        assert mock_cp.call_args[0][0].name == "gemini"
+
+    def test_match_job_keeps_job_new_when_llm_unavailable(self, mock_job, profile_data):
+        from app.services.matcher import match_job, LLMUnavailableError
+        db = MagicMock()
+        with patch("app.services.matcher.llm_score_job", side_effect=LLMUnavailableError("down")):
+            result = match_job(db, mock_job, profile_data, "key", "url", "model")
+        assert result == "rate_limited"
+        # status untouched by the LLM step (still whatever it was)
+        assert mock_job.llm_score is None
 
 
 class TestMatchAllNewJobs:
@@ -565,3 +593,49 @@ class TestFetchMatchIntegration:
         from app.celery_app import celery_app
         import app.tasks.match  # noqa — registers task
         assert "app.tasks.match" in celery_app.conf.include
+
+
+# ---------------------------------------------------------------------------
+# Senior-title prefilter for junior candidates
+# ---------------------------------------------------------------------------
+
+class TestSeniorTitlePrefilter:
+    def _junior_profile(self, profile_data):
+        junior = dict(profile_data)
+        junior["experience"] = [{"title": "Intern", "company": "Acme", "years": 1}]
+        return junior
+
+    def test_blocks_senior_title_for_junior_candidate(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.title = "Senior Backend Engineer"
+        passes, score = keyword_filter(mock_job, self._junior_profile(profile_data))
+        assert passes is False
+
+    def test_blocks_staff_and_principal_titles(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        junior = self._junior_profile(profile_data)
+        for title in ("Staff Software Engineer", "Principal Backend Engineer", "Lead Platform Engineer"):
+            mock_job.title = title
+            passes, _ = keyword_filter(mock_job, junior)
+            assert passes is False, title
+
+    def test_allows_plain_titles_for_junior_candidate(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.title = "Backend Engineer"
+        passes, _ = keyword_filter(mock_job, self._junior_profile(profile_data))
+        assert passes is True
+
+    def test_experienced_candidate_not_blocked(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        # fixture has 3 years of experience — at/above the junior threshold
+        mock_job.title = "Senior Backend Engineer"
+        passes, _ = keyword_filter(mock_job, profile_data)
+        assert passes is True
+
+    def test_senior_word_in_target_roles_not_blocked(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        junior = self._junior_profile(profile_data)
+        junior["target_roles"] = list(junior["target_roles"]) + ["Senior Backend Engineer"]
+        mock_job.title = "Senior Backend Engineer"
+        passes, _ = keyword_filter(mock_job, junior)
+        assert passes is True

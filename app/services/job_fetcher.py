@@ -287,7 +287,7 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
 
 
 def fetch_and_save_jobs(db: Session) -> dict:
-    counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "sources": {}}
+    counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0, "sources": {}}
 
     profile = db.query(Profile).first()
     if not profile:
@@ -351,9 +351,14 @@ def fetch_and_save_jobs(db: Session) -> dict:
             except Exception:
                 return None
         try:
-            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         except Exception:
             return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    max_age_days = getattr(settings, "MAX_JOB_AGE_DAYS", 30)
 
     for job_data in raw_jobs:
         try:
@@ -364,6 +369,13 @@ def fetch_and_save_jobs(db: Session) -> dict:
             title = job_data.get("title", "")
             location = job_data.get("location", "")
             description = job_data.get("description", "")
+
+            # Skip stale postings: they're usually filled or unresponsive, and
+            # they waste LLM matching calls and applications.
+            posted_at = _parse_posted_at(job_data.get("posted_at"))
+            if posted_at and max_age_days and (now - posted_at).days > max_age_days:
+                counts["stale"] += 1
+                continue
 
             dedupe_hash = compute_dedupe_hash(company, title, location)
             existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
@@ -392,7 +404,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
                 experience_level=job_data.get("experience_level", "mid"),
                 status=JobStatus.new,
                 fetched_at=now,
-                posted_at=_parse_posted_at(job_data.get("posted_at")),
+                posted_at=posted_at,
                 dedupe_hash=dedupe_hash,
             )
             db.add(new_job)
@@ -409,7 +421,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
         db.rollback()
 
     logger.info(
-        "job_fetcher done — fetched=%d inserted=%d merged=%d skipped=%d",
-        counts["fetched"], counts["inserted"], counts["merged"], counts["skipped"],
+        "job_fetcher done — fetched=%d inserted=%d merged=%d skipped=%d stale=%d",
+        counts["fetched"], counts["inserted"], counts["merged"], counts["skipped"], counts["stale"],
     )
     return counts

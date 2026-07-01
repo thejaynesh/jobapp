@@ -473,6 +473,9 @@ class TestGenerateDocuments:
             "render": stack.enter_context(patch(
                 "app.services.doc_generator.render_latex",
                 return_value=r"\documentclass{article}\begin{document}ok\end{document}")),
+            "compile_pages": stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf_with_pages",
+                return_value=(Path("/fake/path.pdf"), 1))),
             "compile": stack.enter_context(patch(
                 "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf"))),
         }
@@ -712,6 +715,9 @@ class TestAtsSecondPass:
                 "app.services.doc_generator.render_latex",
                 return_value=r"\documentclass{article}\begin{document}ok\end{document}"))
             stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf_with_pages",
+                return_value=(Path("/fake/path.pdf"), 1)))
+            stack.enter_context(patch(
                 "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf")))
             generate_documents(db, app)
 
@@ -759,6 +765,9 @@ class TestAtsSecondPass:
                 "app.services.doc_generator.render_latex",
                 return_value=r"\documentclass{article}\begin{document}ok\end{document}"))
             stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf_with_pages",
+                return_value=(Path("/fake/path.pdf"), 1)))
+            stack.enter_context(patch(
                 "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf")))
             generate_documents(db, app)
 
@@ -799,7 +808,104 @@ class TestAtsSecondPass:
                 "app.services.doc_generator.render_latex",
                 return_value=r"\documentclass{article}\begin{document}ok\end{document}"))
             stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf_with_pages",
+                return_value=(Path("/fake/path.pdf"), 1)))
+            stack.enter_context(patch(
                 "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf")))
             generate_documents(db, app)
 
         assert mock_bullets.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# One-page resume guarantee
+# ---------------------------------------------------------------------------
+
+class TestPageCountParsing:
+    def _run(self, stdout):
+        from app.services.doc_generator import compile_pdf_with_pages
+        with patch("app.services.doc_generator.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=stdout, stderr="")
+            with patch("app.services.doc_generator.shutil.copy"):
+                return compile_pdf_with_pages(r"\doc", Path("/tmp/out.pdf"))
+
+    def test_parses_single_page(self):
+        _, pages = self._run("Output written on document.pdf (1 page, 34519 bytes).")
+        assert pages == 1
+
+    def test_parses_multiple_pages(self):
+        _, pages = self._run("Output written on document.pdf (2 pages, 64519 bytes).")
+        assert pages == 2
+
+    def test_defaults_to_one_when_unparseable(self):
+        _, pages = self._run("some unexpected log output")
+        assert pages == 1
+
+
+class TestOnePageRetry:
+    def _patches(self, pages_sequence):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        mocks = {
+            "insights": stack.enter_context(patch(
+                "app.services.doc_generator.extract_job_insights",
+                return_value={"keywords": [], "requirements": [], "company_signals": []},
+            )),
+            "bullets": stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_bullets", return_value=[])),
+            "summary": stack.enter_context(patch(
+                "app.services.doc_generator.tailor_summary", return_value="Tailored summary.")),
+            "cover": stack.enter_context(patch(
+                "app.services.doc_generator.generate_cover_letter_body", return_value="Body.")),
+            "render": stack.enter_context(patch(
+                "app.services.doc_generator.render_latex",
+                return_value=r"\documentclass{article}\begin{document}ok\end{document}")),
+            "compile_pages": stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf_with_pages",
+                side_effect=[(Path("/fake/path.pdf"), p) for p in pages_sequence])),
+            "compile": stack.enter_context(patch(
+                "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf"))),
+        }
+        return stack, mocks
+
+    def _db(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.count.return_value = 0
+        db.query.return_value.filter.return_value.all.return_value = []
+        db.query.return_value.first.return_value = MagicMock(data={
+            "personal": {"name": "Jane Doe", "email": "j@j.com"},
+            "narrative": {"summary": "Engineer."},
+            "skills": {"languages": ["Python"]},
+            "experience": [
+                {"id": f"e{i}", "company": f"Co{i}", "role": "SWE", "bullets": ["Did work"]}
+                for i in range(3)
+            ],
+            "education": [],
+            "projects": [
+                {"id": f"p{i}", "name": f"Proj{i}", "bullets": ["Built it"]}
+                for i in range(2)
+            ],
+        })
+        return db
+
+    def test_recompiles_tighter_when_resume_spills(self):
+        from app.services.doc_generator import generate_documents
+        db = self._db()
+        app = _make_app()
+        stack, mocks = self._patches(pages_sequence=[2, 1])
+        with stack:
+            generate_documents(db, app)
+        assert mocks["compile_pages"].call_count == 2
+        # First render is the full resume, second the tightened one
+        tight_ctx = mocks["render"].call_args_list[1][0][1]
+        assert len(tight_ctx["experience"]) <= 2
+        assert len(tight_ctx["projects"]) <= 1
+
+    def test_no_retry_when_one_page(self):
+        from app.services.doc_generator import generate_documents
+        db = self._db()
+        app = _make_app()
+        stack, mocks = self._patches(pages_sequence=[1])
+        with stack:
+            generate_documents(db, app)
+        assert mocks["compile_pages"].call_count == 1

@@ -10,7 +10,9 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from app.config import settings
-from app.services.matcher import chat_completion
+# Quality-first multi-provider chat (Anthropic -> Gemini -> passed-in primary);
+# keeps the single-provider chat_completion signature.
+from app.llm.providers import generation_chat as chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -541,7 +543,11 @@ def render_latex(template_name: str, context: dict) -> str:
     return template.render(**context)
 
 
-def compile_pdf(tex_source: str, output_path: Path) -> Path:
+_PAGES_RE = re.compile(r"Output written on .*?\((\d+) pages?")
+
+
+def compile_pdf_with_pages(tex_source: str, output_path: Path) -> tuple[Path, int]:
+    """Compile LaTeX to PDF; returns (path, page_count) parsed from the pdflatex log."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_file = Path(tmpdir) / "document.tex"
         tex_file.write_text(tex_source, encoding="utf-8")
@@ -563,10 +569,16 @@ def compile_pdf(tex_source: str, output_path: Path) -> Path:
             raise DocGenerationError(
                 f"pdflatex failed (exit {result.returncode}):\n{detail}"
             )
+        m = _PAGES_RE.search(result.stdout or "")
+        pages = int(m.group(1)) if m else 1
         compiled = Path(tmpdir) / "document.pdf"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(str(compiled), str(output_path))
-    return output_path
+    return output_path, pages
+
+
+def compile_pdf(tex_source: str, output_path: Path) -> Path:
+    return compile_pdf_with_pages(tex_source, output_path)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -931,7 +943,30 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     resume_version = _next_version(db, application.id, DocType.resume)
     resume_filename = f"{application.id}_resume_v{resume_version}.pdf"
     resume_path = _OUTPUT_DIR / str(application.id) / resume_filename
-    compiled_resume = compile_pdf(resume_tex, resume_path)
+    compiled_resume, resume_pages = compile_pdf_with_pages(resume_tex, resume_path)
+
+    # One-page guarantee: if the resume spilled onto a second page, tighten the
+    # selection (2 experiences, 1 project) and recompile once.
+    if resume_pages > 1:
+        logger.info(
+            "generate_documents %s: resume is %d pages, tightening selection",
+            application.id, resume_pages,
+        )
+        resume_ctx = build_resume_context(
+            profile_data,
+            tailored_bullets if tailored_bullets else None,
+            selected_experience=selected_experience[:2],
+            selected_projects=selected_projects[:1],
+            selected_skills=selected_skills,
+            tailored_summary=tailored_summary,
+        )
+        resume_tex = render_latex("resume.tex.j2", resume_ctx)
+        compiled_resume, resume_pages = compile_pdf_with_pages(resume_tex, resume_path)
+        if resume_pages > 1:
+            logger.warning(
+                "generate_documents %s: resume still %d pages after tightening",
+                application.id, resume_pages,
+            )
 
     resume_doc = ApplicationDocument(
         application_id=application.id,

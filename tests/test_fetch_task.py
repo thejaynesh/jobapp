@@ -210,3 +210,46 @@ class TestFetchJobsTask:
         entry = schedule["fetch-jobs-every-5-hours"]
         expected_seconds = settings.FETCH_INTERVAL_HOURS * 3600
         assert entry["schedule"].seconds == expected_seconds
+
+
+class TestStaleJobFilter:
+    def test_skips_job_older_than_max_age(self, db):
+        from datetime import timedelta
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        job = _std_job()
+        job["posted_at"] = old
+        with _patch_adapters([job]):
+            result = fetch_and_save_jobs(db)
+        assert result["stale"] == 1
+        assert result["inserted"] == 0
+
+    def test_keeps_recent_job(self, db):
+        from datetime import timedelta
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job()
+        job["posted_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        with _patch_adapters([job]):
+            result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1
+        assert result["stale"] == 0
+
+    def test_keeps_job_without_posted_at(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with _patch_adapters([_std_job()]):  # _std_job has no posted_at
+            result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1
+
+    def test_naive_timestamp_treated_as_utc(self, db):
+        from datetime import timedelta
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job()
+        # naive ISO string (no tz) from a sloppy source — must not crash
+        job["posted_at"] = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%S")
+        with _patch_adapters([job]):
+            result = fetch_and_save_jobs(db)
+        assert result["stale"] == 1
