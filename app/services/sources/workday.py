@@ -16,6 +16,7 @@ _DETAIL_URL = "https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site
 
 _PAGE_SIZE = 20
 _MAX_DETAILS_PER_TENANT = 20  # each description is one extra request
+_MAX_QUERIES_PER_TENANT = 5   # one search POST per query per tenant
 
 _STRIP_TAGS = re.compile(r"<[^>]+>")
 _RELATIVE_POSTED = re.compile(r"posted\s+(today|yesterday|(\d+)\+?\s+days?\s+ago)", re.I)
@@ -75,7 +76,7 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
 
         seen_paths: set[str] = set()
         postings: list[dict] = []
-        for query in queries:
+        for query in queries[:_MAX_QUERIES_PER_TENANT]:
             try:
                 resp = httpx.post(
                     _LIST_URL.format(tenant=tenant, host=host, site=site),

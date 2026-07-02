@@ -10,8 +10,9 @@ _LIST_API = "https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=
 _DETAIL_API = "https://api.smartrecruiters.com/v1/companies/{slug}/postings/{posting_id}"
 _PUBLIC_URL = "https://jobs.smartrecruiters.com/{slug}/{posting_id}"
 
-# The postings list has no descriptions; each needs a detail call. Cap per company.
-_MAX_DETAIL_FETCHES = 20
+# The postings list has no descriptions; each needs a detail call. Cap per company
+# (the slug list can now carry dozens of companies per cycle).
+_MAX_DETAIL_FETCHES = 10
 
 
 def _fetch_description(slug: str, posting_id: str) -> str:

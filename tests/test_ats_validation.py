@@ -116,9 +116,15 @@ class TestSeedsAndAssembly:
 
     def test_build_caps_total(self):
         from app.services.ats_discovery import build_ats_slugs, MAX_TOTAL_SLUGS_PER_ATS
-        many = ",".join(f"co{i}" for i in range(100))
+        many = ",".join(f"co{i}" for i in range(MAX_TOTAL_SLUGS_PER_ATS + 50))
         result = build_ats_slugs(self._cfg(GREENHOUSE_COMPANY_SLUGS=many))
         assert len(result["greenhouse"]) == MAX_TOTAL_SLUGS_PER_ATS
+
+    def test_build_uses_tighter_cap_for_expensive_ats(self):
+        from app.services.ats_discovery import build_ats_slugs, TOTAL_SLUG_CAPS
+        many = ",".join(f"t{i}:wd1:Site" for i in range(60))
+        result = build_ats_slugs(self._cfg(WORKDAY_TENANTS=many))
+        assert len(result["workday"]) == TOTAL_SLUG_CAPS["workday"]
 
 
 class TestWorkdayDiscovery:

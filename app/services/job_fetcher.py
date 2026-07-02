@@ -392,6 +392,16 @@ def fetch_and_save_jobs(db: Session) -> dict:
         profile.data.get("discovered_ats") if settings.ATS_AUTO_DISCOVERY else None
     )
 
+    # Harvest company ATS slugs from community job lists (e.g. the SimplifyJobs
+    # new-grad README) and fold them into the discovered set.
+    if settings.ATS_LIST_HARVEST and settings.SLUG_HARVEST_URLS:
+        try:
+            from app.services.ats_discovery import harvest_slugs_from_lists
+            harvest_urls = [u.strip() for u in settings.SLUG_HARVEST_URLS.split(",") if u.strip()]
+            discovered_ats = harvest_slugs_from_lists(harvest_urls, discovered_ats)
+        except Exception as exc:
+            logger.error("job_fetcher: slug harvest failed: %s", exc)
+
     # Validate/auto-fix the configured ATS slugs (cached per slug on the profile),
     # then assemble the final slug map: configured + verified seeds + discovered.
     from app.services.ats_discovery import build_ats_slugs, configured_ats_slugs

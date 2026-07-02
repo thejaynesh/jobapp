@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     ATS_AUTO_DISCOVERY: bool = True  # learn company ATS boards from fetched job links
     ATS_SEED_COMPANIES: bool = True  # include the verified seed list of known tech companies
     ATS_SLUG_VALIDATION: bool = True  # validate/auto-fix configured slugs against the ATS APIs
+    ATS_LIST_HARVEST: bool = True  # harvest company slugs from community job lists
+    SLUG_HARVEST_URLS: str = (
+        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
+        "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"
+        "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md"
+    )
 
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"

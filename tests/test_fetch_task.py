@@ -307,3 +307,31 @@ class TestSlugValidationWiring:
             with _patch_adapters([_std_job()]):
                 result = fetch_and_save_jobs(db)
         assert result["inserted"] == 1
+
+
+class TestSlugHarvestWiring:
+    def test_harvested_slugs_feed_the_adapters(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.ats_discovery.harvest_slugs_from_lists",
+                   return_value={"greenhouse": ["harvestedco"]}) as mock_harvest:
+            with patch("app.services.query_expansion.expand_search_queries",
+                       return_value=(["Software Engineer"], None)):
+                with patch("app.services.job_fetcher._run_all_adapters",
+                           return_value=([], {})) as mock_run:
+                    fetch_and_save_jobs(db)
+        assert mock_harvest.call_count == 1
+        slug_map = mock_run.call_args[0][3]
+        assert "harvestedco" in slug_map["greenhouse"]
+        # harvested slugs also get persisted with the discovered set
+        profile = db.query(Profile).first()
+        assert "harvestedco" in profile.data["discovered_ats"]["greenhouse"]
+
+    def test_harvest_failure_does_not_block_fetch(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.ats_discovery.harvest_slugs_from_lists",
+                   side_effect=RuntimeError("github down")):
+            with _patch_adapters([_std_job()]):
+                result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1

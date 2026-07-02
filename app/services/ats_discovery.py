@@ -12,9 +12,21 @@ profile, and feeds them into the next cycle's direct board fetches.
 import logging
 import re
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
-MAX_SLUGS_PER_ATS = 25
+# Default cap on auto-discovered slugs per ATS. Cheap boards (one request per
+# company) can carry many; per-company-expensive ATSes are capped lower below.
+MAX_SLUGS_PER_ATS = 100
+DISCOVERY_CAPS = {
+    "workday": 15,          # searches × per-job detail calls per tenant
+    "smartrecruiters": 30,  # per-posting detail calls per company
+}
+
+
+def _discovery_cap(ats: str) -> int:
+    return DISCOVERY_CAPS.get(ats, MAX_SLUGS_PER_ATS)
 
 ATS_PATTERNS: dict[str, re.Pattern] = {
     "greenhouse": re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
@@ -75,12 +87,7 @@ def discover_ats_slugs(raw_jobs: list[dict], existing: dict | None = None) -> di
         if job.get("source") in ALL_ATS:
             continue
         text = f"{job.get('url') or ''}\n{job.get('description') or ''}"
-        for ats, slugs in _extract_slugs(text).items():
-            bucket = merged.setdefault(ats, [])
-            for slug in sorted(slugs):
-                if slug not in bucket and len(bucket) < MAX_SLUGS_PER_ATS:
-                    bucket.append(slug)
-                    new_count += 1
+        new_count += _merge_found(merged, _extract_slugs(text))
 
     if new_count:
         logger.info(
@@ -88,6 +95,41 @@ def discover_ats_slugs(raw_jobs: list[dict], existing: dict | None = None) -> di
             new_count,
             {ats: len(slugs) for ats, slugs in merged.items()},
         )
+    return merged
+
+
+def _merge_found(merged: dict[str, list[str]], found: dict[str, set[str]]) -> int:
+    added = 0
+    for ats, slugs in found.items():
+        bucket = merged.setdefault(ats, [])
+        cap = _discovery_cap(ats)
+        for slug in sorted(slugs):
+            if slug not in bucket and len(bucket) < cap:
+                bucket.append(slug)
+                added += 1
+    return added
+
+
+def harvest_slugs_from_lists(urls: list[str], existing: dict | None = None) -> dict[str, list[str]]:
+    """
+    Pull ATS company slugs out of community-maintained job lists (e.g. the
+    SimplifyJobs new-grad README) — each list is one document full of direct
+    apply links pointing at Greenhouse/Lever/Ashby/Workday/... boards.
+    Returns the existing mapping merged with everything harvested (capped).
+    """
+    merged: dict[str, list[str]] = {
+        ats: list(slugs or []) for ats, slugs in (existing or {}).items()
+        if ats in ALL_ATS
+    }
+    for url in urls:
+        try:
+            resp = httpx.get(url, timeout=30, follow_redirects=True)
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("slug harvest failed for %s: %s", url, exc)
+            continue
+        added = _merge_found(merged, _extract_slugs(resp.text))
+        logger.info("slug harvest: %d new slugs from %s", added, url)
     return merged
 
 
@@ -117,7 +159,17 @@ ATS_CONFIG_FIELDS = {
     "workday": "WORKDAY_TENANTS",
 }
 
-MAX_TOTAL_SLUGS_PER_ATS = 60  # bound per-cycle fetch time
+# Bound per-cycle fetch time: cheap one-request-per-company boards can carry
+# many slugs; per-company-expensive ATSes get tighter totals.
+MAX_TOTAL_SLUGS_PER_ATS = 120
+TOTAL_SLUG_CAPS = {
+    "workday": 20,
+    "smartrecruiters": 40,
+}
+
+
+def _total_cap(ats: str) -> int:
+    return TOTAL_SLUG_CAPS.get(ats, MAX_TOTAL_SLUGS_PER_ATS)
 
 
 def configured_ats_slugs(cfg) -> dict[str, list[str]]:
@@ -150,6 +202,7 @@ def build_ats_slugs(
 
     result: dict[str, list[str]] = {}
     for ats in ATS_CONFIG_FIELDS:
+        cap = _total_cap(ats)
         seen: set[str] = set()
         merged: list[str] = []
         layers = [
@@ -159,7 +212,7 @@ def build_ats_slugs(
         ]
         for layer in layers:
             for slug in layer:
-                if slug and slug.lower() not in seen and len(merged) < MAX_TOTAL_SLUGS_PER_ATS:
+                if slug and slug.lower() not in seen and len(merged) < cap:
                     seen.add(slug.lower())
                     merged.append(slug)
         result[ats] = merged

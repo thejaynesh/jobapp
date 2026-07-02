@@ -77,3 +77,50 @@ class TestMergedSlugs:
     def test_empty_inputs(self):
         assert merged_slugs("", None, "greenhouse") == []
         assert merged_slugs("", {}, "lever") == []
+
+
+class TestHarvestFromLists:
+    def _resp(self, text):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.text = text
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_harvests_slugs_from_list_document(self):
+        from unittest.mock import patch
+        from app.services.ats_discovery import harvest_slugs_from_lists
+        doc = """
+        | Company | Link |
+        | Stripe | [Apply](https://boards.greenhouse.io/stripe/jobs/1) |
+        | OpenAI | [Apply](https://jobs.ashbyhq.com/openai/x) |
+        | Nvidia | [Apply](https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/US/SWE_1) |
+        """
+        with patch("app.services.ats_discovery.httpx.get", return_value=self._resp(doc)):
+            result = harvest_slugs_from_lists(["https://example.com/list.md"])
+        assert result["greenhouse"] == ["stripe"]
+        assert result["ashby"] == ["openai"]
+        assert result["workday"] == ["nvidia:wd5:NVIDIAExternalCareerSite"]
+
+    def test_merges_into_existing_and_survives_url_errors(self):
+        from unittest.mock import patch
+        import httpx as _httpx
+        from app.services.ats_discovery import harvest_slugs_from_lists
+        doc = "https://jobs.lever.co/netflix/1"
+        with patch("app.services.ats_discovery.httpx.get",
+                   side_effect=[_httpx.HTTPError("down"), self._resp(doc)]):
+            result = harvest_slugs_from_lists(
+                ["https://dead.example/a.md", "https://ok.example/b.md"],
+                existing={"lever": ["palantir"]},
+            )
+        assert result["lever"] == ["palantir", "netflix"]
+
+    def test_respects_per_ats_discovery_caps(self):
+        from unittest.mock import patch
+        from app.services.ats_discovery import harvest_slugs_from_lists, DISCOVERY_CAPS
+        doc = "\n".join(
+            f"https://t{i}.wd1.myworkdayjobs.com/Site{i}/job/x" for i in range(40)
+        )
+        with patch("app.services.ats_discovery.httpx.get", return_value=self._resp(doc)):
+            result = harvest_slugs_from_lists(["https://example.com/list.md"])
+        assert len(result["workday"]) == DISCOVERY_CAPS["workday"]
