@@ -253,3 +253,30 @@ class TestStaleJobFilter:
         with _patch_adapters([job]):
             result = fetch_and_save_jobs(db)
         assert result["stale"] == 1
+
+
+class TestAtsDiscoveryWiring:
+    def test_persists_discovered_slugs_from_fetched_jobs(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job()
+        job["description"] = "Apply: https://boards.greenhouse.io/coolstartup/jobs/1"
+        with _patch_adapters([job]):
+            fetch_and_save_jobs(db)
+        profile = db.query(Profile).first()
+        assert "coolstartup" in profile.data["discovered_ats"]["greenhouse"]
+
+    def test_passes_existing_discovered_slugs_to_adapters(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        profile = _make_profile_with_targets(db)
+        import copy
+        data = copy.deepcopy(profile.data)
+        data["discovered_ats"] = {"lever": ["netflix"]}
+        profile.data = data
+        db.flush()
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       return_value=([], {})) as mock_run:
+                fetch_and_save_jobs(db)
+        assert mock_run.call_args[0][3] == {"lever": ["netflix"]}

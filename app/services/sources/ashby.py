@@ -9,7 +9,6 @@ from app.services.sources.base import parse_experience_level
 logger = logging.getLogger(__name__)
 
 _BASE = "https://jobs.ashbyhq.com/api/non-user-facing/posting-board/job-board/jobs"
-_CUTOFF_HOURS = 25
 
 
 def _strip_html(html: str) -> str:
@@ -17,7 +16,11 @@ def _strip_html(html: str) -> str:
 
 
 def fetch(company_slugs: list[str]) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=_CUTOFF_HOURS)
+    # Align with the fetcher's freshness window (was 25h, which hid every
+    # existing opening at newly configured/discovered companies).
+    from app.config import settings
+    days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     jobs = []
     for slug in company_slugs:
         params = {"organizationHostedJobsPageName": slug}

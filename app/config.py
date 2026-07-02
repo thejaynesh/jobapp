@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     GREENHOUSE_COMPANY_SLUGS: str = ""
     LEVER_COMPANY_SLUGS: str = ""
     ASHBY_COMPANY_SLUGS: str = ""
+    SMARTRECRUITERS_COMPANY_SLUGS: str = ""
+    WORKABLE_COMPANY_SLUGS: str = ""
+    RECRUITEE_COMPANY_SLUGS: str = ""
+    JOOBLE_API_KEY: str = ""
+    FINDWORK_API_KEY: str = ""
+    ATS_AUTO_DISCOVERY: bool = True  # learn company ATS boards from fetched job links
 
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"

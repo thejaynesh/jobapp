@@ -24,11 +24,17 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
         entry["errors"].append(error)
 
 
-def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list[dict], dict]:
+def _run_all_adapters(
+    roles: list[str], locations: list[str], cfg, discovered_ats: dict | None = None
+) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
     source_stats: {source: {"count": N, "errors": [...], "enabled": bool}}
+    discovered_ats: auto-discovered company slugs per ATS (see ats_discovery),
+    merged with the configured slugs for the direct board fetches.
     """
+    from app.services.ats_discovery import merged_slugs
+
     all_jobs: list[dict] = []
     stats: dict = {}
 
@@ -63,7 +69,7 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
     else:
         stats["jsearch"] = {"count": 0, "errors": [], "enabled": False}
 
-    greenhouse_slugs = _get_slugs(cfg.GREENHOUSE_COMPANY_SLUGS)
+    greenhouse_slugs = merged_slugs(cfg.GREENHOUSE_COMPANY_SLUGS, discovered_ats, "greenhouse")
     if greenhouse_slugs:
         from app.services.sources.greenhouse import fetch as gh_fetch
         try:
@@ -77,7 +83,7 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
     else:
         stats["greenhouse"] = {"count": 0, "errors": [], "enabled": False}
 
-    lever_slugs = _get_slugs(cfg.LEVER_COMPANY_SLUGS)
+    lever_slugs = merged_slugs(cfg.LEVER_COMPANY_SLUGS, discovered_ats, "lever")
     if lever_slugs:
         from app.services.sources.lever import fetch as lever_fetch
         try:
@@ -91,7 +97,7 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
     else:
         stats["lever"] = {"count": 0, "errors": [], "enabled": False}
 
-    ashby_slugs = _get_slugs(cfg.ASHBY_COMPANY_SLUGS)
+    ashby_slugs = merged_slugs(cfg.ASHBY_COMPANY_SLUGS, discovered_ats, "ashby")
     if ashby_slugs:
         from app.services.sources.ashby import fetch as ashby_fetch
         try:
@@ -104,6 +110,55 @@ def _run_all_adapters(roles: list[str], locations: list[str], cfg) -> tuple[list
         stats["ashby"]["enabled"] = True
     else:
         stats["ashby"] = {"count": 0, "errors": [], "enabled": False}
+
+    # --- Additional slug-based ATS boards (no keys; slugs configured or auto-discovered) ---
+    for ats_name, csv_setting, fetch_path in (
+        ("smartrecruiters", cfg.SMARTRECRUITERS_COMPANY_SLUGS, "app.services.sources.smartrecruiters"),
+        ("workable", cfg.WORKABLE_COMPANY_SLUGS, "app.services.sources.workable"),
+        ("recruitee", cfg.RECRUITEE_COMPANY_SLUGS, "app.services.sources.recruitee"),
+    ):
+        slugs = merged_slugs(csv_setting, discovered_ats, ats_name)
+        if slugs:
+            import importlib
+            ats_fetch = importlib.import_module(fetch_path).fetch
+            stats.setdefault(ats_name, {"count": 0, "errors": [], "enabled": True})
+            try:
+                jobs = ats_fetch(company_slugs=slugs)
+                _record(stats, ats_name, jobs)
+                all_jobs.extend(jobs)
+            except Exception as exc:
+                _record(stats, ats_name, [], str(exc))
+        else:
+            stats[ats_name] = {"count": 0, "errors": [], "enabled": False}
+
+    # --- Jooble: keyed aggregator (free key) ---
+    if cfg.JOOBLE_API_KEY:
+        from app.services.sources.jooble import fetch as jooble_fetch
+        stats.setdefault("jooble", {"count": 0, "errors": [], "enabled": True})
+        for role in roles:
+            for loc in locations:
+                try:
+                    jobs = jooble_fetch(api_key=cfg.JOOBLE_API_KEY, query=role, location=loc)
+                    _record(stats, "jooble", jobs)
+                    all_jobs.extend(jobs)
+                except Exception as exc:
+                    _record(stats, "jooble", [], f"{role}/{loc}: {exc}")
+    else:
+        stats["jooble"] = {"count": 0, "errors": [], "enabled": False}
+
+    # --- Findwork: keyed developer-jobs API (free key) ---
+    if cfg.FINDWORK_API_KEY:
+        from app.services.sources.findwork import fetch as findwork_fetch
+        stats.setdefault("findwork", {"count": 0, "errors": [], "enabled": True})
+        for role in roles:
+            try:
+                jobs = findwork_fetch(api_key=cfg.FINDWORK_API_KEY, query=role)
+                _record(stats, "findwork", jobs)
+                all_jobs.extend(jobs)
+            except Exception as exc:
+                _record(stats, "findwork", [], f"{role}: {exc}")
+    else:
+        stats["findwork"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- LinkedIn: httpx guest API (no browser needed) ---
     from app.services.sources.linkedin import fetch as li_fetch
@@ -316,8 +371,12 @@ def fetch_and_save_jobs(db: Session) -> dict:
     if not queries:
         queries = list(roles)
 
+    discovered_ats = (
+        profile.data.get("discovered_ats") if settings.ATS_AUTO_DISCOVERY else None
+    )
+
     try:
-        raw_jobs, source_stats = _run_all_adapters(queries, locations, settings)
+        raw_jobs, source_stats = _run_all_adapters(queries, locations, settings, discovered_ats)
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts
@@ -331,6 +390,15 @@ def fetch_and_save_jobs(db: Session) -> dict:
     updated_data = copy.deepcopy(profile.data)
     if query_cache:
         updated_data["search_query_cache"] = query_cache
+
+    # Learn company ATS boards from the fetched jobs' links; the merged slug
+    # list feeds the direct board fetches on the next cycle.
+    if settings.ATS_AUTO_DISCOVERY:
+        try:
+            from app.services.ats_discovery import discover_ats_slugs
+            updated_data["discovered_ats"] = discover_ats_slugs(raw_jobs, discovered_ats)
+        except Exception as exc:
+            logger.error("job_fetcher: ATS discovery failed: %s", exc)
     updated_data["last_fetch"] = {
         "at": now.isoformat(),
         "fetched": len(raw_jobs),

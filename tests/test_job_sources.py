@@ -702,3 +702,229 @@ class TestHNHiringAdapter:
         )
         assert title == "Founding Systems Engineer"
         assert company == "CaseLight Systems Inc."
+
+
+# ---------------------------------------------------------------------------
+# Workable adapter
+# ---------------------------------------------------------------------------
+
+class TestWorkableAdapter:
+    def _resp(self, payload):
+        resp = MagicMock()
+        resp.json.return_value = payload
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.workable import fetch
+        payload = {
+            "name": "Acme Co",
+            "jobs": [{
+                "title": "Backend Engineer",
+                "shortcode": "AB12CD",
+                "url": "https://apply.workable.com/acme-co/j/AB12CD/",
+                "description": "<p>Build APIs with Python and Docker.</p>",
+                "city": "Berlin", "state": "", "country": "Germany",
+                "telecommuting": False,
+                "published_on": "2026-06-20",
+            }],
+        }
+        with patch("httpx.get", return_value=self._resp(payload)):
+            results = fetch(company_slugs=["acme-co"])
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "workable"
+        assert job["company"] == "Acme Co"
+        assert job["source_job_id"] == "AB12CD"
+        assert job["location"] == "Berlin, Germany"
+        assert "Python" in job["description"]
+
+    def test_telecommuting_marks_remote(self):
+        from app.services.sources.workable import fetch
+        payload = {"name": "Co", "jobs": [{
+            "title": "SWE", "shortcode": "X", "url": "https://apply.workable.com/co/j/X/",
+            "description": "", "city": "", "state": "", "country": "", "telecommuting": True,
+        }]}
+        with patch("httpx.get", return_value=self._resp(payload)):
+            results = fetch(company_slugs=["co"])
+        assert results[0]["is_remote"] is True
+
+    def test_failed_slug_skipped(self):
+        from app.services.sources.workable import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("404")):
+            assert fetch(company_slugs=["gone"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Recruitee adapter
+# ---------------------------------------------------------------------------
+
+class TestRecruiteeAdapter:
+    def _resp(self, payload):
+        resp = MagicMock()
+        resp.json.return_value = payload
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.recruitee import fetch
+        payload = {"offers": [{
+            "id": 987,
+            "title": "Full Stack Developer",
+            "description": "<p>React and Node.</p>",
+            "location": "Amsterdam, Netherlands",
+            "remote": False,
+            "careers_url": "https://widgetcorp.recruitee.com/o/full-stack-developer",
+            "created_at": "2026-06-25",
+            "company_name": "WidgetCorp",
+        }]}
+        with patch("httpx.get", return_value=self._resp(payload)):
+            results = fetch(company_slugs=["widgetcorp"])
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "recruitee"
+        assert job["source_job_id"] == "987"
+        assert job["company"] == "WidgetCorp"
+        assert job["url"].endswith("/o/full-stack-developer")
+
+    def test_remote_flag(self):
+        from app.services.sources.recruitee import fetch
+        payload = {"offers": [{"id": 1, "title": "SWE", "description": "",
+                               "location": "", "remote": True, "careers_url": "u"}]}
+        with patch("httpx.get", return_value=self._resp(payload)):
+            results = fetch(company_slugs=["co"])
+        assert results[0]["is_remote"] is True
+
+    def test_failed_slug_skipped(self):
+        from app.services.sources.recruitee import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("404")):
+            assert fetch(company_slugs=["gone"]) == []
+
+
+# ---------------------------------------------------------------------------
+# SmartRecruiters adapter
+# ---------------------------------------------------------------------------
+
+class TestSmartRecruitersAdapter:
+    def _resp(self, payload):
+        resp = MagicMock()
+        resp.json.return_value = payload
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts_with_detail_description(self):
+        from app.services.sources.smartrecruiters import fetch
+        listing = {"content": [{
+            "id": "744000012",
+            "name": "Software Engineer",
+            "location": {"city": "San Francisco", "region": "CA", "country": "us", "remote": False},
+            "company": {"name": "Databricks"},
+            "releasedDate": "2026-06-28T00:00:00Z",
+        }]}
+        detail = {"jobAd": {"sections": {
+            "jobDescription": {"title": "Job Description", "text": "Build Spark pipelines."},
+            "qualifications": {"title": "Qualifications", "text": "Python, Scala."},
+        }}}
+        with patch("httpx.get", side_effect=[self._resp(listing), self._resp(detail)]):
+            results = fetch(company_slugs=["Databricks"])
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "smartrecruiters"
+        assert job["company"] == "Databricks"
+        assert job["url"] == "https://jobs.smartrecruiters.com/Databricks/744000012"
+        assert "Spark" in job["description"]
+        assert "Scala" in job["description"]
+
+    def test_detail_error_keeps_job_without_description(self):
+        from app.services.sources.smartrecruiters import fetch
+        import httpx
+        listing = {"content": [{"id": "1", "name": "SWE", "location": {}, "company": {}}]}
+        with patch("httpx.get", side_effect=[self._resp(listing), httpx.HTTPError("500")]):
+            results = fetch(company_slugs=["co"])
+        assert len(results) == 1
+        assert results[0]["description"] == ""
+
+    def test_failed_slug_skipped(self):
+        from app.services.sources.smartrecruiters import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("404")):
+            assert fetch(company_slugs=["gone"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Jooble adapter
+# ---------------------------------------------------------------------------
+
+class TestJoobleAdapter:
+    def _resp(self, payload):
+        resp = MagicMock()
+        resp.json.return_value = payload
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.jooble import fetch
+        payload = {"totalCount": 1, "jobs": [{
+            "id": 555111,
+            "title": "Software Engineer",
+            "location": "Boston, MA",
+            "snippet": "Java and Spring Boot experience...",
+            "link": "https://jooble.org/desc/555111",
+            "company": "Initech",
+            "updated": "2026-06-30T00:00:00.000+0000",
+        }]}
+        with patch("httpx.post", return_value=self._resp(payload)) as mock_post:
+            results = fetch(api_key="KEY", query="Software Engineer", location="Boston")
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "jooble"
+        assert job["company"] == "Initech"
+        assert "KEY" in mock_post.call_args[0][0]
+        assert mock_post.call_args[1]["json"] == {"keywords": "Software Engineer", "location": "Boston"}
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.jooble import fetch
+        import httpx
+        with patch("httpx.post", side_effect=httpx.HTTPError("down")):
+            assert fetch(api_key="KEY", query="SWE", location="NYC") == []
+
+
+# ---------------------------------------------------------------------------
+# Findwork adapter
+# ---------------------------------------------------------------------------
+
+class TestFindworkAdapter:
+    def _resp(self, payload):
+        resp = MagicMock()
+        resp.json.return_value = payload
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.findwork import fetch
+        payload = {"results": [{
+            "id": 321,
+            "role": "Backend Developer",
+            "company_name": "Hooli",
+            "location": "Remote",
+            "remote": True,
+            "text": "<p>Python, Django, PostgreSQL.</p>",
+            "date_posted": "2026-06-29T12:00:00Z",
+            "url": "https://findwork.dev/321/backend-developer",
+        }]}
+        with patch("httpx.get", return_value=self._resp(payload)) as mock_get:
+            results = fetch(api_key="FWKEY", query="Backend Developer")
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "findwork"
+        assert job["company"] == "Hooli"
+        assert job["is_remote"] is True
+        assert mock_get.call_args[1]["headers"]["Authorization"] == "Token FWKEY"
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.findwork import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("down")):
+            assert fetch(api_key="K", query="SWE") == []
