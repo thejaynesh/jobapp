@@ -218,25 +218,40 @@ class TestLeverAdapter:
 # ---------------------------------------------------------------------------
 
 class TestAshbyAdapter:
+    # Uses Ashby's public posting API (api.ashbyhq.com/posting-api/job-board/{slug});
+    # the previous internal endpoint began 404ing for every organization.
     def test_returns_standard_dicts(self):
         from app.services.sources.ashby import fetch
-        raw = {"jobPostings": [{
+        raw = {"jobs": [{
             "id": "ashby-001",
             "title": "Staff Engineer",
-            "locationName": "New York, NY",
+            "location": "New York, NY",
             "isRemote": False,
+            "isListed": True,
             "jobUrl": "https://jobs.ashbyhq.com/rippling/ashby-001",
-            "descriptionHtml": "<p>Scale infrastructure.</p>",
+            "descriptionPlain": "Scale infrastructure.",
+            "publishedAt": None,
         }]}
         with patch("httpx.get", return_value=MagicMock(
             json=lambda: raw, raise_for_status=MagicMock()
-        )):
+        )) as mock_get:
             results = fetch(company_slugs=["rippling"])
+        assert "api.ashbyhq.com/posting-api/job-board/rippling" in mock_get.call_args[0][0]
         assert len(results) == 1
         job = results[0]
         assert job["source"] == "ashby"
         assert job["source_job_id"] == "ashby-001"
         assert job["experience_level"] == "senior"
+        assert job["description"] == "Scale infrastructure."
+
+    def test_skips_unlisted_jobs(self):
+        from app.services.sources.ashby import fetch
+        raw = {"jobs": [{"id": "x", "title": "SWE", "isListed": False,
+                         "location": "", "descriptionPlain": ""}]}
+        with patch("httpx.get", return_value=MagicMock(
+            json=lambda: raw, raise_for_status=MagicMock()
+        )):
+            assert fetch(company_slugs=["co"]) == []
 
     def test_failed_slug_skipped(self):
         from app.services.sources.ashby import fetch
@@ -928,3 +943,72 @@ class TestFindworkAdapter:
         import httpx
         with patch("httpx.get", side_effect=httpx.HTTPError("down")):
             assert fetch(api_key="K", query="SWE") == []
+
+
+# ---------------------------------------------------------------------------
+# Workday adapter
+# ---------------------------------------------------------------------------
+
+class TestWorkdayAdapter:
+    def _post_resp(self, postings):
+        resp = MagicMock()
+        resp.json.return_value = {"total": len(postings), "jobPostings": postings}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def _detail_resp(self, info):
+        resp = MagicMock()
+        resp.json.return_value = {"jobPostingInfo": info}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts_with_detail(self):
+        from app.services.sources.workday import fetch
+        posting = {
+            "title": "Software Engineer (P3)",
+            "externalPath": "/job/USA-GA-Atlanta/Software-Engineer_JR-1",
+            "locationsText": "USA, GA, Atlanta",
+            "postedOn": "Posted Yesterday",
+        }
+        info = {
+            "jobDescription": "<p>Build <b>backend</b> services in Java.</p>",
+            "location": "USA, GA, Atlanta",
+            "externalUrl": "https://workday.wd5.myworkdayjobs.com/Workday/job/x",
+            "startDate": "2026-06-30",
+        }
+        with patch("httpx.post", return_value=self._post_resp([posting])):
+            with patch("httpx.get", return_value=self._detail_resp(info)):
+                results = fetch(tenant_specs=["workday:wd5:Workday"],
+                                queries=["Software Engineer"])
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "workday"
+        assert job["company"] == "workday"
+        assert job["posted_at"] == "2026-06-30"
+        assert "backend" in job["description"] and "<b>" not in job["description"]
+        assert job["url"].startswith("https://workday.wd5.myworkdayjobs.com/")
+
+    def test_dedupes_across_queries(self):
+        from app.services.sources.workday import fetch
+        posting = {"title": "SWE", "externalPath": "/job/X/SWE_1", "postedOn": "Posted Today"}
+        with patch("httpx.post", return_value=self._post_resp([posting])):
+            with patch("httpx.get", return_value=self._detail_resp({})):
+                results = fetch(tenant_specs=["a:wd1:Site"], queries=["SWE", "Software Engineer"])
+        assert len(results) == 1
+
+    def test_invalid_tenant_spec_skipped(self):
+        from app.services.sources.workday import fetch
+        assert fetch(tenant_specs=["justonepart"], queries=["SWE"]) == []
+
+    def test_list_error_skipped(self):
+        from app.services.sources.workday import fetch
+        import httpx
+        with patch("httpx.post", side_effect=httpx.HTTPError("blocked")):
+            assert fetch(tenant_specs=["a:wd1:Site"], queries=["SWE"]) == []
+
+    def test_relative_posted_parsing(self):
+        from app.services.sources.workday import _posted_at_from_text
+        from datetime import datetime, timezone
+        assert _posted_at_from_text("Posted Today")[:10] == datetime.now(timezone.utc).isoformat()[:10]
+        assert _posted_at_from_text("Posted 30+ Days Ago") is not None
+        assert _posted_at_from_text("") is None

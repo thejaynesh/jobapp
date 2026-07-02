@@ -279,4 +279,31 @@ class TestAtsDiscoveryWiring:
             with patch("app.services.job_fetcher._run_all_adapters",
                        return_value=([], {})) as mock_run:
                 fetch_and_save_jobs(db)
-        assert mock_run.call_args[0][3] == {"lever": ["netflix"]}
+        # 4th arg is the assembled slug map: configured + seeds + discovered
+        slug_map = mock_run.call_args[0][3]
+        assert "netflix" in slug_map["lever"]
+
+
+class TestSlugValidationWiring:
+    def test_persists_slug_cache_and_report(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        fixed_report = {"greenhouse": {"fixed": {"Stripe Inc": "stripe"}, "invalid": ["badco"]}}
+        with patch("app.services.ats_validation.validate_configured_slugs",
+                   return_value=({"greenhouse": ["stripe"]},
+                                 {"greenhouse": {"Stripe Inc": "stripe", "badco": None}},
+                                 fixed_report)):
+            with _patch_adapters([]):
+                fetch_and_save_jobs(db)
+        profile = db.query(Profile).first()
+        assert profile.data["ats_slug_report"] == fixed_report
+        assert profile.data["ats_slug_cache"]["greenhouse"]["badco"] is None
+
+    def test_validation_failure_does_not_block_fetch(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.ats_validation.validate_configured_slugs",
+                   side_effect=RuntimeError("network down")):
+            with _patch_adapters([_std_job()]):
+                result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1

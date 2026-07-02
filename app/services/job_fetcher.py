@@ -25,15 +25,18 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
 
 
 def _run_all_adapters(
-    roles: list[str], locations: list[str], cfg, discovered_ats: dict | None = None
+    roles: list[str], locations: list[str], cfg, ats_slugs: dict | None = None
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
     source_stats: {source: {"count": N, "errors": [...], "enabled": bool}}
-    discovered_ats: auto-discovered company slugs per ATS (see ats_discovery),
-    merged with the configured slugs for the direct board fetches.
+    ats_slugs: final slug list per ATS (configured + seeds + discovered), built
+    by the caller; when None, assembled from settings alone.
     """
-    from app.services.ats_discovery import merged_slugs
+    from app.services.ats_discovery import build_ats_slugs
+
+    if ats_slugs is None:
+        ats_slugs = build_ats_slugs(cfg)
 
     all_jobs: list[dict] = []
     stats: dict = {}
@@ -69,7 +72,7 @@ def _run_all_adapters(
     else:
         stats["jsearch"] = {"count": 0, "errors": [], "enabled": False}
 
-    greenhouse_slugs = merged_slugs(cfg.GREENHOUSE_COMPANY_SLUGS, discovered_ats, "greenhouse")
+    greenhouse_slugs = ats_slugs.get("greenhouse") or []
     if greenhouse_slugs:
         from app.services.sources.greenhouse import fetch as gh_fetch
         try:
@@ -83,7 +86,7 @@ def _run_all_adapters(
     else:
         stats["greenhouse"] = {"count": 0, "errors": [], "enabled": False}
 
-    lever_slugs = merged_slugs(cfg.LEVER_COMPANY_SLUGS, discovered_ats, "lever")
+    lever_slugs = ats_slugs.get("lever") or []
     if lever_slugs:
         from app.services.sources.lever import fetch as lever_fetch
         try:
@@ -97,7 +100,7 @@ def _run_all_adapters(
     else:
         stats["lever"] = {"count": 0, "errors": [], "enabled": False}
 
-    ashby_slugs = merged_slugs(cfg.ASHBY_COMPANY_SLUGS, discovered_ats, "ashby")
+    ashby_slugs = ats_slugs.get("ashby") or []
     if ashby_slugs:
         from app.services.sources.ashby import fetch as ashby_fetch
         try:
@@ -112,12 +115,12 @@ def _run_all_adapters(
         stats["ashby"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- Additional slug-based ATS boards (no keys; slugs configured or auto-discovered) ---
-    for ats_name, csv_setting, fetch_path in (
-        ("smartrecruiters", cfg.SMARTRECRUITERS_COMPANY_SLUGS, "app.services.sources.smartrecruiters"),
-        ("workable", cfg.WORKABLE_COMPANY_SLUGS, "app.services.sources.workable"),
-        ("recruitee", cfg.RECRUITEE_COMPANY_SLUGS, "app.services.sources.recruitee"),
+    for ats_name, fetch_path in (
+        ("smartrecruiters", "app.services.sources.smartrecruiters"),
+        ("workable", "app.services.sources.workable"),
+        ("recruitee", "app.services.sources.recruitee"),
     ):
-        slugs = merged_slugs(csv_setting, discovered_ats, ats_name)
+        slugs = ats_slugs.get(ats_name) or []
         if slugs:
             import importlib
             ats_fetch = importlib.import_module(fetch_path).fetch
@@ -130,6 +133,20 @@ def _run_all_adapters(
                 _record(stats, ats_name, [], str(exc))
         else:
             stats[ats_name] = {"count": 0, "errors": [], "enabled": False}
+
+    # --- Workday-hosted career sites (tenant:host:site triples) ---
+    workday_tenants = ats_slugs.get("workday") or []
+    if workday_tenants:
+        from app.services.sources.workday import fetch as workday_fetch
+        stats.setdefault("workday", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = workday_fetch(tenant_specs=workday_tenants, queries=roles)
+            _record(stats, "workday", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "workday", [], str(exc))
+    else:
+        stats["workday"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- Jooble: keyed aggregator (free key) ---
     if cfg.JOOBLE_API_KEY:
@@ -375,8 +392,24 @@ def fetch_and_save_jobs(db: Session) -> dict:
         profile.data.get("discovered_ats") if settings.ATS_AUTO_DISCOVERY else None
     )
 
+    # Validate/auto-fix the configured ATS slugs (cached per slug on the profile),
+    # then assemble the final slug map: configured + verified seeds + discovered.
+    from app.services.ats_discovery import build_ats_slugs, configured_ats_slugs
+    slug_cache = None
+    slug_report: dict = {}
+    validated_configured = None
+    if settings.ATS_SLUG_VALIDATION:
+        try:
+            from app.services.ats_validation import validate_configured_slugs
+            validated_configured, slug_cache, slug_report = validate_configured_slugs(
+                configured_ats_slugs(settings), profile.data.get("ats_slug_cache")
+            )
+        except Exception as exc:
+            logger.error("job_fetcher: slug validation failed: %s", exc)
+    ats_slugs = build_ats_slugs(settings, discovered_ats, validated_configured)
+
     try:
-        raw_jobs, source_stats = _run_all_adapters(queries, locations, settings, discovered_ats)
+        raw_jobs, source_stats = _run_all_adapters(queries, locations, settings, ats_slugs)
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts
@@ -390,6 +423,10 @@ def fetch_and_save_jobs(db: Session) -> dict:
     updated_data = copy.deepcopy(profile.data)
     if query_cache:
         updated_data["search_query_cache"] = query_cache
+    if slug_cache is not None:
+        updated_data["ats_slug_cache"] = slug_cache
+    if slug_report:
+        updated_data["ats_slug_report"] = slug_report
 
     # Learn company ATS boards from the fetched jobs' links; the merged slug
     # list feeds the direct board fetches on the next cycle.

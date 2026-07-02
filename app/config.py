@@ -37,9 +37,12 @@ class Settings(BaseSettings):
     SMARTRECRUITERS_COMPANY_SLUGS: str = ""
     WORKABLE_COMPANY_SLUGS: str = ""
     RECRUITEE_COMPANY_SLUGS: str = ""
+    WORKDAY_TENANTS: str = ""  # comma-separated tenant:host:site, e.g. nvidia:wd5:NVIDIAExternalCareerSite
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     ATS_AUTO_DISCOVERY: bool = True  # learn company ATS boards from fetched job links
+    ATS_SEED_COMPANIES: bool = True  # include the verified seed list of known tech companies
+    ATS_SLUG_VALIDATION: bool = True  # validate/auto-fix configured slugs against the ATS APIs
 
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"

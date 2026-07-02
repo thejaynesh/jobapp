@@ -25,10 +25,20 @@ ATS_PATTERNS: dict[str, re.Pattern] = {
     "recruitee": re.compile(r"https?://([A-Za-z0-9-]{2,})\.recruitee\.com", re.I),
 }
 
+# Workday boards need a tenant:host:site triple, extracted from URLs like
+# https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/...
+_WORKDAY_RE = re.compile(
+    r"https?://([a-z0-9-]{2,})\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]{2,})",
+    re.I,
+)
+
+# All ATS kinds we can fetch directly (patterned single-slug ones plus workday).
+ALL_ATS = frozenset(ATS_PATTERNS) | {"workday"}
+
 # Path segments and subdomains that match the patterns but aren't company slugs.
 _SLUG_BLOCKLIST = frozenset({
     "embed", "api", "static", "assets", "www", "app", "jobs", "j", "widget",
-    "careers", "share", "hire", "docs", "help", "blog",
+    "careers", "share", "hire", "docs", "help", "blog", "wday", "job", "login",
 })
 
 
@@ -41,6 +51,10 @@ def _extract_slugs(text: str) -> dict[str, set[str]]:
             slug = match.group(1).lower().rstrip(".")
             if slug and slug not in _SLUG_BLOCKLIST:
                 found.setdefault(ats, set()).add(slug)
+    for match in _WORKDAY_RE.finditer(text):
+        tenant, host, site = match.group(1).lower(), match.group(2).lower(), match.group(3)
+        if site.lower() not in _SLUG_BLOCKLIST:
+            found.setdefault("workday", set()).add(f"{tenant}:{host}:{site}")
     return found
 
 
@@ -52,13 +66,13 @@ def discover_ats_slugs(raw_jobs: list[dict], existing: dict | None = None) -> di
     """
     merged: dict[str, list[str]] = {
         ats: list(slugs or []) for ats, slugs in (existing or {}).items()
-        if ats in ATS_PATTERNS
+        if ats in ALL_ATS
     }
 
     new_count = 0
     for job in raw_jobs:
         # A job already fetched from an ATS shouldn't rediscover itself.
-        if job.get("source") in ATS_PATTERNS:
+        if job.get("source") in ALL_ATS:
             continue
         text = f"{job.get('url') or ''}\n{job.get('description') or ''}"
         for ats, slugs in _extract_slugs(text).items():
@@ -89,4 +103,64 @@ def merged_slugs(configured_csv: str, discovered: dict | None, ats: str) -> list
         if slug and slug.lower() not in seen:
             seen.add(slug.lower())
             result.append(slug)
+    return result
+
+
+# Which settings field carries each ATS's configured slugs.
+ATS_CONFIG_FIELDS = {
+    "greenhouse": "GREENHOUSE_COMPANY_SLUGS",
+    "lever": "LEVER_COMPANY_SLUGS",
+    "ashby": "ASHBY_COMPANY_SLUGS",
+    "smartrecruiters": "SMARTRECRUITERS_COMPANY_SLUGS",
+    "workable": "WORKABLE_COMPANY_SLUGS",
+    "recruitee": "RECRUITEE_COMPANY_SLUGS",
+    "workday": "WORKDAY_TENANTS",
+}
+
+MAX_TOTAL_SLUGS_PER_ATS = 60  # bound per-cycle fetch time
+
+
+def configured_ats_slugs(cfg) -> dict[str, list[str]]:
+    """The raw configured slugs per ATS from settings."""
+    result = {}
+    for ats, field in ATS_CONFIG_FIELDS.items():
+        result[ats] = [
+            s.strip() for s in (getattr(cfg, field, "") or "").split(",") if s.strip()
+        ]
+    return result
+
+
+def build_ats_slugs(
+    cfg,
+    discovered: dict | None = None,
+    validated_configured: dict | None = None,
+) -> dict[str, list[str]]:
+    """
+    Assemble the final slug list per ATS for one fetch cycle:
+    configured (validated when available) → verified seed companies → discovered,
+    deduplicated and capped.
+    """
+    from app.services.ats_seeds import SEED_ATS_SLUGS
+
+    configured = (
+        validated_configured if validated_configured is not None
+        else configured_ats_slugs(cfg)
+    )
+    use_seeds = getattr(cfg, "ATS_SEED_COMPANIES", True)
+
+    result: dict[str, list[str]] = {}
+    for ats in ATS_CONFIG_FIELDS:
+        seen: set[str] = set()
+        merged: list[str] = []
+        layers = [
+            configured.get(ats, []),
+            SEED_ATS_SLUGS.get(ats, []) if use_seeds else [],
+            (discovered or {}).get(ats, []) or [],
+        ]
+        for layer in layers:
+            for slug in layer:
+                if slug and slug.lower() not in seen and len(merged) < MAX_TOTAL_SLUGS_PER_ATS:
+                    seen.add(slug.lower())
+                    merged.append(slug)
+        result[ats] = merged
     return result
