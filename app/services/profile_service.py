@@ -23,6 +23,7 @@ DEFAULT_PROFILE: dict = {
     "cover_letter_template": "",
     "target_roles": [],
     "target_locations": [],
+    "location_preferences": {"regions": [], "remote_ok": True, "custom": []},
     "excluded_companies": [],
     "min_match_score": 70,
     "narrative": {
@@ -154,7 +155,8 @@ PROFILE_SEED: dict = {
         "Backend Engineer",
         "Android Engineer",
     ],
-    "target_locations": ["Open to all locations", "Remote", "Relocation OK"],
+    "location_preferences": {"regions": ["usa", "canada", "uk"], "remote_ok": True, "custom": []},
+    "target_locations": ["United States", "Canada", "London, United Kingdom", "Remote"],
     "min_match_score": 65,
     "narrative": {
         "answers": [],

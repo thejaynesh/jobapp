@@ -25,18 +25,23 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
 
 
 def _run_all_adapters(
-    roles: list[str], locations: list[str], cfg, ats_slugs: dict | None = None
+    roles: list[str], locations: list[str], cfg,
+    ats_slugs: dict | None = None, loc_prefs: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
     source_stats: {source: {"count": N, "errors": [...], "enabled": bool}}
     ats_slugs: final slug list per ATS (configured + seeds + discovered), built
     by the caller; when None, assembled from settings alone.
+    loc_prefs: normalized location preferences (see services.locations).
     """
     from app.services.ats_discovery import build_ats_slugs
+    from app.services.locations import adzuna_countries, jobicy_geos
 
     if ats_slugs is None:
         ats_slugs = build_ats_slugs(cfg)
+    adzuna_country_codes = adzuna_countries(loc_prefs or {})
+    jobicy_geo_list = jobicy_geos(loc_prefs or {})
 
     all_jobs: list[dict] = []
     stats: dict = {}
@@ -46,15 +51,17 @@ def _run_all_adapters(
     if cfg.ADZUNA_APP_ID and cfg.ADZUNA_APP_KEY:
         from app.services.sources.adzuna import fetch as adzuna_fetch
         stats.setdefault("adzuna", {"count": 0, "errors": [], "enabled": True})
+        # Adzuna has one API endpoint per country: search country-wide in each
+        # preferred country instead of passing location text to the US endpoint.
         for role in roles:
-            for loc in locations:
+            for country in (adzuna_country_codes or ["us"]):
                 try:
                     jobs = adzuna_fetch(app_id=cfg.ADZUNA_APP_ID, app_key=cfg.ADZUNA_APP_KEY,
-                                       query=role, location=loc)
+                                       query=role, location="", country=country)
                     _record(stats, "adzuna", jobs)
                     all_jobs.extend(jobs)
                 except Exception as exc:
-                    _record(stats, "adzuna", [], f"{role}/{loc}: {exc}")
+                    _record(stats, "adzuna", [], f"{role}/{country}: {exc}")
     else:
         stats["adzuna"] = {"count": 0, "errors": [], "enabled": False}
 
@@ -268,16 +275,17 @@ def _run_all_adapters(
         except Exception as exc:
             _record(stats, "himalayas", [], f"{role}: {exc}")
 
-    # --- Jobicy: free public API for remote tech jobs ---
+    # --- Jobicy: free public API for remote tech jobs (region-targeted) ---
     from app.services.sources.jobicy import fetch as jobicy_fetch
     stats.setdefault("jobicy", {"count": 0, "errors": [], "enabled": True})
     for role in roles:
-        try:
-            jobs = jobicy_fetch(query=role)
-            _record(stats, "jobicy", jobs)
-            all_jobs.extend(jobs)
-        except Exception as exc:
-            _record(stats, "jobicy", [], f"{role}: {exc}")
+        for geo in jobicy_geo_list:
+            try:
+                jobs = jobicy_fetch(query=role, geo=geo)
+                _record(stats, "jobicy", jobs)
+                all_jobs.extend(jobs)
+            except Exception as exc:
+                _record(stats, "jobicy", [], f"{role}/{geo}: {exc}")
 
     # --- Hacker News "Who is hiring?": one monthly thread, fetched once ---
     from app.services.sources.hnhiring import fetch as hn_fetch
@@ -367,10 +375,15 @@ def fetch_and_save_jobs(db: Session) -> dict:
         return counts
 
     roles: list[str] = profile.data.get("target_roles") or []
-    locations: list[str] = profile.data.get("target_locations") or []
 
-    if not roles or not locations:
-        logger.warning("job_fetcher: target_roles or target_locations empty.")
+    # Structured location preferences drive the search locations, Adzuna
+    # country endpoints, and the region prefilter during matching.
+    from app.services.locations import normalize_prefs, search_locations
+    loc_prefs = normalize_prefs(profile.data)
+    locations: list[str] = search_locations(loc_prefs)
+
+    if not roles:
+        logger.warning("job_fetcher: target_roles empty.")
         return counts
 
     # Expand target roles into the fuller set of queries recruiters post under
@@ -419,7 +432,9 @@ def fetch_and_save_jobs(db: Session) -> dict:
     ats_slugs = build_ats_slugs(settings, discovered_ats, validated_configured)
 
     try:
-        raw_jobs, source_stats = _run_all_adapters(queries, locations, settings, ats_slugs)
+        raw_jobs, source_stats = _run_all_adapters(
+            queries, locations, settings, ats_slugs, loc_prefs
+        )
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts

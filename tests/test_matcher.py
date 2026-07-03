@@ -639,3 +639,51 @@ class TestSeniorTitlePrefilter:
         mock_job.title = "Senior Backend Engineer"
         passes, _ = keyword_filter(mock_job, junior)
         assert passes is True
+
+
+# ---------------------------------------------------------------------------
+# Location prefilter
+# ---------------------------------------------------------------------------
+
+class TestLocationPrefilter:
+    def _profile_with_regions(self, profile_data):
+        p = dict(profile_data)
+        p["location_preferences"] = {"regions": ["usa", "canada", "uk"], "remote_ok": True, "custom": []}
+        return p
+
+    def test_blocks_job_in_unselected_region(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.location = "Bengaluru, India"
+        mock_job.is_remote = False
+        passes, _ = keyword_filter(mock_job, self._profile_with_regions(profile_data))
+        assert passes is False
+
+    def test_allows_job_in_selected_region(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.location = "Toronto, Ontario, Canada"
+        mock_job.is_remote = False
+        passes, _ = keyword_filter(mock_job, self._profile_with_regions(profile_data))
+        assert passes is True
+
+    def test_allows_remote_job(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.location = "Anywhere"
+        mock_job.is_remote = True
+        passes, _ = keyword_filter(mock_job, self._profile_with_regions(profile_data))
+        assert passes is True
+
+    def test_unknown_location_passes_to_llm(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.location = "Gotham City"
+        mock_job.is_remote = False
+        passes, _ = keyword_filter(mock_job, self._profile_with_regions(profile_data))
+        assert passes is True
+
+    def test_prompt_includes_preferred_locations(self, mock_job, profile_data):
+        from app.services.matcher import _build_match_prompt
+        prof = self._profile_with_regions(profile_data)
+        messages = _build_match_prompt(mock_job, prof)
+        full_text = " ".join(m["content"] for m in messages)
+        assert "Preferred locations" in full_text
+        assert "United States" in full_text
+        assert "United Kingdom" in full_text

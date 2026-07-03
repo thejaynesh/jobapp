@@ -8,6 +8,7 @@ from openai import OpenAI, RateLimitError
 
 from app.config import settings
 from app.llm.providers import call_provider, matching_fallbacks
+from app.services.locations import describe_prefs, location_allowed, normalize_prefs
 from app.models.application import Application
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
@@ -110,6 +111,13 @@ def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
     if _blocked_by_seniority(job.title, profile_data):
         return False, 0.0
 
+    # Drop jobs whose location clearly belongs to a region the candidate did
+    # not choose; ambiguous/unknown locations continue to the LLM.
+    loc_text = job.location if isinstance(getattr(job, "location", None), str) else ""
+    if location_allowed(loc_text, bool(getattr(job, "is_remote", False)),
+                        normalize_prefs(profile_data)) is False:
+        return False, 0.0
+
     excluded = [c.lower() for c in profile_data.get("excluded_companies", [])]
     if job.company and job.company.lower() in excluded:
         return False, 0.0
@@ -167,6 +175,7 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         extras.append(f"Work preference: {remote_pref}")
     if salary_min:
         extras.append(f"Minimum salary: ${salary_min:,}")
+    extras.append(f"Preferred locations: {describe_prefs(normalize_prefs(profile_data))}")
     extras_str = "\n".join(extras)
 
     system_content = (

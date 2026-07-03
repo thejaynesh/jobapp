@@ -9,12 +9,15 @@ logger = logging.getLogger(__name__)
 _BASE = "https://jobicy.com/api/v2/remote-jobs"
 
 
-def fetch(query: str) -> list[dict]:
+def fetch(query: str, geo: str | None = None) -> list[dict]:
     """Fetch remote tech jobs from Jobicy's free public API (no key required)."""
+    params: dict = {"count": 50, "tag": query}
+    if geo:
+        params["geo"] = geo
     try:
         resp = httpx.get(
             _BASE,
-            params={"count": 50, "tag": query},
+            params=params,
             timeout=15,
             follow_redirects=True,
         )

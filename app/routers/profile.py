@@ -7,10 +7,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import get_db
+from app.services.locations import REGION_OPTIONS, normalize_prefs
 from app.services.profile_service import get_or_create_profile
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 templates = Jinja2Templates(directory="app/templates")
+templates.env.globals["region_options"] = REGION_OPTIONS
+templates.env.globals["location_prefs"] = normalize_prefs
 
 TABS = ["personal", "experience", "projects", "skills", "education", "templates", "narrative"]
 
@@ -138,10 +141,13 @@ def save_skills(
     request: Request,
     languages: str = Form(""), frameworks: str = Form(""),
     tools: str = Form(""), clouds: str = Form(""),
-    target_roles: str = Form(""), target_locations: str = Form(""),
+    target_roles: str = Form(""),
+    location_regions: list[str] = Form(default=[]),
+    remote_ok: str = Form(""), custom_locations: str = Form(""),
     excluded_companies: str = Form(""), min_match_score: int = Form(70),
     db: Session = Depends(get_db),
 ):
+    from app.services.locations import REGIONS, search_locations
     from app.services.profile_service import save_section
     save_section(db, "skills", {
         "languages": [x.strip() for x in languages.split(",") if x.strip()],
@@ -150,7 +156,14 @@ def save_skills(
         "clouds": [x.strip() for x in clouds.split(",") if x.strip()],
     })
     save_section(db, "target_roles", [x.strip() for x in target_roles.splitlines() if x.strip()])
-    save_section(db, "target_locations", [x.strip() for x in target_locations.split(",") if x.strip()])
+    prefs = {
+        "regions": [r for r in location_regions if r in REGIONS],
+        "remote_ok": bool(remote_ok),
+        "custom": [x.strip() for x in custom_locations.split(",") if x.strip()],
+    }
+    save_section(db, "location_preferences", prefs)
+    # keep the legacy field in sync (derived search strings) for older code/UI
+    save_section(db, "target_locations", search_locations(prefs))
     save_section(db, "excluded_companies", [x.strip() for x in excluded_companies.splitlines() if x.strip()])
     profile = save_section(db, "min_match_score", min_match_score)
     db.commit()
