@@ -1012,3 +1012,52 @@ class TestWorkdayAdapter:
         assert _posted_at_from_text("Posted Today")[:10] == datetime.now(timezone.utc).isoformat()[:10]
         assert _posted_at_from_text("Posted 30+ Days Ago") is not None
         assert _posted_at_from_text("") is None
+
+
+# ---------------------------------------------------------------------------
+# Careerjet adapter
+# ---------------------------------------------------------------------------
+
+class TestCareerjetAdapter:
+    def _resp(self, payload):
+        resp = MagicMock()
+        resp.json.return_value = payload
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.careerjet import fetch
+        payload = {"type": "JOBS", "hits": 1, "jobs": [{
+            "title": "Software Engineer",
+            "company": "Initech",
+            "locations": "London",
+            "url": "https://jobviewtrack.com/x/job1",
+            "description": "Build things in Java and Python...",
+            "date": "2026-07-01",
+        }]}
+        with patch("httpx.get", return_value=self._resp(payload)) as mock_get:
+            results = fetch(affid="AFF123", query="Software Engineer", location="London, United Kingdom")
+        assert len(results) == 1
+        job = results[0]
+        assert job["source"] == "careerjet"
+        assert job["company"] == "Initech"
+        params = mock_get.call_args[1]["params"]
+        assert params["affid"] == "AFF123"
+        assert params["locale_code"] == "en_GB"  # locale picked from location
+
+    def test_us_locale_default(self):
+        from app.services.sources.careerjet import fetch
+        with patch("httpx.get", return_value=self._resp({"type": "JOBS", "jobs": []})) as mock_get:
+            fetch(affid="A", query="SWE", location="United States")
+        assert mock_get.call_args[1]["params"]["locale_code"] == "en_US"
+
+    def test_non_jobs_payload_returns_empty(self):
+        from app.services.sources.careerjet import fetch
+        with patch("httpx.get", return_value=self._resp({"type": "ERROR", "error": "bad affid"})):
+            assert fetch(affid="A", query="SWE", location="NYC") == []
+
+    def test_http_error_returns_empty(self):
+        from app.services.sources.careerjet import fetch
+        import httpx
+        with patch("httpx.get", side_effect=httpx.HTTPError("down")):
+            assert fetch(affid="A", query="SWE", location="NYC") == []

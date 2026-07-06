@@ -176,3 +176,59 @@ class TestMergeOrSkip:
                       layer=3)
         db.flush()
         assert "very long" in job.description
+
+
+# ---------------------------------------------------------------------------
+# Normalization v2 — cross-aggregator variants must collide
+# ---------------------------------------------------------------------------
+
+class TestNormalizationV2:
+    def test_company_legal_suffixes_collapse(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Stripe, Inc.", "Software Engineer", "New York, NY")
+        h2 = compute_dedupe_hash("Stripe", "Software Engineer", "New York, NY")
+        h3 = compute_dedupe_hash("Stripe Inc", "Software Engineer", "New York, NY")
+        assert h1 == h2 == h3
+
+    def test_title_abbreviations_collapse(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Acme", "Sr. Software Engineer", "Austin, TX")
+        h2 = compute_dedupe_hash("Acme", "Senior Software Engineer", "Austin, TX")
+        assert h1 == h2
+
+    def test_title_mode_tags_collapse(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Acme", "Backend Engineer (Remote)", "Toronto")
+        h2 = compute_dedupe_hash("Acme", "Backend Engineer", "Toronto")
+        assert h1 == h2
+
+    def test_location_country_suffix_collapses(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Acme", "SWE", "San Francisco, CA, United States")
+        h2 = compute_dedupe_hash("Acme", "SWE", "San Francisco, CA")
+        h3 = compute_dedupe_hash("Acme", "SWE", "San Francisco")
+        assert h1 == h2 == h3
+
+    def test_remote_variants_collapse(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Acme", "SWE", "Remote (US)")
+        h2 = compute_dedupe_hash("Acme", "SWE", "Remote - Worldwide")
+        h3 = compute_dedupe_hash("Acme", "SWE", "Work from home")
+        assert h1 == h2 == h3
+
+    def test_different_cities_stay_distinct(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Stripe", "Backend Engineer", "New York, NY")
+        h2 = compute_dedupe_hash("Stripe", "Backend Engineer", "Toronto, Canada")
+        assert h1 != h2
+
+    def test_different_titles_stay_distinct(self):
+        from app.services.deduplication import compute_dedupe_hash
+        h1 = compute_dedupe_hash("Stripe", "Backend Engineer", "NYC")
+        h2 = compute_dedupe_hash("Stripe", "Frontend Engineer", "NYC")
+        assert h1 != h2
+
+    def test_single_word_suffix_company_survives(self):
+        from app.services.deduplication import normalize_company
+        # a company literally named "Co" must not normalize to empty
+        assert normalize_company("Co") == "co"

@@ -170,6 +170,21 @@ def _run_all_adapters(
     else:
         stats["jooble"] = {"count": 0, "errors": [], "enabled": False}
 
+    # --- Careerjet: keyed aggregator (free affiliate id) ---
+    if cfg.CAREERJET_AFFID:
+        from app.services.sources.careerjet import fetch as careerjet_fetch
+        stats.setdefault("careerjet", {"count": 0, "errors": [], "enabled": True})
+        for role in roles:
+            for loc in locations:
+                try:
+                    jobs = careerjet_fetch(affid=cfg.CAREERJET_AFFID, query=role, location=loc)
+                    _record(stats, "careerjet", jobs)
+                    all_jobs.extend(jobs)
+                except Exception as exc:
+                    _record(stats, "careerjet", [], f"{role}/{loc}: {exc}")
+    else:
+        stats["careerjet"] = {"count": 0, "errors": [], "enabled": False}
+
     # --- Findwork: keyed developer-jobs API (free key) ---
     if cfg.FINDWORK_API_KEY:
         from app.services.sources.findwork import fetch as findwork_fetch
