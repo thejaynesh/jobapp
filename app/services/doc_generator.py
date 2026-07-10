@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import re
@@ -358,7 +359,10 @@ def render_latex(template_name: str, context: dict) -> str:
     return template.render(**context)
 
 
-def compile_pdf(tex_source: str, output_path: Path) -> Path:
+_PAGES_RE = re.compile(r"Output written on .*?\((\d+) pages?")
+
+
+def compile_pdf(tex_source: str, output_path: Path, page_count_out: dict | None = None) -> Path:
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_file = Path(tmpdir) / "document.tex"
         tex_file.write_text(tex_source, encoding="utf-8")
@@ -380,9 +384,58 @@ def compile_pdf(tex_source: str, output_path: Path) -> Path:
             raise DocGenerationError(
                 f"pdflatex failed (exit {result.returncode}):\n{detail}"
             )
+        if page_count_out is not None:
+            m = _PAGES_RE.search(result.stdout or "")
+            if m:
+                page_count_out["pages"] = int(m.group(1))
         compiled = Path(tmpdir) / "document.pdf"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(str(compiled), str(output_path))
+    return output_path
+
+
+def _trim_resume_context(ctx: dict, level: int) -> dict:
+    """Return a progressively trimmed copy of a resume context.
+
+    Level 0 = untouched. Each level cuts lower-priority content (bullets are
+    assumed strongest-first, so they are trimmed from the end):
+      1: cap bullets at 3 per experience / 2 per project
+      2: cap bullets at 2 per experience, keep only the top project
+      3: drop the summary, cap project bullets at 1
+    """
+    if level <= 0:
+        return ctx
+    trimmed = copy.deepcopy(ctx)
+    max_exp_bullets = {1: 3, 2: 2, 3: 2}[min(level, 3)]
+    max_proj_bullets = {1: 2, 2: 2, 3: 1}[min(level, 3)]
+    for e in trimmed.get("experience") or []:
+        e["bullets"] = (e.get("bullets") or [])[:max_exp_bullets]
+    if level >= 2:
+        trimmed["projects"] = (trimmed.get("projects") or [])[:1]
+    if level >= 3:
+        trimmed["narrative_summary"] = ""
+    for p in trimmed.get("projects") or []:
+        p["bullets"] = (p.get("bullets") or [])[:max_proj_bullets]
+    return trimmed
+
+
+def compile_resume_one_page(resume_ctx: dict, output_path: Path) -> Path:
+    """Compile the resume, re-trimming and recompiling until it fits one page.
+
+    If even the most aggressive trim level still overflows, the last (smallest)
+    version is kept rather than failing generation.
+    """
+    for level in range(4):
+        ctx = _trim_resume_context(resume_ctx, level)
+        tex = render_latex("resume.tex.j2", ctx)
+        pages: dict = {}
+        compile_pdf(tex, output_path, page_count_out=pages)
+        if pages.get("pages", 1) <= 1:
+            if level:
+                logger.info("Resume fit to one page at trim level %d", level)
+            return output_path
+        logger.info("Resume is %s pages at trim level %d — trimming further", pages.get("pages"), level)
+    logger.warning("Resume still over one page after maximum trimming")
     return output_path
 
 
@@ -558,11 +611,10 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         selected_projects=selected_projects,
         selected_skills=selected_skills,
     )
-    resume_tex = render_latex("resume.tex.j2", resume_ctx)
     resume_version = _next_version(db, application.id, DocType.resume)
     resume_filename = f"{application.id}_resume_v{resume_version}.pdf"
     resume_path = _OUTPUT_DIR / str(application.id) / resume_filename
-    compiled_resume = compile_pdf(resume_tex, resume_path)
+    compiled_resume = compile_resume_one_page(resume_ctx, resume_path)
 
     resume_doc = ApplicationDocument(
         application_id=application.id,

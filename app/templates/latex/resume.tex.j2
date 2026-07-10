@@ -1,14 +1,16 @@
 \documentclass[11pt,letterpaper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage[margin=0.75in]{geometry}
+\usepackage[margin=0.65in]{geometry}
 \usepackage[colorlinks=true, urlcolor=blue, linkcolor=blue]{hyperref}
 \usepackage{enumitem}
 \usepackage{titlesec}
 \pagestyle{empty}
+\raggedbottom
 
 \titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
-\setlist[itemize]{noitemsep, topsep=2pt}
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+\setlist[itemize]{noitemsep, topsep=2pt, leftmargin=1.2em}
 
 \begin{document}
 
