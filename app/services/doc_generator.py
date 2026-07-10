@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -49,16 +50,33 @@ _UNICODE_MAP = {
     "”": "''",        # right double quote
     "•": r"\textbullet{}",   # bullet
     "…": "...",       # ellipsis
+    "→": " to ",      # rightwards arrow
+    "×": "x",         # multiplication sign
     " ": " ",         # non-breaking space
 }
 _UNICODE_RE = re.compile("[" + "".join(_UNICODE_MAP.keys()) + "]")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7F]")
+
+
+def _fold_non_ascii(match: re.Match) -> str:
+    """Fold an unmapped non-ASCII char to its closest ASCII form, or drop it.
+
+    pdflatex aborts on Unicode it has no declaration for (e.g. U+272A), and
+    LLM output can contain anything — so every char must leave here compilable.
+    NFKD strips accents (e.g. an accented e becomes plain e); symbols with no
+    ASCII equivalent become ''. Folded output is re-escaped in case the fold
+    produced a LaTeX special character.
+    """
+    folded = unicodedata.normalize("NFKD", match.group()).encode("ascii", "ignore").decode()
+    return _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], folded)
 
 
 def latex_escape(text) -> str:
     if not isinstance(text, str):
         return ""
     text = _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], text)
-    return _UNICODE_RE.sub(lambda m: _UNICODE_MAP[m.group()], text)
+    text = _UNICODE_RE.sub(lambda m: _UNICODE_MAP[m.group()], text)
+    return _NON_ASCII_RE.sub(_fold_non_ascii, text)
 
 
 def _make_jinja_env() -> Environment:
@@ -499,6 +517,33 @@ def tailor_summary(
         return base_summary
 
 
+# Canonical display order and labels for skill categories. JSONB storage
+# alphabetizes dict keys, so without this the PDF prints them in random order
+# with raw keys like "Ai_ml".
+_SKILL_CATEGORY_ORDER = ["languages", "frameworks", "ai_ml", "databases", "clouds", "tools"]
+_SKILL_CATEGORY_LABELS = {
+    "languages": "Languages",
+    "frameworks": "Frameworks",
+    "ai_ml": "AI/ML",
+    "databases": "Databases",
+    "clouds": "Cloud",
+    "tools": "Tools",
+}
+
+
+def _ordered_skills(skills: dict) -> list[tuple[str, list]]:
+    """Return (label, items) pairs in canonical order, unknown categories last."""
+    ordered = []
+    for key in _SKILL_CATEGORY_ORDER:
+        items = skills.get(key)
+        if items:
+            ordered.append((_SKILL_CATEGORY_LABELS[key], items))
+    for key, items in skills.items():
+        if key not in _SKILL_CATEGORY_ORDER and items:
+            ordered.append((key.replace("_", " ").title(), items))
+    return ordered
+
+
 def build_resume_context(
     profile_data: dict,
     tailored_bullets: list[dict] | None,
@@ -511,10 +556,12 @@ def build_resume_context(
         selected_experience if selected_experience is not None
         else (profile_data.get("experience") or [])
     )
+    skills = selected_skills if selected_skills is not None else (profile_data.get("skills") or {})
     return {
         "profile": _normalize_profile_for_template(profile_data),
         "narrative_summary": tailored_summary or (profile_data.get("narrative") or {}).get("summary", ""),
-        "skills": selected_skills if selected_skills is not None else (profile_data.get("skills") or {}),
+        "skills": skills,
+        "skills_ordered": _ordered_skills(skills),
         "experience": _normalize_experience(experience_source, tailored_bullets),
         "education": _normalize_education(profile_data.get("education") or []),
         "projects": selected_projects if selected_projects is not None else (profile_data.get("projects") or []),

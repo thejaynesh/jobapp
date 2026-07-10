@@ -1,29 +1,31 @@
-\documentclass[11pt,letterpaper]{article}
+\documentclass[10pt,letterpaper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage[margin=0.65in]{geometry}
+\usepackage[margin=0.6in]{geometry}
 \usepackage[colorlinks=true, urlcolor=blue, linkcolor=blue]{hyperref}
 \usepackage{enumitem}
 \usepackage{titlesec}
 \pagestyle{empty}
 \raggedbottom
+\setlength{\parskip}{0pt}
 
-\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
-\titlespacing*{\section}{0pt}{8pt}{4pt}
-\setlist[itemize]{noitemsep, topsep=2pt, leftmargin=1.2em}
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\vspace{-4pt}\titlerule]
+\titlespacing*{\section}{0pt}{7pt}{4pt}
+\setlist[itemize]{noitemsep, topsep=1pt, parsep=0pt, partopsep=0pt, itemsep=1pt, leftmargin=1.1em}
 
 \begin{document}
 
 % Header
 \begin{center}
-  {\LARGE \textbf{ {{- profile.name | default("") | latex_escape -}} }}\\[4pt]
+  {\LARGE \textbf{ {{- profile.name | default("") | latex_escape -}} }}\\[3pt]
   {{- profile.contact.email | default("") | latex_escape }}%
-  {% if profile.contact.phone %} \quad | \quad {{ profile.contact.phone | latex_escape }}{% endif %}%
-  {% if profile.contact.location %} \quad | \quad {{ profile.contact.location | latex_escape }}{% endif %}%
-  {% if profile.contact.linkedin %} \quad | \quad \href{ {{- profile.contact.linkedin -}} }{LinkedIn}{% endif %}%
-  {% if profile.contact.github %} \quad | \quad \href{ {{- profile.contact.github -}} }{GitHub}{% endif %}%
-  {% if profile.contact.website %} \quad | \quad \href{ {{- profile.contact.website -}} }{Website}{% endif %}
+  {% if profile.contact.phone %} \,$|$\, {{ profile.contact.phone | latex_escape }}{% endif %}%
+  {% if profile.contact.location %} \,$|$\, {{ profile.contact.location | latex_escape }}{% endif %}%
+  {% if profile.contact.linkedin %} \,$|$\, \href{ {{- profile.contact.linkedin -}} }{LinkedIn}{% endif %}%
+  {% if profile.contact.github %} \,$|$\, \href{ {{- profile.contact.github -}} }{GitHub}{% endif %}%
+  {% if profile.contact.website %} \,$|$\, \href{ {{- profile.contact.website -}} }{Website}{% endif %}
 \end{center}
+\vspace{-6pt}
 
 {% if narrative_summary %}
 % Summary
@@ -31,26 +33,23 @@
 {{ narrative_summary | latex_escape }}
 {% endif %}
 
-{% set non_empty_skills = [] %}
-{% for category, items in skills.items() %}{% if items %}{% set _ = non_empty_skills.append(1) %}{% endif %}{% endfor %}
-{% if non_empty_skills %}
+{% set skill_rows = skills_ordered | default(none) %}
+{% if not skill_rows %}
+{% set skill_rows = [] %}
+{% for category, items in skills.items() %}{% if items %}{% set _ = skill_rows.append((category | replace("_", " ") | title, items)) %}{% endif %}{% endfor %}
+{% endif %}
+{% if skill_rows %}
 % Skills
 \section{Skills}
-\begin{itemize}
-{% for category, items in skills.items() %}
-{% if items %}
-  \item \textbf{ {{- category | title | latex_escape -}} :} {{ items | join(", ") | latex_escape }}
-{% endif %}
-{% endfor %}
-\end{itemize}
+{% for label, items in skill_rows %}\textbf{ {{- label | latex_escape -}} :} {{ items | join(", ") | latex_escape }}{% if not loop.last %}\\
+{% endif %}{% endfor %}
 {% endif %}
 
 {% if experience %}
 % Experience
 \section{Experience}
 {% for exp in experience %}
-\textbf{ {{- exp.title | default("") | latex_escape -}} } \hfill {{ exp.start_date | default("") | latex_escape }} -- {{ exp.end_date | default("Present") | latex_escape }}\\
-\textit{ {{- exp.company | default("") | latex_escape -}} }{% if exp.location %} \hfill {{ exp.location | latex_escape }}{% endif %}
+\textbf{ {{- exp.title | default("") | latex_escape -}} }, \textit{ {{- exp.company | default("") | latex_escape -}} } \hfill {{ exp.start_date | default("") | latex_escape }} -- {{ exp.end_date | default("Present") | latex_escape }}{% if exp.location %} \,$|$\, {{ exp.location | latex_escape }}{% endif %}
 {% if exp.bullets %}
 \begin{itemize}
 {% for bullet in exp.bullets %}
@@ -58,15 +57,7 @@
 {% endfor %}
 \end{itemize}
 {% endif %}
-{% endfor %}
-{% endif %}
-
-{% if education %}
-% Education
-\section{Education}
-{% for edu in education %}
-\textbf{ {{- edu.degree | default("") | latex_escape -}} } \hfill {{ edu.graduation_year | default("") | latex_escape }}\\
-\textit{ {{- edu.school | default("") | latex_escape -}} }
+{% if not loop.last %}\vspace{4pt}{% endif %}
 {% endfor %}
 {% endif %}
 
@@ -74,8 +65,7 @@
 % Projects
 \section{Projects}
 {% for proj in projects %}
-\textbf{ {{- proj.name | default("") | latex_escape -}} }{% if proj.url %} (\href{ {{- proj.url -}} }{link}){% endif %}\\
-{% if proj.description %}{{ proj.description | latex_escape }}{% endif %}
+\textbf{ {{- proj.name | default("") | latex_escape -}} }{% if proj.description %} --- {{ proj.description | latex_escape }}{% endif %}{% if proj.url %} \,(\href{ {{- proj.url -}} }{link}){% endif %}
 {% if proj.bullets %}
 \begin{itemize}
 {% for bullet in proj.bullets %}
@@ -83,7 +73,15 @@
 {% endfor %}
 \end{itemize}
 {% endif %}
+{% if not loop.last %}\vspace{4pt}{% endif %}
 {% endfor %}
+{% endif %}
+
+{% if education %}
+% Education
+\section{Education}
+{% for edu in education %}\textbf{ {{- edu.degree | default("") | latex_escape -}} }{% if edu.field %}, {{ edu.field | latex_escape }}{% endif %} --- \textit{ {{- edu.school | default("") | latex_escape -}} }{% if edu.gpa %} (GPA {{ edu.gpa | latex_escape }}){% endif %} \hfill {{ edu.graduation_year | default("") | latex_escape }}{% if not loop.last %}\\
+{% endif %}{% endfor %}
 {% endif %}
 
 \end{document}
