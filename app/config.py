@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     NVIDIA_NIM_MODEL: str = "meta/llama-3.1-70b-instruct"
     NVIDIA_NIM_RPM: int = 40  # requests per minute allowed by the API
 
+    # Optional additional LLM providers. When configured, document generation
+    # prefers quality-first (Anthropic -> Gemini -> NIM) and job matching uses
+    # them as failover (NIM -> Gemini -> Anthropic).
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-opus-4-8"
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
     HUNTER_IO_API_KEY: str = ""
 
     # Job source API keys
@@ -25,6 +34,22 @@ class Settings(BaseSettings):
     GREENHOUSE_COMPANY_SLUGS: str = ""
     LEVER_COMPANY_SLUGS: str = ""
     ASHBY_COMPANY_SLUGS: str = ""
+    SMARTRECRUITERS_COMPANY_SLUGS: str = ""
+    WORKABLE_COMPANY_SLUGS: str = ""
+    RECRUITEE_COMPANY_SLUGS: str = ""
+    WORKDAY_TENANTS: str = ""  # comma-separated tenant:host:site, e.g. nvidia:wd5:NVIDIAExternalCareerSite
+    JOOBLE_API_KEY: str = ""
+    FINDWORK_API_KEY: str = ""
+    CAREERJET_AFFID: str = ""
+    ATS_AUTO_DISCOVERY: bool = True  # learn company ATS boards from fetched job links
+    ATS_SEED_COMPANIES: bool = True  # include the verified seed list of known tech companies
+    ATS_SLUG_VALIDATION: bool = True  # validate/auto-fix configured slugs against the ATS APIs
+    ATS_LIST_HARVEST: bool = True  # harvest company slugs from community job lists
+    SLUG_HARVEST_URLS: str = (
+        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
+        "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"
+        "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md"
+    )
 
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"
@@ -32,6 +57,9 @@ class Settings(BaseSettings):
     MIN_MATCH_SCORE: int = 70
     FETCH_INTERVAL_HOURS: int = 5
     MIN_KEYWORD_SKILLS: int = 2
+    MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
+    FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates
+    JUNIOR_MAX_YEARS: float = 3.0  # candidate is "junior" below this many years of experience
 
 
 settings = Settings()

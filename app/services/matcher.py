@@ -7,6 +7,8 @@ from difflib import SequenceMatcher
 from openai import OpenAI, RateLimitError
 
 from app.config import settings
+from app.llm.providers import call_provider, matching_fallbacks
+from app.services.locations import describe_prefs, location_allowed, normalize_prefs
 from app.models.application import Application
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
@@ -14,6 +16,10 @@ from app.models.profile import Profile
 logger = logging.getLogger(__name__)
 
 MIN_KEYWORD_SKILLS = 2  # overridden by settings.MIN_KEYWORD_SKILLS if present
+
+
+class LLMUnavailableError(Exception):
+    """All LLM providers failed; the job should stay `new` and retry later."""
 
 
 _STOP = frozenset({
@@ -68,9 +74,48 @@ def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
     return count
 
 
+_SENIOR_TITLE_WORDS = ("senior", "sr", "staff", "principal", "lead", "director", "vp", "head")
+
+
+def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
+    """
+    Junior candidates waste LLM calls (and get penalized anyway) on jobs whose
+    TITLE is explicitly senior-level, so drop them up front. Only title words
+    count — 'senior' in a description is too noisy. Words that appear in the
+    candidate's own target roles are never blocked.
+    """
+    if not getattr(settings, "FILTER_SENIOR_TITLES", True):
+        return False
+    total_years = sum(
+        float(e.get("years", 0) or 0) for e in profile_data.get("experience", [])
+    )
+    if total_years >= getattr(settings, "JUNIOR_MAX_YEARS", 3.0):
+        return False
+
+    role_words = {
+        w for role in profile_data.get("target_roles", [])
+        for w in re.findall(r"[a-z]+", role.lower())
+    }
+    title_lower = title.lower()
+    return any(
+        word not in role_words and re.search(rf"\b{word}\b", title_lower)
+        for word in _SENIOR_TITLE_WORDS
+    )
+
+
 def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
     target_roles = profile_data.get("target_roles", [])
     if not _title_matches_roles(job.title, target_roles):
+        return False, 0.0
+
+    if _blocked_by_seniority(job.title, profile_data):
+        return False, 0.0
+
+    # Drop jobs whose location clearly belongs to a region the candidate did
+    # not choose; ambiguous/unknown locations continue to the LLM.
+    loc_text = job.location if isinstance(getattr(job, "location", None), str) else ""
+    if location_allowed(loc_text, bool(getattr(job, "is_remote", False)),
+                        normalize_prefs(profile_data)) is False:
         return False, 0.0
 
     excluded = [c.lower() for c in profile_data.get("excluded_companies", [])]
@@ -101,15 +146,25 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
     salary_min = profile_data.get("salary_min")
     education = profile_data.get("education", [])
 
+    projects = profile_data.get("projects", [])
+
     total_years = sum(float(e.get("years", 0) or 0) for e in experience)
 
     exp_lines = "\n".join(
-        f"- {e.get('title', '')} at {e.get('company', '')} ({e.get('years', 'N/A')} years)"
+        f"- {e.get('title') or e.get('role') or ''} at {e.get('company', '')} ({e.get('years', 'N/A')} years)"
+        + (f" — tech: {', '.join(e.get('tech'))}" if e.get("tech") else "")
         for e in experience
     )
 
+    proj_lines = "\n".join(
+        f"- {p.get('name', '')}: {p.get('description', '')}"
+        + (f" — tech: {', '.join(p.get('tech'))}" if p.get("tech") else "")
+        for p in projects
+    ) if projects else ""
+
     edu_lines = "\n".join(
         f"- {e.get('degree', '')} in {e.get('field', '')} from {e.get('school', '')}"
+        + (f" (expected {e.get('end_date')})" if e.get("end_date") else "")
         for e in education
     ) if education else ""
 
@@ -120,6 +175,7 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         extras.append(f"Work preference: {remote_pref}")
     if salary_min:
         extras.append(f"Minimum salary: ${salary_min:,}")
+    extras.append(f"Preferred locations: {describe_prefs(normalize_prefs(profile_data))}")
     extras_str = "\n".join(extras)
 
     system_content = (
@@ -130,8 +186,18 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         "  matched_skills (list of skills from the candidate that appear in the job),\n"
         "  missing_skills (list of skills the job requires that the candidate lacks),\n"
         "  seniority_fit (boolean — true if the job seniority matches the candidate's experience level).\n"
-        "Penalize heavily if required years of experience greatly exceed the candidate's total. "
-        "Reward remote-friendly jobs when the candidate prefers remote. "
+        "Score with this rubric, then sum:\n"
+        "  - Core skill overlap with the job's REQUIRED (not nice-to-have) skills: 0-40\n"
+        "  - Seniority/years fit: 0-25. Judge required years against the candidate's total; "
+        "count substantial personal/academic projects as evidence of ability but not as years. "
+        "A recent or soon-graduating Master's candidate is a fit for entry/new-grad/junior roles "
+        "and roles asking up to ~3 years; heavily penalize roles demanding 5+ years or 'senior/staff/lead' titles.\n"
+        "  - Domain and role-type fit (backend vs mobile vs data etc., industry): 0-20\n"
+        "  - Location/remote/work-authorization compatibility: 0-15. Reward remote-friendly jobs "
+        "when the candidate prefers remote.\n"
+        "Treat transferable skills generously (e.g. strong Java experience for a Kotlin role), "
+        "but never ignore explicit hard requirements stated in the job (clearances, specific "
+        "degrees, must-have technologies).\n"
         "Return ONLY the JSON object, no markdown, no explanation."
     )
 
@@ -141,13 +207,14 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         f"Target roles: {', '.join(roles)}\n"
         f"Skills: {', '.join(skills_flat)}\n"
         f"Experience:\n{exp_lines}\n"
+        + (f"Projects:\n{proj_lines}\n" if proj_lines else "")
         + (f"Education:\n{edu_lines}\n" if edu_lines else "")
         + (f"{extras_str}\n" if extras_str else "")
         + f"\nJob title: {job.title}\n"
         f"Company: {job.company}\n"
         f"Location: {job.location or 'Unknown'} (remote: {job.is_remote})\n"
         f"Experience level: {job.experience_level or 'unknown'}\n"
-        f"Description:\n{(job.description or '')[:3000]}"
+        f"Description:\n{(job.description or '')[:4000]}"
     )
 
     return [
@@ -180,13 +247,20 @@ def _parse_llm_response(content: str) -> dict:
         return {"score": 0, "reasoning": f"Parse error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
 
 
-def chat_completion(messages: list[dict], api_key: str, base_url: str, model: str) -> str:
+def chat_completion(
+    messages: list[dict],
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float = 0.1,
+    max_tokens: int = 512,
+) -> str:
     client = OpenAI(api_key=api_key, base_url=base_url)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.1,
-        max_tokens=512,
+        temperature=temperature,
+        max_tokens=max_tokens,
         timeout=90,
     )
     return response.choices[0].message.content or ""
@@ -204,6 +278,23 @@ def _retry_delays() -> list[int]:
     return [int(interval * 2), 65]
 
 
+def _score_via_fallbacks(messages: list[dict], job) -> dict | None:
+    """Try the secondary providers (Gemini/Anthropic); None if all fail or none set."""
+    for provider in matching_fallbacks():
+        try:
+            raw = call_provider(provider, messages, temperature=0.1, max_tokens=512)
+            logger.info(
+                "llm_score_job: scored job %s via fallback provider %s",
+                getattr(job, "id", "?"), provider.name,
+            )
+            return _parse_llm_response(raw)
+        except Exception as exc:
+            logger.warning(
+                "llm_score_job: fallback provider %s failed: %s", provider.name, exc
+            )
+    return None
+
+
 def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: str) -> dict:
     messages = _build_match_prompt(job, profile_data)
     delays = _retry_delays()
@@ -219,10 +310,21 @@ def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: s
             last_exc = exc
         except Exception as exc:
             logger.error("llm_score_job failed for job %s: %s", getattr(job, "id", "?"), exc)
-            return {"score": 0, "reasoning": f"LLM error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
-    # All retries exhausted on rate limit — propagate so caller can keep job as `new`
-    logger.error("llm_score_job rate-limited after %d attempts for job %s", len(delays) + 1, getattr(job, "id", "?"))
-    raise last_exc
+            last_exc = exc
+            break
+
+    # Primary provider exhausted — try the configured fallback providers before
+    # giving up, so a NIM outage/rate-limit doesn't stall matching.
+    result = _score_via_fallbacks(messages, job)
+    if result is not None:
+        return result
+
+    if isinstance(last_exc, RateLimitError):
+        logger.error("llm_score_job rate-limited after %d attempts for job %s", len(delays) + 1, getattr(job, "id", "?"))
+        raise last_exc
+    # Propagate instead of returning score 0: a transient LLM failure must not
+    # cause the job to be filtered out — the caller keeps it `new` to retry.
+    raise LLMUnavailableError(str(last_exc)) from last_exc
 
 
 def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: str) -> str:
@@ -239,7 +341,7 @@ def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: s
 
     try:
         llm_result = llm_score_job(job, profile_data, api_key, base_url, model)
-    except RateLimitError:
+    except (RateLimitError, LLMUnavailableError):
         # Leave status as `new` so the next cycle retries this job
         return "rate_limited"
 

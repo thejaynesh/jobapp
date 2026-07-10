@@ -132,7 +132,8 @@ def upgrade() -> None:
     patch_json = json.dumps(PROFILE_PATCH)
     conn.execute(
         sa.text(
-            "UPDATE profiles SET data = data || :patch::jsonb "
+            # CAST(...) instead of ::jsonb — text() misparses "::" after a bindparam
+            "UPDATE profiles SET data = data || CAST(:patch AS jsonb) "
             "WHERE id = (SELECT id FROM profiles ORDER BY id LIMIT 1)"
         ),
         {"patch": patch_json},

@@ -3,15 +3,21 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
+from app.config import settings
 from app.services.sources.base import parse_experience_level
 
 logger = logging.getLogger(__name__)
 
-_CUTOFF_HOURS = 25  # slightly over 24h to avoid missing jobs on boundary
+
+def _cutoff() -> datetime:
+    # Align with the fetcher's freshness window: a 25h cutoff hid every existing
+    # opening at newly configured/discovered companies. Dedupe absorbs re-fetches.
+    days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
+    return datetime.now(timezone.utc) - timedelta(days=days)
 
 
 def fetch(company_slugs: list[str]) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=_CUTOFF_HOURS)
+    cutoff = _cutoff()
     jobs = []
     for slug in company_slugs:
         url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"

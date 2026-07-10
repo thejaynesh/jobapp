@@ -21,9 +21,29 @@
     <label class="block text-sm font-medium text-gray-700">Target Roles <span class="text-gray-400 text-xs">(one per line)</span></label>
     <textarea name="target_roles" rows="3" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">{{ profile.target_roles | join('\n') }}</textarea>
   </div>
+  {% set prefs = location_prefs(profile) %}
   <div>
-    <label class="block text-sm font-medium text-gray-700">Target Locations <span class="text-gray-400 text-xs">(comma-separated)</span></label>
-    <input type="text" name="target_locations" value="{{ profile.target_locations | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+    <label class="block text-sm font-medium text-gray-700">Target Locations</label>
+    <div class="mt-2 grid grid-cols-2 gap-1">
+      {% for key, label in region_options %}
+      <label class="flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" name="location_regions" value="{{ key }}"
+               {% if key in prefs.regions %}checked{% endif %}
+               class="rounded border-gray-300">
+        {{ label }}
+      </label>
+      {% endfor %}
+    </div>
+    <label class="mt-2 flex items-center gap-2 text-sm font-medium text-gray-700">
+      <input type="checkbox" name="remote_ok" value="1"
+             {% if prefs.remote_ok %}checked{% endif %}
+             class="rounded border-gray-300">
+      Remote OK
+    </label>
+    <input type="text" name="custom_locations" value="{{ prefs.custom | join(', ') }}"
+           placeholder="Extra cities/regions, comma-separated (e.g. Dubai, Singapore)"
+           class="mt-2 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+    <p class="mt-1 text-xs text-gray-400">Drives which regions are searched and filters out jobs from other regions.</p>
   </div>
   <div>
     <label class="block text-sm font-medium text-gray-700">Excluded Companies <span class="text-gray-400 text-xs">(one per line)</span></label>
