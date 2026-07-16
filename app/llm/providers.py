@@ -101,9 +101,26 @@ def call_provider(
 
 
 def matching_fallbacks() -> list[Provider]:
-    """Providers to try (in order) when the primary matching provider fails."""
+    """
+    Providers to try (in order) when the primary matching provider fails.
+    Matching is high-volume JSON scoring, so the Anthropic entry uses the cheap
+    match model (Haiku by default) rather than the generation model.
+    """
     providers = configured_providers()
-    return [providers[name] for name in MATCHING_PREFERENCE if name in providers]
+    chain = []
+    for name in MATCHING_PREFERENCE:
+        if name not in providers:
+            continue
+        provider = providers[name]
+        if name == "anthropic":
+            provider = Provider(
+                name="anthropic",
+                api_key=provider.api_key,
+                model=getattr(settings, "ANTHROPIC_MATCH_MODEL", "claude-haiku-4-5")
+                or provider.model,
+            )
+        chain.append(provider)
+    return chain
 
 
 def generation_chat(

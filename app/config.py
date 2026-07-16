@@ -18,10 +18,17 @@ class Settings(BaseSettings):
     # prefers quality-first (Anthropic -> Gemini -> NIM) and job matching uses
     # them as failover (NIM -> Gemini -> Anthropic).
     ANTHROPIC_API_KEY: str = ""
+    # Generation model (resumes/cover letters — the user-facing writing).
+    # claude-opus-4-8: best quality, ~$0.11/application; claude-sonnet-5: ~$0.04.
     ANTHROPIC_MODEL: str = "claude-opus-4-8"
+    # Matching-failover model (high-volume JSON scoring — cheap by design).
+    ANTHROPIC_MATCH_MODEL: str = "claude-haiku-4-5"
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    # Hard ceiling on PAID (non-NIM) matching calls per cycle. When NIM is down
+    # and the cap is hit, remaining jobs simply stay `new` and retry next cycle.
+    MAX_PAID_MATCH_CALLS_PER_CYCLE: int = 150
 
     HUNTER_IO_API_KEY: str = ""
 

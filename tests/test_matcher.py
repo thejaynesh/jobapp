@@ -687,3 +687,45 @@ class TestLocationPrefilter:
         assert "Preferred locations" in full_text
         assert "United States" in full_text
         assert "United Kingdom" in full_text
+
+
+# ---------------------------------------------------------------------------
+# Paid-call budget for matching failover
+# ---------------------------------------------------------------------------
+
+class TestPaidCallBudget:
+    def _fallback(self):
+        from app.llm.providers import Provider
+        return Provider(name="gemini", api_key="gk", model="gemini-2.5-flash", base_url="http://g")
+
+    def test_budget_exhausted_skips_paid_fallback(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job, LLMUnavailableError
+        budget = {"paid_calls": 999}
+        with patch("app.services.matcher.chat_completion", side_effect=Exception("nim down")):
+            with patch("app.services.matcher.matching_fallbacks", return_value=[self._fallback()]):
+                with patch("app.services.matcher.call_provider") as mock_cp:
+                    with pytest.raises(LLMUnavailableError):
+                        llm_score_job(mock_job, profile_data, "k", "u", "m", budget=budget)
+        mock_cp.assert_not_called()
+
+    def test_budget_counts_paid_calls(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job
+        raw = json.dumps({"score": 70, "reasoning": "ok", "matched_skills": [],
+                          "missing_skills": [], "seniority_fit": True})
+        budget = {"paid_calls": 0}
+        with patch("app.services.matcher.chat_completion", side_effect=Exception("nim down")):
+            with patch("app.services.matcher.matching_fallbacks", return_value=[self._fallback()]):
+                with patch("app.services.matcher.call_provider", return_value=raw):
+                    result = llm_score_job(mock_job, profile_data, "k", "u", "m", budget=budget)
+        assert result["score"] == 70
+        assert budget["paid_calls"] == 1
+
+    def test_no_budget_means_no_cap(self, mock_job, profile_data):
+        from app.services.matcher import llm_score_job
+        raw = json.dumps({"score": 60, "reasoning": "ok", "matched_skills": [],
+                          "missing_skills": [], "seniority_fit": True})
+        with patch("app.services.matcher.chat_completion", side_effect=Exception("nim down")):
+            with patch("app.services.matcher.matching_fallbacks", return_value=[self._fallback()]):
+                with patch("app.services.matcher.call_provider", return_value=raw):
+                    result = llm_score_job(mock_job, profile_data, "k", "u", "m")
+        assert result["score"] == 60

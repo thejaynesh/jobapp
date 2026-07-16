@@ -278,14 +278,27 @@ def _retry_delays() -> list[int]:
     return [int(interval * 2), 65]
 
 
-def _score_via_fallbacks(messages: list[dict], job) -> dict | None:
-    """Try the secondary providers (Gemini/Anthropic); None if all fail or none set."""
+def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) -> dict | None:
+    """
+    Try the secondary (paid) providers; None if all fail, none are set, or the
+    per-cycle paid-call budget is exhausted. `budget` is a mutable counter dict
+    shared across one matching cycle: {"paid_calls": int}.
+    """
+    cap = getattr(settings, "MAX_PAID_MATCH_CALLS_PER_CYCLE", 150)
     for provider in matching_fallbacks():
+        if budget is not None and cap and budget.get("paid_calls", 0) >= cap:
+            logger.warning(
+                "llm_score_job: paid-call budget (%d) exhausted this cycle; "
+                "leaving job %s for the next cycle", cap, getattr(job, "id", "?"),
+            )
+            return None
         try:
+            if budget is not None:
+                budget["paid_calls"] = budget.get("paid_calls", 0) + 1
             raw = call_provider(provider, messages, temperature=0.1, max_tokens=512)
             logger.info(
-                "llm_score_job: scored job %s via fallback provider %s",
-                getattr(job, "id", "?"), provider.name,
+                "llm_score_job: scored job %s via fallback provider %s (%s)",
+                getattr(job, "id", "?"), provider.name, provider.model,
             )
             return _parse_llm_response(raw)
         except Exception as exc:
@@ -295,7 +308,10 @@ def _score_via_fallbacks(messages: list[dict], job) -> dict | None:
     return None
 
 
-def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: str) -> dict:
+def llm_score_job(
+    job, profile_data: dict, api_key: str, base_url: str, model: str,
+    budget: dict | None = None,
+) -> dict:
     messages = _build_match_prompt(job, profile_data)
     delays = _retry_delays()
     last_exc: Exception | None = None
@@ -315,7 +331,7 @@ def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: s
 
     # Primary provider exhausted — try the configured fallback providers before
     # giving up, so a NIM outage/rate-limit doesn't stall matching.
-    result = _score_via_fallbacks(messages, job)
+    result = _score_via_fallbacks(messages, job, budget)
     if result is not None:
         return result
 
@@ -327,7 +343,10 @@ def llm_score_job(job, profile_data: dict, api_key: str, base_url: str, model: s
     raise LLMUnavailableError(str(last_exc)) from last_exc
 
 
-def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: str) -> str:
+def match_job(
+    db, job, profile_data: dict, api_key: str, base_url: str, model: str,
+    budget: dict | None = None,
+) -> str:
     """Returns 'matched', 'filtered_out', or 'rate_limited'."""
     passes, kw_score = keyword_filter(job, profile_data)
 
@@ -340,7 +359,7 @@ def match_job(db, job, profile_data: dict, api_key: str, base_url: str, model: s
     job.keyword_score = round(kw_score, 4)
 
     try:
-        llm_result = llm_score_job(job, profile_data, api_key, base_url, model)
+        llm_result = llm_score_job(job, profile_data, api_key, base_url, model, budget=budget)
     except (RateLimitError, LLMUnavailableError):
         # Leave status as `new` so the next cycle retries this job
         return "rate_limited"
@@ -383,10 +402,12 @@ def match_all_new_jobs(db) -> dict[str, int]:
     filtered_out = 0
     rate_limited = 0
     errors = 0
+    # One shared paid-call budget for the whole cycle (see _score_via_fallbacks).
+    budget = {"paid_calls": 0}
 
     for job in new_jobs:
         try:
-            result = match_job(db, job, profile_data, api_key, base_url, model)
+            result = match_job(db, job, profile_data, api_key, base_url, model, budget=budget)
             db.commit()
             processed += 1
             if result == "matched":
@@ -404,7 +425,8 @@ def match_all_new_jobs(db) -> dict[str, int]:
             errors += 1
 
     logger.info(
-        "match_all_new_jobs done — processed=%d matched=%d filtered_out=%d rate_limited=%d errors=%d",
-        processed, matched, filtered_out, rate_limited, errors,
+        "match_all_new_jobs done — processed=%d matched=%d filtered_out=%d rate_limited=%d errors=%d paid_llm_calls=%d",
+        processed, matched, filtered_out, rate_limited, errors, budget["paid_calls"],
     )
-    return {"processed": processed, "matched": matched, "filtered_out": filtered_out, "rate_limited": rate_limited, "errors": errors}
+    return {"processed": processed, "matched": matched, "filtered_out": filtered_out,
+            "rate_limited": rate_limited, "errors": errors, "paid_llm_calls": budget["paid_calls"]}

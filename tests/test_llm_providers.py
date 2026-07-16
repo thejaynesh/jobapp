@@ -127,3 +127,20 @@ class TestCallProvider:
         _, kwargs = mock_client.chat.completions.create.call_args
         assert kwargs["temperature"] == 0.3
         assert kwargs["max_tokens"] == 256
+
+
+class TestMatchingModelSplit:
+    def test_anthropic_matching_uses_cheap_model(self):
+        with _settings(anthropic_key="ak", gemini_key="gk"):
+            with patch("app.llm.providers.settings.ANTHROPIC_MATCH_MODEL",
+                       "claude-haiku-4-5", create=True):
+                chain = matching_fallbacks()
+        by_name = {p.name: p for p in chain}
+        assert by_name["anthropic"].model == "claude-haiku-4-5"
+        assert by_name["gemini"].model == "gemini-2.5-flash"
+
+    def test_generation_still_uses_generation_model(self):
+        with _settings(anthropic_key="ak"):
+            with patch("app.llm.providers.call_provider", return_value="out") as mock_call:
+                generation_chat(_MESSAGES, "nk", "http://nim", "llama")
+        assert mock_call.call_args[0][0].model == "claude-opus-4-8"
