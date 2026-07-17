@@ -865,6 +865,14 @@ class TestOnePageRetry:
                 side_effect=[(Path("/fake/path.pdf"), p) for p in pages_sequence])),
             "compile": stack.enter_context(patch(
                 "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf"))),
+            "selection": stack.enter_context(patch(
+                "app.services.doc_generator.tailor_resume_selection",
+                side_effect=lambda profile_data, *a, **k: {
+                    "experience": profile_data.get("experience") or [],
+                    "projects": profile_data.get("projects") or [],
+                    "skills": profile_data.get("skills") or {},
+                },
+            )),
         }
         return stack, mocks
 
@@ -877,12 +885,13 @@ class TestOnePageRetry:
             "narrative": {"summary": "Engineer."},
             "skills": {"languages": ["Python"]},
             "experience": [
-                {"id": f"e{i}", "company": f"Co{i}", "role": "SWE", "bullets": ["Did work"]}
+                {"id": f"e{i}", "company": f"Co{i}", "role": "SWE",
+                 "bullets": [f"Did work {j}" for j in range(5)]}
                 for i in range(3)
             ],
             "education": [],
             "projects": [
-                {"id": f"p{i}", "name": f"Proj{i}", "bullets": ["Built it"]}
+                {"id": f"p{i}", "name": f"Proj{i}", "bullets": ["Built it"] * 3}
                 for i in range(2)
             ],
         })
@@ -896,10 +905,28 @@ class TestOnePageRetry:
         with stack:
             generate_documents(db, app)
         assert mocks["compile_pages"].call_count == 2
-        # First render is the full resume, second the tightened one
+        # First render is the full resume, second the tightened one:
+        # trim level 1 caps bullets (3/experience, 2/project) but keeps all items.
+        full_ctx = mocks["render"].call_args_list[0][0][1]
+        assert all(len(e["bullets"]) == 5 for e in full_ctx["experience"])
         tight_ctx = mocks["render"].call_args_list[1][0][1]
-        assert len(tight_ctx["experience"]) <= 2
-        assert len(tight_ctx["projects"]) <= 1
+        assert len(tight_ctx["experience"]) == 3
+        assert all(len(e["bullets"]) <= 3 for e in tight_ctx["experience"])
+        assert all(len(p["bullets"]) <= 2 for p in tight_ctx["projects"])
+
+    def test_deep_spill_reaches_most_aggressive_trim(self):
+        from app.services.doc_generator import generate_documents
+        db = self._db()
+        app = _make_app()
+        stack, mocks = self._patches(pages_sequence=[2, 2, 2, 2, 2])
+        with stack:
+            generate_documents(db, app)
+        assert mocks["compile_pages"].call_count == 5
+        # Level 4: only the top 2 experiences and 1 project survive, no summary.
+        last_ctx = mocks["render"].call_args_list[4][0][1]
+        assert len(last_ctx["experience"]) <= 2
+        assert len(last_ctx["projects"]) <= 1
+        assert not last_ctx.get("narrative_summary")
 
     def test_no_retry_when_one_page(self):
         from app.services.doc_generator import generate_documents

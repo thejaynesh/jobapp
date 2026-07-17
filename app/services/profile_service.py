@@ -155,8 +155,15 @@ PROFILE_SEED: dict = {
         "Backend Engineer",
         "Android Engineer",
     ],
-    "location_preferences": {"regions": ["usa", "canada", "uk"], "remote_ok": True, "custom": []},
-    "target_locations": ["United States", "Canada", "London, United Kingdom", "Remote"],
+    "location_preferences": {
+        "regions": ["usa", "canada", "uk", "europe", "australia", "new_zealand"],
+        "remote_ok": True,
+        "custom": [],
+    },
+    "target_locations": [
+        "United States", "Canada", "London, United Kingdom", "Europe",
+        "Sydney, Australia", "Auckland, New Zealand", "Remote",
+    ],
     "min_match_score": 65,
     "narrative": {
         "answers": [],

@@ -30,7 +30,7 @@ REGIONS: dict[str, dict] = {
     "usa": {
         "label": "United States",
         "search": ["United States"],
-        "adzuna": "us",
+        "adzuna": ["us"],
         "jobicy_geo": "usa",
         "keywords": [
             "united states", "usa", "u.s.", "america", "new york", "nyc",
@@ -45,7 +45,7 @@ REGIONS: dict[str, dict] = {
     "canada": {
         "label": "Canada",
         "search": ["Canada"],
-        "adzuna": "ca",
+        "adzuna": ["ca"],
         "jobicy_geo": "canada",
         "keywords": [
             "canada", "toronto", "vancouver", "montreal", "ottawa", "calgary",
@@ -57,7 +57,7 @@ REGIONS: dict[str, dict] = {
     "uk": {
         "label": "United Kingdom",
         "search": ["London, United Kingdom", "United Kingdom"],
-        "adzuna": "gb",
+        "adzuna": ["gb"],
         "jobicy_geo": "uk",
         "keywords": [
             "united kingdom", "london", "england", "scotland", "manchester",
@@ -66,9 +66,10 @@ REGIONS: dict[str, dict] = {
         "abbrevs": ["UK"],
     },
     "europe": {
-        "label": "Europe (EU)",
-        "search": ["Berlin, Germany", "Amsterdam, Netherlands"],
-        "adzuna": "de",
+        "label": "Europe",
+        "search": ["Europe", "Berlin, Germany", "Amsterdam, Netherlands"],
+        # Adzuna is per-country in Europe; query the largest tech markets.
+        "adzuna": ["de", "nl", "fr", "es", "it", "pl"],
         "jobicy_geo": "europe",
         "keywords": [
             "germany", "berlin", "munich", "netherlands", "amsterdam",
@@ -76,13 +77,16 @@ REGIONS: dict[str, dict] = {
             "barcelona", "portugal", "lisbon", "poland", "warsaw", "krakow",
             "sweden", "stockholm", "denmark", "copenhagen", "switzerland",
             "zurich", "austria", "vienna", "belgium", "brussels", "europe",
+            "italy", "rome", "milan", "czech", "prague", "finland", "helsinki",
+            "norway", "oslo", "romania", "bucharest", "hungary", "budapest",
+            "greece", "athens", "estonia", "tallinn", "luxembourg",
         ],
-        "abbrevs": ["EU"],
+        "abbrevs": ["EU", "EMEA"],
     },
     "india": {
         "label": "India",
         "search": ["Bengaluru, India", "India"],
-        "adzuna": "in",
+        "adzuna": ["in"],
         "jobicy_geo": "india",
         "keywords": [
             "india", "bangalore", "bengaluru", "hyderabad", "mumbai", "pune",
@@ -93,10 +97,21 @@ REGIONS: dict[str, dict] = {
     "australia": {
         "label": "Australia",
         "search": ["Sydney, Australia", "Australia"],
-        "adzuna": "au",
+        "adzuna": ["au"],
         "jobicy_geo": "australia",
-        "keywords": ["australia", "sydney", "melbourne", "brisbane", "perth"],
+        "keywords": [
+            "australia", "sydney", "melbourne", "brisbane", "perth",
+            "canberra", "adelaide",
+        ],
         "abbrevs": [],
+    },
+    "new_zealand": {
+        "label": "New Zealand",
+        "search": ["Auckland, New Zealand", "New Zealand"],
+        "adzuna": ["nz"],
+        "jobicy_geo": "new-zealand",
+        "keywords": ["new zealand", "auckland", "wellington", "christchurch"],
+        "abbrevs": ["NZ"],
     },
 }
 
@@ -114,7 +129,7 @@ _LEGACY_REGION_NAMES = {
      "united kingdom": "uk", "london": "uk", "canada": "canada",
      "europe": "europe", "india": "india", "australia": "australia"}
 
-MAX_SEARCH_LOCATIONS = 6  # bounds query fan-out per search-based source
+MAX_SEARCH_LOCATIONS = 8  # bounds query fan-out per search-based source
 
 
 def normalize_prefs(profile_data: dict) -> dict:
@@ -149,28 +164,39 @@ def normalize_prefs(profile_data: dict) -> dict:
 
 
 def search_locations(prefs: dict) -> list[str]:
-    """Well-formed location strings for search-based job sources."""
+    """
+    Well-formed location strings for search-based job sources. Every selected
+    region contributes its primary search term first, so with many regions the
+    cap trims secondary terms — never a whole region.
+    """
     result: list[str] = []
-    for region in prefs.get("regions") or []:
-        for term in REGIONS[region]["search"]:
-            if term not in result:
-                result.append(term)
+
+    def _add(term: str) -> None:
+        if term and term not in result and len(result) < MAX_SEARCH_LOCATIONS:
+            result.append(term)
+
+    regions = prefs.get("regions") or []
+    for region in regions:                      # primaries first
+        _add(REGIONS[region]["search"][0])
     for entry in prefs.get("custom") or []:
-        if entry not in result:
-            result.append(entry)
-    if prefs.get("remote_ok") and "Remote" not in result:
-        result.append("Remote")
+        _add(entry)
+    if prefs.get("remote_ok"):
+        _add("Remote")
+    for region in regions:                      # secondaries fill leftover room
+        for term in REGIONS[region]["search"][1:]:
+            _add(term)
+
     if not result:
         result = ["Remote", "United States"]
-    return result[:MAX_SEARCH_LOCATIONS]
+    return result
 
 
 def adzuna_countries(prefs: dict) -> list[str]:
-    countries = []
+    countries: list[str] = []
     for region in prefs.get("regions") or []:
-        code = REGIONS[region].get("adzuna")
-        if code and code not in countries:
-            countries.append(code)
+        for code in REGIONS[region].get("adzuna") or []:
+            if code not in countries:
+                countries.append(code)
     return countries or ["us"]
 
 

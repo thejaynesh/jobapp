@@ -13,7 +13,10 @@ _LOCALE_HINTS = [
     ("en_GB", ("united kingdom", "london", "uk", "england")),
     ("en_CA", ("canada", "toronto", "vancouver", "montreal")),
     ("en_AU", ("australia", "sydney", "melbourne")),
+    ("en_NZ", ("new zealand", "auckland", "wellington")),
     ("en_IN", ("india", "bengaluru", "bangalore", "mumbai")),
+    ("de_DE", ("germany", "berlin", "munich")),
+    ("nl_NL", ("netherlands", "amsterdam")),
 ]
 
 

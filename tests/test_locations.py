@@ -48,7 +48,14 @@ class TestSearchLocations:
     def test_custom_included_and_capped(self):
         locs = search_locations(_prefs(regions=["usa", "uk", "europe"],
                                        custom=["Dubai", "Singapore", "Tokyo"]))
-        assert len(locs) <= 6
+        assert len(locs) <= 8
+
+    def test_every_region_gets_a_primary_search_even_at_cap(self):
+        regions = ["usa", "canada", "uk", "europe", "india", "australia", "new_zealand"]
+        locs = search_locations(_prefs(regions=regions))
+        from app.services.locations import REGIONS
+        for r in regions:
+            assert REGIONS[r]["search"][0] in locs, r
 
     def test_fallback_when_empty(self):
         assert search_locations(_prefs(remote_ok=False)) == ["Remote", "United States"]
@@ -59,8 +66,13 @@ class TestAdapterTargeting:
         assert adzuna_countries(_prefs(regions=["usa", "canada", "uk"])) == ["us", "ca", "gb"]
         assert adzuna_countries(_prefs()) == ["us"]
 
+    def test_adzuna_europe_expands_to_multiple_countries(self):
+        countries = adzuna_countries(_prefs(regions=["europe", "new_zealand"]))
+        assert "de" in countries and "nl" in countries and "nz" in countries
+
     def test_jobicy_geos(self):
         assert jobicy_geos(_prefs(regions=["usa", "uk"])) == ["usa", "uk"]
+        assert jobicy_geos(_prefs(regions=["new_zealand"])) == ["new-zealand"]
         assert jobicy_geos(_prefs()) == [None]
 
 
@@ -108,3 +120,18 @@ class TestDescribePrefs:
 
     def test_no_restriction(self):
         assert describe_prefs(_prefs(remote_ok=False)) == "No restriction"
+
+
+class TestNewRegions:
+    def test_nz_city_allowed(self):
+        assert location_allowed("Auckland", False, _prefs(regions=["new_zealand"])) is True
+
+    def test_nz_abbrev_allowed(self):
+        assert location_allowed("Wellington, NZ", False, _prefs(regions=["new_zealand"])) is True
+
+    def test_european_cities_allowed(self):
+        for loc in ("Berlin, Germany", "Milan, Italy", "Prague", "Helsinki, Finland"):
+            assert location_allowed(loc, False, _prefs(regions=["europe"])) is True, loc
+
+    def test_nz_rejected_when_not_selected(self):
+        assert location_allowed("Auckland, New Zealand", False, _prefs(regions=["usa"])) is False
