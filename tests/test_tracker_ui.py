@@ -23,6 +23,7 @@ def _make_job(status=JobStatus.matched, title="Backend Engineer", company="Acme"
     job.missing_skills = ["Rust"]
     job.source = "adzuna"
     job.fetched_at = None
+    job.applications = []
     return job
 
 
@@ -86,6 +87,44 @@ class TestJobsRouter:
         response = client.post(f"/jobs/{job.id}/override")
         assert response.status_code == 200
         assert job.status == JobStatus.matched
+
+    def test_matched_filter_includes_docs_generated(self):
+        from app.routers.jobs import _STATUS_FILTERS
+        assert JobStatus.docs_generated in _STATUS_FILTERS["matched"]
+        assert JobStatus.matched in _STATUS_FILTERS["matched"]
+
+    def test_matched_no_docs_filter_excludes_docs_generated(self):
+        from app.routers.jobs import _STATUS_FILTERS
+        assert _STATUS_FILTERS["matched_no_docs"] == [JobStatus.matched]
+
+    def test_get_jobs_ignores_unknown_status(self):
+        mock_db = MagicMock()
+        self._mock_jobs_query(mock_db, [])
+        client = self._make_client(mock_db)
+        response = client.get("/jobs?status=new")
+        assert response.status_code == 200
+
+    def test_override_docs_generated_to_filtered(self):
+        job = _make_job(status=JobStatus.docs_generated)
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = job
+        client = self._make_client(mock_db)
+        response = client.post(f"/jobs/{job.id}/override")
+        assert response.status_code == 200
+        assert job.status == JobStatus.filtered_out
+
+    def test_override_restores_docs_generated_when_docs_exist(self):
+        job = _make_job(status=JobStatus.filtered_out)
+        app_obj = MagicMock()
+        app_obj.generation_status = "done"
+        app_obj.documents = [MagicMock()]
+        job.applications = [app_obj]
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = job
+        client = self._make_client(mock_db)
+        response = client.post(f"/jobs/{job.id}/override")
+        assert response.status_code == 200
+        assert job.status == JobStatus.docs_generated
 
     def test_override_returns_404_for_missing_job(self):
         mock_db = MagicMock()

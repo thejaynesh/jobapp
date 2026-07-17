@@ -17,6 +17,13 @@ def match_jobs() -> dict[str, Any]:
         matched_jobs = db.query(Job).filter(Job.status == JobStatus.matched).all()
         for job in matched_jobs:
             for app in job.applications:
+                # Only queue idle applications: "generating" is already in
+                # flight, and "failed" waits for a manual retry — re-queueing
+                # either every cycle duplicates work and burns LLM budget.
+                if app.generation_status != "idle":
+                    continue
+                app.generation_status = "generating"
+                db.commit()
                 from app.tasks.generate import generate_docs
                 generate_docs.delay(str(app.id))
         logger.info(

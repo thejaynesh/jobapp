@@ -16,9 +16,10 @@
 
     <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
       <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
-      <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
-      <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
+      <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched (incl. docs generated)</option>
+      <option value="matched_no_docs" {% if status_filter == "matched_no_docs" %}selected{% endif %}>Matched — no docs yet</option>
       <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
+      <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
     </select>
 
     <select name="source" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -62,7 +63,7 @@
 
     <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
-    {% if status_filter or q or source_filter or remote_filter or min_score_filter %}
+    {% if status_filter or q or source_filter or remote_filter or min_score_filter or exp_level_filter %}
     <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
     {% endif %}
   </div>
