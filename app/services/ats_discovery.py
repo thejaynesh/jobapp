@@ -28,13 +28,34 @@ DISCOVERY_CAPS = {
 def _discovery_cap(ats: str) -> int:
     return DISCOVERY_CAPS.get(ats, MAX_SLUGS_PER_ATS)
 
-ATS_PATTERNS: dict[str, re.Pattern] = {
-    "greenhouse": re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
-    "lever": re.compile(r"jobs\.lever\.co/([A-Za-z0-9_-]{2,})", re.I),
-    "ashby": re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.\-]{2,})", re.I),
-    "smartrecruiters": re.compile(r"jobs\.smartrecruiters\.com/([A-Za-z0-9_-]{2,})", re.I),
-    "workable": re.compile(r"apply\.workable\.com/(?:api/)?([A-Za-z0-9-]{2,})", re.I),
-    "recruitee": re.compile(r"https?://([A-Za-z0-9-]{2,})\.recruitee\.com", re.I),
+# Several shapes per ATS: the public board URL people link to, the embed widget
+# a company drops into its own careers page, and the API endpoint that widget
+# calls. Careers pages very often only ever reveal the latter two.
+ATS_PATTERNS: dict[str, list[re.Pattern]] = {
+    "greenhouse": [
+        # Embed widget: boards.greenhouse.io/embed/job_board?for=<slug>
+        re.compile(r"greenhouse\.io/embed/job_board[^\"'\s]*[?&]for=([A-Za-z0-9_-]{2,})", re.I),
+        re.compile(r"greenhouse\.io/(?:v1/)?boards/([A-Za-z0-9_-]{2,})", re.I),
+        re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
+    ],
+    "lever": [
+        re.compile(r"jobs\.lever\.co/([A-Za-z0-9_-]{2,})", re.I),
+        re.compile(r"api\.lever\.co/v0/postings/([A-Za-z0-9_-]{2,})", re.I),
+    ],
+    "ashby": [
+        re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.\-]{2,})", re.I),
+        re.compile(r"ashbyhq\.com/posting-api/job-board/([A-Za-z0-9_.\-]{2,})", re.I),
+    ],
+    "smartrecruiters": [
+        re.compile(r"jobs\.smartrecruiters\.com/([A-Za-z0-9_-]{2,})", re.I),
+        re.compile(r"api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9_-]{2,})", re.I),
+    ],
+    "workable": [
+        re.compile(r"apply\.workable\.com/(?:api/)?([A-Za-z0-9-]{2,})", re.I),
+    ],
+    "recruitee": [
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.recruitee\.com", re.I),
+    ],
 }
 
 # Workday boards need a tenant:host:site triple, extracted from URLs like
@@ -58,15 +79,39 @@ def _extract_slugs(text: str) -> dict[str, set[str]]:
     found: dict[str, set[str]] = {}
     if not text:
         return found
-    for ats, pattern in ATS_PATTERNS.items():
-        for match in pattern.finditer(text):
-            slug = match.group(1).lower().rstrip(".")
-            if slug and slug not in _SLUG_BLOCKLIST:
-                found.setdefault(ats, set()).add(slug)
+    for ats, patterns in ATS_PATTERNS.items():
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                slug = match.group(1).lower().rstrip(".")
+                if slug and slug not in _SLUG_BLOCKLIST:
+                    found.setdefault(ats, set()).add(slug)
     for match in _WORKDAY_RE.finditer(text):
         tenant, host, site = match.group(1).lower(), match.group(2).lower(), match.group(3)
         if site.lower() not in _SLUG_BLOCKLIST:
             found.setdefault("workday", set()).add(f"{tenant}:{host}:{site}")
+    return found
+
+
+def extract_slugs(text: str) -> dict[str, set[str]]:
+    """Public wrapper: every ATS company slug referenced anywhere in `text`."""
+    return _extract_slugs(text)
+
+
+def discover_from_jobs(raw_jobs: list[dict]) -> dict[str, set[str]]:
+    """
+    ATS slugs referenced by a batch of fetched jobs, uncapped and unmerged —
+    for callers that persist boards themselves (see services.company_boards).
+    Scans each job's listing URL, its resolved apply URL, and its description.
+    """
+    found: dict[str, set[str]] = {}
+    for job in raw_jobs:
+        if job.get("source") in ALL_ATS:
+            continue  # a job fetched from an ATS shouldn't rediscover itself
+        text = "\n".join(filter(None, (
+            job.get("url"), job.get("apply_url"), job.get("description"),
+        )))
+        for ats, slugs in _extract_slugs(text).items():
+            found.setdefault(ats, set()).update(slugs)
     return found
 
 
@@ -86,7 +131,9 @@ def discover_ats_slugs(raw_jobs: list[dict], existing: dict | None = None) -> di
         # A job already fetched from an ATS shouldn't rediscover itself.
         if job.get("source") in ALL_ATS:
             continue
-        text = f"{job.get('url') or ''}\n{job.get('description') or ''}"
+        text = "\n".join(filter(None, (
+            job.get("url"), job.get("apply_url"), job.get("description"),
+        )))
         new_count += _merge_found(merged, _extract_slugs(text))
 
     if new_count:
@@ -160,16 +207,27 @@ ATS_CONFIG_FIELDS = {
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
-# many slugs; per-company-expensive ATSes get tighter totals.
-MAX_TOTAL_SLUGS_PER_ATS = 120
+# many slugs; per-company-expensive ATSes get tighter totals. Board fetches run
+# concurrently (see sources.base.fetch_boards_concurrently), so these are far
+# more generous than when each slug cost a serial round trip.
+MAX_TOTAL_SLUGS_PER_ATS = 300
 TOTAL_SLUG_CAPS = {
-    "workday": 20,
-    "smartrecruiters": 40,
+    "workday": 30,          # searches × per-job detail calls per tenant
+    "smartrecruiters": 80,  # per-posting detail calls per company
 }
 
 
 def _total_cap(ats: str) -> int:
-    return TOTAL_SLUG_CAPS.get(ats, MAX_TOTAL_SLUGS_PER_ATS)
+    from app.config import settings
+
+    default = getattr(settings, "ATS_MAX_SLUGS_PER_ATS", MAX_TOTAL_SLUGS_PER_ATS)
+    capped = TOTAL_SLUG_CAPS.get(ats)
+    return min(capped, default) if capped is not None else default
+
+
+def slug_caps() -> dict[str, int]:
+    """The per-cycle slug budget for each ATS."""
+    return {ats: _total_cap(ats) for ats in ATS_CONFIG_FIELDS}
 
 
 def configured_ats_slugs(cfg) -> dict[str, list[str]]:
@@ -186,10 +244,12 @@ def build_ats_slugs(
     cfg,
     discovered: dict | None = None,
     validated_configured: dict | None = None,
+    registry: dict | None = None,
 ) -> dict[str, list[str]]:
     """
     Assemble the final slug list per ATS for one fetch cycle:
-    configured (validated when available) → verified seed companies → discovered,
+    configured (validated when available) → verified seed companies → registry
+    boards (ranked by what they've actually yielded) → legacy discovered blob,
     deduplicated and capped.
     """
     from app.services.ats_seeds import SEED_ATS_SLUGS
@@ -208,6 +268,7 @@ def build_ats_slugs(
         layers = [
             configured.get(ats, []),
             SEED_ATS_SLUGS.get(ats, []) if use_seeds else [],
+            (registry or {}).get(ats, []) or [],
             (discovered or {}).get(ats, []) or [],
         ]
         for layer in layers:

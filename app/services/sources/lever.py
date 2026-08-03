@@ -4,7 +4,11 @@ from datetime import datetime, timezone, timedelta
 import httpx
 
 from app.config import settings
-from app.services.sources.base import parse_experience_level
+from app.services.sources.base import (
+    board_workers,
+    fetch_boards_concurrently,
+    parse_experience_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -14,17 +18,14 @@ def fetch(company_slugs: list[str]) -> list[dict]:
     # existing opening at newly configured/discovered companies).
     days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
     cutoff_ms = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000
-    jobs = []
-    for slug in company_slugs:
-        url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
-        try:
-            resp = httpx.get(url, timeout=15)
-            resp.raise_for_status()
-            items = resp.json()
-        except Exception as exc:
-            logger.error("Lever fetch error for slug '%s': %s", slug, exc)
-            continue
 
+    def _fetch_one(slug: str) -> list[dict]:
+        url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+        resp = httpx.get(url, timeout=15)
+        resp.raise_for_status()
+        items = resp.json()
+
+        jobs = []
         for item in items:
             created_at = item.get("createdAt", 0)
             if created_at and created_at < cutoff_ms:
@@ -44,4 +45,6 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, desc),
                 "posted_at": created_at / 1000 if created_at else None,
             })
-    return jobs
+        return jobs
+
+    return fetch_boards_concurrently(company_slugs, _fetch_one, "Lever", board_workers())

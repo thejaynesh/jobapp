@@ -2,7 +2,11 @@ import logging
 
 import httpx
 
-from app.services.sources.base import parse_experience_level
+from app.services.sources.base import (
+    board_workers,
+    fetch_boards_concurrently,
+    parse_experience_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11,16 +15,12 @@ _API = "https://apply.workable.com/api/v1/widget/accounts/{slug}?details=true"
 
 def fetch(company_slugs: list[str]) -> list[dict]:
     """Fetch jobs from Workable's public widget API (no key; details=true includes full JDs)."""
-    jobs: list[dict] = []
-    for slug in company_slugs:
-        try:
-            resp = httpx.get(_API.format(slug=slug), timeout=15, follow_redirects=True)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.error("Workable fetch error for slug '%s': %s", slug, exc)
-            continue
+    def _fetch_one(slug: str) -> list[dict]:
+        resp = httpx.get(_API.format(slug=slug), timeout=15, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
 
+        jobs = []
         company = (data.get("name") or slug).strip()
         for item in data.get("jobs", []):
             title = (item.get("title") or "").strip()
@@ -41,5 +41,6 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, desc),
                 "posted_at": item.get("published_on"),
             })
-    logger.info("Workable: %d jobs across %d companies", len(jobs), len(company_slugs))
-    return jobs
+        return jobs
+
+    return fetch_boards_concurrently(company_slugs, _fetch_one, "Workable", board_workers())

@@ -30,6 +30,9 @@ class Job(Base):
     location: Mapped[str | None] = mapped_column(String, nullable=True)
     is_remote: Mapped[bool] = mapped_column(Boolean, default=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
+    # The employer's own apply link, when `url` was an aggregator redirect page
+    # that we followed through to the company's ATS / careers site.
+    apply_url: Mapped[str | None] = mapped_column(String, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     experience_level: Mapped[str | None] = mapped_column(String, nullable=True)
     keyword_score: Mapped[float | None] = mapped_column(Float, nullable=True)

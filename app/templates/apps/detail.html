@@ -40,6 +40,13 @@
       {% else %}bg-gray-100 text-gray-500{% endif %}">
       {{ app.status.value | replace("_", " ") | title }}
     </span>
+    {% if app.job.apply_url %}
+    <a href="{{ app.job.apply_url }}" target="_blank"
+       title="Employer's own apply page, resolved from the aggregator link"
+       class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700 whitespace-nowrap">
+      Apply direct &nearr;
+    </a>
+    {% endif %}
     <a href="{{ app.job.url }}" target="_blank"
        class="bg-gray-800 text-white px-4 py-1.5 rounded text-sm hover:bg-gray-700 whitespace-nowrap">
       Job link &nearr;

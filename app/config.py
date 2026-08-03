@@ -52,6 +52,32 @@ class Settings(BaseSettings):
     ATS_SEED_COMPANIES: bool = True  # include the verified seed list of known tech companies
     ATS_SLUG_VALIDATION: bool = True  # validate/auto-fix configured slugs against the ATS APIs
     ATS_LIST_HARVEST: bool = True  # harvest company slugs from community job lists
+    ATS_BOARD_REGISTRY: bool = True  # persist discovered boards and rank them by yield
+    ATS_MAX_SLUGS_PER_ATS: int = 300  # per-cycle slug budget per ATS (tighter caps still apply)
+    ATS_BOARD_FETCH_WORKERS: int = 8  # concurrent per-company board fetches
+    ATS_BOARD_MAX_EMPTY_CYCLES: int = 8  # retire a discovered board after this many silent cycles
+
+    # Aggregators (Adzuna, Jooble, Careerjet) link to their own redirect page
+    # rather than the employer. Following those once per new posting yields the
+    # real apply URL and exposes the company's ATS board to discovery.
+    RESOLVE_APPLY_LINKS: bool = True
+    LINK_RESOLVE_MAX_PER_CYCLE: int = 400
+    LINK_RESOLVE_WORKERS: int = 8
+    # Sniff company careers sites (careers.acme.com) for an embedded ATS board.
+    ATS_SNIFF_CAREER_SITES: bool = True
+    ATS_SNIFF_MAX_HOSTS_PER_CYCLE: int = 40
+
+    # LinkedIn guest API. The endpoint pages in blocks of 10, and jobs without a
+    # description are dropped by the skill filter, so these two caps set the
+    # source's real yield.
+    LINKEDIN_MAX_PAGES: int = 5
+    LINKEDIN_RECENCY_HOURS: int = 168  # 0 disables the freshness filter
+    LINKEDIN_MAX_DETAIL_FETCHES: int = 200  # per cycle, not per search
+    LINKEDIN_DETAIL_WORKERS: int = 4
+
+    # Adzuna pages 50 results at a time; a 1-day window threw most of them away.
+    ADZUNA_MAX_PAGES: int = 3
+    ADZUNA_MAX_DAYS_OLD: int = 7
     SLUG_HARVEST_URLS: str = (
         "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"

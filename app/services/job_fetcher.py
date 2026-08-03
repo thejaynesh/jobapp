@@ -200,16 +200,19 @@ def _run_all_adapters(
         stats["findwork"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- LinkedIn: httpx guest API (no browser needed) ---
-    from app.services.sources.linkedin import fetch as li_fetch
+    # One call for the whole cycle: the same posting appears under many
+    # query/location pairs, and deduping before the description fetches keeps
+    # the detail budget going to distinct jobs.
+    from app.services.sources.linkedin import fetch_all as li_fetch_all
     stats.setdefault("linkedin", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        for loc in locations:
-            try:
-                jobs = li_fetch(session_cookie=cfg.LINKEDIN_SESSION_COOKIE, query=role, location=loc)
-                _record(stats, "linkedin", jobs)
-                all_jobs.extend(jobs)
-            except Exception as exc:
-                _record(stats, "linkedin", [], f"{role}/{loc}: {exc}")
+    try:
+        jobs = li_fetch_all(
+            session_cookie=cfg.LINKEDIN_SESSION_COOKIE, queries=roles, locations=locations
+        )
+        _record(stats, "linkedin", jobs)
+        all_jobs.extend(jobs)
+    except Exception as exc:
+        _record(stats, "linkedin", [], str(exc))
 
     # --- Indeed: httpx RSS feed (no browser needed) ---
     from app.services.sources.indeed import fetch as indeed_fetch
@@ -381,6 +384,133 @@ def _run_all_adapters(
     return all_jobs, stats
 
 
+def _known_urls(db: Session) -> set[str]:
+    """Every URL already attached to a stored job, listing or apply."""
+    known: set[str] = set()
+    for url, source_urls, apply_url in db.query(Job.url, Job.source_urls, Job.apply_url):
+        if url:
+            known.add(url)
+        if apply_url:
+            known.add(apply_url)
+        known.update(u for u in (source_urls or []) if u)
+    return known
+
+
+def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
+    """
+    Turn aggregator interstitials into real apply URLs, in place.
+
+    Restricted to postings we've never stored, so steady-state cycles spend
+    almost no requests here — a job's apply link is resolved exactly once.
+    """
+    from app.services.link_resolver import is_interstitial, resolve_jobs
+
+    known = _known_urls(db)
+    fresh = [
+        job for job in raw_jobs
+        if (job.get("url") or "") not in known and is_interstitial(job.get("url") or "")
+    ]
+    if not fresh:
+        return None
+    return resolve_jobs(
+        fresh,
+        max_links=settings.LINK_RESOLVE_MAX_PER_CYCLE,
+        workers=settings.LINK_RESOLVE_WORKERS,
+    )
+
+
+def _update_board_registry(
+    db: Session,
+    raw_jobs: list[dict],
+    ats_slugs: dict,
+    source_stats: dict,
+    resolve_stats,
+    updated_data: dict,
+) -> dict:
+    """
+    Fold this cycle's findings back into the board registry:
+    new boards spotted in job links and resolved apply URLs, boards sniffed off
+    company careers sites, and how many jobs each polled board returned.
+    """
+    from app.services import company_boards as boards
+    from app.services.ats_discovery import discover_from_jobs
+
+    stats: dict = {}
+
+    found = discover_from_jobs(raw_jobs)
+    stats["discovered"] = boards.record_boards(db, found, origin="discovered")
+
+    # Career sites that aren't a recognised ATS: sniff them for an embedded
+    # board. The landing HTML from link resolution often answers for free.
+    if settings.ATS_SNIFF_CAREER_SITES:
+        stats["sniffed"] = _sniff_career_sites(db, raw_jobs, resolve_stats, updated_data)
+
+    # Per-board yield, so next cycle's budget favours boards that produce.
+    for ats, attempted in (ats_slugs or {}).items():
+        if not attempted:
+            continue
+        per_slug: dict[str, int] = {}
+        for job in raw_jobs:
+            if job.get("source") == ats and job.get("ats_slug"):
+                per_slug[job["ats_slug"]] = per_slug.get(job["ats_slug"], 0) + 1
+        boards.record_fetch_results(
+            db, ats, attempted, per_slug,
+            had_errors=bool((source_stats.get(ats) or {}).get("errors")),
+            max_empty_cycles=settings.ATS_BOARD_MAX_EMPTY_CYCLES,
+        )
+
+    return stats
+
+
+def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
+                        updated_data: dict) -> int:
+    """Mine company careers sites for the ATS board behind them."""
+    from app.services import company_boards as boards
+    from app.services.ats_discovery import ALL_ATS
+    from app.services.ats_sniffer import company_host, sniff_hosts
+    from app.services.link_resolver import is_aggregator
+
+    landing_html = resolve_stats.landing_html if resolve_stats else {}
+
+    # Candidates are apply URLs we resolved out of aggregator redirects *and*
+    # the many sources (Remotive, RemoteOK, HN, The Muse, ...) that link
+    # straight at the employer's own site to begin with.
+    hosts: dict[str, str] = {}   # host → landing HTML, "" meaning "go fetch it"
+    host_company: dict[str, str] = {}
+    for job in raw_jobs:
+        if job.get("source") in ALL_ATS:
+            continue  # already a board we poll directly
+        candidate = job.get("apply_url") or job.get("url") or ""
+        if not candidate or is_aggregator(candidate):
+            continue
+        host = company_host(candidate)
+        if not host:
+            continue
+        html = landing_html.get(job.get("url") or "", "")
+        if html or host not in hosts:
+            hosts[host] = html or hosts.get(host, "")
+        if job.get("company"):
+            host_company.setdefault(host, job["company"])
+
+    if not hosts:
+        return 0
+
+    merged, cache, per_host = sniff_hosts(
+        hosts,
+        updated_data.get("ats_sniff_cache"),
+        max_hosts=settings.ATS_SNIFF_MAX_HOSTS_PER_CYCLE,
+    )
+    updated_data["ats_sniff_cache"] = cache
+
+    new_boards = 0
+    for host, found in per_host.items():
+        new_boards += boards.record_boards(
+            db, found, origin="sniffed",
+            company=host_company.get(host), source_host=host,
+        )
+    return new_boards
+
+
 def fetch_and_save_jobs(db: Session) -> dict:
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0, "sources": {}}
 
@@ -432,7 +562,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
 
     # Validate/auto-fix the configured ATS slugs (cached per slug on the profile),
     # then assemble the final slug map: configured + verified seeds + discovered.
-    from app.services.ats_discovery import build_ats_slugs, configured_ats_slugs
+    from app.services.ats_discovery import build_ats_slugs, configured_ats_slugs, slug_caps
     slug_cache = None
     slug_report: dict = {}
     validated_configured = None
@@ -444,7 +574,33 @@ def fetch_and_save_jobs(db: Session) -> dict:
             )
         except Exception as exc:
             logger.error("job_fetcher: slug validation failed: %s", exc)
-    ats_slugs = build_ats_slugs(settings, discovered_ats, validated_configured)
+
+    # The board registry is the durable store of every company ATS board we've
+    # learned about, ranked by what each one actually yields. Legacy slugs from
+    # the old profile blob are folded in on the way past.
+    registry_boards = None
+    if settings.ATS_BOARD_REGISTRY:
+        try:
+            from app.services import company_boards as boards
+            # Savepoint, not the whole transaction: a registry problem must not
+            # discard the query cache or the jobs this cycle is about to save.
+            with db.begin_nested():
+                if discovered_ats:
+                    boards.backfill_from_slugs(db, discovered_ats, origin="discovered")
+                if settings.ATS_SEED_COMPANIES:
+                    from app.services.ats_seeds import SEED_ATS_SLUGS
+                    boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed")
+                if validated_configured:
+                    boards.backfill_from_slugs(db, validated_configured, origin="configured")
+            db.commit()
+            registry_boards = boards.registry_slugs(db, slug_caps())
+        except Exception as exc:
+            logger.error("job_fetcher: board registry unavailable: %s", exc)
+            registry_boards = None
+
+    ats_slugs = build_ats_slugs(
+        settings, discovered_ats, validated_configured, registry_boards
+    )
 
     try:
         raw_jobs, source_stats = _run_all_adapters(
@@ -457,6 +613,15 @@ def fetch_and_save_jobs(db: Session) -> dict:
     counts["fetched"] = len(raw_jobs)
     counts["sources"] = source_stats
     now = datetime.now(timezone.utc)
+
+    # Follow aggregator redirect pages through to the employer's own apply link.
+    # Only postings we haven't seen before are worth the round trip.
+    resolve_stats = None
+    if settings.RESOLVE_APPLY_LINKS:
+        try:
+            resolve_stats = _resolve_apply_links(db, raw_jobs)
+        except Exception as exc:
+            logger.error("job_fetcher: apply-link resolution failed: %s", exc)
 
     # Persist last fetch stats on the profile so UI can show them
     import copy
@@ -476,6 +641,22 @@ def fetch_and_save_jobs(db: Session) -> dict:
             updated_data["discovered_ats"] = discover_ats_slugs(raw_jobs, discovered_ats)
         except Exception as exc:
             logger.error("job_fetcher: ATS discovery failed: %s", exc)
+
+    board_stats: dict = {}
+    if settings.ATS_BOARD_REGISTRY:
+        try:
+            with db.begin_nested():
+                board_stats = _update_board_registry(
+                    db, raw_jobs, ats_slugs, source_stats,
+                    resolve_stats, updated_data,
+                )
+            db.commit()
+            from app.services.company_boards import summary
+            board_stats["registry"] = summary(db)
+        except Exception as exc:
+            logger.error("job_fetcher: board registry update failed: %s", exc)
+            board_stats = {}
+
     updated_data["last_fetch"] = {
         "at": now.isoformat(),
         "fetched": len(raw_jobs),
@@ -484,8 +665,12 @@ def fetch_and_save_jobs(db: Session) -> dict:
                   "errors": s["errors"][:3]}  # cap at 3 errors stored
             for src, s in source_stats.items()
         },
+        "links": resolve_stats.as_dict() if resolve_stats else None,
+        "boards": board_stats or None,
     }
     profile.data = updated_data
+    counts["links"] = resolve_stats.as_dict() if resolve_stats else {}
+    counts["boards"] = board_stats
 
     def _parse_posted_at(raw) -> datetime | None:
         if raw is None:
@@ -514,6 +699,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
             title = job_data.get("title", "")
             location = job_data.get("location", "")
             description = job_data.get("description", "")
+            apply_url = job_data.get("apply_url")
 
             # Skip stale postings: they're usually filled or unresponsive, and
             # they waste LLM matching calls and applications.
@@ -526,6 +712,10 @@ def fetch_and_save_jobs(db: Session) -> dict:
             existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
 
             if existing is not None:
+                # A direct apply link is worth backfilling even on a job we're
+                # otherwise skipping — it's what the user actually clicks.
+                if apply_url and not existing.apply_url:
+                    existing.apply_url = apply_url
                 if url in existing.source_urls:
                     counts["skipped"] += 1
                     continue
@@ -545,6 +735,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
                 location=location,
                 is_remote=job_data.get("is_remote", False),
                 url=url,
+                apply_url=apply_url,
                 description=description,
                 experience_level=job_data.get("experience_level", "mid"),
                 status=JobStatus.new,
