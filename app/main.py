@@ -18,6 +18,7 @@ from app.routers.jobs import router as jobs_router
 from app.routers.apps import router as apps_router
 from app.routers.settings import router as settings_router
 from app.routers.outreach import router as outreach_router
+from app.routers.runs import router as runs_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -92,6 +93,7 @@ app.include_router(jobs_router)
 app.include_router(apps_router)
 app.include_router(settings_router)
 app.include_router(outreach_router)
+app.include_router(runs_router)
 
 
 def _is_htmx(request: Request) -> bool:
