@@ -9,7 +9,12 @@
         {% if job.is_remote %}<span class="ml-1 bg-green-100 text-green-700 text-xs px-1.5 py-0.5 rounded">Remote</span>{% endif %}
       </p>
       <p class="text-xs text-gray-400 mt-0.5">
-        Posted: {{ (job.posted_at or job.fetched_at).strftime("%b %d, %Y") }}
+        {# Say which date this is: several sources don't report a posting date,
+           and calling a fetch date "Posted" made the date sort look broken. #}
+        {% if job.posted_at %}Posted: {{ job.posted_at.strftime("%b %d, %Y") }}
+        {% else %}Fetched: {{ job.fetched_at.strftime("%b %d, %Y") }}
+          <span class="text-gray-300" title="This source didn't report a posting date">·  no posted date</span>
+        {% endif %}
       </p>
     </div>
     <div class="text-right shrink-0">
@@ -49,10 +54,12 @@
     <div class="flex flex-wrap items-center gap-2">
       <span class="text-xs px-2 py-1 rounded font-medium
         {% if job.status.value == 'matched' %}bg-green-100 text-green-700
+        {% elif job.status.value == 'new' %}bg-blue-50 text-blue-600
         {% elif job.status.value == 'filtered_out' %}bg-gray-100 text-gray-500
         {% elif job.status.value == 'docs_generated' %}bg-purple-100 text-purple-700
         {% else %}bg-gray-100 text-gray-500{% endif %}">
-        {{ job.status.value | replace("_", " ") | title }}
+        {% if job.status.value == 'new' %}Awaiting match
+        {% else %}{{ job.status.value | replace("_", " ") | title }}{% endif %}
       </span>
       {% if app and app.status.value != 'not_applied' %}
       <span class="text-xs px-2 py-1 rounded font-medium

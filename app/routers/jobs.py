@@ -17,10 +17,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 templates = Jinja2Templates(directory="app/templates")
 
-_FILTERABLE_STATUSES = [JobStatus.matched, JobStatus.filtered_out, JobStatus.docs_generated]
+# `new` belongs here: a freshly fetched job is real and worth seeing before the
+# matcher has had its say. Leaving it out made every job invisible until a
+# matching cycle ran — and a source-scoped manual fetch skips matching entirely,
+# so those jobs would never have appeared at all.
+_FILTERABLE_STATUSES = [
+    JobStatus.new, JobStatus.matched, JobStatus.filtered_out,
+    JobStatus.docs_generated,
+]
 _PAGE_SIZE = 50
-_SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice", "remotive", "arbeitnow", "remoteok", "weworkremotely"]
 _EXP_LEVELS = ["entry", "mid", "senior"]
+
+
+def _known_sources(db: Session) -> list[str]:
+    """
+    Sources that actually have jobs.
+
+    The previous hand-kept list had drifted and omitted a third of the adapters
+    (jooble, careerjet, themuse, jobicy, the ATS boards…), so those couldn't be
+    filtered to at all.
+    """
+    rows = db.query(Job.source).distinct().order_by(Job.source).all()
+    return [r[0] for r in rows if r[0]]
+
 
 def _region_clause(region_key: str):
     """Match a job's free-text location against a region's keyword registry.
@@ -57,11 +76,17 @@ def _filter_reason_counts(db: Session) -> list[tuple[str, int]]:
     return [(reason, int(count)) for reason, count in rows]
 
 
+# Not every source reports a posting date, and the card falls back to the
+# fetched date when one is missing. Sorting on `posted_at` alone therefore
+# ordered by a value the reader couldn't see, dumping every dateless job at the
+# bottom under a recent-looking date. Sort on the same expression we display.
+_EFFECTIVE_DATE = func.coalesce(Job.posted_at, Job.fetched_at)
+
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),
     "score_asc": Job.llm_score.asc().nullsfirst(),
-    "posted_desc": Job.posted_at.desc().nullslast(),
-    "posted_asc": Job.posted_at.asc().nullslast(),
+    "posted_desc": _EFFECTIVE_DATE.desc(),
+    "posted_asc": _EFFECTIVE_DATE.asc(),
     "company_asc": Job.company.asc(),
 }
 
@@ -149,7 +174,7 @@ def get_jobs(
             "page_size": _PAGE_SIZE,
             "has_prev": page > 0,
             "has_next": (page + 1) * _PAGE_SIZE < total,
-            "sources": _SOURCES,
+            "sources": _known_sources(db),
             "exp_levels": _EXP_LEVELS,
             "region_options": REGION_OPTIONS,
         },

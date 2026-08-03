@@ -297,6 +297,94 @@ class TestRunsPage:
         assert client.get("/runs?limit=0").status_code == 200
 
 
+class TestJobListVisibilityAndSorting:
+    """Two reported bugs: unmatched jobs were hidden, and the date sort
+    ordered by a value the page never showed."""
+
+    def _job(self, db, *, source="arbeitnow", status=None, posted_at=None,
+             fetched_at=None, title="Backend Engineer", url=None):
+        import hashlib
+        from app.models.job import Job, JobStatus
+        url = url or f"https://ex.com/{title}-{source}"
+        job = Job(
+            source=source, source_urls=[url], title=title, company="Acme",
+            location="NYC", is_remote=False, url=url, description="d",
+            experience_level="mid", status=status or JobStatus.new,
+            fetched_at=fetched_at or datetime(2026, 8, 3, tzinfo=timezone.utc),
+            posted_at=posted_at,
+            dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
+        )
+        db.add(job)
+        db.commit()
+        return job
+
+    def test_a_job_awaiting_matching_is_visible(self, db, client):
+        """Fetched-but-unmatched jobs were invisible; a scoped manual fetch
+        skips matching, so they would never have appeared."""
+        self._job(db, title="Arbeitnow Role")
+        response = client.get("/jobs")
+        assert response.status_code == 200
+        assert "Arbeitnow Role" in response.text
+        assert "Awaiting match" in response.text
+
+    def test_filtering_by_that_source_finds_it(self, db, client):
+        self._job(db, source="arbeitnow", title="Arbeitnow Role")
+        response = client.get("/jobs?source=arbeitnow")
+        assert "Arbeitnow Role" in response.text
+
+    def test_can_filter_to_only_unmatched_jobs(self, db, client):
+        from app.models.job import JobStatus
+        self._job(db, title="Fresh One")
+        self._job(db, title="Scored One", status=JobStatus.matched)
+        response = client.get("/jobs?status=new")
+        assert "Fresh One" in response.text
+        assert "Scored One" not in response.text
+
+    def test_the_source_dropdown_lists_sources_that_have_jobs(self, db, client):
+        """The hand-kept list had drifted and omitted several adapters."""
+        self._job(db, source="jobicy", title="A")
+        self._job(db, source="themuse", title="B")
+        response = client.get("/jobs")
+        assert 'value="jobicy"' in response.text
+        assert 'value="themuse"' in response.text
+
+    def test_newest_first_uses_the_date_the_card_shows(self, db, client):
+        """
+        A job with no posted_at displays its fetch date. Sorting on posted_at
+        alone buried those at the bottom under a recent-looking date.
+        """
+        self._job(db, title="Old Posted", url="https://ex.com/old",
+                  posted_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
+        self._job(db, title="No Date But Fresh", url="https://ex.com/fresh",
+                  posted_at=None,
+                  fetched_at=datetime(2026, 8, 3, tzinfo=timezone.utc))
+
+        body = client.get("/jobs?sort=posted_desc").text
+        assert body.index("No Date But Fresh") < body.index("Old Posted")
+
+    def test_oldest_first_reverses_it(self, db, client):
+        self._job(db, title="Old Posted", url="https://ex.com/old",
+                  posted_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
+        self._job(db, title="No Date But Fresh", url="https://ex.com/fresh",
+                  posted_at=None,
+                  fetched_at=datetime(2026, 8, 3, tzinfo=timezone.utc))
+
+        body = client.get("/jobs?sort=posted_asc").text
+        assert body.index("Old Posted") < body.index("No Date But Fresh")
+
+    def test_a_missing_posted_date_is_labelled_honestly(self, db, client):
+        self._job(db, title="No Date", posted_at=None)
+        response = client.get("/jobs")
+        assert "Fetched:" in response.text
+        assert "no posted date" in response.text
+
+    def test_a_real_posted_date_is_labelled_posted(self, db, client):
+        self._job(db, title="Dated",
+                  posted_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        response = client.get("/jobs")
+        assert "Posted: Aug 01, 2026" in response.text
+
+
 class TestManualFetchTrigger:
     def test_the_runs_page_offers_a_fetch_button_and_source_picker(self, db, client):
         with patch("app.services.fetch_lock.state",
