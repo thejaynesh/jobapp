@@ -19,6 +19,17 @@ class _BrowserTierSkipped(Exception):
     """Internal signal: no Playwright source was requested this run."""
 
 
+def _reset_source_caches() -> None:
+    """Clear per-cycle adapter caches so each cycle starts from live data."""
+    from app.services.sources import arbeitnow, wellfound
+
+    for module in (arbeitnow, wellfound):
+        try:
+            module.reset_cache()
+        except Exception as exc:  # never let a cache reset break a fetch
+            logger.warning("could not reset %s cache: %s", module.__name__, exc)
+
+
 def _get_slugs(raw: str) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
@@ -87,6 +98,13 @@ def _run_all_adapters(
 
     all_jobs: list[dict] = []
     stats: dict = {}
+
+    # Some adapters cache within a cycle (a Wellfound role page and the
+    # Arbeitnow feed are identical for every location, so re-downloading them
+    # per location is pure waste). That caching must not outlive the cycle:
+    # otherwise a manual re-trigger after an adapter change returns the old
+    # results and looks like the change did nothing.
+    _reset_source_caches()
 
     def _skip(source: str) -> bool:
         """True when `only` excludes this source; records it as disabled."""

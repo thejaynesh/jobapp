@@ -514,6 +514,14 @@ class TestIndeedScraper:
 # ---------------------------------------------------------------------------
 
 class TestWellfoundScraper:
+    @pytest.fixture(autouse=True)
+    def _fresh_cycle(self):
+        """Role pages are cached within a cycle; each test is its own cycle."""
+        from app.services.sources import wellfound
+        wellfound.reset_cache()
+        yield
+        wellfound.reset_cache()
+
     def test_returns_standard_dicts(self):
         import asyncio
 
