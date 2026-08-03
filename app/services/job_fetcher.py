@@ -27,6 +27,35 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
         entry["errors"].append(error)
 
 
+def _run_combos(
+    stats: dict, all_jobs: list, source: str, fetch_one, combos,
+) -> None:
+    """
+    Call `fetch_one(*combo)` over each combination, recording per-source stats.
+
+    Stops the whole source the moment it raises SourceUnavailable — a rejected
+    key or a spent quota answers the same way for every remaining query, and
+    walking them all just produced dozens of identical errors (and, for
+    rate-limited APIs, made the situation worse).
+    """
+    from app.services.sources.base import SourceUnavailable
+
+    stats.setdefault(source, {"count": 0, "errors": [], "enabled": True})
+    for combo in combos:
+        try:
+            jobs = fetch_one(*combo)
+        except SourceUnavailable as exc:
+            _record(stats, source, [], str(exc))
+            logger.warning("%s: %s", source, exc)
+            return
+        except Exception as exc:
+            label = "/".join(str(c) for c in combo)
+            _record(stats, source, [], f"{label}: {exc}")
+            continue
+        _record(stats, source, jobs)
+        all_jobs.extend(jobs)
+
+
 def _run_all_adapters(
     roles: list[str], locations: list[str], cfg,
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
@@ -70,15 +99,12 @@ def _run_all_adapters(
 
     if cfg.JSEARCH_API_KEY:
         from app.services.sources.jsearch import fetch as jsearch_fetch
-        stats.setdefault("jsearch", {"count": 0, "errors": [], "enabled": True})
-        for role in roles:
-            for loc in locations:
-                try:
-                    jobs = jsearch_fetch(api_key=cfg.JSEARCH_API_KEY, query=role, location=loc)
-                    _record(stats, "jsearch", jobs)
-                    all_jobs.extend(jobs)
-                except Exception as exc:
-                    _record(stats, "jsearch", [], f"{role}/{loc}: {exc}")
+        _run_combos(
+            stats, all_jobs, "jsearch",
+            lambda role, loc: jsearch_fetch(
+                api_key=cfg.JSEARCH_API_KEY, query=role, location=loc),
+            [(r, l) for r in roles for l in locations],
+        )
     else:
         stats["jsearch"] = {"count": 0, "errors": [], "enabled": False}
 
@@ -217,17 +243,20 @@ def _run_all_adapters(
     except Exception as exc:
         _record(stats, "linkedin", [], str(exc))
 
-    # --- Indeed: httpx RSS feed (no browser needed) ---
-    from app.services.sources.indeed import fetch as indeed_fetch
-    stats.setdefault("indeed", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        for loc in locations:
-            try:
-                jobs = indeed_fetch(query=role, location=loc)
-                _record(stats, "indeed", jobs)
-                all_jobs.extend(jobs)
-            except Exception as exc:
-                _record(stats, "indeed", [], f"{role}/{loc}: {exc}")
+    # --- Indeed: RSS feed, retired upstream (every query 404s) ---
+    if getattr(cfg, "INDEED_RSS_ENABLED", False):
+        from app.services.sources.indeed import fetch as indeed_fetch
+        _run_combos(
+            stats, all_jobs, "indeed",
+            lambda role, loc: indeed_fetch(query=role, location=loc),
+            [(r, l) for r in roles for l in locations],
+        )
+    else:
+        stats["indeed"] = {
+            "count": 0, "enabled": False,
+            "errors": ["Indeed retired its public RSS feed (404 for every "
+                       "query); set INDEED_RSS_ENABLED=true to retry it"],
+        }
 
     # --- Remotive: free public API for remote tech jobs ---
     from app.services.sources.remotive import fetch as remotive_fetch
@@ -240,17 +269,15 @@ def _run_all_adapters(
         except Exception as exc:
             _record(stats, "remotive", [], f"{role}: {exc}")
 
-    # --- Arbeitnow: free public API ---
+    # --- Arbeitnow: free public feed, downloaded once and filtered per query ---
     from app.services.sources.arbeitnow import fetch as arbeitnow_fetch
-    stats.setdefault("arbeitnow", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        for loc in locations:
-            try:
-                jobs = arbeitnow_fetch(query=role, location=loc)
-                _record(stats, "arbeitnow", jobs)
-                all_jobs.extend(jobs)
-            except Exception as exc:
-                _record(stats, "arbeitnow", [], f"{role}/{loc}: {exc}")
+    _run_combos(
+        stats, all_jobs, "arbeitnow",
+        lambda role, loc: arbeitnow_fetch(
+            query=role, location=loc,
+            max_pages=getattr(cfg, "ARBEITNOW_MAX_PAGES", 3)),
+        [(r, l) for r in roles for l in locations],
+    )
 
     # --- RemoteOK: free public API for remote tech jobs ---
     from app.services.sources.remoteok import fetch as remoteok_fetch

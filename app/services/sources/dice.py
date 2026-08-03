@@ -4,6 +4,7 @@ from app.services.sources.base import parse_experience_level
 from app.services.sources.playwright_base import (
     CONTEXT_OPTIONS,
     LAUNCH_OPTIONS,
+    describe_page,
     encode,
     is_remote_location,
 )
@@ -25,7 +26,10 @@ async def _scrape(query: str, location: str) -> list[dict]:
             await page.goto(url, timeout=30000, wait_until="domcontentloaded")
             await page.wait_for_selector("dhi-job-card, [data-cy='card-title-link']", timeout=12000)
         except Exception as exc:
-            logger.warning("Dice: page load failed: %s", exc)
+            logger.warning(
+                "Dice: job cards never appeared (%s) — %s",
+                type(exc).__name__, await describe_page(page),
+            )
             await browser.close()
             return []
 

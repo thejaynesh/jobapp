@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # Adzuna pages 50 results at a time; a 1-day window threw most of them away.
     ADZUNA_MAX_PAGES: int = 3
     ADZUNA_MAX_DAYS_OLD: int = 7
+
+    # Indeed retired its public RSS feed — every query 404s. Off by default so
+    # it stops burning requests; flip on if the feed ever comes back.
+    INDEED_RSS_ENABLED: bool = False
+    ARBEITNOW_MAX_PAGES: int = 3
     SLUG_HARVEST_URLS: str = (
         "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"

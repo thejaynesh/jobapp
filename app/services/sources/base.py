@@ -11,6 +11,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_BOARD_WORKERS = 8
 
 
+class SourceUnavailable(Exception):
+    """
+    The source has told us to stop — bad credentials, quota spent, or a rate
+    limit. Retrying the remaining query/location combinations can only produce
+    the same answer, so the caller abandons this source for the cycle instead of
+    generating dozens of identical errors.
+    """
+
+
+# Statuses that mean "stop asking", as opposed to a transient server fault.
+BLOCKING_STATUSES = frozenset({401, 402, 403, 429})
+
+
+def raise_if_blocked(resp, source: str) -> None:
+    """Turn an auth/quota/rate-limit response into SourceUnavailable."""
+    if resp.status_code in BLOCKING_STATUSES:
+        raise SourceUnavailable(
+            f"{source} returned HTTP {resp.status_code}; skipping the rest of "
+            f"this source for this cycle"
+        )
+
+
 def fetch_boards_concurrently(
     slugs: list[str],
     fetch_one: Callable[[str], list[dict]],

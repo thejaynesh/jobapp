@@ -5,6 +5,7 @@ from app.services.sources.base import parse_experience_level
 from app.services.sources.playwright_base import (
     CONTEXT_OPTIONS,
     LAUNCH_OPTIONS,
+    describe_page,
     encode,
     is_remote_location,
 )
@@ -55,7 +56,10 @@ async def _scrape(query: str, location: str) -> list[dict]:
                 break
 
         if not cards:
-            logger.warning("Wellfound: no job cards found with any selector")
+            logger.warning(
+                "Wellfound: no job cards found with any selector — %s",
+                await describe_page(page),
+            )
             await browser.close()
             return []
 

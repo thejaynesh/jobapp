@@ -4,7 +4,11 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from app.services.sources.base import parse_experience_level
+from app.services.sources.base import (
+    SourceUnavailable,
+    parse_experience_level,
+    raise_if_blocked,
+)
 from app.services.sources.playwright_base import encode, is_remote_location
 
 logger = logging.getLogger(__name__)
@@ -23,14 +27,29 @@ def _strip(html: str) -> str:
 
 
 def fetch(query: str, location: str) -> list[dict]:
-    """Fetch Indeed jobs via RSS feed — no browser required."""
+    """
+    Fetch Indeed jobs via RSS feed.
+
+    Indeed retired public RSS: this endpoint answers 404 for every query, and
+    hammering it just earns a 429 on top. The source is therefore disabled by
+    default (INDEED_RSS_ENABLED) rather than failing loudly every cycle — the
+    code stays so it can be re-enabled if the feed ever returns. For Indeed
+    listings today, JSearch proxies them.
+    """
     url = (
         f"https://www.indeed.com/rss"
         f"?q={encode(query)}&l={encode(location)}&fromage=7&sort=date"
     )
     try:
         resp = httpx.get(url, headers=_HEADERS, timeout=15, follow_redirects=True)
+        raise_if_blocked(resp, "Indeed")
+        if resp.status_code == 404:
+            raise SourceUnavailable(
+                "Indeed RSS returned 404 — the public feed has been retired"
+            )
         resp.raise_for_status()
+    except SourceUnavailable:
+        raise  # retired feed or rate limit — stop asking
     except Exception as exc:
         logger.error("Indeed RSS fetch error: %s", exc)
         return []
