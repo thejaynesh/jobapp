@@ -34,6 +34,7 @@ def get_jobs(
     status: str = "",
     q: str = "",
     source: str = "",
+    location: str = "",
     remote: str = "",
     min_score: str = "",
     exp_level: str = "",
@@ -54,6 +55,13 @@ def get_jobs(
         )
     if source:
         query = query.filter(Job.source == source)
+    if location:
+        # Free-text match on the job's location; "remote" also matches jobs
+        # flagged remote whose location string doesn't say so.
+        loc_clause = Job.location.ilike(f"%{location}%")
+        if "remote" in location.lower():
+            loc_clause = loc_clause | (Job.is_remote == True)  # noqa: E712
+        query = query.filter(loc_clause)
     if remote == "1":
         query = query.filter(Job.is_remote == True)  # noqa: E712
     if exp_level:
@@ -76,6 +84,7 @@ def get_jobs(
             "status_filter": status,
             "q": q,
             "source_filter": source,
+            "location_filter": location,
             "remote_filter": remote,
             "min_score_filter": min_score,
             "exp_level_filter": exp_level,
