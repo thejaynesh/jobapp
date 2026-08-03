@@ -68,6 +68,7 @@ def update_app_status(
     app_id: uuid.UUID,
     request: Request,
     status: str = Form(...),
+    fragment: str = "",
     db: Session = Depends(get_db),
 ):
     app_obj = db.query(Application).filter(Application.id == app_id).first()
@@ -78,6 +79,13 @@ def update_app_status(
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid status: {status}")
     db.commit()
+    # The detail page swaps only a small confirmation badge; the apps list
+    # swaps the whole card.
+    if fragment == "badge":
+        return templates.TemplateResponse(
+            "apps/partials/status_badge.html",
+            {"request": request, "app": app_obj},
+        )
     return templates.TemplateResponse(
         "apps/partials/app_card.html",
         {"request": request, "app": app_obj},
