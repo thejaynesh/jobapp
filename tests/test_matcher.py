@@ -157,6 +157,123 @@ class TestKeywordFilter:
         assert passes is False
 
 
+class TestFilterReasons:
+    """Each rejection has to name itself — they were all (False, 0.0) before."""
+
+    def _evaluate(self, job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+        return evaluate_keyword_filter(job, profile_data)
+
+    def test_a_passing_job_has_no_reason(self, mock_job, profile_data):
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.passed is True
+        assert outcome.reason is None
+        assert outcome.detail is None
+
+    def test_title_mismatch_names_the_title_and_target_roles(self, mock_job, profile_data):
+        mock_job.title = "Marketing Manager"
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.reason == "title_mismatch"
+        assert "Marketing Manager" in outcome.detail
+        assert "Backend Engineer" in outcome.detail
+
+    def test_excluded_company_names_the_company(self, mock_job, profile_data):
+        mock_job.company = "BadCorp"
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.reason == "excluded_company"
+        assert "BadCorp" in outcome.detail
+
+    def test_few_skills_reports_the_counts(self, mock_job, profile_data):
+        mock_job.description = "We need a Backend Engineer who knows Python."
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.reason == "few_skills"
+        assert "Only 1" in outcome.detail
+        assert "minimum is 2" in outcome.detail
+
+    def test_a_missing_description_is_distinguished_from_a_poor_match(
+        self, mock_job, profile_data
+    ):
+        """Different cause, different fix: chase the source, not the filters."""
+        mock_job.description = ""
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.reason == "no_description"
+        assert "no description" in outcome.detail.lower()
+
+    def test_seniority_names_the_offending_word(self, mock_job, profile_data):
+        junior = {**profile_data, "experience": [{"years": 1}],
+                  "target_roles": ["Backend Engineer"]}
+        mock_job.title = "Staff Backend Engineer"
+        outcome = self._evaluate(mock_job, junior)
+        assert outcome.reason == "seniority"
+        assert "staff" in outcome.detail
+
+    def test_location_names_the_location_and_preferences(self, mock_job, profile_data):
+        prefs = {**profile_data, "location_preferences": {
+            "regions": ["usa", "canada"], "remote_ok": True, "custom": [],
+        }}
+        mock_job.location = "Bengaluru, India"
+        mock_job.is_remote = False
+        outcome = self._evaluate(mock_job, prefs)
+        assert outcome.reason == "location"
+        assert "Bengaluru" in outcome.detail
+
+    def test_every_reason_key_has_a_label(self):
+        from app.services.matcher import FILTER_REASON_LABELS
+        for key in ("title_mismatch", "seniority", "location", "excluded_company",
+                    "few_skills", "no_description", "low_score", "manual"):
+            assert key in FILTER_REASON_LABELS
+
+
+class TestFilterReasonPersisted:
+    """match_job has to write the reason onto the job, not just compute it."""
+
+    def test_a_keyword_rejection_is_stored_on_the_job(self, mock_job, profile_data):
+        from app.services.matcher import match_job
+        from app.models.job import JobStatus
+        mock_job.title = "Marketing Manager"
+        result = match_job(MagicMock(), mock_job, profile_data, "k", "u", "m")
+        assert result == "filtered_out"
+        assert mock_job.status == JobStatus.filtered_out
+        assert mock_job.filter_reason == "title_mismatch"
+        assert "Marketing Manager" in mock_job.filter_detail
+
+    def test_a_low_score_is_stored_with_both_numbers(self, mock_job, profile_data):
+        from app.services.matcher import match_job
+        low = {"score": 42, "reasoning": "Weak fit.", "matched_skills": [],
+               "missing_skills": [], "seniority_fit": True}
+        with patch("app.services.matcher.llm_score_job", return_value=low):
+            match_job(MagicMock(), mock_job, profile_data, "k", "u", "m")
+        assert mock_job.filter_reason == "low_score"
+        assert "42" in mock_job.filter_detail
+        assert "70" in mock_job.filter_detail
+
+    def test_the_seniority_penalty_is_explained_when_applied(self, mock_job, profile_data):
+        from app.services.matcher import match_job
+        low = {"score": 60, "reasoning": "Too senior.", "matched_skills": [],
+               "missing_skills": [], "seniority_fit": False}
+        with patch("app.services.matcher.llm_score_job", return_value=low):
+            match_job(MagicMock(), mock_job, profile_data, "k", "u", "m")
+        assert mock_job.filter_reason == "low_score"
+        assert "seniority penalty" in mock_job.filter_detail
+        assert "45" in mock_job.filter_detail  # 60 - 15
+
+    def test_a_match_clears_a_stale_reason(self, mock_job, profile_data):
+        """A job re-matched after a profile change must not keep the old excuse."""
+        from app.services.matcher import match_job
+        from app.models.job import JobStatus
+        mock_job.filter_reason = "low_score"
+        mock_job.filter_detail = "AI scored this 42/100..."
+        mock_job.applications = []
+        good = {"score": 91, "reasoning": "Great fit.", "matched_skills": ["Python"],
+                "missing_skills": [], "seniority_fit": True}
+        with patch("app.services.matcher.llm_score_job", return_value=good):
+            result = match_job(MagicMock(), mock_job, profile_data, "k", "u", "m")
+        assert result == "matched"
+        assert mock_job.status == JobStatus.matched
+        assert mock_job.filter_reason is None
+        assert mock_job.filter_detail is None
+
+
 # ---------------------------------------------------------------------------
 # Task 2 — prompt builder + response parser
 # ---------------------------------------------------------------------------

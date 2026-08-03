@@ -25,6 +25,13 @@
     </div>
   </div>
 
+  {% if job.status.value == 'filtered_out' and job.filter_detail %}
+  <div class="mt-2 bg-gray-50 border-l-2 border-gray-300 pl-3 py-1.5">
+    <p class="text-xs font-medium text-gray-500">Filtered out</p>
+    <p class="text-sm text-gray-600">{{ job.filter_detail }}</p>
+  </div>
+  {% endif %}
+
   {% if job.llm_reasoning %}
   <p class="text-sm text-gray-500 mt-2 italic">{{ job.llm_reasoning }}</p>
   {% endif %}

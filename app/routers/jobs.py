@@ -4,12 +4,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.job import Job, JobStatus
 from app.services.locations import REGIONS, REGION_OPTIONS, resolve_region_key
+from app.services.matcher import FILTER_REASON_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,25 @@ def _region_clause(region_key: str):
     return or_(*clauses)
 
 
+def _filter_reason_counts(db: Session) -> list[tuple[str, int]]:
+    """
+    How many jobs each filter reason accounts for, biggest first.
+
+    Seeing that 900 of 1000 filtered jobs are `title_mismatch` versus
+    `no_description` points at completely different fixes — narrow your target
+    roles in the first case, chase a broken source in the second.
+    """
+    rows = (
+        db.query(Job.filter_reason, func.count(Job.id))
+        .filter(Job.status == JobStatus.filtered_out,
+                Job.filter_reason.isnot(None))
+        .group_by(Job.filter_reason)
+        .order_by(func.count(Job.id).desc())
+        .all()
+    )
+    return [(reason, int(count)) for reason, count in rows]
+
+
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),
     "score_asc": Job.llm_score.asc().nullsfirst(),
@@ -57,6 +77,7 @@ def get_jobs(
     remote: str = "",
     min_score: str = "",
     exp_level: str = "",
+    filter_reason: str = "",
     sort: str = "score_desc",
     page: int = 0,
     db: Session = Depends(get_db),
@@ -99,6 +120,8 @@ def get_jobs(
             query = query.filter(Job.llm_score >= int(min_score))
         except ValueError:
             pass
+    if filter_reason:
+        query = query.filter(Job.filter_reason == filter_reason)
 
     order = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["score_desc"])
     total = query.count()
@@ -109,6 +132,9 @@ def get_jobs(
         {
             "request": request,
             "jobs": jobs,
+            "filter_reason_filter": filter_reason,
+            "filter_reason_counts": _filter_reason_counts(db),
+            "filter_reason_labels": FILTER_REASON_LABELS,
             "status_filter": status,
             "q": q,
             "source_filter": source,
@@ -154,8 +180,13 @@ def override_job_status(job_id: uuid.UUID, request: Request, db: Session = Depen
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status == JobStatus.matched:
         job.status = JobStatus.filtered_out
+        job.filter_reason = "manual"
+        job.filter_detail = "You filtered this out from the jobs list."
     elif job.status == JobStatus.filtered_out:
         job.status = JobStatus.matched
+        # Reinstated by hand — the old explanation no longer applies.
+        job.filter_reason = None
+        job.filter_detail = None
     db.commit()
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",

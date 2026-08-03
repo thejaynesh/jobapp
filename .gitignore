@@ -24,3 +24,4 @@ alembic/versions/*.py
 !alembic/versions/0008_add_llm_attribution.py
 !alembic/versions/0009_company_boards_and_apply_url.py
 !alembic/versions/0010_fetch_run_history.py
+!alembic/versions/0011_job_filter_reason.py

@@ -154,6 +154,78 @@ class TestJobsRouter:
 # Apps router tests
 # ---------------------------------------------------------------------------
 
+class TestFilterReasonVisibility:
+    """A filtered job must say what filtered it."""
+
+    def _job(self, db, *, reason="title_mismatch", detail="Title 'X' shares no keyword.",
+             url="https://ex.com/f1", title="Marketing Manager"):
+        import hashlib
+        from app.models.job import Job, JobStatus
+        job = Job(
+            source="linkedin", source_urls=[url], title=title, company="Acme",
+            location="NYC", is_remote=False, url=url, description="d",
+            experience_level="mid", status=JobStatus.filtered_out,
+            filter_reason=reason, filter_detail=detail,
+            fetched_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
+        )
+        db.add(job)
+        db.commit()
+        return job
+
+    def test_the_explanation_appears_on_the_job_card(self, db, client):
+        self._job(db, detail="Title 'Marketing Manager' shares no keyword with your target roles.")
+        response = client.get("/jobs")
+        assert response.status_code == 200
+        assert "Filtered out" in response.text
+        assert "shares no keyword" in response.text
+
+    def test_the_reason_breakdown_is_shown_with_counts(self, db, client):
+        self._job(db, url="https://ex.com/a", title="Marketing Manager")
+        self._job(db, url="https://ex.com/b", title="Sales Lead")
+        self._job(db, reason="no_description",
+                  detail="The source returned no description.",
+                  url="https://ex.com/c", title="Backend Engineer")
+        response = client.get("/jobs")
+        assert "Why jobs were filtered out" in response.text
+        assert "Title doesn&#39;t match target roles" in response.text \
+            or "Title doesn't match target roles" in response.text
+        assert "No job description available" in response.text
+
+    def test_can_filter_the_list_to_one_reason(self, db, client):
+        self._job(db, url="https://ex.com/a", title="Marketing Manager")
+        self._job(db, reason="no_description", detail="No description came back.",
+                  url="https://ex.com/b", title="Backend Engineer")
+        response = client.get("/jobs?filter_reason=no_description")
+        assert "No description came back." in response.text
+        assert "shares no keyword" not in response.text
+
+    def test_no_breakdown_when_nothing_is_filtered(self, db, client):
+        response = client.get("/jobs")
+        assert "Why jobs were filtered out" not in response.text
+
+    def test_reinstating_a_job_clears_its_reason(self, db, client):
+        job = self._job(db)
+        response = client.post(f"/jobs/{job.id}/override")
+        assert response.status_code == 200
+        db.refresh(job)
+        assert job.filter_reason is None
+        assert job.filter_detail is None
+
+    def test_filtering_a_job_by_hand_records_that(self, db, client):
+        from app.models.job import JobStatus
+        job = self._job(db)
+        job.status = JobStatus.matched
+        job.filter_reason = None
+        job.filter_detail = None
+        db.commit()
+
+        client.post(f"/jobs/{job.id}/override")
+        db.refresh(job)
+        assert job.status == JobStatus.filtered_out
+        assert job.filter_reason == "manual"
+
+
 class TestRunsPage:
     def _record(self, db, **kwargs):
         from app.services.fetch_history import record_run

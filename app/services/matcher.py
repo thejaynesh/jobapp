@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from difflib import SequenceMatcher
+from typing import NamedTuple
 
 from openai import OpenAI, RateLimitError
 
@@ -103,36 +104,103 @@ def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
     )
 
 
-def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
+class FilterOutcome(NamedTuple):
+    """Why the keyword prefilter decided what it decided."""
+    passed: bool
+    score: float
+    reason: str | None = None   # stable key, see FILTER_REASON_LABELS
+    detail: str | None = None   # sentence naming the specific values involved
+
+
+# Short labels for the UI. Keys are stored on the job, so they're stable.
+FILTER_REASON_LABELS = {
+    "title_mismatch": "Title doesn't match target roles",
+    "seniority": "Too senior for your experience",
+    "location": "Outside your locations",
+    "excluded_company": "Excluded company",
+    "few_skills": "Too few skills in description",
+    "no_description": "No job description available",
+    "low_score": "AI score below your minimum",
+    "manual": "You filtered it manually",
+}
+
+
+def evaluate_keyword_filter(job, profile_data: dict) -> FilterOutcome:
+    """
+    The keyword prefilter, with its reasoning.
+
+    Five distinct rejections used to be indistinguishable — every one returned
+    (False, 0.0) — so a filtered job gave no clue whether the title was wrong,
+    the location was, or the description simply never arrived. Each now names
+    itself and the values that triggered it.
+    """
     target_roles = profile_data.get("target_roles", [])
     if not _title_matches_roles(job.title, target_roles):
-        return False, 0.0
+        roles = ", ".join(target_roles[:5]) or "none set"
+        return FilterOutcome(
+            False, 0.0, "title_mismatch",
+            f"Title {job.title!r} shares no keyword with your target roles ({roles}).",
+        )
 
     if _blocked_by_seniority(job.title, profile_data):
-        return False, 0.0
+        hit = next(
+            (w for w in _SENIOR_TITLE_WORDS
+             if re.search(rf"\b{w}\b", (job.title or "").lower())),
+            "senior",
+        )
+        max_years = getattr(settings, "JUNIOR_MAX_YEARS", 3.0)
+        return FilterOutcome(
+            False, 0.0, "seniority",
+            f"Title contains {hit!r}, which is filtered while your profile shows "
+            f"under {max_years:g} years of experience.",
+        )
 
     # Drop jobs whose location clearly belongs to a region the candidate did
     # not choose; ambiguous/unknown locations continue to the LLM.
     loc_text = job.location if isinstance(getattr(job, "location", None), str) else ""
     if location_allowed(loc_text, bool(getattr(job, "is_remote", False)),
                         normalize_prefs(profile_data)) is False:
-        return False, 0.0
+        wanted = describe_prefs(normalize_prefs(profile_data))
+        return FilterOutcome(
+            False, 0.0, "location",
+            f"Location {loc_text or 'unknown'!r} is outside your preferences ({wanted}).",
+        )
 
     excluded = [c.lower() for c in profile_data.get("excluded_companies", [])]
     if job.company and job.company.lower() in excluded:
-        return False, 0.0
+        return FilterOutcome(
+            False, 0.0, "excluded_company",
+            f"{job.company} is on your excluded-companies list.",
+        )
 
     skills_flat = _flatten_skills(profile_data.get("skills", {}))
     if not skills_flat:
-        return True, 1.0
+        return FilterOutcome(True, 1.0)
 
     min_skills = getattr(settings, "MIN_KEYWORD_SKILLS", MIN_KEYWORD_SKILLS)
-    matched = _count_skill_matches(job.description or "", skills_flat)
+    description = job.description or ""
+    matched = _count_skill_matches(description, skills_flat)
     if matched < min_skills:
-        return False, 0.0
+        # An empty description is a fetch problem, not a bad job — worth saying
+        # so, because the fix is on the source side rather than the filters.
+        if not description.strip():
+            return FilterOutcome(
+                False, 0.0, "no_description",
+                "The source returned no description, so skills couldn't be matched.",
+            )
+        return FilterOutcome(
+            False, 0.0, "few_skills",
+            f"Only {matched} of your {len(skills_flat)} skills appear in the "
+            f"description; the minimum is {min_skills}.",
+        )
 
-    score = matched / len(skills_flat)
-    return True, score
+    return FilterOutcome(True, matched / len(skills_flat))
+
+
+def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
+    """Pass/score only — see evaluate_keyword_filter for the reasoning."""
+    outcome = evaluate_keyword_filter(job, profile_data)
+    return outcome.passed, outcome.score
 
 
 def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
@@ -352,15 +420,17 @@ def match_job(
     budget: dict | None = None,
 ) -> str:
     """Returns 'matched', 'filtered_out', or 'rate_limited'."""
-    passes, kw_score = keyword_filter(job, profile_data)
+    outcome = evaluate_keyword_filter(job, profile_data)
 
-    if not passes:
+    if not outcome.passed:
         job.status = JobStatus.filtered_out
         job.keyword_score = 0.0
         job.llm_score = None
+        job.filter_reason = outcome.reason
+        job.filter_detail = outcome.detail
         return "filtered_out"
 
-    job.keyword_score = round(kw_score, 4)
+    job.keyword_score = round(outcome.score, 4)
 
     try:
         llm_result = llm_score_job(job, profile_data, api_key, base_url, model, budget=budget)
@@ -383,12 +453,22 @@ def match_job(
 
     if score >= min_score:
         job.status = JobStatus.matched
+        # Clear any reason from a previous cycle so a re-matched job isn't
+        # still carrying an explanation for why it used to be rejected.
+        job.filter_reason = None
+        job.filter_detail = None
         if not job.applications:
             db.add(Application(job_id=job.id))
         return "matched"
-    else:
-        job.status = JobStatus.filtered_out
-        return "filtered_out"
+
+    job.status = JobStatus.filtered_out
+    job.filter_reason = "low_score"
+    penalty = " (after a 15-point seniority penalty)" if not llm_result.get(
+        "seniority_fit", True) else ""
+    job.filter_detail = (
+        f"AI scored this {score}/100{penalty}, below your minimum of {min_score}."
+    )
+    return "filtered_out"
 
 
 def match_all_new_jobs(db) -> dict[str, int]:

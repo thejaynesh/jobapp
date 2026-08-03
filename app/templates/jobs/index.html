@@ -34,6 +34,16 @@
         <option value="{{ lvl }}" {% if exp_level_filter == lvl %}selected{% endif %}>{{ lvl | title }}</option>
       {% endfor %}
     </select>
+
+    <select name="filter_reason" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            title="Why a job was filtered out">
+      <option value="" {% if not filter_reason_filter %}selected{% endif %}>Any filter reason</option>
+      {% for reason, count in filter_reason_counts %}
+        <option value="{{ reason }}" {% if filter_reason_filter == reason %}selected{% endif %}>
+          {{ filter_reason_labels.get(reason, reason) }} ({{ count }})
+        </option>
+      {% endfor %}
+    </select>
   </div>
 
   <!-- Row 2: region + location + min score + remote + sort + buttons -->
@@ -78,6 +88,26 @@
   </div>
 </form>
 
+{% if filter_reason_counts %}
+{# The distribution matters more than any single job: mostly title_mismatch
+   means your target roles are too broad, mostly no_description means a
+   source is fetching listings without their text. #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <p class="text-xs font-medium text-gray-500 uppercase mb-2">Why jobs were filtered out</p>
+  <div class="flex flex-wrap gap-2">
+    {% for reason, count in filter_reason_counts %}
+    <a href="/jobs?status=filtered_out&filter_reason={{ reason }}"
+       class="text-xs px-2 py-1 rounded border
+              {% if filter_reason_filter == reason %}border-blue-400 bg-blue-50 text-blue-700
+              {% else %}border-gray-200 bg-gray-50 text-gray-600 hover:border-blue-300{% endif %}">
+      {{ filter_reason_labels.get(reason, reason) }}
+      <span class="font-semibold ml-1">{{ count }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <div id="job-list" class="space-y-4">
 {% if jobs %}
   {% for job in jobs %}
@@ -92,7 +122,7 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&sort=" ~ sort %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"

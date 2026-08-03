@@ -44,6 +44,11 @@ class Job(Base):
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus), default=JobStatus.new, nullable=False
     )
+    # Why this job was filtered out. `filter_reason` is a stable key for
+    # grouping (see matcher.FILTER_REASON_LABELS); `filter_detail` is the
+    # sentence naming the actual values that triggered it.
+    filter_reason: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    filter_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

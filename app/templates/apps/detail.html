@@ -190,6 +190,13 @@
     <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
       <h2 class="text-base font-semibold text-gray-800 mb-3">Job Match</h2>
 
+      {% if app.job.filter_detail %}
+      <div class="bg-gray-50 border-l-2 border-gray-300 pl-3 py-2 mb-3">
+        <p class="text-xs font-medium text-gray-500">Filtered out</p>
+        <p class="text-sm text-gray-600">{{ app.job.filter_detail }}</p>
+      </div>
+      {% endif %}
+
       {% if app.job.llm_score is not none %}
       <div class="flex items-baseline gap-2 mb-2">
         <span class="text-3xl font-bold {% if app.job.llm_score >= 75 %}text-green-600{% elif app.job.llm_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
