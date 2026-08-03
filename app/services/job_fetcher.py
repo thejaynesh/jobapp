@@ -567,6 +567,7 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
 
 
 def fetch_and_save_jobs(db: Session) -> dict:
+    started_at = datetime.now(timezone.utc)
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0, "sources": {}}
 
     profile = db.query(Profile).first()
@@ -757,6 +758,16 @@ def fetch_and_save_jobs(db: Session) -> dict:
 
     max_age_days = getattr(settings, "MAX_JOB_AGE_DAYS", 30)
 
+    # Per-source outcomes. "Fetched" alone flatters a source that returns the
+    # same postings every cycle; what matters is how many were actually new.
+    per_source: dict[str, dict] = {}
+
+    def _tally(source: str, outcome: str) -> None:
+        entry = per_source.setdefault(
+            source, {"inserted": 0, "merged": 0, "skipped": 0, "stale": 0}
+        )
+        entry[outcome] += 1
+
     for job_data in raw_jobs:
         try:
             url = job_data.get("url", "")
@@ -773,6 +784,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
             posted_at = _parse_posted_at(job_data.get("posted_at"))
             if posted_at and max_age_days and (now - posted_at).days > max_age_days:
                 counts["stale"] += 1
+                _tally(source, "stale")
                 continue
 
             dedupe_hash = compute_dedupe_hash(company, title, location)
@@ -785,12 +797,15 @@ def fetch_and_save_jobs(db: Session) -> dict:
                     existing.apply_url = apply_url
                 if url in existing.source_urls:
                     counts["skipped"] += 1
+                    _tally(source, "skipped")
                     continue
                 if source_job_id and existing.source_job_id == source_job_id and existing.source == source:
                     counts["skipped"] += 1
+                    _tally(source, "skipped")
                     continue
                 merge_or_skip(db, existing, url, description, layer=3)
                 counts["merged"] += 1
+                _tally(source, "merged")
                 continue
 
             new_job = Job(
@@ -813,6 +828,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
             db.add(new_job)
             db.flush()
             counts["inserted"] += 1
+            _tally(source, "inserted")
 
         except Exception as exc:
             logger.error("job_fetcher: error processing job: %s", exc)
@@ -823,8 +839,66 @@ def fetch_and_save_jobs(db: Session) -> dict:
         logger.error("job_fetcher: DB commit failed: %s", exc)
         db.rollback()
 
-    logger.info(
-        "job_fetcher done — fetched=%d inserted=%d merged=%d skipped=%d stale=%d",
-        counts["fetched"], counts["inserted"], counts["merged"], counts["skipped"], counts["stale"],
-    )
+    counts["per_source"] = per_source
+    _log_run_summary(counts, source_stats, per_source, resolve_stats, board_stats,
+                     started_at)
+
+    # History outlives the profile's single-run snapshot, so trends are visible.
+    try:
+        from app.services.fetch_history import record_run
+        record_run(
+            db,
+            started_at=started_at,
+            counts=counts,
+            source_stats=source_stats,
+            per_source_outcome=per_source,
+            queries=queries,
+            locations=locations,
+            resolve_stats=resolve_stats.as_dict() if resolve_stats else None,
+            board_stats=board_stats,
+            backfill=backfill_report,
+        )
+        db.commit()
+    except Exception as exc:
+        logger.error("job_fetcher: could not record run history: %s", exc)
+        db.rollback()
+
     return counts
+
+
+def _log_run_summary(counts: dict, source_stats: dict, per_source: dict,
+                     resolve_stats, board_stats: dict, started_at: datetime) -> None:
+    """
+    One readable block per cycle, so the container log answers the same
+    questions the UI does without needing the UI.
+    """
+    from app.services.source_diagnostics import classify
+
+    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+    logger.info(
+        "=== fetch cycle done in %.1fs — fetched=%d new=%d merged=%d dup=%d stale=%d ===",
+        elapsed, counts["fetched"], counts["inserted"], counts["merged"],
+        counts["skipped"], counts["stale"],
+    )
+    logger.info("  %-16s %-9s %7s %6s %7s  %s",
+                "SOURCE", "STATUS", "FETCHED", "NEW", "DUP", "REASON")
+    for source, stats in sorted(source_stats.items()):
+        outcome = per_source.get(source, {})
+        reason = (stats.get("errors") or [""])[0]
+        logger.info(
+            "  %-16s %-9s %7d %6d %7d  %s",
+            source, classify(stats), stats.get("count", 0),
+            outcome.get("inserted", 0),
+            outcome.get("skipped", 0) + outcome.get("merged", 0),
+            reason[:120],
+        )
+    if resolve_stats:
+        logger.info("  apply links: %s", resolve_stats.as_dict())
+    if board_stats:
+        registry = board_stats.get("registry") or {}
+        logger.info(
+            "  boards: %d discovered, %d sniffed, active per ATS %s",
+            board_stats.get("discovered", 0) or 0,
+            board_stats.get("sniffed", 0) or 0,
+            {ats: info.get("active", 0) for ats, info in registry.items()},
+        )

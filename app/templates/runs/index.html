@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}Fetch runs — JobApp{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold text-gray-800 mb-1">Fetch runs</h1>
+<p class="text-sm text-gray-400 mb-8">
+  What each cycle actually did. "New" is the number that matters — a source can
+  fetch hundreds of jobs every run and contribute nothing you haven't seen.
+</p>
+
+{% if not runs %}
+<div class="text-sm text-gray-400">
+  No runs recorded yet. History starts with the next fetch cycle.
+</div>
+{% else %}
+
+<div class="overflow-x-auto mb-10">
+  <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+    <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+      <tr>
+        <th class="text-left px-3 py-2">Started</th>
+        <th class="text-left px-3 py-2">Status</th>
+        <th class="text-right px-3 py-2">Took</th>
+        <th class="text-right px-3 py-2">Fetched</th>
+        <th class="text-right px-3 py-2">New</th>
+        <th class="text-right px-3 py-2">Merged</th>
+        <th class="text-right px-3 py-2">Dup</th>
+        <th class="text-right px-3 py-2">Stale</th>
+        <th class="text-right px-3 py-2">Links</th>
+        <th class="text-right px-3 py-2">Boards</th>
+        <th class="px-3 py-2"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100 bg-white">
+      {% for run in runs %}
+      <tr>
+        <td class="px-3 py-2 text-gray-600 whitespace-nowrap">
+          {{ run.started_at.strftime("%b %d %H:%M") }}
+        </td>
+        <td class="px-3 py-2">
+          {% if run.status == 'ok' %}
+            <span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">OK</span>
+          {% elif run.status == 'partial' %}
+            <span class="text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Partial</span>
+          {% else %}
+            <span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600">Failed</span>
+          {% endif %}
+        </td>
+        <td class="px-3 py-2 text-right text-gray-400">
+          {% if run.duration_seconds %}{{ "%.0f"|format(run.duration_seconds) }}s{% else %}—{% endif %}
+        </td>
+        <td class="px-3 py-2 text-right text-gray-600">{{ run.fetched }}</td>
+        <td class="px-3 py-2 text-right font-medium {% if run.inserted %}text-green-700{% else %}text-gray-400{% endif %}">
+          {{ run.inserted }}
+        </td>
+        <td class="px-3 py-2 text-right text-gray-500">{{ run.merged }}</td>
+        <td class="px-3 py-2 text-right text-gray-400">{{ run.skipped }}</td>
+        <td class="px-3 py-2 text-right text-gray-400">{{ run.stale }}</td>
+        <td class="px-3 py-2 text-right text-gray-500"
+            title="Aggregator redirects followed to the employer">
+          {% if run.links_attempted %}{{ run.links_resolved }}/{{ run.links_attempted }}{% else %}—{% endif %}
+        </td>
+        <td class="px-3 py-2 text-right text-gray-500"
+            title="New company boards discovered / sniffed this run">
+          {% if run.boards_discovered or run.boards_sniffed %}
+            +{{ run.boards_discovered }}{% if run.boards_sniffed %}/{{ run.boards_sniffed }}{% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="px-3 py-2 text-right">
+          <button class="text-xs text-blue-600 hover:text-blue-800 underline"
+                  onclick="document.getElementById('sources-{{ run.id }}').classList.toggle('hidden')">
+            Sources
+          </button>
+        </td>
+      </tr>
+      <tr id="sources-{{ run.id }}" class="hidden bg-gray-50">
+        <td colspan="11" class="px-3 py-3">
+          {% if run.backfill %}
+          <p class="text-xs text-gray-500 mb-2">
+            One-time backfill ran: scanned {{ run.backfill.jobs_scanned }} stored jobs,
+            recovered {{ run.backfill.boards_found }} boards.
+          </p>
+          {% endif %}
+          {% if run.queries %}
+          <p class="text-xs text-gray-400 mb-2">
+            Searched {{ run.queries | length }} queries across
+            {{ run.locations | length }} locations:
+            <span class="text-gray-500">{{ run.queries[:8] | join(", ") }}{% if run.queries | length > 8 %} …{% endif %}</span>
+          </p>
+          {% endif %}
+          <table class="w-full text-xs">
+            <thead class="text-gray-400 uppercase">
+              <tr>
+                <th class="text-left py-1">Source</th>
+                <th class="text-left py-1">Status</th>
+                <th class="text-right py-1">Fetched</th>
+                <th class="text-right py-1">New</th>
+                <th class="text-right py-1">Merged</th>
+                <th class="text-right py-1">Dup</th>
+                <th class="text-left py-1 pl-4">Reason</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200">
+              {% for s in run.sources | sort(attribute='source') %}
+              <tr>
+                <td class="py-1 font-medium text-gray-700">{{ s.source }}</td>
+                <td class="py-1">
+                  {% if s.status == 'ok' %}<span class="text-green-700">ok</span>
+                  {% elif s.status == 'partial' %}<span class="text-yellow-700">partial</span>
+                  {% elif s.status == 'failed' %}<span class="text-red-600">failed</span>
+                  {% elif s.status == 'disabled' %}<span class="text-gray-400">disabled</span>
+                  {% else %}<span class="text-gray-500">no results</span>{% endif %}
+                </td>
+                <td class="py-1 text-right text-gray-600">{{ s.fetched }}</td>
+                <td class="py-1 text-right {% if s.inserted %}text-green-700 font-medium{% else %}text-gray-400{% endif %}">
+                  {{ s.inserted }}
+                </td>
+                <td class="py-1 text-right text-gray-500">{{ s.merged }}</td>
+                <td class="py-1 text-right text-gray-400">{{ s.skipped }}</td>
+                <td class="py-1 pl-4 text-red-500">
+                  {% for err in s.errors %}<div class="truncate max-w-lg" title="{{ err }}">{{ err }}</div>{% endfor %}
+                  {% if not s.errors %}<span class="text-gray-300">—</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if source_totals %}
+<h2 class="text-lg font-semibold text-gray-800 mb-1">Source contribution</h2>
+<p class="text-xs text-gray-400 mb-4">
+  Totalled over the last {{ rollup_window }} runs. A source with a high fetch
+  count and no new jobs is spending requests to tell you what you already know.
+</p>
+<div class="overflow-x-auto mb-10">
+  <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+    <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+      <tr>
+        <th class="text-left px-4 py-2">Source</th>
+        <th class="text-right px-4 py-2">Runs</th>
+        <th class="text-right px-4 py-2">Fetched</th>
+        <th class="text-right px-4 py-2">New jobs</th>
+        <th class="text-right px-4 py-2">Merged</th>
+        <th class="text-right px-4 py-2">Failed runs</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100 bg-white">
+      {% for t in source_totals %}
+      <tr>
+        <td class="px-4 py-2 font-medium text-gray-700">{{ t.source }}</td>
+        <td class="px-4 py-2 text-right text-gray-400">{{ t.runs }}</td>
+        <td class="px-4 py-2 text-right text-gray-600">{{ t.fetched }}</td>
+        <td class="px-4 py-2 text-right {% if t.inserted %}text-green-700 font-medium{% else %}text-gray-400{% endif %}">
+          {{ t.inserted }}
+        </td>
+        <td class="px-4 py-2 text-right text-gray-500">{{ t.merged }}</td>
+        <td class="px-4 py-2 text-right {% if t.failed_runs %}text-red-500{% else %}text-gray-300{% endif %}">
+          {{ t.failed_runs }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if top_boards %}
+<h2 class="text-lg font-semibold text-gray-800 mb-1">Top company boards</h2>
+<p class="text-xs text-gray-400 mb-4">
+  Individual ATS boards ranked by how many jobs they've ever produced.
+</p>
+<div class="overflow-x-auto">
+  <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+    <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+      <tr>
+        <th class="text-left px-4 py-2">ATS</th>
+        <th class="text-left px-4 py-2">Slug</th>
+        <th class="text-left px-4 py-2">Found via</th>
+        <th class="text-right px-4 py-2">Jobs total</th>
+        <th class="text-right px-4 py-2">Last run</th>
+        <th class="text-left px-4 py-2">State</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100 bg-white">
+      {% for b in top_boards %}
+      <tr>
+        <td class="px-4 py-2 text-gray-500">{{ b.ats }}</td>
+        <td class="px-4 py-2 font-mono text-xs text-gray-700">{{ b.slug }}</td>
+        <td class="px-4 py-2 text-xs text-gray-400">{{ b.origin }}</td>
+        <td class="px-4 py-2 text-right text-gray-600">{{ b.total_job_count }}</td>
+        <td class="px-4 py-2 text-right text-gray-400">{{ b.last_job_count }}</td>
+        <td class="px-4 py-2 text-xs">
+          {% if b.active %}<span class="text-green-700">active</span>
+          {% else %}<span class="text-red-500">not working</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}

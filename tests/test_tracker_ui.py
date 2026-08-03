@@ -154,6 +154,77 @@ class TestJobsRouter:
 # Apps router tests
 # ---------------------------------------------------------------------------
 
+class TestRunsPage:
+    def _record(self, db, **kwargs):
+        from app.services.fetch_history import record_run
+        counts = {"fetched": 12, "inserted": 4, "merged": 1, "skipped": 7, "stale": 0}
+        sources = {
+            "linkedin": {"count": 12, "errors": [], "enabled": True},
+            "indeed": {"count": 0, "errors": ["Indeed RSS fetch error: 403"],
+                       "enabled": True},
+        }
+        run = record_run(
+            db, datetime(2026, 8, 3, 6, 0, tzinfo=timezone.utc), counts, sources,
+            per_source_outcome={"linkedin": {"inserted": 4, "merged": 1,
+                                             "skipped": 7, "stale": 0}},
+            queries=["software engineer"], locations=["New York, NY"],
+            **kwargs,
+        )
+        db.commit()
+        return run
+
+    def test_empty_history_explains_itself(self, db, client):
+        response = client.get("/runs")
+        assert response.status_code == 200
+        assert "No runs recorded yet" in response.text
+
+    def test_lists_a_recorded_run(self, db, client):
+        self._record(db)
+        response = client.get("/runs")
+        assert response.status_code == 200
+        assert "Aug 03 06:00" in response.text
+
+    def test_shows_each_source_and_its_failure_reason(self, db, client):
+        self._record(db)
+        response = client.get("/runs")
+        assert "linkedin" in response.text
+        assert "indeed" in response.text
+        assert "Indeed RSS fetch error: 403" in response.text
+
+    def test_shows_the_source_contribution_rollup(self, db, client):
+        self._record(db)
+        response = client.get("/runs")
+        assert "Source contribution" in response.text
+
+    def test_shows_the_queries_the_run_actually_searched(self, db, client):
+        self._record(db)
+        response = client.get("/runs")
+        assert "software engineer" in response.text
+
+    def test_top_boards_leaderboard_lists_producing_boards(self, db, client):
+        from app.models.company_board import CompanyBoard
+        from app.services.company_boards import record_boards, record_fetch_results
+        self._record(db)
+        record_boards(db, {"greenhouse": ["topco"]}, origin="discovered")
+        record_fetch_results(db, "greenhouse", ["topco"], {"topco": 9})
+        db.commit()
+
+        response = client.get("/runs")
+        assert "Top company boards" in response.text
+        assert "topco" in response.text
+
+    def test_page_survives_missing_history(self, db, client):
+        with patch("app.services.fetch_history.recent_runs",
+                   side_effect=RuntimeError("no table")):
+            response = client.get("/runs")
+        assert response.status_code == 200
+
+    def test_limit_is_clamped(self, db, client):
+        self._record(db)
+        assert client.get("/runs?limit=99999").status_code == 200
+        assert client.get("/runs?limit=0").status_code == 200
+
+
 class TestRetiredBoardVisibility:
     """A board we stopped polling has to be visible, not silently dropped."""
 

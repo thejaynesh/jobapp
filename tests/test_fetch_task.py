@@ -284,6 +284,91 @@ class TestAtsDiscoveryWiring:
         assert "netflix" in slug_map["lever"]
 
 
+class TestRunHistoryWiring:
+    def test_a_cycle_records_a_run_with_per_source_detail(self, db):
+        from app.models.fetch_run import FetchRun
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _adapters(*args, **kwargs):
+            return (
+                [_std_job(source="linkedin", url="https://ex.com/li", source_job_id="L1")],
+                {"linkedin": {"count": 1, "errors": [], "enabled": True},
+                 "indeed": {"count": 0, "errors": [], "enabled": True}},
+            )
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                fetch_and_save_jobs(db)
+
+        run = db.query(FetchRun).one()
+        assert run.fetched == 1
+        assert run.inserted == 1
+        assert run.duration_seconds is not None
+        assert run.queries == ["Software Engineer"]
+
+        by_source = {s.source: s for s in run.sources}
+        assert by_source["linkedin"].fetched == 1
+        assert by_source["linkedin"].inserted == 1
+        assert by_source["indeed"].status == "empty"
+
+    def test_duplicates_are_attributed_to_the_source_that_refetched_them(self, db):
+        """The number that tells you a source has stopped being useful."""
+        from app.models.fetch_run import FetchRun
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job(source="remotive", url="https://ex.com/dup", source_job_id="D1")
+
+        def _adapters(*args, **kwargs):
+            return ([dict(job)],
+                    {"remotive": {"count": 1, "errors": [], "enabled": True}})
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                fetch_and_save_jobs(db)   # first cycle inserts it
+                fetch_and_save_jobs(db)   # second re-fetches the same posting
+
+        latest = db.query(FetchRun).order_by(FetchRun.started_at.desc()).first()
+        remotive = next(s for s in latest.sources if s.source == "remotive")
+        assert remotive.fetched == 1
+        assert remotive.inserted == 0
+        assert remotive.skipped == 1
+
+    def test_a_failing_source_marks_the_run_partial(self, db):
+        import logging
+        from app.models.fetch_run import FetchRun
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _adapters(*args, **kwargs):
+            logging.getLogger("app.services.sources.dice").error("Dice: blocked")
+            return [], {"dice": {"count": 0, "errors": [], "enabled": True}}
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                fetch_and_save_jobs(db)
+
+        run = db.query(FetchRun).one()
+        assert run.status == "partial"
+        assert next(s for s in run.sources if s.source == "dice").status == "failed"
+
+    def test_history_failure_does_not_lose_the_fetched_jobs(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.fetch_history.record_run",
+                   side_effect=RuntimeError("history table missing")):
+            with _patch_adapters([_std_job()]):
+                result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1
+        assert db.query(Job).count() == 1
+
+
 class TestSourceFailureVisibility:
     """A source that returned nothing must say why, not read as healthy."""
 
