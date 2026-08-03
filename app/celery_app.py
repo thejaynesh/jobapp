@@ -7,7 +7,10 @@ celery_app = Celery(
     "jobapp",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.fetch", "app.tasks.match", "app.tasks.generate"],
+    include=[
+        "app.tasks.fetch", "app.tasks.match", "app.tasks.generate",
+        "app.tasks.backfill",
+    ],
 )
 
 celery_app.conf.update(
