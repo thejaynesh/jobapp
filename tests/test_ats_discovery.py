@@ -35,6 +35,34 @@ class TestDiscoverAtsSlugs:
         assert result["workable"] == ["acme-co"]
         assert result["recruitee"] == ["widgetcorp"]
 
+    def test_discovers_greenhouse_from_the_embed_widget(self):
+        """The form careers pages actually use: an iframe with ?for=<slug>."""
+        jobs = [_job(description=(
+            '<iframe src="https://boards.greenhouse.io/embed/job_board?for=acmecorp">'
+        ))]
+        assert discover_ats_slugs(jobs)["greenhouse"] == ["acmecorp"]
+
+    def test_discovers_from_ats_api_endpoints(self):
+        jobs = [_job(description="""
+            https://api.lever.co/v0/postings/netflix?mode=json
+            https://api.ashbyhq.com/posting-api/job-board/openai
+            https://api.smartrecruiters.com/v1/companies/Bosch/postings
+        """)]
+        result = discover_ats_slugs(jobs)
+        assert result["lever"] == ["netflix"]
+        assert result["ashby"] == ["openai"]
+        assert result["smartrecruiters"] == ["bosch"]
+
+    def test_discovers_from_a_resolved_apply_url(self):
+        """Aggregator listings only reveal the ATS once the redirect is followed."""
+        jobs = [{
+            "source": "adzuna",
+            "url": "https://www.adzuna.com/land/ad/123",
+            "apply_url": "https://jobs.lever.co/acme/abc",
+            "description": "",
+        }]
+        assert discover_ats_slugs(jobs)["lever"] == ["acme"]
+
     def test_blocklist_filters_non_company_segments(self):
         jobs = [_job(description="https://boards.greenhouse.io/embed/job_board?for=acme "
                                  "https://apply.workable.com/api/v1/widget")]

@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
@@ -24,21 +24,18 @@ def setup_test_db():
 
 @pytest.fixture
 def db():
-    # Open a connection and start an outer transaction
+    """
+    A session whose commits are rolled back when the test ends.
+
+    `join_transaction_mode="create_savepoint"` is what lets application code use
+    its own `begin_nested()` savepoints (the job fetcher wraps the board
+    registry in one) — the older after_transaction_end recipe fought with them.
+    """
     connection = test_engine.connect()
     transaction = connection.begin()
-
-    # Bind a session to this connection (so commits go to this transaction, not the DB)
-    session = TestSessionLocal(bind=connection)
-
-    # For nested transactions (SAVEPOINTs), intercept begin_nested
-    @event.listens_for(session, "after_transaction_end")
-    def restart_savepoint(session, transaction):
-        if transaction.nested and not transaction._parent.nested:
-            session.begin_nested()
-
-    session.begin_nested()  # initial savepoint
-
+    session = TestSessionLocal(
+        bind=connection, join_transaction_mode="create_savepoint"
+    )
     try:
         yield session
     finally:

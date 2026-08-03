@@ -21,6 +21,16 @@ _DEFAULTS = {
 }
 
 
+def _board_registry(db: Session) -> dict:
+    """Per-ATS board counts; never let a registry hiccup break the page."""
+    try:
+        from app.services.company_boards import summary
+        return summary(db)
+    except Exception as exc:
+        logger.warning("settings: board registry summary failed: %s", exc)
+        return {}
+
+
 @router.get("", response_class=HTMLResponse)
 def get_settings(request: Request, db: Session = Depends(get_db)):
     profile = get_or_create_profile(db)
@@ -29,7 +39,8 @@ def get_settings(request: Request, db: Session = Depends(get_db)):
     last_fetch = profile.data.get("last_fetch")
     return templates.TemplateResponse(
         "settings/index.html",
-        {"request": request, "settings": current, "saved": False, "last_fetch": last_fetch},
+        {"request": request, "settings": current, "saved": False,
+         "last_fetch": last_fetch, "board_registry": _board_registry(db)},
     )
 
 
@@ -53,5 +64,6 @@ def save_settings(
     last_fetch = profile.data.get("last_fetch")
     return templates.TemplateResponse(
         "settings/index.html",
-        {"request": request, "settings": new_data["settings"], "saved": True, "last_fetch": last_fetch},
+        {"request": request, "settings": new_data["settings"], "saved": True,
+         "last_fetch": last_fetch, "board_registry": _board_registry(db)},
     )

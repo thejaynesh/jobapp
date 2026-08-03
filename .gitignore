@@ -21,3 +21,4 @@ alembic/versions/*.py
 !alembic/versions/0006_recompute_dedupe_hashes.py
 !alembic/versions/0007_set_location_preferences.py
 !alembic/versions/0008_add_llm_attribution.py
+!alembic/versions/0009_company_boards_and_apply_url.py

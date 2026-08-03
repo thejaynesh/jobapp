@@ -79,8 +79,53 @@
       </tbody>
     </table>
   </div>
+
+  {% if last_fetch.links %}
+  <p class="text-xs text-gray-400 mt-3">
+    Apply links: {{ last_fetch.links.resolved }} of {{ last_fetch.links.attempted }}
+    aggregator redirects followed through to the employer
+    {%- if last_fetch.links.failed %}, {{ last_fetch.links.failed }} failed{% endif %}
+    {%- if last_fetch.links.skipped_budget %},
+    {{ last_fetch.links.skipped_budget }} deferred to the next cycle{% endif %}.
+  </p>
+  {% endif %}
 </div>
-{% else %}
+{% endif %}
+
+{% if board_registry %}
+<div class="mt-10">
+  <h2 class="text-lg font-semibold text-gray-800 mb-1">Company ATS boards</h2>
+  <p class="text-xs text-gray-400 mb-4">
+    Boards learned from job links, resolved apply URLs and sniffed careers pages.
+    Each cycle polls the highest-yielding ones directly; boards that stay silent
+    are retired automatically.
+  </p>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="text-left px-4 py-2">ATS</th>
+          <th class="text-right px-4 py-2">Active</th>
+          <th class="text-right px-4 py-2">Known</th>
+          <th class="text-right px-4 py-2">Jobs sourced</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100 bg-white">
+        {% for ats, info in board_registry.items() %}
+        <tr>
+          <td class="px-4 py-2 font-medium text-gray-700">{{ ats }}</td>
+          <td class="px-4 py-2 text-right text-gray-600">{{ info.active }}</td>
+          <td class="px-4 py-2 text-right text-gray-400">{{ info.total }}</td>
+          <td class="px-4 py-2 text-right text-gray-600">{{ info.jobs }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if not last_fetch %}
 <div class="mt-10 text-sm text-gray-400">No fetch data yet — run a job fetch to see source health here.</div>
 {% endif %}
 {% endblock %}

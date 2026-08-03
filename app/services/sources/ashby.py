@@ -3,7 +3,11 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
-from app.services.sources.base import parse_experience_level
+from app.services.sources.base import (
+    board_workers,
+    fetch_boards_concurrently,
+    parse_experience_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +21,12 @@ def fetch(company_slugs: list[str]) -> list[dict]:
     days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-    jobs = []
-    for slug in company_slugs:
-        try:
-            resp = httpx.get(_BASE.format(slug=slug), timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.error("Ashby fetch error for slug '%s': %s", slug, exc)
-            continue
+    def _fetch_one(slug: str) -> list[dict]:
+        resp = httpx.get(_BASE.format(slug=slug), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
 
+        jobs = []
         for item in data.get("jobs", []):
             if item.get("isListed") is False:
                 continue
@@ -53,4 +53,6 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, desc),
                 "posted_at": published_raw or None,
             })
-    return jobs
+        return jobs
+
+    return fetch_boards_concurrently(company_slugs, _fetch_one, "Ashby", board_workers())

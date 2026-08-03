@@ -284,6 +284,197 @@ class TestAtsDiscoveryWiring:
         assert "netflix" in slug_map["lever"]
 
 
+class TestApplyLinkWiring:
+    def _adzuna_job(self):
+        return _std_job(url="https://www.adzuna.com/land/ad/9", source_job_id="AZ9")
+
+    def test_resolved_apply_url_is_stored_on_the_job(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _resolve(jobs, **kwargs):
+            from app.services.link_resolver import ResolveStats
+            jobs[0]["apply_url"] = "https://boards.greenhouse.io/coolco/jobs/5"
+            return ResolveStats(attempted=1, resolved=1)
+
+        with patch("app.services.link_resolver.resolve_jobs", side_effect=_resolve):
+            with _patch_adapters([self._adzuna_job()]):
+                fetch_and_save_jobs(db)
+
+        assert db.query(Job).one().apply_url == "https://boards.greenhouse.io/coolco/jobs/5"
+
+    def test_the_ats_behind_the_redirect_becomes_a_known_board(self, db):
+        from app.models.company_board import CompanyBoard
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _resolve(jobs, **kwargs):
+            from app.services.link_resolver import ResolveStats
+            jobs[0]["apply_url"] = "https://jobs.lever.co/hiddenco/abc"
+            return ResolveStats(attempted=1, resolved=1)
+
+        with patch("app.services.link_resolver.resolve_jobs", side_effect=_resolve):
+            with _patch_adapters([self._adzuna_job()]):
+                fetch_and_save_jobs(db)
+
+        board = db.query(CompanyBoard).filter(
+            CompanyBoard.ats == "lever", CompanyBoard.slug == "hiddenco"
+        ).one()
+        assert board.origin == "discovered"
+
+    def test_already_stored_urls_are_not_resolved_again(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = self._adzuna_job()
+        with patch("app.services.link_resolver.resolve_jobs",
+                   return_value=None) as resolve:
+            with _patch_adapters([job]):
+                fetch_and_save_jobs(db)
+            assert resolve.call_count == 1
+            with _patch_adapters([dict(job)]):
+                fetch_and_save_jobs(db)
+        # Second cycle saw the same URL already in the DB, so it skipped it.
+        assert resolve.call_count == 1
+
+    def test_resolution_failure_does_not_block_the_fetch(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.link_resolver.resolve_jobs",
+                   side_effect=RuntimeError("proxy down")):
+            with _patch_adapters([self._adzuna_job()]):
+                result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1
+
+    def test_disabled_by_config(self, db):
+        from app.config import settings
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch.object(settings, "RESOLVE_APPLY_LINKS", False):
+            with patch("app.services.link_resolver.resolve_jobs") as resolve:
+                with _patch_adapters([self._adzuna_job()]):
+                    fetch_and_save_jobs(db)
+        resolve.assert_not_called()
+
+
+class TestBoardRegistryWiring:
+    def test_boards_seen_in_job_links_are_registered(self, db):
+        from app.models.company_board import CompanyBoard
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job(description="Apply at https://boards.greenhouse.io/newco/jobs/1")
+        with _patch_adapters([job]):
+            fetch_and_save_jobs(db)
+        assert db.query(CompanyBoard).filter(
+            CompanyBoard.ats == "greenhouse", CompanyBoard.slug == "newco"
+        ).count() == 1
+
+    def test_registry_boards_are_polled_next_cycle(self, db):
+        """The registry, not the legacy JSON blob, is what carries a board forward."""
+        import copy
+        from app.services.job_fetcher import fetch_and_save_jobs
+        profile = _make_profile_with_targets(db)
+        job = _std_job(description="https://jobs.ashbyhq.com/registryco/x")
+        with _patch_adapters([job]):
+            fetch_and_save_jobs(db)
+
+        data = copy.deepcopy(profile.data)
+        data["discovered_ats"] = {}
+        profile.data = data
+        db.flush()
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       return_value=([], {})) as mock_run:
+                fetch_and_save_jobs(db)
+        assert "registryco" in mock_run.call_args[0][3]["ashby"]
+
+    def test_per_board_yield_is_recorded(self, db):
+        from app.models.company_board import CompanyBoard
+        from app.services.company_boards import record_boards
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        record_boards(db, {"greenhouse": ["busyco", "quietco"]}, origin="discovered")
+        db.flush()
+
+        gh_job = _std_job(source="greenhouse", url="https://boards.greenhouse.io/busyco/jobs/1",
+                          source_job_id="GH1", company="BusyCo")
+        gh_job["ats_slug"] = "busyco"
+        with patch("app.services.ats_discovery.build_ats_slugs",
+                   return_value={"greenhouse": ["busyco", "quietco"]}):
+            with _patch_adapters([gh_job]):
+                fetch_and_save_jobs(db)
+
+        boards = {b.slug: b for b in db.query(CompanyBoard).all()}
+        assert boards["busyco"].last_job_count == 1
+        assert boards["busyco"].total_job_count == 1
+        assert boards["quietco"].consecutive_empty == 1
+
+    def test_careers_site_sniffing_registers_the_hidden_board(self, db):
+        from app.models.company_board import CompanyBoard
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _resolve(jobs, **kwargs):
+            from app.services.link_resolver import ResolveStats
+            jobs[0]["apply_url"] = "https://careers.sniffme.com/job/1"
+            return ResolveStats(
+                attempted=1, resolved=1,
+                landing_html={jobs[0]["url"]:
+                              '<iframe src="https://boards.greenhouse.io/embed/job_board?for=sniffme">'},
+            )
+
+        job = _std_job(url="https://www.adzuna.com/land/ad/77", source_job_id="AZ77")
+        with patch("app.services.link_resolver.resolve_jobs", side_effect=_resolve):
+            with _patch_adapters([job]):
+                fetch_and_save_jobs(db)
+
+        board = db.query(CompanyBoard).filter(CompanyBoard.slug == "sniffme").one()
+        assert board.ats == "greenhouse"
+        assert board.origin == "sniffed"
+        assert board.source_host == "careers.sniffme.com"
+
+    def test_sniffs_career_sites_linked_directly_by_non_aggregator_sources(self, db):
+        """Remotive/RemoteOK/HN link straight at the employer — sniff those too."""
+        from app.models.company_board import CompanyBoard
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job(source="remotive", url="https://careers.directco.com/jobs/1",
+                       source_job_id="RM1")
+
+        with patch("app.services.ats_sniffer.sniff_host",
+                   return_value={"lever": ["directco"]}) as sniff:
+            with _patch_adapters([job]):
+                fetch_and_save_jobs(db)
+
+        assert sniff.call_args[0][0] == "careers.directco.com"
+        board = db.query(CompanyBoard).filter(CompanyBoard.slug == "directco").one()
+        assert board.origin == "sniffed"
+
+    def test_aggregator_and_ats_urls_are_not_sniffed(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        jobs = [
+            _std_job(source="indeed", url="https://www.indeed.com/viewjob?jk=1",
+                     source_job_id="IN1"),
+            _std_job(source="greenhouse", url="https://boards.greenhouse.io/x/jobs/1",
+                     source_job_id="GH1", company="X"),
+        ]
+        with patch("app.services.ats_sniffer.sniff_host") as sniff:
+            with _patch_adapters(jobs):
+                fetch_and_save_jobs(db)
+        sniff.assert_not_called()
+
+    def test_registry_failure_does_not_block_the_fetch(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.company_boards.record_boards",
+                   side_effect=RuntimeError("registry down")):
+            with _patch_adapters([_std_job()]):
+                result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1
+
+
 class TestSlugValidationWiring:
     def test_persists_slug_cache_and_report(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs

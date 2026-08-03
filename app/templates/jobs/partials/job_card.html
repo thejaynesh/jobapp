@@ -83,6 +83,13 @@
          class="text-xs text-gray-500 hover:text-blue-600 underline whitespace-nowrap">
         Job link &nearr;
       </a>
+      {% if job.apply_url %}
+      <a href="{{ job.apply_url }}" target="_blank"
+         title="Employer's own apply page, resolved from the aggregator link"
+         class="text-xs text-blue-600 hover:text-blue-800 underline whitespace-nowrap">
+        Apply direct &nearr;
+      </a>
+      {% endif %}
       {% if job.status.value in ['matched', 'filtered_out'] %}
       <button
         hx-post="/jobs/{{ job.id }}/override"

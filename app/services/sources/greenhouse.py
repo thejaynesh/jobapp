@@ -4,7 +4,11 @@ from datetime import datetime, timezone, timedelta
 import httpx
 
 from app.config import settings
-from app.services.sources.base import parse_experience_level
+from app.services.sources.base import (
+    board_workers,
+    fetch_boards_concurrently,
+    parse_experience_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +22,14 @@ def _cutoff() -> datetime:
 
 def fetch(company_slugs: list[str]) -> list[dict]:
     cutoff = _cutoff()
-    jobs = []
-    for slug in company_slugs:
-        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
-        try:
-            resp = httpx.get(url, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.error("Greenhouse fetch error for slug '%s': %s", slug, exc)
-            continue
 
+    def _fetch_one(slug: str) -> list[dict]:
+        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+        resp = httpx.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        jobs = []
         for item in data.get("jobs", []):
             updated_raw = item.get("updated_at", "")
             if updated_raw:
@@ -53,4 +54,8 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, desc),
                 "posted_at": item.get("updated_at"),
             })
-    return jobs
+        return jobs
+
+    return fetch_boards_concurrently(
+        company_slugs, _fetch_one, "Greenhouse", board_workers()
+    )

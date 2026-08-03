@@ -1,4 +1,52 @@
+import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+# Board fetches are network-bound and independent per company, so they run in a
+# small thread pool. This is what makes carrying hundreds of discovered company
+# slugs per cycle affordable instead of a serial multi-minute crawl.
+DEFAULT_BOARD_WORKERS = 8
+
+
+def fetch_boards_concurrently(
+    slugs: list[str],
+    fetch_one: Callable[[str], list[dict]],
+    label: str,
+    workers: int = DEFAULT_BOARD_WORKERS,
+) -> list[dict]:
+    """
+    Run `fetch_one(slug)` for every slug across a thread pool and return the
+    flattened jobs, each tagged with the `ats_slug` it came from so the caller
+    can attribute per-board yield. A slug that raises is logged and skipped —
+    one dead board never costs the rest of the cycle.
+    """
+    if not slugs:
+        return []
+
+    def _guarded(slug: str) -> list[dict]:
+        try:
+            jobs = fetch_one(slug) or []
+        except Exception as exc:
+            logger.error("%s fetch error for slug '%s': %s", label, slug, exc)
+            return []
+        for job in jobs:
+            job.setdefault("ats_slug", slug)
+        return jobs
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(slugs)))) as pool:
+        results = list(pool.map(_guarded, slugs))
+
+    jobs = [job for board_jobs in results for job in board_jobs]
+    logger.info("%s: %d jobs across %d companies", label, len(jobs), len(slugs))
+    return jobs
+
+
+def board_workers() -> int:
+    from app.config import settings
+    return getattr(settings, "ATS_BOARD_FETCH_WORKERS", DEFAULT_BOARD_WORKERS)
 
 
 def parse_experience_level(title: str, description: str) -> str:

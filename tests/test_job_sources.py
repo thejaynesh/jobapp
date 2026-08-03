@@ -1,5 +1,7 @@
 from unittest.mock import patch, MagicMock, AsyncMock
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Adzuna adapter
@@ -265,29 +267,58 @@ class TestAshbyAdapter:
 # LinkedIn guest API (httpx, mocked)
 # ---------------------------------------------------------------------------
 
-class TestLinkedInScraper:
-    _SEARCH_HTML = """
+def _li_card(job_id: str, title="Software Engineer", company="Stripe",
+             location="New York, NY", posted="2026-08-01") -> str:
+    return f"""
     <li>
-      <a href="https://www.linkedin.com/jobs/view/software-engineer-at-stripe-4012345678?refId=abc">link</a>
-      <h3 class="base-search-card__title">Software Engineer</h3>
-      <h4 class="base-search-card__subtitle"><a>Stripe</a></h4>
-      <span class="job-search-card__location">New York, NY</span>
+      <a href="https://www.linkedin.com/jobs/view/{title.lower().replace(' ', '-')}-at-{company.lower()}-{job_id}?refId=abc">link</a>
+      <h3 class="base-search-card__title">{title}</h3>
+      <h4 class="base-search-card__subtitle"><a>{company}</a></h4>
+      <span class="job-search-card__location">{location}</span>
+      <time class="job-search-card__listdate" datetime="{posted}">1 day ago</time>
     </li>
     """
+
+
+class TestLinkedInScraper:
+    _SEARCH_HTML = _li_card("4012345678")
     _POSTING_HTML = (
         '<div class="show-more-less-html__markup">'
         "Build <b>APIs</b> with Python.<br>Docker required.</div>"
     )
 
-    def _resp(self, text: str) -> MagicMock:
+    @pytest.fixture(autouse=True)
+    def _clear_description_cache(self):
+        # Descriptions are cached for the life of the worker process, so tests
+        # sharing a job id would otherwise leak results into each other.
+        from app.services.sources import linkedin
+        linkedin._DESC_CACHE.clear()
+        yield
+        linkedin._DESC_CACHE.clear()
+
+    def _resp(self, text: str, status: int = 200) -> MagicMock:
         resp = MagicMock()
         resp.text = text
+        resp.status_code = status
         resp.raise_for_status = MagicMock()
         return resp
 
+    def _router(self, search: str, posting=None):
+        """Answer by URL — detail fetches run concurrently, so order isn't fixed."""
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                if posting is None:
+                    import httpx
+                    raise httpx.HTTPError("blocked")
+                if isinstance(posting, int):
+                    return self._resp("", status=posting)
+                return self._resp(posting)
+            return self._resp(search)
+        return _get
+
     def test_returns_standard_dicts_with_full_description(self):
         from app.services.sources.linkedin import fetch
-        with patch("httpx.get", side_effect=[self._resp(self._SEARCH_HTML), self._resp(self._POSTING_HTML)]):
+        with patch("httpx.get", side_effect=self._router(self._SEARCH_HTML, self._POSTING_HTML)):
             results = fetch(session_cookie="", query="Software Engineer", location="New York")
         assert len(results) == 1
         job = results[0]
@@ -295,13 +326,13 @@ class TestLinkedInScraper:
         assert job["title"] == "Software Engineer"
         assert job["company"] == "Stripe"
         assert job["source_job_id"] == "4012345678"
+        assert job["posted_at"] == "2026-08-01"
         assert "Docker required." in job["description"]
         assert "<b>" not in job["description"]
 
     def test_detail_fetch_error_keeps_job_without_description(self):
-        import httpx
         from app.services.sources.linkedin import fetch
-        with patch("httpx.get", side_effect=[self._resp(self._SEARCH_HTML), httpx.HTTPError("blocked")]):
+        with patch("httpx.get", side_effect=self._router(self._SEARCH_HTML, None)):
             results = fetch(session_cookie="", query="SWE", location="NYC")
         assert len(results) == 1
         assert results[0]["description"] == ""
@@ -317,6 +348,92 @@ class TestLinkedInScraper:
         from app.services.sources.linkedin import _job_id_from_url
         assert _job_id_from_url("https://www.linkedin.com/jobs/view/swe-at-acme-4012345678") == "4012345678"
         assert _job_id_from_url("https://www.linkedin.com/jobs/view/no-id-here") is None
+
+    def test_cards_parsed_independently(self):
+        """A card missing a field must not shift the next card's company/location."""
+        from app.services.sources.linkedin import _split_cards, _parse_card
+        html = (
+            '<li><a href="https://www.linkedin.com/jobs/view/a-11111111">x</a>'
+            '<h3 class="base-search-card__title">Backend Engineer</h3></li>'
+            + _li_card("22222222", title="Data Engineer", company="Figma",
+                       location="Remote")
+        )
+        cards = [_parse_card(c) for c in _split_cards(html)]
+        assert cards[0]["title"] == "Backend Engineer"
+        assert cards[0]["company"] == ""       # genuinely absent, not borrowed
+        assert cards[1]["company"] == "Figma"
+        assert cards[1]["location"] == "Remote"
+        assert cards[1]["is_remote"] is True
+
+    def test_paginates_until_short_page(self):
+        from app.services.sources.linkedin import fetch_all
+        full_page = "".join(_li_card(f"4000000{i:03d}") for i in range(10))
+        pages = [full_page, _li_card("4000000999")]
+        calls = []
+
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                return self._resp(self._POSTING_HTML)
+            calls.append(url)
+            return self._resp(pages[len(calls) - 1] if len(calls) <= len(pages) else "")
+
+        with patch("httpx.get", side_effect=_get):
+            results = fetch_all("", ["SWE"], ["NYC"], max_pages=5, max_details=0)
+        # Page 1 was full so it asked for page 2; page 2 was short so it stopped.
+        assert len(calls) == 2
+        assert "start=0" in calls[0] and "start=10" in calls[1]
+        assert len(results) == 11
+
+    def test_deduplicates_the_same_posting_across_searches(self):
+        from app.services.sources.linkedin import fetch_all
+        with patch("httpx.get", side_effect=self._router(self._SEARCH_HTML, self._POSTING_HTML)):
+            results = fetch_all("", ["SWE", "Backend Engineer"], ["NYC", "Boston"],
+                                max_pages=1)
+        assert len(results) == 1
+
+    def test_description_budget_is_respected(self):
+        from app.services.sources.linkedin import fetch_all
+        search = "".join(_li_card(f"4000001{i:03d}") for i in range(3))
+        detail_calls = []
+
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                detail_calls.append(url)
+                return self._resp(self._POSTING_HTML)
+            return self._resp(search)
+
+        with patch("httpx.get", side_effect=_get):
+            results = fetch_all("", ["SWE"], ["NYC"], max_pages=1, max_details=2)
+        assert len(detail_calls) == 2
+        assert sum(1 for job in results if job["description"]) == 2
+
+    def test_gives_up_after_repeated_throttling(self):
+        from app.services.sources import linkedin
+        calls = []
+
+        def _get(url, **kwargs):
+            calls.append(url)
+            return self._resp("", status=429)
+
+        with patch("httpx.get", side_effect=_get), \
+             patch.object(linkedin.time, "sleep"):
+            results = linkedin.fetch_all("", ["a", "b", "c", "d", "e"], ["NYC"],
+                                         max_pages=5)
+        assert results == []
+        assert len(calls) == linkedin._MAX_CONSECUTIVE_THROTTLES
+
+    def test_recency_and_sort_params_are_sent(self):
+        from app.services.sources.linkedin import fetch_all
+        calls = []
+
+        def _get(url, **kwargs):
+            calls.append(url)
+            return self._resp("")
+
+        with patch("httpx.get", side_effect=_get):
+            fetch_all("", ["SWE"], ["NYC"], max_pages=1, recency_hours=24)
+        assert "sortBy=DD" in calls[0]
+        assert "f_TPR=r86400" in calls[0]
 
 
 # ---------------------------------------------------------------------------

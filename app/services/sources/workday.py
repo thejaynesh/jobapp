@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from app.services.sources.base import parse_experience_level
+from app.services.sources.base import (
+    board_workers,
+    fetch_boards_concurrently,
+    parse_experience_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +71,13 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
     deduped by posting path; full descriptions come from capped per-job detail
     calls (which also carry the real posted date and public URL).
     """
-    jobs: list[dict] = []
-    for spec in tenant_specs:
+    def _fetch_one(spec: str) -> list[dict]:
         parsed = parse_tenant_spec(spec)
         if not parsed:
-            continue
+            return []
         tenant, host, site = parsed
 
+        jobs: list[dict] = []
         seen_paths: set[str] = set()
         postings: list[dict] = []
         for query in queries[:_MAX_QUERIES_PER_TENANT]:
@@ -126,5 +130,6 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, description),
                 "posted_at": posted_at,
             })
-    logger.info("Workday: %d jobs across %d tenants", len(jobs), len(tenant_specs))
-    return jobs
+        return jobs
+
+    return fetch_boards_concurrently(tenant_specs, _fetch_one, "Workday", board_workers())
