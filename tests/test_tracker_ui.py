@@ -297,6 +297,84 @@ class TestRunsPage:
         assert client.get("/runs?limit=0").status_code == 200
 
 
+class TestManualFetchTrigger:
+    def test_the_runs_page_offers_a_fetch_button_and_source_picker(self, db, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}):
+            response = client.get("/runs")
+        assert response.status_code == 200
+        assert "Run a fetch now" in response.text
+        assert 'name="sources" value="arbeitnow"' in response.text
+
+    def test_triggering_queues_the_task_with_the_chosen_sources(self, db, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}), \
+             patch("app.tasks.fetch.fetch_jobs") as task:
+            response = client.post("/runs/trigger",
+                                   data={"sources": ["arbeitnow", "dice"]})
+        assert response.status_code == 200
+        assert task.delay.call_args.kwargs["only"] == ["arbeitnow", "dice"]
+        assert "arbeitnow" in response.text
+
+    def test_a_narrow_run_skips_matching(self):
+        """Matching costs LLM calls; a single-source smoke test shouldn't."""
+        from app.routers.runs import trigger_fetch
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}), \
+             patch("app.tasks.fetch.fetch_jobs") as task:
+            trigger_fetch(MagicMock(), sources=["arbeitnow"])
+        assert task.delay.call_args.kwargs["match_after"] is False
+
+    def test_a_full_run_still_matches(self):
+        from app.routers.runs import trigger_fetch
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}), \
+             patch("app.tasks.fetch.fetch_jobs") as task:
+            trigger_fetch(MagicMock(), sources=[])
+        assert task.delay.call_args.kwargs["match_after"] is True
+        assert task.delay.call_args.kwargs["only"] is None
+
+    def test_unknown_source_names_are_ignored(self):
+        from app.routers.runs import trigger_fetch
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}), \
+             patch("app.tasks.fetch.fetch_jobs") as task:
+            trigger_fetch(MagicMock(), sources=["arbeitnow", "'; drop table jobs"])
+        assert task.delay.call_args.kwargs["only"] == ["arbeitnow"]
+
+    def test_it_refuses_while_a_fetch_is_already_running(self, db, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": True, "seconds_left": 120}), \
+             patch("app.tasks.fetch.fetch_jobs") as task:
+            response = client.post("/runs/trigger", data={})
+        task.delay.assert_not_called()
+        assert "already running" in response.text
+
+    def test_a_broker_failure_is_reported_not_raised(self, db, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}), \
+             patch("app.tasks.fetch.fetch_jobs") as task:
+            task.delay.side_effect = RuntimeError("redis down")
+            response = client.post("/runs/trigger", data={})
+        assert response.status_code == 200
+        assert "Could not queue" in response.text
+
+    def test_the_status_endpoint_reports_a_running_fetch(self, db, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": True, "seconds_left": 60}):
+            response = client.get("/runs/status")
+        assert response.status_code == 200
+        assert "Fetch running" in response.text
+        assert 'hx-trigger="every 5s"' in response.text
+
+    def test_the_status_endpoint_stops_polling_when_idle(self, db, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}):
+            response = client.get("/runs/status")
+        assert "No fetch running" in response.text
+        assert "hx-trigger" not in response.text
+
+
 class TestRetiredBoardVisibility:
     """A board we stopped polling has to be visible, not silently dropped."""
 

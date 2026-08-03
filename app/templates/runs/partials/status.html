@@ -1,0 +1,29 @@
+{# Polls itself while a fetch is in flight, then stops and offers a reload. #}
+<div id="fetch-status"
+     {% if fetch_state.running %}
+     hx-get="/runs/status" hx-trigger="every 5s" hx-swap="outerHTML"
+     {% endif %}>
+  {% if triggered %}
+  <div class="text-sm mb-2 {% if triggered.ok %}text-green-700{% else %}text-red-600{% endif %}">
+    {{ triggered.message }}
+  </div>
+  {% endif %}
+
+  {% if fetch_state.running %}
+  <div class="flex items-center gap-2 text-sm text-blue-700">
+    <span class="inline-block h-2 w-2 rounded-full bg-blue-500 animate-pulse"></span>
+    Fetch running… this panel refreshes every 5s.
+  </div>
+  {% elif triggered and triggered.ok %}
+  <div class="text-sm text-gray-500">
+    Queued. <a href="/runs" class="text-blue-600 underline">Reload</a> once it finishes.
+  </div>
+  {% else %}
+  <div class="text-sm text-gray-400">
+    No fetch running.
+    {% if fetch_state.error %}
+    <span class="text-red-500">(Couldn't read lock state: {{ fetch_state.error }})</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

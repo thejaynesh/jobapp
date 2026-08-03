@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 _MAX_BACKFILL_ATTEMPTS = 3
 
 
+class _BrowserTierSkipped(Exception):
+    """Internal signal: no Playwright source was requested this run."""
+
+
 def _get_slugs(raw: str) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
@@ -28,7 +32,7 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
 
 
 def _run_combos(
-    stats: dict, all_jobs: list, source: str, fetch_one, combos,
+    stats: dict, all_jobs: list, source: str, fetch_one, combos, skip=None,
 ) -> None:
     """
     Call `fetch_one(*combo)` over each combination, recording per-source stats.
@@ -40,6 +44,8 @@ def _run_combos(
     """
     from app.services.sources.base import SourceUnavailable
 
+    if skip is not None and skip(source):
+        return
     stats.setdefault(source, {"count": 0, "errors": [], "enabled": True})
     for combo in combos:
         try:
@@ -59,6 +65,7 @@ def _run_combos(
 def _run_all_adapters(
     roles: list[str], locations: list[str], cfg,
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
+    only: set[str] | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
@@ -66,6 +73,9 @@ def _run_all_adapters(
     ats_slugs: final slug list per ATS (configured + seeds + discovered), built
     by the caller; when None, assembled from settings alone.
     loc_prefs: normalized location preferences (see services.locations).
+    only: when given, run just these sources. A full cycle takes minutes, which
+    makes testing one adapter painfully slow; restricting it turns that into
+    seconds. Skipped sources report as disabled rather than silently absent.
     """
     from app.services.ats_discovery import build_ats_slugs
     from app.services.locations import adzuna_countries, jobicy_geos
@@ -78,9 +88,16 @@ def _run_all_adapters(
     all_jobs: list[dict] = []
     stats: dict = {}
 
+    def _skip(source: str) -> bool:
+        """True when `only` excludes this source; records it as disabled."""
+        if only is not None and source not in only:
+            stats[source] = {"count": 0, "errors": [], "enabled": False}
+            return True
+        return False
+
     # --- Tier 1: httpx adapters ---
 
-    if cfg.ADZUNA_APP_ID and cfg.ADZUNA_APP_KEY:
+    if cfg.ADZUNA_APP_ID and cfg.ADZUNA_APP_KEY and not _skip("adzuna"):
         from app.services.sources.adzuna import fetch as adzuna_fetch
         stats.setdefault("adzuna", {"count": 0, "errors": [], "enabled": True})
         # Adzuna has one API endpoint per country: search country-wide in each
@@ -97,19 +114,20 @@ def _run_all_adapters(
     else:
         stats["adzuna"] = {"count": 0, "errors": [], "enabled": False}
 
-    if cfg.JSEARCH_API_KEY:
+    if cfg.JSEARCH_API_KEY and not _skip("jsearch"):
         from app.services.sources.jsearch import fetch as jsearch_fetch
         _run_combos(
             stats, all_jobs, "jsearch",
             lambda role, loc: jsearch_fetch(
                 api_key=cfg.JSEARCH_API_KEY, query=role, location=loc),
             [(r, l) for r in roles for l in locations],
+            _skip,
         )
     else:
         stats["jsearch"] = {"count": 0, "errors": [], "enabled": False}
 
     greenhouse_slugs = ats_slugs.get("greenhouse") or []
-    if greenhouse_slugs:
+    if greenhouse_slugs and not _skip("greenhouse"):
         from app.services.sources.greenhouse import fetch as gh_fetch
         try:
             jobs = gh_fetch(company_slugs=greenhouse_slugs)
@@ -123,7 +141,7 @@ def _run_all_adapters(
         stats["greenhouse"] = {"count": 0, "errors": [], "enabled": False}
 
     lever_slugs = ats_slugs.get("lever") or []
-    if lever_slugs:
+    if lever_slugs and not _skip("lever"):
         from app.services.sources.lever import fetch as lever_fetch
         try:
             jobs = lever_fetch(company_slugs=lever_slugs)
@@ -137,7 +155,7 @@ def _run_all_adapters(
         stats["lever"] = {"count": 0, "errors": [], "enabled": False}
 
     ashby_slugs = ats_slugs.get("ashby") or []
-    if ashby_slugs:
+    if ashby_slugs and not _skip("ashby"):
         from app.services.sources.ashby import fetch as ashby_fetch
         try:
             jobs = ashby_fetch(company_slugs=ashby_slugs)
@@ -157,7 +175,7 @@ def _run_all_adapters(
         ("recruitee", "app.services.sources.recruitee"),
     ):
         slugs = ats_slugs.get(ats_name) or []
-        if slugs:
+        if slugs and not _skip(ats_name):
             import importlib
             ats_fetch = importlib.import_module(fetch_path).fetch
             stats.setdefault(ats_name, {"count": 0, "errors": [], "enabled": True})
@@ -172,7 +190,7 @@ def _run_all_adapters(
 
     # --- Workday-hosted career sites (tenant:host:site triples) ---
     workday_tenants = ats_slugs.get("workday") or []
-    if workday_tenants:
+    if workday_tenants and not _skip("workday"):
         from app.services.sources.workday import fetch as workday_fetch
         stats.setdefault("workday", {"count": 0, "errors": [], "enabled": True})
         try:
@@ -185,7 +203,7 @@ def _run_all_adapters(
         stats["workday"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- Jooble: keyed aggregator (free key) ---
-    if cfg.JOOBLE_API_KEY:
+    if cfg.JOOBLE_API_KEY and not _skip("jooble"):
         from app.services.sources.jooble import fetch as jooble_fetch
         stats.setdefault("jooble", {"count": 0, "errors": [], "enabled": True})
         for role in roles:
@@ -200,7 +218,7 @@ def _run_all_adapters(
         stats["jooble"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- Careerjet: keyed aggregator (free affiliate id) ---
-    if cfg.CAREERJET_AFFID:
+    if cfg.CAREERJET_AFFID and not _skip("careerjet"):
         from app.services.sources.careerjet import fetch as careerjet_fetch
         stats.setdefault("careerjet", {"count": 0, "errors": [], "enabled": True})
         for role in roles:
@@ -215,7 +233,7 @@ def _run_all_adapters(
         stats["careerjet"] = {"count": 0, "errors": [], "enabled": False}
 
     # --- Findwork: keyed developer-jobs API (free key) ---
-    if cfg.FINDWORK_API_KEY:
+    if cfg.FINDWORK_API_KEY and not _skip("findwork"):
         from app.services.sources.findwork import fetch as findwork_fetch
         stats.setdefault("findwork", {"count": 0, "errors": [], "enabled": True})
         for role in roles:
@@ -232,24 +250,27 @@ def _run_all_adapters(
     # One call for the whole cycle: the same posting appears under many
     # query/location pairs, and deduping before the description fetches keeps
     # the detail budget going to distinct jobs.
-    from app.services.sources.linkedin import fetch_all as li_fetch_all
-    stats.setdefault("linkedin", {"count": 0, "errors": [], "enabled": True})
-    try:
-        jobs = li_fetch_all(
-            session_cookie=cfg.LINKEDIN_SESSION_COOKIE, queries=roles, locations=locations
-        )
-        _record(stats, "linkedin", jobs)
-        all_jobs.extend(jobs)
-    except Exception as exc:
-        _record(stats, "linkedin", [], str(exc))
+    if not _skip("linkedin"):
+        from app.services.sources.linkedin import fetch_all as li_fetch_all
+        stats.setdefault("linkedin", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = li_fetch_all(
+                session_cookie=cfg.LINKEDIN_SESSION_COOKIE, queries=roles,
+                locations=locations,
+            )
+            _record(stats, "linkedin", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "linkedin", [], str(exc))
 
     # --- Indeed: RSS feed, retired upstream (every query 404s) ---
-    if getattr(cfg, "INDEED_RSS_ENABLED", False):
+    if getattr(cfg, "INDEED_RSS_ENABLED", False) and not _skip("indeed"):
         from app.services.sources.indeed import fetch as indeed_fetch
         _run_combos(
             stats, all_jobs, "indeed",
             lambda role, loc: indeed_fetch(query=role, location=loc),
             [(r, l) for r in roles for l in locations],
+            _skip,
         )
     else:
         stats["indeed"] = {
@@ -260,14 +281,8 @@ def _run_all_adapters(
 
     # --- Remotive: free public API for remote tech jobs ---
     from app.services.sources.remotive import fetch as remotive_fetch
-    stats.setdefault("remotive", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        try:
-            jobs = remotive_fetch(query=role)
-            _record(stats, "remotive", jobs)
-            all_jobs.extend(jobs)
-        except Exception as exc:
-            _record(stats, "remotive", [], f"{role}: {exc}")
+    _run_combos(stats, all_jobs, "remotive",
+                lambda role: remotive_fetch(query=role), [(r,) for r in roles], _skip)
 
     # --- Arbeitnow: free public feed, downloaded once and filtered per query ---
     from app.services.sources.arbeitnow import fetch as arbeitnow_fetch
@@ -277,103 +292,87 @@ def _run_all_adapters(
             query=role, location=loc,
             max_pages=getattr(cfg, "ARBEITNOW_MAX_PAGES", 3)),
         [(r, l) for r in roles for l in locations],
-    )
+        _skip,
+        )
 
     # --- RemoteOK: free public API for remote tech jobs ---
     from app.services.sources.remoteok import fetch as remoteok_fetch
-    stats.setdefault("remoteok", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        try:
-            jobs = remoteok_fetch(query=role)
-            _record(stats, "remoteok", jobs)
-            all_jobs.extend(jobs)
-        except Exception as exc:
-            _record(stats, "remoteok", [], f"{role}: {exc}")
+    _run_combos(stats, all_jobs, "remoteok",
+                lambda role: remoteok_fetch(query=role), [(r,) for r in roles], _skip)
 
     # --- We Work Remotely: RSS feed for remote tech jobs ---
     from app.services.sources.weworkremotely import fetch as wwr_fetch
-    stats.setdefault("weworkremotely", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        try:
-            jobs = wwr_fetch(query=role)
-            _record(stats, "weworkremotely", jobs)
-            all_jobs.extend(jobs)
-        except Exception as exc:
-            _record(stats, "weworkremotely", [], f"{role}: {exc}")
+    _run_combos(stats, all_jobs, "weworkremotely",
+                lambda role: wwr_fetch(query=role), [(r,) for r in roles], _skip)
 
     # --- The Muse: free public API, tech categories ---
     from app.services.sources.themuse import fetch as themuse_fetch
-    stats.setdefault("themuse", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        try:
-            jobs = themuse_fetch(query=role)
-            _record(stats, "themuse", jobs)
-            all_jobs.extend(jobs)
-        except Exception as exc:
-            _record(stats, "themuse", [], f"{role}: {exc}")
+    _run_combos(stats, all_jobs, "themuse",
+                lambda role: themuse_fetch(query=role), [(r,) for r in roles], _skip)
 
     # --- Himalayas: free public API for remote tech jobs ---
     from app.services.sources.himalayas import fetch as himalayas_fetch
-    stats.setdefault("himalayas", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        try:
-            jobs = himalayas_fetch(query=role)
-            _record(stats, "himalayas", jobs)
-            all_jobs.extend(jobs)
-        except Exception as exc:
-            _record(stats, "himalayas", [], f"{role}: {exc}")
+    _run_combos(stats, all_jobs, "himalayas",
+                lambda role: himalayas_fetch(query=role), [(r,) for r in roles], _skip)
 
     # --- Jobicy: free public API for remote tech jobs (region-targeted) ---
     from app.services.sources.jobicy import fetch as jobicy_fetch
-    stats.setdefault("jobicy", {"count": 0, "errors": [], "enabled": True})
-    for role in roles:
-        for geo in jobicy_geo_list:
-            try:
-                jobs = jobicy_fetch(query=role, geo=geo)
-                _record(stats, "jobicy", jobs)
-                all_jobs.extend(jobs)
-            except Exception as exc:
-                _record(stats, "jobicy", [], f"{role}/{geo}: {exc}")
+    _run_combos(stats, all_jobs, "jobicy",
+                lambda role, geo: jobicy_fetch(query=role, geo=geo),
+                [(r, g) for r in roles for g in jobicy_geo_list], _skip)
 
     # --- Hacker News "Who is hiring?": one monthly thread, fetched once ---
-    from app.services.sources.hnhiring import fetch as hn_fetch
-    stats.setdefault("hnhiring", {"count": 0, "errors": [], "enabled": True})
-    try:
-        jobs = hn_fetch(queries=roles)
-        _record(stats, "hnhiring", jobs)
-        all_jobs.extend(jobs)
-    except Exception as exc:
-        _record(stats, "hnhiring", [], str(exc))
+    if not _skip("hnhiring"):
+        from app.services.sources.hnhiring import fetch as hn_fetch
+        stats.setdefault("hnhiring", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = hn_fetch(queries=roles)
+            _record(stats, "hnhiring", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "hnhiring", [], str(exc))
 
     # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
+    # Launching a browser is the most expensive thing here, so don't do it at
+    # all when none of its sources were asked for.
+    pw_sources = {"wellfound", "dice", "handshake"}
+    run_browser_tier = only is None or bool(pw_sources & only)
 
     async def _run_playwright() -> tuple[list[dict], dict]:
         pw_jobs: list[dict] = []
         pw_stats: dict = {}
 
-        from app.services.sources.wellfound import fetch as wf_fetch
-        pw_stats.setdefault("wellfound", {"count": 0, "errors": [], "enabled": True})
-        for role in roles:
-            for loc in locations:
-                try:
-                    jobs = await wf_fetch(query=role, location=loc)
-                    _record(pw_stats, "wellfound", jobs)
-                    pw_jobs.extend(jobs)
-                except Exception as exc:
-                    _record(pw_stats, "wellfound", [], f"{role}/{loc}: {exc}")
+        if only is None or "wellfound" in only:
+            from app.services.sources.wellfound import fetch as wf_fetch
+            pw_stats.setdefault("wellfound", {"count": 0, "errors": [], "enabled": True})
+            for role in roles:
+                for loc in locations:
+                    try:
+                        jobs = await wf_fetch(query=role, location=loc)
+                        _record(pw_stats, "wellfound", jobs)
+                        pw_jobs.extend(jobs)
+                    except Exception as exc:
+                        _record(pw_stats, "wellfound", [], f"{role}/{loc}: {exc}")
+        else:
+            pw_stats["wellfound"] = {"count": 0, "errors": [], "enabled": False}
 
-        from app.services.sources.dice import fetch as dice_fetch
-        pw_stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
-        for role in roles:
-            for loc in locations:
-                try:
-                    jobs = await dice_fetch(query=role, location=loc)
-                    _record(pw_stats, "dice", jobs)
-                    pw_jobs.extend(jobs)
-                except Exception as exc:
-                    _record(pw_stats, "dice", [], f"{role}/{loc}: {exc}")
+        if only is None or "dice" in only:
+            from app.services.sources.dice import fetch as dice_fetch
+            pw_stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
+            for role in roles:
+                for loc in locations:
+                    try:
+                        jobs = await dice_fetch(query=role, location=loc)
+                        _record(pw_stats, "dice", jobs)
+                        pw_jobs.extend(jobs)
+                    except Exception as exc:
+                        _record(pw_stats, "dice", [], f"{role}/{loc}: {exc}")
+        else:
+            pw_stats["dice"] = {"count": 0, "errors": [], "enabled": False}
 
-        if getattr(cfg, "HANDSHAKE_SESSION_COOKIE", ""):
+        if getattr(cfg, "HANDSHAKE_SESSION_COOKIE", "") and (
+            only is None or "handshake" in only
+        ):
             from app.services.sources.handshake import fetch as hs_fetch
             pw_stats.setdefault("handshake", {"count": 0, "errors": [], "enabled": True})
             for role in roles:
@@ -390,9 +389,14 @@ def _run_all_adapters(
         return pw_jobs, pw_stats
 
     try:
+        if not run_browser_tier:
+            raise _BrowserTierSkipped
         pw_jobs, pw_stats = asyncio.run(_run_playwright())
         all_jobs.extend(pw_jobs)
         stats.update(pw_stats)
+    except _BrowserTierSkipped:
+        for src in sorted(pw_sources):
+            stats[src] = {"count": 0, "errors": [], "enabled": False}
     except Exception as exc:
         logger.error("Playwright scrapers fatal error: %s", exc)
         for src in ("wellfound", "dice", "handshake"):
@@ -593,7 +597,11 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
     return new_boards
 
 
-def fetch_and_save_jobs(db: Session) -> dict:
+def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
+    """
+    Run one fetch cycle. `only` restricts it to the named sources, which is what
+    makes testing a single adapter take seconds instead of minutes.
+    """
     started_at = datetime.now(timezone.utc)
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0, "sources": {}}
 
@@ -697,7 +705,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
     try:
         with SourceLogCapture() as capture:
             raw_jobs, source_stats = _run_all_adapters(
-                queries, locations, settings, ats_slugs, loc_prefs
+                queries, locations, settings, ats_slugs, loc_prefs, only
             )
         merge_into_stats(source_stats, capture.messages)
     except Exception as exc:
