@@ -1,3 +1,4 @@
+import errno
 import logging
 import uuid
 
@@ -10,13 +11,23 @@ from app.models.application import Application
 logger = logging.getLogger(__name__)
 
 
+def _friendly_error(exc: BaseException) -> str:
+    if isinstance(exc, OSError) and exc.errno == errno.EAGAIN:
+        return (
+            "The server was temporarily out of resources (memory/processes). "
+            "It usually recovers in a minute — please retry."
+        )
+    return str(exc)
+
+
 @celery_app.task(
     name="app.tasks.generate.generate_docs",
-    bind=False,
+    bind=True,
     soft_time_limit=300,
     time_limit=360,
+    max_retries=2,
 )
-def generate_docs(application_id: str, feedback: str | None = None) -> dict:
+def generate_docs(self, application_id: str, feedback: str | None = None) -> dict:
     db = SessionLocal()
     try:
         app = db.query(Application).filter(Application.id == uuid.UUID(application_id)).first()
@@ -44,8 +55,21 @@ def generate_docs(application_id: str, feedback: str | None = None) -> dict:
         return {"status": "timeout"}
 
     except Exception as exc:
+        db.rollback()
+        # Transient resource exhaustion (fork/thread EAGAIN): retry the whole
+        # task after a pause instead of failing the generation outright.
+        if (
+            isinstance(exc, OSError)
+            and exc.errno == errno.EAGAIN
+            and self.request.retries < self.max_retries
+        ):
+            logger.warning(
+                "generate_docs EAGAIN for %s — retrying task (attempt %d)",
+                application_id, self.request.retries + 1,
+            )
+            raise self.retry(countdown=20, exc=exc)
         logger.error("generate_docs failed for %s: %s", application_id, exc)
-        _mark_failed(db, application_id, str(exc))
+        _mark_failed(db, application_id, _friendly_error(exc))
         return {"status": "error", "error": str(exc)}
     finally:
         db.close()

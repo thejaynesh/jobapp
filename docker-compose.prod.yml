@@ -40,7 +40,7 @@ services:
 
   worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=25
     volumes:
       - storage_data:/storage
     env_file: .env

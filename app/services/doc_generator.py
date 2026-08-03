@@ -1,10 +1,13 @@
 import copy
+import errno
+import fcntl
 import json
 import logging
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 import uuid
 from pathlib import Path
@@ -594,21 +597,46 @@ def render_latex(template_name: str, context: dict) -> str:
 _PAGES_RE = re.compile(r"Output written on .*?\((\d+) pages?")
 
 
+# pdflatex forks a new process per compile; under memory/PID pressure (small
+# VPS, several Celery workers) fork fails with EAGAIN. Serialize compiles
+# machine-wide via a file lock and retry transient spawn failures.
+_PDFLATEX_LOCK_PATH = Path(tempfile.gettempdir()) / "jobapp_pdflatex.lock"
+
+
+def _run_pdflatex(cmd: list[str]) -> subprocess.CompletedProcess:
+    delays = [0, 2, 5, 10]
+    last_exc: OSError | None = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            with open(_PDFLATEX_LOCK_PATH, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except OSError as exc:
+            if exc.errno != errno.EAGAIN:
+                raise
+            last_exc = exc
+            logger.warning("pdflatex spawn hit EAGAIN (system busy) — retrying")
+    raise DocGenerationError(
+        "The server was too busy to start the PDF compiler (out of memory or "
+        f"processes) after {len(delays)} attempts: {last_exc}"
+    )
+
+
 def compile_pdf_with_pages(tex_source: str, output_path: Path) -> tuple[Path, int]:
     """Compile LaTeX to PDF; returns (path, page_count) parsed from the pdflatex log."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_file = Path(tmpdir) / "document.tex"
         tex_file.write_text(tex_source, encoding="utf-8")
-        result = subprocess.run(
+        result = _run_pdflatex(
             [
                 "pdflatex",
                 "-interaction=nonstopmode",
                 "-halt-on-error",
                 "-output-directory", tmpdir,
                 str(tex_file),
-            ],
-            capture_output=True,
-            text=True,
+            ]
         )
         if result.returncode != 0:
             log = (result.stdout or "") + (result.stderr or "")
