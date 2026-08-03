@@ -29,6 +29,22 @@ async def _scrape(query: str, location: str) -> list[dict]:
             await browser.close()
             return []
 
+        # networkidle can settle before this SPA paints anything, so wait for
+        # the body to actually contain text. A page that never produces any is
+        # not a selector problem — there is nothing on it to select.
+        try:
+            await page.wait_for_function(
+                "() => (document.body?.innerText || '').trim().length > 200",
+                timeout=15000,
+            )
+        except Exception:
+            logger.warning(
+                "Wellfound: page rendered no text at all — %s",
+                await describe_page(page),
+            )
+            await browser.close()
+            return []
+
         # Try to extract data from embedded JSON first (most reliable)
         raw = await page.evaluate("""() => {
             const scripts = [...document.querySelectorAll('script[type="application/json"],' +
