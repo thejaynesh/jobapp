@@ -168,6 +168,80 @@ class TestWellfoundRolePages:
             await fetch("Software Engineer", "United States")
         assert page.goto.call_args[0][0] == "https://wellfound.com/role/software-engineer"
 
+    def test_the_configured_roles_default_to_the_four_we_want(self):
+        from app.services.sources.wellfound import configured_roles
+        assert configured_roles() == [
+            "software-engineer", "full-stack-engineer",
+            "backend-engineer", "mobile-engineer",
+        ]
+
+    def test_configured_roles_are_slugified_and_overridable(self):
+        from app.config import settings
+        from app.services.sources.wellfound import configured_roles
+        with patch.object(settings, "WELLFOUND_ROLES", "Data Engineer, ml-engineer"):
+            assert configured_roles() == ["data-engineer", "ml-engineer"]
+
+    def test_a_blank_setting_falls_back_to_the_defaults(self):
+        from app.config import settings
+        from app.services.sources.wellfound import configured_roles, DEFAULT_ROLES
+        with patch.object(settings, "WELLFOUND_ROLES", ""):
+            assert configured_roles() == list(DEFAULT_ROLES)
+
+    @pytest.mark.asyncio
+    async def test_every_configured_role_page_is_visited(self):
+        from app.services.sources.wellfound import fetch_roles
+        page = _page(evaluate=[self._ROW], body="x" * 500)
+        with patch("playwright.async_api.async_playwright", return_value=_playwright(page)):
+            await fetch_roles()
+
+        visited = [c[0][0] for c in page.goto.call_args_list]
+        assert visited == [
+            "https://wellfound.com/role/software-engineer",
+            "https://wellfound.com/role/full-stack-engineer",
+            "https://wellfound.com/role/backend-engineer",
+            "https://wellfound.com/role/mobile-engineer",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_all_roles_share_one_browser_launch(self):
+        """Starting Chromium dominates this source's cost."""
+        from app.services.sources.wellfound import fetch_roles
+        page = _page(evaluate=[self._ROW], body="x" * 500)
+        ctx = _playwright(page)
+        with patch("playwright.async_api.async_playwright", return_value=ctx):
+            await fetch_roles()
+        chromium = ctx.__aenter__.return_value.chromium
+        assert chromium.launch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_one_broken_role_does_not_lose_the_others(self):
+        from app.services.sources.wellfound import fetch_roles
+        page = _page(evaluate=[self._ROW], body="x" * 500)
+        calls = {"n": 0}
+
+        async def _goto(url, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("navigation failed")
+            return MagicMock(status=200)
+
+        page.goto = AsyncMock(side_effect=_goto)
+        with patch("playwright.async_api.async_playwright", return_value=_playwright(page)):
+            jobs = await fetch_roles(["a-role", "broken-role", "c-role"])
+        # Three attempted, the middle one empty, the others still counted.
+        assert page.goto.await_count == 3
+        assert len(jobs) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_nonexistent_role_page_is_named_as_such(self):
+        from app.services.sources.wellfound import fetch_roles
+        page = _page(evaluate=[self._ROW], body="x" * 500)
+        page.goto = AsyncMock(return_value=MagicMock(status=404))
+        with patch("playwright.async_api.async_playwright", return_value=_playwright(page)):
+            jobs = await fetch_roles(["not-a-real-role"])
+        assert jobs == []
+        page.evaluate.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_it_builds_jobs_from_the_extractor(self):
         from app.services.sources.wellfound import fetch

@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # it stops burning requests; flip on if the feed ever comes back.
     INDEED_RSS_ENABLED: bool = False
     ARBEITNOW_MAX_PAGES: int = 3
+
+    # Wellfound role pages are a fixed taxonomy (wellfound.com/role/<slug>), so
+    # they're listed explicitly rather than derived from expanded search
+    # queries, which would mostly request pages that don't exist.
+    WELLFOUND_ROLES: str = (
+        "software-engineer,full-stack-engineer,backend-engineer,mobile-engineer"
+    )
     SLUG_HARVEST_URLS: str = (
         "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"

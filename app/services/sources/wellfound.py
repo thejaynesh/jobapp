@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 
 _ROLE_URL = "https://wellfound.com/role/{slug}"
 
+# Wellfound role pages are a fixed taxonomy, not free text — deriving slugs
+# from expanded search queries ("senior backend engineer python") would mostly
+# request pages that don't exist. The roles to scrape are configured instead.
+DEFAULT_ROLES = (
+    "software-engineer",
+    "full-stack-engineer",
+    "backend-engineer",
+    "mobile-engineer",
+)
+
 # A role page is the same regardless of which location asked for it.
 _CACHE_TTL_SECONDS = 900
 _cache: dict = {}
@@ -36,6 +46,15 @@ def role_slug(query: str) -> str:
     """'Senior Software Engineer' → 'senior-software-engineer'."""
     slug = re.sub(r"[^a-z0-9]+", "-", (query or "").lower()).strip("-")
     return slug or "software-engineer"
+
+
+def configured_roles() -> list[str]:
+    """Role slugs to scrape, from settings, falling back to the defaults."""
+    from app.config import settings
+
+    raw = getattr(settings, "WELLFOUND_ROLES", "") or ""
+    slugs = [role_slug(s) for s in raw.split(",") if s.strip()]
+    return slugs or list(DEFAULT_ROLES)
 
 
 # Layered like the Dice extractor: structured data first, then anchors, so a
@@ -130,64 +149,103 @@ def _to_jobs(rows: list[dict], fallback_location: str) -> list[dict]:
     return jobs
 
 
-async def _scrape(query: str, location: str) -> list[dict]:
+async def _scrape_role(page, slug: str, location: str) -> list[dict]:
+    """One role page, reusing an already-open browser page."""
+    url = _ROLE_URL.format(slug=slug)
+    try:
+        response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception as exc:
+        logger.warning("Wellfound: page load failed for %s: %s", url, exc)
+        return []
+
+    # A misconfigured slug is worth naming precisely — it looks identical to a
+    # role that simply has no openings otherwise.
+    status = getattr(response, "status", None)
+    if status == 404:
+        logger.warning("Wellfound: no such role page %s (404) — check the slug", url)
+        return []
+
+    # A page with no text at all is a block, not a markup problem — there is
+    # nothing on it to select, so say that rather than blaming selectors.
+    try:
+        await page.wait_for_function(
+            "() => (document.body?.innerText || '').trim().length > 200",
+            timeout=15000,
+        )
+    except Exception:
+        logger.warning("Wellfound: %s rendered no text at all — %s",
+                       url, await describe_page(page))
+        return []
+
+    try:
+        rows = await page.evaluate(_EXTRACT_JS)
+    except Exception as exc:
+        logger.warning("Wellfound: extraction failed (%s) — %s",
+                       type(exc).__name__, await describe_page(page))
+        return []
+
+    jobs = _to_jobs(rows or [], location)
+
+    if not jobs:
+        # Last resort: the embedded app state, which sometimes carries the
+        # listings even when neither structured data nor links do.
+        raw = await page.evaluate("""() => [...document.querySelectorAll(
+            'script[type="application/json"],script[id*="__NEXT_DATA__"]'
+        )].map(s => s.textContent).join('|||')""")
+        jobs = _parse_json_data(raw, location)
+
+    if not jobs:
+        logger.warning("Wellfound: no jobs found on %s — %s",
+                       url, await describe_page(page))
+    logger.info("Wellfound: %d jobs for role %s", len(jobs), slug)
+    return jobs
+
+
+async def fetch_roles(slugs: list[str] | None = None, location: str = "") -> list[dict]:
+    """
+    Scrape every configured role page in a single browser session.
+
+    One Chromium launch for all roles rather than one per role: starting the
+    browser dominates the cost of this source.
+    """
     from playwright.async_api import async_playwright
 
-    slug = role_slug(query)
-    url = _ROLE_URL.format(slug=slug)
+    slugs = slugs or configured_roles()
+    fresh = [s for s in slugs if not _cached(s)]
+    jobs: list[dict] = [job for s in slugs if _cached(s) for job in _cached(s)]
+
+    if not fresh:
+        return jobs
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(**LAUNCH_OPTIONS)
         context = await browser.new_context(**CONTEXT_OPTIONS)
         page = await context.new_page()
         try:
-            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception as exc:
-            logger.warning("Wellfound: page load failed for %s: %s", url, exc)
+            for slug in fresh:
+                try:
+                    found = await _scrape_role(page, slug, location)
+                except Exception as exc:
+                    logger.error("Wellfound: role %s failed: %s", slug, exc)
+                    found = []
+                _cache[slug] = (time.monotonic(), found)
+                jobs.extend(found)
+        finally:
             await browser.close()
-            return []
 
-        # A page with no text at all is a block, not a markup problem — there is
-        # nothing on it to select, so say that rather than blaming selectors.
-        try:
-            await page.wait_for_function(
-                "() => (document.body?.innerText || '').trim().length > 200",
-                timeout=15000,
-            )
-        except Exception:
-            logger.warning("Wellfound: %s rendered no text at all — %s",
-                           url, await describe_page(page))
-            await browser.close()
-            return []
-
-        try:
-            rows = await page.evaluate(_EXTRACT_JS)
-        except Exception as exc:
-            logger.warning("Wellfound: extraction failed (%s) — %s",
-                           type(exc).__name__, await describe_page(page))
-            await browser.close()
-            return []
-
-        jobs = _to_jobs(rows or [], location)
-
-        if not jobs:
-            # Last resort: the embedded app state, which sometimes carries the
-            # listings even when neither structured data nor links do.
-            raw = await page.evaluate("""() => [...document.querySelectorAll(
-                'script[type="application/json"],script[id*="__NEXT_DATA__"]'
-            )].map(s => s.textContent).join('|||')""")
-            jobs = _parse_json_data(raw, query, location)
-
-        if not jobs:
-            logger.warning("Wellfound: no jobs found on %s — %s",
-                           url, await describe_page(page))
-        await browser.close()
-        logger.info("Wellfound: %d jobs for %s", len(jobs), slug)
-        return jobs
+    logger.info("Wellfound: %d jobs across %d role pages", len(jobs), len(slugs))
+    return jobs
 
 
-def _parse_json_data(raw: str, query: str, location: str) -> list[dict]:
+def _cached(slug: str) -> list[dict] | None:
+    entry = _cache.get(slug)
+    if entry and (time.monotonic() - entry[0]) < _CACHE_TTL_SECONDS:
+        return entry[1]
+    return None
+
+
+def _parse_json_data(raw: str, location: str) -> list[dict]:
     """Try to extract jobs from embedded page JSON blobs."""
     jobs: list[dict] = []
     for chunk in (raw or "").split("|||"):
@@ -232,24 +290,18 @@ def _walk_json(node, jobs: list, depth: int = 0) -> None:
         _walk_json(v, jobs, depth + 1)
 
 
-async def fetch(query: str, location: str) -> list[dict]:
-    """
-    Jobs for one role. Cached per role slug: the URL ignores location, so
-    without this the same page would be loaded once per configured location.
-    """
-    slug = role_slug(query)
-    cached = _cache.get(slug)
-    if cached and (time.monotonic() - cached[0]) < _CACHE_TTL_SECONDS:
-        return [dict(job, location=job["location"] or location) for job in cached[1]]
+async def _scrape(query: str, location: str = "") -> list[dict]:
+    """The single-role entry point, mirroring the other Playwright adapters."""
+    return await fetch_roles([role_slug(query)], location)
 
+
+async def fetch(query: str, location: str = "") -> list[dict]:
+    """Jobs for the single role page matching `query`."""
     try:
-        jobs = await _scrape(query, location)
+        return await _scrape(query, location)
     except Exception as exc:
         logger.error("Wellfound scraper error: %s", exc)
         return []
-
-    _cache[slug] = (time.monotonic(), jobs)
-    return jobs
 
 
 def reset_cache() -> None:

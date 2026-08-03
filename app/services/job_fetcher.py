@@ -361,16 +361,17 @@ def _run_all_adapters(
         pw_stats: dict = {}
 
         if only is None or "wellfound" in only:
-            from app.services.sources.wellfound import fetch as wf_fetch
+            # Wellfound is scraped by role page, not by search query: the
+            # pages are a fixed taxonomy and carry no location, so one pass over
+            # the configured roles covers every query/location combination.
+            from app.services.sources.wellfound import fetch_roles as wf_fetch_roles
             pw_stats.setdefault("wellfound", {"count": 0, "errors": [], "enabled": True})
-            for role in roles:
-                for loc in locations:
-                    try:
-                        jobs = await wf_fetch(query=role, location=loc)
-                        _record(pw_stats, "wellfound", jobs)
-                        pw_jobs.extend(jobs)
-                    except Exception as exc:
-                        _record(pw_stats, "wellfound", [], f"{role}/{loc}: {exc}")
+            try:
+                jobs = await wf_fetch_roles(location=locations[0] if locations else "")
+                _record(pw_stats, "wellfound", jobs)
+                pw_jobs.extend(jobs)
+            except Exception as exc:
+                _record(pw_stats, "wellfound", [], str(exc))
         else:
             pw_stats["wellfound"] = {"count": 0, "errors": [], "enabled": False}
 
