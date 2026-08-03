@@ -84,8 +84,10 @@ def backfill_boards(
     sniff_sites: bool = True,
     max_links: int = 2000,
     max_hosts: int = 500,
+    workers: int = 8,
     batch_size: int = BATCH_SIZE,
     dry_run: bool = False,
+    commit: bool = True,
 ) -> BackfillReport:
     """
     Mine every stored job for company ATS boards.
@@ -94,6 +96,9 @@ def backfill_boards(
     an apply URL; `sniff_sites` inspects the company careers hosts those jobs
     point at. Both make outbound requests, so they're capped and can be turned
     off for a purely offline pass.
+
+    Pass `commit=False` when the caller owns the transaction — the fetch cycle
+    runs this inside a savepoint alongside its own bookkeeping.
     """
     from app.services import company_boards as boards
     from app.services.ats_discovery import ALL_ATS, extract_slugs
@@ -146,21 +151,25 @@ def backfill_boards(
 
     if resolve_links and unresolved:
         report.links_attempted, report.links_resolved, report.jobs_given_apply_url = (
-            _resolve_stored_links(db, unresolved[:max_links], career_hosts, host_company)
+            _resolve_stored_links(
+                db, unresolved[:max_links], career_hosts, host_company, workers
+            )
         )
 
     if sniff_sites and career_hosts:
         report.boards_sniffed = _sniff_stored_hosts(
-            db, career_hosts, host_company, max_hosts
+            db, career_hosts, host_company, max_hosts, workers
         )
 
-    db.commit()
+    if commit:
+        db.commit()
     logger.info("board_backfill done — %s", report.as_dict())
     return report
 
 
 def _resolve_stored_links(
-    db: Session, jobs: list[Job], career_hosts: dict, host_company: dict
+    db: Session, jobs: list[Job], career_hosts: dict, host_company: dict,
+    workers: int = 8,
 ) -> tuple[int, int, int]:
     """Follow the aggregator redirects that stored jobs still point at."""
     from app.services import company_boards as boards
@@ -170,7 +179,7 @@ def _resolve_stored_links(
 
     # resolve_jobs works on the fetch-time dict shape, so adapt and map back.
     shims = [{"source": job.source, "url": job.url} for job in jobs]
-    stats = resolve_jobs(shims, max_links=len(shims))
+    stats = resolve_jobs(shims, max_links=len(shims), workers=workers)
 
     given = 0
     found: dict[str, set[str]] = {}
@@ -203,13 +212,16 @@ def _resolve_stored_links(
 
 
 def _sniff_stored_hosts(
-    db: Session, career_hosts: dict, host_company: dict, max_hosts: int
+    db: Session, career_hosts: dict, host_company: dict, max_hosts: int,
+    workers: int = 8,
 ) -> int:
     """Sniff the company careers sites that stored jobs point at."""
     from app.services import company_boards as boards
     from app.services.ats_sniffer import sniff_hosts
 
-    _, _, per_host = sniff_hosts(career_hosts, cache=None, max_hosts=max_hosts)
+    _, _, per_host = sniff_hosts(
+        career_hosts, cache=None, max_hosts=max_hosts, workers=workers
+    )
 
     new_boards = 0
     for host, found in per_host.items():
