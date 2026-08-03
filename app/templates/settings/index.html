@@ -116,6 +116,7 @@
         <tr>
           <th class="text-left px-4 py-2">ATS</th>
           <th class="text-right px-4 py-2">Active</th>
+          <th class="text-right px-4 py-2">Not working</th>
           <th class="text-right px-4 py-2">Known</th>
           <th class="text-right px-4 py-2">Jobs sourced</th>
         </tr>
@@ -125,12 +126,96 @@
         <tr>
           <td class="px-4 py-2 font-medium text-gray-700">{{ ats }}</td>
           <td class="px-4 py-2 text-right text-gray-600">{{ info.active }}</td>
+          <td class="px-4 py-2 text-right {% if info.retired %}text-red-500{% else %}text-gray-300{% endif %}">
+            {{ info.retired }}
+          </td>
           <td class="px-4 py-2 text-right text-gray-400">{{ info.total }}</td>
           <td class="px-4 py-2 text-right text-gray-600">{{ info.jobs }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+  </div>
+</div>
+{% endif %}
+
+{% if retired_boards %}
+<div class="mt-10">
+  <h2 class="text-lg font-semibold text-gray-800 mb-1">Boards not working</h2>
+  <p class="text-xs text-gray-400 mb-4">
+    These returned no jobs for enough cycles running that we stopped polling them.
+    Usually the company stopped hiring or renamed its board — a wrong slug behaves
+    exactly the same way. Retry puts one back into rotation.
+  </p>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="text-left px-4 py-2">ATS</th>
+          <th class="text-left px-4 py-2">Slug</th>
+          <th class="text-left px-4 py-2">Company</th>
+          <th class="text-left px-4 py-2">Found via</th>
+          <th class="text-right px-4 py-2">Jobs ever</th>
+          <th class="text-right px-4 py-2">Empty cycles</th>
+          <th class="text-left px-4 py-2">Last checked</th>
+          <th class="px-4 py-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100 bg-white">
+        {% for board in retired_boards %}
+        <tr id="board-{{ board.id }}">
+          <td class="px-4 py-2 text-gray-500">{{ board.ats }}</td>
+          <td class="px-4 py-2 font-mono text-xs text-gray-700">{{ board.slug }}</td>
+          <td class="px-4 py-2 text-gray-600">{{ board.company or "—" }}</td>
+          <td class="px-4 py-2 text-xs text-gray-400">{{ board.origin }}</td>
+          <td class="px-4 py-2 text-right text-gray-500">{{ board.total_job_count }}</td>
+          <td class="px-4 py-2 text-right text-red-500">{{ board.consecutive_empty }}</td>
+          <td class="px-4 py-2 text-xs text-gray-400">
+            {% if board.last_fetched_at %}{{ board.last_fetched_at.strftime("%b %d, %Y") }}{% else %}never{% endif %}
+          </td>
+          <td class="px-4 py-2 text-right">
+            <button
+              hx-post="/settings/boards/{{ board.id }}/reactivate"
+              hx-target="#board-{{ board.id }}"
+              hx-swap="outerHTML"
+              class="text-xs text-blue-600 hover:text-blue-800 underline">
+              Retry
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if slug_report %}
+<div class="mt-10">
+  <h2 class="text-lg font-semibold text-gray-800 mb-1">Configured slug problems</h2>
+  <p class="text-xs text-gray-400 mb-4">
+    Slugs you set in the environment that don't match a real board. Invalid ones
+    contribute nothing until corrected.
+  </p>
+  <div class="space-y-2 text-sm">
+    {% for ats, info in slug_report.items() %}
+    {% if info is mapping %}
+    {% if info.invalid %}
+    <p class="text-red-600">
+      <span class="font-medium">{{ ats }}</span> — no working board for:
+      <span class="font-mono text-xs">{{ info.invalid | join(", ") }}</span>
+    </p>
+    {% endif %}
+    {% if info.fixed %}
+    <p class="text-gray-500">
+      <span class="font-medium">{{ ats }}</span> — auto-corrected:
+      {% for original, fixed in info.fixed.items() %}
+      <span class="font-mono text-xs">{{ original }} → {{ fixed }}</span>{% if not loop.last %}, {% endif %}
+      {% endfor %}
+    </p>
+    {% endif %}
+    {% endif %}
+    {% endfor %}
   </div>
 </div>
 {% endif %}

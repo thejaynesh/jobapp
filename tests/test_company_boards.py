@@ -171,5 +171,67 @@ class TestSummary:
         db.flush()
 
         result = summary(db)
-        assert result["greenhouse"] == {"total": 2, "active": 1, "jobs": 4}
+        assert result["greenhouse"] == {
+            "total": 2, "active": 1, "retired": 1, "jobs": 4,
+        }
         assert result["lever"]["total"] == 1
+        assert result["lever"]["retired"] == 0
+
+
+class TestRetiredBoards:
+    def test_lists_only_retired_boards(self, db):
+        from app.services.company_boards import retired_boards
+        _board(db, slug="alive")
+        dead = _board(db, slug="dead")
+        dead.active = False
+        db.flush()
+
+        result = retired_boards(db)
+        assert [b.slug for b in result] == ["dead"]
+
+    def test_a_board_retired_by_silence_shows_up(self, db):
+        """End to end: going quiet is what makes a board visible as broken."""
+        from app.services.company_boards import retired_boards
+        _board(db, slug="wentquiet")
+        for _ in range(DEFAULT_MAX_EMPTY_CYCLES):
+            record_fetch_results(db, "greenhouse", ["wentquiet"], {})
+        db.flush()
+
+        result = retired_boards(db)
+        assert len(result) == 1
+        assert result[0].slug == "wentquiet"
+        assert result[0].consecutive_empty == DEFAULT_MAX_EMPTY_CYCLES
+
+    def test_empty_when_everything_is_healthy(self, db):
+        from app.services.company_boards import retired_boards
+        _board(db, slug="fine")
+        assert retired_boards(db) == []
+
+    def test_respects_the_limit(self, db):
+        from app.services.company_boards import retired_boards
+        for i in range(5):
+            board = _board(db, slug=f"dead{i}")
+            board.active = False
+        db.flush()
+        assert len(retired_boards(db, limit=2)) == 2
+
+
+class TestReactivate:
+    def test_puts_a_board_back_with_a_clean_slate(self, db):
+        from app.services.company_boards import board_slugs, reactivate
+        board = _board(db, slug="revived")
+        board.active = False
+        board.consecutive_empty = 9
+        db.flush()
+
+        result = reactivate(db, board.id)
+        db.flush()
+        assert result is not None
+        assert board.active is True
+        assert board.consecutive_empty == 0
+        assert "revived" in board_slugs(db, "greenhouse", 10)
+
+    def test_unknown_id_returns_none(self, db):
+        import uuid
+        from app.services.company_boards import reactivate
+        assert reactivate(db, uuid.uuid4()) is None

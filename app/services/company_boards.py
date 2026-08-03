@@ -199,11 +199,47 @@ def summary(db: Session) -> dict:
         .group_by(CompanyBoard.ats)
         .all()
     )
-    return {
-        ats: {
-            "total": int(total or 0),
-            "active": int(active or 0),
+    result = {}
+    for ats, total, active, jobs in rows:
+        total, active = int(total or 0), int(active or 0)
+        result[ats] = {
+            "total": total,
+            "active": active,
+            "retired": total - active,
             "jobs": int(jobs or 0),
         }
-        for ats, total, active, jobs in rows
-    }
+    return result
+
+
+def retired_boards(db: Session, limit: int = 200) -> list[CompanyBoard]:
+    """
+    Boards we've stopped polling, most recently given up on first.
+
+    Retirement is silent by design — it just stops costing us requests — but
+    that also makes it invisible, and a board going quiet is often a signal
+    worth acting on: a renamed slug, a company that stopped hiring, a board
+    that moved to a different ATS. Surfacing these lets that be a decision
+    rather than something that quietly happens.
+    """
+    return (
+        db.query(CompanyBoard)
+        .filter(CompanyBoard.active.is_(False))
+        .order_by(
+            CompanyBoard.last_fetched_at.desc().nullslast(),
+            CompanyBoard.ats.asc(),
+            CompanyBoard.slug.asc(),
+        )
+        .limit(limit)
+        .all()
+    )
+
+
+def reactivate(db: Session, board_id) -> CompanyBoard | None:
+    """Put a retired board back into rotation with a clean slate."""
+    board = db.query(CompanyBoard).filter(CompanyBoard.id == board_id).first()
+    if board is None:
+        return None
+    board.active = True
+    board.consecutive_empty = 0
+    logger.info("company_boards: reactivated %s/%s", board.ats, board.slug)
+    return board
