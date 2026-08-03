@@ -9,11 +9,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy via SSH
+        id: deploy_first
+        uses: appleboy/ssh-action@v1.0.3
+        continue-on-error: true
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 90s
+          script: |
+            cd /opt/jobapp
+            git pull origin main
+            docker compose -f docker-compose.prod.yml up -d --build
+            docker compose -f docker-compose.prod.yml exec -T web alembic upgrade head
+            docker compose -f docker-compose.prod.yml restart nginx
+
+      # SSH to the VPS occasionally times out (connection throttling); wait out
+      # the throttle window and try once more before failing the deploy.
+      - name: Wait before retry
+        if: steps.deploy_first.outcome == 'failure'
+        run: sleep 120
+
+      - name: Deploy via SSH (retry)
+        if: steps.deploy_first.outcome == 'failure'
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 90s
           script: |
             cd /opt/jobapp
             git pull origin main
