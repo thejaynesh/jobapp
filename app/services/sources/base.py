@@ -26,11 +26,15 @@ def fetch_boards_concurrently(
     if not slugs:
         return []
 
+    # Log under the ATS's own logger so per-slug failures are attributed to that
+    # source rather than to this shared helper (see services.source_diagnostics).
+    board_logger = logging.getLogger(f"{__package__}.{label.lower()}")
+
     def _guarded(slug: str) -> list[dict]:
         try:
             jobs = fetch_one(slug) or []
         except Exception as exc:
-            logger.error("%s fetch error for slug '%s': %s", label, slug, exc)
+            board_logger.error("%s fetch error for slug '%s': %s", label, slug, exc)
             return []
         for job in jobs:
             job.setdefault("ats_slug", slug)
@@ -40,7 +44,7 @@ def fetch_boards_concurrently(
         results = list(pool.map(_guarded, slugs))
 
     jobs = [job for board_jobs in results for job in board_jobs]
-    logger.info("%s: %d jobs across %d companies", label, len(jobs), len(slugs))
+    board_logger.info("%s: %d jobs across %d companies", label, len(jobs), len(slugs))
     return jobs
 
 

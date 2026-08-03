@@ -661,10 +661,17 @@ def fetch_and_save_jobs(db: Session) -> dict:
         settings, discovered_ats, validated_configured, registry_boards
     )
 
+    # Adapters handle their own failures and return [], so the reason a source
+    # produced nothing lives only in its log line. Capture those and attach them
+    # to the stats, otherwise a blocked source is indistinguishable from a
+    # search that genuinely had no matches.
+    from app.services.source_diagnostics import SourceLogCapture, merge_into_stats
     try:
-        raw_jobs, source_stats = _run_all_adapters(
-            queries, locations, settings, ats_slugs, loc_prefs
-        )
+        with SourceLogCapture() as capture:
+            raw_jobs, source_stats = _run_all_adapters(
+                queries, locations, settings, ats_slugs, loc_prefs
+            )
+        merge_into_stats(source_stats, capture.messages)
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts
@@ -721,7 +728,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
         "fetched": len(raw_jobs),
         "sources": {
             src: {"count": s["count"], "enabled": s["enabled"],
-                  "errors": s["errors"][:3]}  # cap at 3 errors stored
+                  "errors": s["errors"][:3]}  # cap at 3 reasons stored
             for src, s in source_stats.items()
         },
         "links": resolve_stats.as_dict() if resolve_stats else None,

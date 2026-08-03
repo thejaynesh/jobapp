@@ -422,6 +422,33 @@ class TestLinkedInScraper:
         assert results == []
         assert len(calls) == linkedin._MAX_CONSECUTIVE_THROTTLES
 
+    def test_a_200_with_unrecognisable_markup_is_reported_not_silent(self, caplog):
+        """
+        Markup drift is the failure mode that looks exactly like "no jobs".
+        A substantial response we can't parse has to say so.
+        """
+        import logging
+        from app.services.sources.linkedin import fetch_all
+        redesigned = "<div class='totally-new-markup'>" + ("x" * 2000) + "</div>"
+
+        with caplog.at_level(logging.ERROR, logger="app.services.sources.linkedin"):
+            with patch("httpx.get", side_effect=lambda url, **kw: self._resp(redesigned)):
+                results = fetch_all("", ["SWE"], ["NYC"], max_pages=2)
+
+        assert results == []
+        assert "no job cards parsed" in caplog.text
+
+    def test_a_genuinely_empty_response_is_not_reported_as_broken(self, caplog):
+        import logging
+        from app.services.sources.linkedin import fetch_all
+
+        with caplog.at_level(logging.ERROR, logger="app.services.sources.linkedin"):
+            with patch("httpx.get", side_effect=lambda url, **kw: self._resp("")):
+                results = fetch_all("", ["SWE"], ["NYC"], max_pages=2)
+
+        assert results == []
+        assert caplog.text == ""
+
     def test_recency_and_sort_params_are_sent(self):
         from app.services.sources.linkedin import fetch_all
         calls = []

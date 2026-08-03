@@ -85,6 +85,14 @@ class _Throttled(Exception):
     """LinkedIn returned 429 for a guest request."""
 
 
+class _Unparsed(Exception):
+    """LinkedIn answered with content we couldn't find any job cards in."""
+
+
+# Below this, an empty response is just an exhausted result set, not a problem.
+_MIN_MEANINGFUL_RESPONSE = 500
+
+
 # --- card parsing ----------------------------------------------------------
 
 _CARD_URL_RE = re.compile(
@@ -159,7 +167,15 @@ def _search_page(query: str, location: str, start: int, headers: dict,
     resp.raise_for_status()
 
     cards = [_parse_card(card) for card in _split_cards(resp.text)]
-    return [c for c in cards if c]
+    parsed = [c for c in cards if c]
+    # A substantial 200 that yields nothing means the markup moved, which is a
+    # very different problem from "no jobs matched" — say so.
+    if not parsed and len(resp.text) > _MIN_MEANINGFUL_RESPONSE:
+        raise _Unparsed(
+            f"{len(resp.text)} bytes returned but no job cards parsed "
+            f"(LinkedIn markup may have changed)"
+        )
+    return parsed
 
 
 def _fetch_description(job_id: str, headers: dict) -> str:
@@ -240,6 +256,7 @@ def fetch_all(
     by_id: dict[str, dict] = {}
     without_id: list[dict] = []
     throttles = 0
+    unparsed = 0
     searches = 0
 
     for query in queries:
@@ -259,6 +276,13 @@ def fetch_all(
                     logger.warning("LinkedIn throttled (%s/%s): %s",
                                    throttles, _MAX_CONSECUTIVE_THROTTLES, exc)
                     time.sleep(_THROTTLE_BACKOFF_SECONDS * throttles)
+                    break
+                except _Unparsed as exc:
+                    # Worth one loud line, not one per query — the markup is
+                    # either right for every search or wrong for every search.
+                    unparsed += 1
+                    if unparsed == 1:
+                        logger.error("LinkedIn: %s", exc)
                     break
                 except Exception as exc:
                     logger.error("LinkedIn guest API error (%s / %s): %s", query, location, exc)

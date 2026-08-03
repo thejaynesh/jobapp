@@ -54,12 +54,16 @@
           <td class="px-4 py-2">
             {% if not info.enabled %}
               <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">Disabled</span>
-            {% elif info.errors | length == 0 %}
-              <span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">OK</span>
-            {% elif info.count > 0 %}
+            {% elif info.count > 0 and info.errors %}
               <span class="text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Partial</span>
-            {% else %}
+            {% elif info.count > 0 %}
+              <span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">OK</span>
+            {% elif info.errors %}
               <span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600">Failed</span>
+            {% else %}
+              {# Reached the source fine, it just had nothing to give. #}
+              <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-500"
+                    title="Source responded but returned no matching jobs">No results</span>
             {% endif %}
           </td>
           <td class="px-4 py-2 text-right text-gray-600">

@@ -284,6 +284,72 @@ class TestAtsDiscoveryWiring:
         assert "netflix" in slug_map["lever"]
 
 
+class TestSourceFailureVisibility:
+    """A source that returned nothing must say why, not read as healthy."""
+
+    def test_a_swallowed_adapter_error_reaches_the_stats(self, db):
+        import logging
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _adapters(*args, **kwargs):
+            # Exactly what the real adapters do: log the reason, return [].
+            logging.getLogger("app.services.sources.indeed").error(
+                "Indeed RSS fetch error: 403 Forbidden"
+            )
+            return [], {"indeed": {"count": 0, "errors": [], "enabled": True}}
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                result = fetch_and_save_jobs(db)
+
+        assert result["sources"]["indeed"]["errors"] == [
+            "Indeed RSS fetch error: 403 Forbidden"
+        ]
+
+    def test_the_reason_is_persisted_for_the_settings_page(self, db):
+        import logging
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _adapters(*args, **kwargs):
+            logging.getLogger("app.services.sources.dice").warning(
+                "Dice: page load failed: Timeout 30000ms exceeded"
+            )
+            return [], {"dice": {"count": 0, "errors": [], "enabled": True}}
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                fetch_and_save_jobs(db)
+
+        stored = db.query(Profile).first().data["last_fetch"]["sources"]["dice"]
+        assert "Timeout" in stored["errors"][0]
+
+    def test_a_working_source_is_not_polluted_by_its_warnings(self, db):
+        import logging
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _adapters(*args, **kwargs):
+            logging.getLogger("app.services.sources.linkedin").warning(
+                "LinkedIn throttled (1/3)"
+            )
+            return ([_std_job(source="linkedin")],
+                    {"linkedin": {"count": 1, "errors": [], "enabled": True}})
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                result = fetch_and_save_jobs(db)
+
+        assert result["sources"]["linkedin"]["errors"] == []
+
+
 class TestApplyLinkWiring:
     def _adzuna_job(self):
         return _std_job(url="https://www.adzuna.com/land/ad/9", source_job_id="AZ9")
