@@ -2,15 +2,9 @@
   {% set app = job.applications[0] if job.applications else none %}
   <div class="flex justify-between items-start gap-3">
     <div class="min-w-0">
-      {% if app %}
-      <a href="/apps/{{ app.id }}" class="text-base font-semibold text-blue-600 hover:underline break-words">
+      <a href="/jobs/{{ job.id }}/application" class="text-base font-semibold text-blue-600 hover:underline break-words">
         {{ job.title }}
       </a>
-      {% else %}
-      <a href="{{ job.url }}" target="_blank" class="text-base font-semibold text-blue-600 hover:underline break-words">
-        {{ job.title }}
-      </a>
-      {% endif %}
       <p class="text-gray-600 text-sm mt-0.5 break-words">{{ job.company }} &bull; {{ job.location or "Unknown" }}
         {% if job.is_remote %}<span class="ml-1 bg-green-100 text-green-700 text-xs px-1.5 py-0.5 rounded">Remote</span>{% endif %}
       </p>

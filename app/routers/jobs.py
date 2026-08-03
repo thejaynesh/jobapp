@@ -2,7 +2,7 @@ import uuid
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -128,6 +128,23 @@ def get_jobs(
             "region_options": REGION_OPTIONS,
         },
     )
+
+
+@router.get("/{job_id}/application")
+def open_job_application(job_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Open the job's application/docs page, creating the application if needed
+    so every job is reachable regardless of match/docs state."""
+    from app.models.application import Application
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    app_obj = job.applications[0] if job.applications else None
+    if not app_obj:
+        app_obj = Application(job_id=job.id)
+        db.add(app_obj)
+        db.commit()
+        db.refresh(app_obj)
+    return RedirectResponse(url=f"/apps/{app_obj.id}", status_code=302)
 
 
 @router.post("/{job_id}/override", response_class=HTMLResponse)
