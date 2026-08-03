@@ -176,8 +176,66 @@
 
   </div>
 
-  <!-- Right column: outreach + notes -->
+  <!-- Right column: match details + outreach + notes -->
   <div class="space-y-6">
+
+    <!-- Job match details -->
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-3">Job Match</h2>
+
+      {% if app.job.llm_score is not none %}
+      <div class="flex items-baseline gap-2 mb-2">
+        <span class="text-3xl font-bold {% if app.job.llm_score >= 75 %}text-green-600{% elif app.job.llm_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
+          {{ app.job.llm_score }}
+        </span>
+        <span class="text-xs text-gray-400">match score</span>
+      </div>
+      {% if app.job.matched_by %}
+      <p class="text-[10px] text-gray-400 mb-2" title="AI model that scored this job">scored by {{ app.job.matched_by }}</p>
+      {% endif %}
+      {% endif %}
+
+      {% if app.job.llm_reasoning %}
+      <p class="text-sm text-gray-600 italic mb-3">{{ app.job.llm_reasoning }}</p>
+      {% endif %}
+
+      {% if app.job.matched_skills %}
+      <p class="text-xs font-medium text-gray-600 mb-1">Matched skills</p>
+      <div class="flex flex-wrap gap-1 mb-3">
+        {% for skill in app.job.matched_skills %}
+          <span class="bg-blue-50 text-blue-700 text-xs px-2 py-0.5 rounded">{{ skill }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if app.job.missing_skills %}
+      <p class="text-xs font-medium text-gray-600 mb-1">Missing skills</p>
+      <div class="flex flex-wrap gap-1 mb-3">
+        {% for skill in app.job.missing_skills %}
+          <span class="bg-red-50 text-red-600 text-xs px-2 py-0.5 rounded line-through">{{ skill }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <dl class="text-xs text-gray-500 space-y-1.5 border-t border-gray-100 pt-3">
+        {% if app.job.source %}
+        <div class="flex justify-between"><dt class="font-medium">Source</dt><dd>{{ app.job.source | title }}</dd></div>
+        {% endif %}
+        {% if app.job.posted_at %}
+        <div class="flex justify-between"><dt class="font-medium">Posted</dt><dd>{{ app.job.posted_at.strftime("%b %d, %Y") }}</dd></div>
+        {% endif %}
+        {% if app.job.fetched_at %}
+        <div class="flex justify-between"><dt class="font-medium">Fetched</dt><dd>{{ app.job.fetched_at.strftime("%b %d, %Y") }}</dd></div>
+        {% endif %}
+        {% if app.job.experience_level %}
+        <div class="flex justify-between"><dt class="font-medium">Experience level</dt><dd>{{ app.job.experience_level | title }}</dd></div>
+        {% endif %}
+        {% if app.job.keyword_score is not none %}
+        <div class="flex justify-between"><dt class="font-medium">Keyword score</dt><dd>{{ "%.0f" | format(app.job.keyword_score * 100) }}%</dd></div>
+        {% endif %}
+        <div class="flex justify-between"><dt class="font-medium">Job status</dt><dd>{{ app.job.status.value | replace("_", " ") | title }}</dd></div>
+      </dl>
+    </div>
 
     <!-- Outreach contacts -->
     <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
