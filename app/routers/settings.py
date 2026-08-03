@@ -1,7 +1,8 @@
 import copy
 import logging
+import uuid
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -31,17 +32,54 @@ def _board_registry(db: Session) -> dict:
         return {}
 
 
+def _retired_boards(db: Session) -> list:
+    """Boards that stopped returning jobs and are no longer polled."""
+    try:
+        from app.services.company_boards import retired_boards
+        # Materialise here: a lazy/failed result blowing up mid-render would
+        # take the whole settings page down.
+        return list(retired_boards(db))
+    except Exception as exc:
+        logger.warning("settings: retired board lookup failed: %s", exc)
+        return []
+
+
+def _page_context(request: Request, profile, db: Session, settings_data: dict,
+                  saved: bool) -> dict:
+    return {
+        "request": request,
+        "settings": settings_data,
+        "saved": saved,
+        "last_fetch": profile.data.get("last_fetch"),
+        "board_registry": _board_registry(db),
+        "retired_boards": _retired_boards(db),
+        # Configured slugs the validator could not make work — the other kind
+        # of "not working" board, and previously computed but never shown.
+        "slug_report": profile.data.get("ats_slug_report") or {},
+    }
+
+
 @router.get("", response_class=HTMLResponse)
 def get_settings(request: Request, db: Session = Depends(get_db)):
     profile = get_or_create_profile(db)
     db.commit()
     current = {**_DEFAULTS, **profile.data.get("settings", {})}
-    last_fetch = profile.data.get("last_fetch")
     return templates.TemplateResponse(
-        "settings/index.html",
-        {"request": request, "settings": current, "saved": False,
-         "last_fetch": last_fetch, "board_registry": _board_registry(db)},
+        "settings/index.html", _page_context(request, profile, db, current, False)
     )
+
+
+@router.post("/boards/{board_id}/reactivate", response_class=HTMLResponse)
+def reactivate_board(board_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Put a retired board back into rotation, e.g. after fixing its slug."""
+    from app.services.company_boards import reactivate
+
+    board = reactivate(db, board_id)
+    if board is None:
+        raise HTTPException(status_code=404, detail="Board not found")
+    db.commit()
+    # The row removes itself from the "not working" list.
+    return HTMLResponse("")
 
 
 @router.post("", response_class=HTMLResponse)
@@ -61,9 +99,7 @@ def save_settings(
     }
     profile.data = new_data
     db.commit()
-    last_fetch = profile.data.get("last_fetch")
     return templates.TemplateResponse(
         "settings/index.html",
-        {"request": request, "settings": new_data["settings"], "saved": True,
-         "last_fetch": last_fetch, "board_registry": _board_registry(db)},
+        _page_context(request, profile, db, new_data["settings"], True),
     )

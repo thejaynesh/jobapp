@@ -1,10 +1,51 @@
 import uuid
+from datetime import datetime, timezone
+
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
 from app.models.job import JobStatus
+
+
+def _make_job_model(**overrides):
+    """
+    A real (unsaved) Job rather than a MagicMock, for templates that render one.
+
+    The application detail page reads a dozen job fields and does real work with
+    them — `llm_score >= 75`, `posted_at.strftime(...)`, `status.value`. On a
+    MagicMock each of those is a Mock that raises or renders as garbage, and
+    stubbing them one at a time only defers the breakage to the next field
+    someone adds to the template.
+    """
+    from app.models.job import Job
+    fields = {
+        "id": uuid.uuid4(),
+        "source": "linkedin",
+        "source_job_id": "J1",
+        "source_urls": ["https://example.com"],
+        "title": "Backend Engineer",
+        "company": "Acme",
+        "location": "New York, NY",
+        "is_remote": False,
+        "url": "https://example.com",
+        "apply_url": None,
+        "description": "Build things.",
+        "experience_level": "mid",
+        "keyword_score": None,
+        "llm_score": None,
+        "llm_reasoning": None,
+        "matched_by": None,
+        "matched_skills": [],
+        "missing_skills": [],
+        "status": JobStatus.matched,
+        "fetched_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "posted_at": None,
+        "dedupe_hash": "h1",
+    }
+    fields.update(overrides)
+    return Job(**fields)
 
 
 def _make_job(status=JobStatus.matched, title="Backend Engineer", company="Acme"):
@@ -113,6 +154,61 @@ class TestJobsRouter:
 # Apps router tests
 # ---------------------------------------------------------------------------
 
+class TestRetiredBoardVisibility:
+    """A board we stopped polling has to be visible, not silently dropped."""
+
+    def _retire(self, db, slug="deadco", ats="greenhouse"):
+        from app.models.company_board import CompanyBoard
+        from app.services.company_boards import record_boards
+        record_boards(db, {ats: [slug]}, origin="discovered")
+        board = (
+            db.query(CompanyBoard)
+            .filter(CompanyBoard.ats == ats, CompanyBoard.slug == slug)
+            .one()
+        )
+        board.active = False
+        board.consecutive_empty = 8
+        db.commit()
+        return board
+
+    def test_retired_board_is_listed_as_not_working(self, db, client):
+        self._retire(db)
+        response = client.get("/settings")
+        assert response.status_code == 200
+        assert "Boards not working" in response.text
+        assert "deadco" in response.text
+
+    def test_active_boards_are_not_in_the_not_working_list(self, db, client):
+        from app.services.company_boards import record_boards
+        record_boards(db, {"lever": ["healthyco"]}, origin="discovered")
+        db.commit()
+        response = client.get("/settings")
+        assert "Boards not working" not in response.text
+
+    def test_summary_counts_the_retired_board(self, db, client):
+        self._retire(db)
+        response = client.get("/settings")
+        assert "Not working" in response.text
+
+    def test_retry_puts_the_board_back_into_rotation(self, db, client):
+        board = self._retire(db)
+        response = client.post(f"/settings/boards/{board.id}/reactivate")
+        assert response.status_code == 200
+        db.refresh(board)
+        assert board.active is True
+        assert board.consecutive_empty == 0
+
+    def test_retry_on_an_unknown_board_is_a_404(self, db, client):
+        response = client.post(f"/settings/boards/{uuid.uuid4()}/reactivate")
+        assert response.status_code == 404
+
+    def test_page_survives_a_registry_failure(self, db, client):
+        with patch("app.services.company_boards.retired_boards",
+                   side_effect=RuntimeError("db gone")):
+            response = client.get("/settings")
+        assert response.status_code == 200
+
+
 class TestAppsRouter:
     def _make_app_obj(self, status="not_applied"):
         from app.models.application import ApplicationStatus
@@ -122,11 +218,7 @@ class TestAppsRouter:
         app_obj.notes = ""
         app_obj.applied_at = None
         app_obj.created_at = None
-        app_obj.job = MagicMock()
-        app_obj.job.id = uuid.uuid4()
-        app_obj.job.title = "Backend Engineer"
-        app_obj.job.company = "Acme"
-        app_obj.job.url = "https://example.com"
+        app_obj.job = _make_job_model()
         app_obj.documents = []
         return app_obj
 
@@ -282,14 +374,10 @@ class TestAppDetailRouter:
         app_obj.applied_at = None
         app_obj.created_at = None
         app_obj.outreach_contacts = []
-        app_obj.job = MagicMock()
-        app_obj.job.id = uuid.uuid4()
-        app_obj.job.title = "Backend Engineer"
-        app_obj.job.company = "Acme"
-        app_obj.job.url = "https://example.com"
-        app_obj.job.location = "Remote"
-        app_obj.job.is_remote = True
-        app_obj.job.description = "We need a backend engineer."
+        app_obj.job = _make_job_model(
+            location="Remote", is_remote=True,
+            description="We need a backend engineer.",
+        )
         app_obj.documents = []
         return app_obj
 
