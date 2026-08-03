@@ -4,10 +4,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.job import Job, JobStatus
+from app.services.locations import REGIONS, REGION_OPTIONS, resolve_region_key
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,22 @@ _FILTERABLE_STATUSES = [JobStatus.matched, JobStatus.filtered_out, JobStatus.doc
 _PAGE_SIZE = 50
 _SOURCES = ["adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby", "handshake", "indeed", "wellfound", "dice", "remotive", "arbeitnow", "remoteok", "weworkremotely"]
 _EXP_LEVELS = ["entry", "mid", "senior"]
+
+def _region_clause(region_key: str):
+    """Match a job's free-text location against a region's keyword registry.
+
+    Job boards write locations inconsistently ("San Jose, CA", "NYC", "USA"),
+    so a region match ORs the region's known city/state/country keywords plus
+    a case-sensitive word-boundary regex for 2-letter codes (so ", CA" matches
+    but "Canada" doesn't).
+    """
+    cfg = REGIONS[region_key]
+    clauses = [Job.location.ilike(f"%{kw}%") for kw in cfg["keywords"]]
+    if cfg["abbrevs"]:
+        pattern = r"\y(" + "|".join(cfg["abbrevs"]) + r")\y"
+        clauses.append(Job.location.op("~")(pattern))
+    return or_(*clauses)
+
 
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),
@@ -34,6 +52,7 @@ def get_jobs(
     status: str = "",
     q: str = "",
     source: str = "",
+    region: str = "",
     location: str = "",
     remote: str = "",
     min_score: str = "",
@@ -55,13 +74,22 @@ def get_jobs(
         )
     if source:
         query = query.filter(Job.source == source)
+    if region and region in REGIONS:
+        query = query.filter(_region_clause(region))
     if location:
-        # Free-text match on the job's location; "remote" also matches jobs
-        # flagged remote whose location string doesn't say so.
-        loc_clause = Job.location.ilike(f"%{location}%")
-        if "remote" in location.lower():
-            loc_clause = loc_clause | (Job.is_remote == True)  # noqa: E712
-        query = query.filter(loc_clause)
+        # If the free text names a known region ("united states", "USA", "US"),
+        # expand it to the full region match instead of a literal substring —
+        # job locations rarely spell the country out.
+        region_key = resolve_region_key(location)
+        if region_key:
+            query = query.filter(_region_clause(region_key))
+        else:
+            loc_clause = Job.location.ilike(f"%{location}%")
+            # "remote" also matches jobs flagged remote whose location
+            # string doesn't say so.
+            if "remote" in location.lower():
+                loc_clause = loc_clause | (Job.is_remote == True)  # noqa: E712
+            query = query.filter(loc_clause)
     if remote == "1":
         query = query.filter(Job.is_remote == True)  # noqa: E712
     if exp_level:
@@ -84,6 +112,7 @@ def get_jobs(
             "status_filter": status,
             "q": q,
             "source_filter": source,
+            "region_filter": region,
             "location_filter": location,
             "remote_filter": remote,
             "min_score_filter": min_score,
@@ -96,6 +125,7 @@ def get_jobs(
             "has_next": (page + 1) * _PAGE_SIZE < total,
             "sources": _SOURCES,
             "exp_levels": _EXP_LEVELS,
+            "region_options": REGION_OPTIONS,
         },
     )
 

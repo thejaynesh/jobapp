@@ -129,6 +129,25 @@ _LEGACY_REGION_NAMES = {
      "united kingdom": "uk", "london": "uk", "canada": "canada",
      "europe": "europe", "india": "india", "australia": "australia"}
 
+# Free-text spellings users type for a region ("united states", "US", "america",
+# "EU", ...) → region key. Superset of the legacy names used by normalize_prefs.
+_REGION_ALIASES: dict[str, str] = _LEGACY_REGION_NAMES | {
+    "america": "usa", "u.s.": "usa", "u.s.a.": "usa", "united states of america": "usa",
+    "states": "usa",
+    "england": "uk", "great britain": "uk", "britain": "uk",
+    "eu": "europe", "european union": "europe",
+    "aus": "australia",
+    "nz": "new_zealand",
+}
+
+
+def resolve_region_key(text: str) -> str | None:
+    """Map free text like 'united states' or 'US' to a region key, else None."""
+    if not isinstance(text, str):
+        return None
+    return _REGION_ALIASES.get(text.strip().lower())
+
+
 MAX_SEARCH_LOCATIONS = 8  # bounds query fan-out per search-based source
 
 

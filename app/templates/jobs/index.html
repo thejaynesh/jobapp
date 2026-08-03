@@ -36,9 +36,16 @@
     </select>
   </div>
 
-  <!-- Row 2: location + min score + remote + sort + buttons -->
+  <!-- Row 2: region + location + min score + remote + sort + buttons -->
   <div class="flex flex-wrap gap-2 items-center">
-    <input type="text" name="location" value="{{ location_filter }}" placeholder="Location (e.g. San Jose, Remote)..."
+    <select name="region" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not region_filter %}selected{% endif %}>Any region</option>
+      {% for key, label in region_options %}
+        <option value="{{ key }}" {% if region_filter == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <input type="text" name="location" value="{{ location_filter }}" placeholder="City/state (e.g. San Jose)..."
       class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-blue-500">
 
     <select name="min_score" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -65,7 +72,7 @@
 
     <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
-    {% if status_filter or q or source_filter or location_filter or remote_filter or min_score_filter %}
+    {% if status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter %}
     <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
     {% endif %}
   </div>
@@ -85,7 +92,7 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&sort=" ~ sort %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"
