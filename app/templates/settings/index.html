@@ -80,6 +80,16 @@
     </table>
   </div>
 
+  {% if last_fetch.backfill %}
+  <p class="text-xs text-gray-400 mt-3">
+    One-time backfill: scanned {{ last_fetch.backfill.jobs_scanned }} stored jobs,
+    recovered {{ last_fetch.backfill.boards_found }} company boards
+    {%- if last_fetch.backfill.boards_sniffed %},
+    {{ last_fetch.backfill.boards_sniffed }} more from careers sites{% endif %}
+    {%- if last_fetch.backfill.jobs_given_apply_url %},
+    added direct apply links to {{ last_fetch.backfill.jobs_given_apply_url }} jobs{% endif %}.
+  </p>
+  {% endif %}
   {% if last_fetch.links %}
   <p class="text-xs text-gray-400 mt-3">
     Apply links: {{ last_fetch.links.resolved }} of {{ last_fetch.links.attempted }}

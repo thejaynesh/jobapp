@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     ATS_SNIFF_CAREER_SITES: bool = True
     ATS_SNIFF_MAX_HOSTS_PER_CYCLE: int = 40
 
+    # Jobs stored before the registry existed were never mined for the company
+    # boards hiding in their descriptions. The first fetch cycle after deploy
+    # does that once; these cap the extra requests it costs that one cycle.
+    # Sized so the worst case (every request timing out) stays a few minutes
+    # rather than stalling the cycle for twenty.
+    BOARD_BACKFILL_ON_START: bool = True
+    BOARD_BACKFILL_MAX_LINKS: int = 400
+    BOARD_BACKFILL_MAX_HOSTS: int = 120
+    BOARD_BACKFILL_WORKERS: int = 16
+
     # LinkedIn guest API. The endpoint pages in blocks of 10, and jobs without a
     # description are dropped by the skill filter, so these two caps set the
     # source's real yield.

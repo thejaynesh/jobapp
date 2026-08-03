@@ -475,6 +475,87 @@ class TestBoardRegistryWiring:
         assert result["inserted"] == 1
 
 
+class TestOneTimeBackfillWiring:
+    def test_runs_on_the_first_cycle_and_records_it(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        profile = _make_profile_with_targets(db)
+        with patch("app.services.board_backfill.backfill_boards") as backfill:
+            from app.services.board_backfill import BackfillReport
+            backfill.return_value = BackfillReport(jobs_scanned=12, boards_found=3)
+            with _patch_adapters([]):
+                fetch_and_save_jobs(db)
+
+        assert backfill.call_count == 1
+        state = profile.data["board_backfill"]
+        assert state["done"] is True
+        assert state["boards_found"] == 3
+        assert profile.data["last_fetch"]["backfill"]["jobs_scanned"] == 12
+
+    def test_never_runs_a_second_time(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.board_backfill.backfill_boards") as backfill:
+            from app.services.board_backfill import BackfillReport
+            backfill.return_value = BackfillReport()
+            with _patch_adapters([]):
+                fetch_and_save_jobs(db)
+            with _patch_adapters([]):
+                fetch_and_save_jobs(db)
+        assert backfill.call_count == 1
+
+    def test_recovered_boards_are_used_by_the_same_cycle(self, db):
+        """The point of running it here rather than as a manual step."""
+        from app.services.company_boards import record_boards
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        def _backfill(session, **kwargs):
+            from app.services.board_backfill import BackfillReport
+            record_boards(session, {"lever": ["recovered"]}, origin="backfill")
+            return BackfillReport(boards_found=1)
+
+        with patch("app.services.board_backfill.backfill_boards", side_effect=_backfill):
+            with patch("app.services.query_expansion.expand_search_queries",
+                       return_value=(["Software Engineer"], None)):
+                with patch("app.services.job_fetcher._run_all_adapters",
+                           return_value=([], {})) as mock_run:
+                    fetch_and_save_jobs(db)
+
+        assert "recovered" in mock_run.call_args[0][3]["lever"]
+
+    def test_a_failure_is_retried_then_given_up_on(self, db):
+        from app.services.job_fetcher import _MAX_BACKFILL_ATTEMPTS, fetch_and_save_jobs
+        profile = _make_profile_with_targets(db)
+        with patch("app.services.board_backfill.backfill_boards",
+                   side_effect=RuntimeError("network down")) as backfill:
+            for _ in range(_MAX_BACKFILL_ATTEMPTS + 2):
+                with _patch_adapters([]):
+                    fetch_and_save_jobs(db)
+
+        assert backfill.call_count == _MAX_BACKFILL_ATTEMPTS
+        assert profile.data["board_backfill"]["done"] is False
+        assert profile.data["board_backfill"]["attempts"] == _MAX_BACKFILL_ATTEMPTS
+
+    def test_a_failure_does_not_block_the_fetch(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.board_backfill.backfill_boards",
+                   side_effect=RuntimeError("network down")):
+            with _patch_adapters([_std_job()]):
+                result = fetch_and_save_jobs(db)
+        assert result["inserted"] == 1
+
+    def test_disabled_by_config(self, db):
+        from app.config import settings
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch.object(settings, "BOARD_BACKFILL_ON_START", False):
+            with patch("app.services.board_backfill.backfill_boards") as backfill:
+                with _patch_adapters([]):
+                    fetch_and_save_jobs(db)
+        backfill.assert_not_called()
+
+
 class TestSlugValidationWiring:
     def test_persists_slug_cache_and_report(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs

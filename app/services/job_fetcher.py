@@ -11,6 +11,9 @@ from app.services.deduplication import compute_dedupe_hash, find_existing_job, m
 
 logger = logging.getLogger(__name__)
 
+# Give the one-time board backfill a few shots at a flaky network, then stop.
+_MAX_BACKFILL_ATTEMPTS = 3
+
 
 def _get_slugs(raw: str) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
@@ -419,6 +422,58 @@ def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
     )
 
 
+def _maybe_backfill_boards(db: Session, profile) -> dict | None:
+    """
+    Mine the pre-registry jobs table, once, on the first cycle after deploy.
+
+    Discovery, link resolution and sniffing only ever see freshly fetched
+    postings, so without this the whole back catalogue — the richest source of
+    company boards we have — stays unread. Running it here rather than as a
+    manual step means the boards it recovers are available to this very cycle's
+    fetch, and nobody has to remember to trigger anything.
+
+    Recorded on the profile so it happens exactly once. Failures are retried on
+    later cycles but give up after a few attempts rather than re-running an
+    expensive scan forever.
+    """
+    import copy
+
+    if not settings.BOARD_BACKFILL_ON_START:
+        return None
+
+    state = (profile.data or {}).get("board_backfill") or {}
+    if state.get("done"):
+        return None
+    attempts = state.get("attempts", 0)
+    if attempts >= _MAX_BACKFILL_ATTEMPTS:
+        return None
+
+    from app.services.board_backfill import backfill_boards
+
+    logger.info("job_fetcher: running one-time board backfill (attempt %d)", attempts + 1)
+    try:
+        with db.begin_nested():
+            report = backfill_boards(
+                db,
+                max_links=settings.BOARD_BACKFILL_MAX_LINKS,
+                max_hosts=settings.BOARD_BACKFILL_MAX_HOSTS,
+                workers=settings.BOARD_BACKFILL_WORKERS,
+                commit=False,
+            )
+        record = {"done": True, "at": datetime.now(timezone.utc).isoformat(),
+                  **report.as_dict()}
+    except Exception as exc:
+        logger.error("job_fetcher: board backfill failed: %s", exc)
+        record = {"done": False, "attempts": attempts + 1, "error": str(exc)[:200]}
+        report = None
+
+    data = copy.deepcopy(profile.data)
+    data["board_backfill"] = record
+    profile.data = data
+    db.commit()
+    return report.as_dict() if report else None
+
+
 def _update_board_registry(
     db: Session,
     raw_jobs: list[dict],
@@ -579,6 +634,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
     # learned about, ranked by what each one actually yields. Legacy slugs from
     # the old profile blob are folded in on the way past.
     registry_boards = None
+    backfill_report = None
     if settings.ATS_BOARD_REGISTRY:
         try:
             from app.services import company_boards as boards
@@ -593,6 +649,9 @@ def fetch_and_save_jobs(db: Session) -> dict:
                 if validated_configured:
                     boards.backfill_from_slugs(db, validated_configured, origin="configured")
             db.commit()
+            # Before picking this cycle's slugs, so anything the backfill
+            # recovers from the back catalogue is fetched straight away.
+            backfill_report = _maybe_backfill_boards(db, profile)
             registry_boards = boards.registry_slugs(db, slug_caps())
         except Exception as exc:
             logger.error("job_fetcher: board registry unavailable: %s", exc)
@@ -667,6 +726,7 @@ def fetch_and_save_jobs(db: Session) -> dict:
         },
         "links": resolve_stats.as_dict() if resolve_stats else None,
         "boards": board_stats or None,
+        "backfill": backfill_report,
     }
     profile.data = updated_data
     counts["links"] = resolve_stats.as_dict() if resolve_stats else {}
