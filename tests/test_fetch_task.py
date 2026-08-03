@@ -321,10 +321,16 @@ class TestRunHistoryWiring:
         _make_profile_with_targets(db)
         job = _std_job(source="remotive", url="https://ex.com/dup", source_job_id="D1")
 
-        with _patch_adapters([job]):
-            fetch_and_save_jobs(db)
-        with _patch_adapters([dict(job)]):
-            fetch_and_save_jobs(db)
+        def _adapters(*args, **kwargs):
+            return ([dict(job)],
+                    {"remotive": {"count": 1, "errors": [], "enabled": True}})
+
+        with patch("app.services.query_expansion.expand_search_queries",
+                   return_value=(["Software Engineer"], None)):
+            with patch("app.services.job_fetcher._run_all_adapters",
+                       side_effect=_adapters):
+                fetch_and_save_jobs(db)   # first cycle inserts it
+                fetch_and_save_jobs(db)   # second re-fetches the same posting
 
         latest = db.query(FetchRun).order_by(FetchRun.started_at.desc()).first()
         remotive = next(s for s in latest.sources if s.source == "remotive")

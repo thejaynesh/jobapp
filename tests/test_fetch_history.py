@@ -112,6 +112,8 @@ class TestRecordRun:
         remotive = next(s for s in run.sources if s.source == "remotive")
         assert remotive.inserted == 3
         assert remotive.skipped == 1
+        # Inferred rather than recorded as a false zero.
+        assert remotive.fetched == 4
 
     def test_caps_stored_error_messages(self, db):
         run = record_run(db, _NOW, _counts(), {

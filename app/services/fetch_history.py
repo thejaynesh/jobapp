@@ -94,10 +94,14 @@ def record_run(
     # if it never reported stats, so processed jobs are never left unattributed.
     all_sources = set(source_stats or {}) | set(per_source_outcome)
     for source in sorted(all_sources):
-        stats = (source_stats or {}).get(source) or {
-            "count": 0, "errors": [], "enabled": True,
-        }
         outcome = per_source_outcome.get(source, {})
+        stats = (source_stats or {}).get(source)
+        if stats is None:
+            # No stats reported, but we demonstrably processed its jobs — infer
+            # the fetch count from them rather than recording a false zero.
+            stats = {
+                "count": sum(outcome.values()), "errors": [], "enabled": True,
+            }
         db.add(FetchSourceRun(
             run_id=run.id,
             source=source,
