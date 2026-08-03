@@ -17,6 +17,9 @@
           {{ job.llm_score }}
         </span>
         <p class="text-xs text-gray-400">score</p>
+        {% if job.matched_by %}
+        <p class="text-[10px] text-gray-300 mt-0.5" title="AI model that scored this job">{{ job.matched_by }}</p>
+        {% endif %}
       {% endif %}
     </div>
   </div>

@@ -965,10 +965,15 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     from app.models.application import ApplicationDocument, DocType
     from app.models.job import JobStatus
     from app.models.profile import Profile
+    from app.llm.providers import start_llm_log, collect_llm_log
 
     api_key = settings.NVIDIA_NIM_API_KEY
     base_url = settings.NVIDIA_NIM_BASE_URL
     model = settings.NVIDIA_NIM_MODEL
+
+    # Track which provider/model actually serves each LLM call (fallback chain
+    # means it can vary per call) so the generated docs record their author.
+    start_llm_log()
 
     profile = db.query(Profile).first()
     profile_data = profile.data if profile else {}
@@ -1068,12 +1073,15 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     resume_path = _OUTPUT_DIR / str(application.id) / resume_filename
     compiled_resume = compile_resume_one_page(resume_ctx, resume_path)
 
+    generated_by = ", ".join(collect_llm_log()) or None
+
     resume_doc = ApplicationDocument(
         application_id=application.id,
         doc_type=DocType.resume,
         version=resume_version,
         path=str(compiled_resume),
         generation_feedback=feedback,
+        generated_by=generated_by,
     )
     _set_only_current(db, application.id, DocType.resume, resume_doc)
     db.add(resume_doc)
@@ -1092,6 +1100,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         version=cl_version,
         path=str(compiled_cl),
         generation_feedback=feedback,
+        generated_by=generated_by,
     )
     _set_only_current(db, application.id, DocType.cover_letter, cl_doc)
     db.add(cl_doc)

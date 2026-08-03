@@ -11,6 +11,7 @@ while high-volume job matching uses the extra providers only as failover.
 Providers without an API key configured are simply skipped.
 """
 
+import contextvars
 import logging
 from dataclasses import dataclass
 
@@ -20,6 +21,39 @@ logger = logging.getLogger(__name__)
 
 GENERATION_PREFERENCE = ["anthropic", "gemini"]
 MATCHING_PREFERENCE = ["gemini", "anthropic"]
+
+# Records which provider/model served each successful LLM call, so callers
+# (e.g. document generation) can persist "who wrote this". Only active between
+# start_llm_log() and collect_llm_log(); calls outside a log window are not
+# tracked. Context-local so concurrent tasks don't mix logs.
+_llm_call_log: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "llm_call_log", default=None
+)
+
+
+def provider_label(provider: "Provider") -> str:
+    return f"{provider.name}/{provider.model}"
+
+
+def start_llm_log() -> None:
+    _llm_call_log.set([])
+
+
+def collect_llm_log() -> list[str]:
+    """Unique provider/model labels used since start_llm_log(), in first-use order."""
+    log = _llm_call_log.get() or []
+    _llm_call_log.set(None)
+    seen: list[str] = []
+    for label in log:
+        if label not in seen:
+            seen.append(label)
+    return seen
+
+
+def _record_llm_use(provider: "Provider") -> None:
+    log = _llm_call_log.get()
+    if log is not None:
+        log.append(provider_label(provider))
 
 
 @dataclass(frozen=True)
@@ -96,8 +130,11 @@ def call_provider(
     max_tokens: int = 512,
 ) -> str:
     if provider.name == "anthropic":
-        return _call_anthropic(provider, messages, max_tokens)
-    return _call_openai_compatible(provider, messages, temperature, max_tokens)
+        result = _call_anthropic(provider, messages, max_tokens)
+    else:
+        result = _call_openai_compatible(provider, messages, temperature, max_tokens)
+    _record_llm_use(provider)
+    return result
 
 
 def matching_fallbacks() -> list[Provider]:

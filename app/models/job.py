@@ -35,6 +35,7 @@ class Job(Base):
     keyword_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     llm_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     llm_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    matched_by: Mapped[str | None] = mapped_column(String, nullable=True)
     matched_skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
     missing_skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
     status: Mapped[JobStatus] = mapped_column(

@@ -52,6 +52,10 @@
             Download v{{ current_resume.version }}
           </a>
           <span class="text-xs text-gray-400">Current version</span>
+          {% if current_resume.generated_by %}
+          <span class="text-[10px] bg-purple-50 text-purple-600 border border-purple-200 rounded-full px-2 py-0.5"
+                title="AI model(s) that generated this document">{{ current_resume.generated_by }}</span>
+          {% endif %}
         </div>
         {% if resumes | length > 1 %}
         <details class="mt-2">
@@ -67,6 +71,9 @@
               <span class="text-gray-400">{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '' }}</span>
               {% if doc.generation_feedback %}
                 <span class="italic text-gray-400">&ldquo;{{ doc.generation_feedback[:60] }}{% if doc.generation_feedback|length > 60 %}…{% endif %}&rdquo;</span>
+              {% endif %}
+              {% if doc.generated_by %}
+                <span class="text-purple-500">{{ doc.generated_by }}</span>
               {% endif %}
             </li>
             {% endfor %}
@@ -116,6 +123,10 @@
             Download v{{ current_cl.version }}
           </a>
           <span class="text-xs text-gray-400">Current version</span>
+          {% if current_cl.generated_by %}
+          <span class="text-[10px] bg-purple-50 text-purple-600 border border-purple-200 rounded-full px-2 py-0.5"
+                title="AI model(s) that generated this document">{{ current_cl.generated_by }}</span>
+          {% endif %}
         </div>
         {% if cover_letters | length > 1 %}
         <details class="mt-2">
@@ -129,6 +140,9 @@
                 v{{ doc.version }}
               </a>
               <span class="text-gray-400">{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '' }}</span>
+              {% if doc.generated_by %}
+                <span class="text-purple-500">{{ doc.generated_by }}</span>
+              {% endif %}
             </li>
             {% endfor %}
           </ul>

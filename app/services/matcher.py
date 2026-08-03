@@ -300,7 +300,9 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) 
                 "llm_score_job: scored job %s via fallback provider %s (%s)",
                 getattr(job, "id", "?"), provider.name, provider.model,
             )
-            return _parse_llm_response(raw)
+            result = _parse_llm_response(raw)
+            result["scored_by"] = f"{provider.name}/{provider.model}"
+            return result
         except Exception as exc:
             logger.warning(
                 "llm_score_job: fallback provider %s failed: %s", provider.name, exc
@@ -321,7 +323,9 @@ def llm_score_job(
             time.sleep(delay)
         try:
             raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
-            return _parse_llm_response(raw)
+            result = _parse_llm_response(raw)
+            result["scored_by"] = f"nim/{model}"
+            return result
         except RateLimitError as exc:
             last_exc = exc
         except Exception as exc:
@@ -375,6 +379,7 @@ def match_job(
     job.llm_reasoning = llm_result["reasoning"]
     job.matched_skills = llm_result["matched_skills"]
     job.missing_skills = llm_result["missing_skills"]
+    job.matched_by = llm_result.get("scored_by")
 
     if score >= min_score:
         job.status = JobStatus.matched
