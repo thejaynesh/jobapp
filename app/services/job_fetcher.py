@@ -360,7 +360,9 @@ def _run_all_adapters(
         pw_jobs: list[dict] = []
         pw_stats: dict = {}
 
-        if only is None or "wellfound" in only:
+        if (only is None or "wellfound" in only) and getattr(
+            cfg, "WELLFOUND_ENABLED", True
+        ):
             # Wellfound is scraped by role page, not by search query: the
             # pages are a fixed taxonomy and carry no location, so one pass over
             # the configured roles covers every query/location combination.

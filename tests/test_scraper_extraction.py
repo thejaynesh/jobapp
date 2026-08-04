@@ -232,6 +232,76 @@ class TestWellfoundRolePages:
         assert page.goto.await_count == 3
         assert len(jobs) == 2
 
+    def _html_resp(self, html: str, status: int = 200) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.text = html
+        return resp
+
+    _LD_HTML = """<html><head>
+      <script type="application/ld+json">
+      {"@type": "JobPosting", "title": "Backend Engineer",
+       "url": "https://wellfound.com/jobs/99-backend",
+       "hiringOrganization": {"name": "Acme"},
+       "jobLocation": {"address": {"addressLocality": "Remote",
+                                   "addressRegion": ""}},
+       "description": "<p>Go and Postgres.</p>"}
+      </script></head><body>x</body></html>"""
+
+    @pytest.mark.asyncio
+    async def test_plain_http_is_tried_before_launching_a_browser(self):
+        """
+        Headless Chromium gets an empty response from Wellfound. A plain client
+        has a different TLS fingerprint and these pages are server-rendered, so
+        it's worth trying — and it costs nothing when it works.
+        """
+        from app.services.sources.wellfound import fetch_roles
+        with patch("httpx.get", return_value=self._html_resp(self._LD_HTML)), \
+             patch("playwright.async_api.async_playwright") as pw:
+            jobs = await fetch_roles(["backend-engineer"])
+
+        pw.assert_not_called()
+        assert len(jobs) == 1
+        assert jobs[0]["title"] == "Backend Engineer"
+        assert jobs[0]["company"] == "Acme"
+        assert "Go and Postgres" in jobs[0]["description"]
+
+    @pytest.mark.asyncio
+    async def test_it_falls_back_to_the_browser_when_plain_http_gives_nothing(self):
+        from app.services.sources.wellfound import fetch_roles
+        page = _page(evaluate=[self._ROW], body="x" * 500)
+        with patch("httpx.get", return_value=self._html_resp("<html></html>")), \
+             patch("playwright.async_api.async_playwright",
+                   return_value=_playwright(page)):
+            jobs = await fetch_roles(["backend-engineer"])
+
+        page.goto.assert_awaited()
+        assert len(jobs) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_plain_http_response_falls_through_quietly(self):
+        from app.services.sources.wellfound import fetch_roles
+        page = _page(evaluate=[self._ROW], body="x" * 500)
+        with patch("httpx.get", return_value=self._html_resp("", status=403)), \
+             patch("playwright.async_api.async_playwright",
+                   return_value=_playwright(page)):
+            jobs = await fetch_roles(["backend-engineer"])
+        assert len(jobs) == 1  # browser path still ran
+
+    def test_html_parsing_finds_posting_links_without_structured_data(self):
+        from app.services.sources.wellfound import _jobs_from_html
+        html = ('<a href="/jobs/1234-staff-engineer">Staff Engineer</a>'
+                '<a href="/company/acme">Acme</a>')
+        jobs = _jobs_from_html(html, "United States")
+        assert len(jobs) == 1
+        assert jobs[0]["title"] == "Staff Engineer"
+        assert jobs[0]["url"] == "https://wellfound.com/jobs/1234-staff-engineer"
+
+    def test_html_parsing_survives_malformed_structured_data(self):
+        from app.services.sources.wellfound import _jobs_from_html
+        html = '<script type="application/ld+json">{not json</script>'
+        assert _jobs_from_html(html, "") == []
+
     @pytest.mark.asyncio
     async def test_a_nonexistent_role_page_is_named_as_such(self):
         from app.services.sources.wellfound import fetch_roles

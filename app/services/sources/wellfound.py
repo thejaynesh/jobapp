@@ -174,8 +174,13 @@ async def _scrape_role(page, slug: str, location: str) -> list[dict]:
             timeout=15000,
         )
     except Exception:
-        logger.warning("Wellfound: %s rendered no text at all — %s",
-                       url, await describe_page(page))
+        # Include the HTTP status: 403 is a hard block, whereas 200-with-nothing
+        # means the response was empty or the app refused to boot for us. Those
+        # want different answers, and the page text alone can't tell them apart.
+        logger.warning(
+            "Wellfound: %s rendered no text at all (HTTP %s) — %s",
+            url, status if status is not None else "unknown", await describe_page(page),
+        )
         return []
 
     try:
@@ -202,21 +207,130 @@ async def _scrape_role(page, slug: str, location: str) -> list[dict]:
     return jobs
 
 
+_LD_JSON_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.S | re.I,
+)
+_JOB_ANCHOR_RE = re.compile(
+    r'<a[^>]+href="(/jobs/\d+[^"]*)"[^>]*>(.*?)</a>', re.S | re.I
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _jobs_from_html(html: str, location: str) -> list[dict]:
+    """Pull postings out of server-rendered HTML, no browser involved."""
+    rows: list[dict] = []
+
+    for blob in _LD_JSON_RE.findall(html or ""):
+        try:
+            data = json.loads(blob.strip())
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for node in item.get("@graph", [item]):
+                if not isinstance(node, dict) or node.get("@type") != "JobPosting":
+                    continue
+                org = node.get("hiringOrganization") or {}
+                loc_node = node.get("jobLocation") or {}
+                if isinstance(loc_node, list):
+                    loc_node = loc_node[0] if loc_node else {}
+                addr = (loc_node or {}).get("address") or {}
+                rows.append({
+                    "title": node.get("title") or "",
+                    "company": org if isinstance(org, str) else (org.get("name") or ""),
+                    "location": ", ".join(filter(None, [
+                        addr.get("addressLocality"), addr.get("addressRegion"),
+                    ])),
+                    "url": node.get("url") or "",
+                    "description": _TAG_RE.sub(" ", node.get("description") or "").strip(),
+                    "remote": bool(node.get("jobLocationType")),
+                })
+
+    if not rows:
+        seen = set()
+        for href, inner in _JOB_ANCHOR_RE.findall(html or ""):
+            title = _TAG_RE.sub(" ", inner).strip()
+            title = " ".join(title.split())
+            if not title or len(title) < 3 or title in seen:
+                continue
+            seen.add(title)
+            rows.append({
+                "title": title, "company": "", "location": "",
+                "url": f"https://wellfound.com{href}",
+                "description": "", "remote": False,
+            })
+
+    return _to_jobs(rows, location)
+
+
+def _fetch_role_over_http(slug: str, location: str) -> list[dict]:
+    """
+    Try the role page with a plain HTTP client.
+
+    Headless Chromium gets an empty response from Wellfound — zero characters
+    of body and the bare hostname as the title, which is what Chromium shows
+    when nothing came back. A plain client presents a completely different
+    TLS/HTTP2 fingerprint, and these pages are server-rendered, so it's worth
+    trying before paying for a browser at all.
+    """
+    import httpx
+
+    url = _ROLE_URL.format(slug=slug)
+    try:
+        resp = httpx.get(url, headers=_HTTP_HEADERS, timeout=20, follow_redirects=True)
+    except Exception as exc:
+        logger.info("Wellfound: plain HTTP failed for %s (%s)", slug, exc)
+        return []
+
+    if resp.status_code != 200:
+        logger.info("Wellfound: plain HTTP got %s for %s", resp.status_code, url)
+        return []
+
+    jobs = _jobs_from_html(resp.text, location)
+    logger.info("Wellfound: plain HTTP returned %d bytes, %d jobs for %s",
+                len(resp.text), len(jobs), slug)
+    return jobs
+
+
 async def fetch_roles(slugs: list[str] | None = None, location: str = "") -> list[dict]:
     """
-    Scrape every configured role page in a single browser session.
+    Fetch every configured role page.
 
-    One Chromium launch for all roles rather than one per role: starting the
-    browser dominates the cost of this source.
+    Plain HTTP first — it's free, and these pages are server-rendered. Only if
+    that yields nothing does this fall back to a browser, and then a single
+    session covers every remaining role.
     """
     from playwright.async_api import async_playwright
 
     slugs = slugs or configured_roles()
-    fresh = [s for s in slugs if not _cached(s)]
     jobs: list[dict] = [job for s in slugs if _cached(s) for job in _cached(s)]
+    fresh = [s for s in slugs if not _cached(s)]
 
-    if not fresh:
+    still_needed = []
+    for slug in fresh:
+        found = _fetch_role_over_http(slug, location)
+        if found:
+            _cache[slug] = (time.monotonic(), found)
+            jobs.extend(found)
+        else:
+            still_needed.append(slug)
+
+    if not still_needed:
+        logger.info("Wellfound: %d jobs over plain HTTP, no browser needed", len(jobs))
         return jobs
+    fresh = still_needed
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(**LAUNCH_OPTIONS)
