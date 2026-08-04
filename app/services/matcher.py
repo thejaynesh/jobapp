@@ -23,6 +23,10 @@ class LLMUnavailableError(Exception):
     """All LLM providers failed; the job should stay `new` and retry later."""
 
 
+class ResponseParseError(Exception):
+    """The model replied, but not with a score we can read."""
+
+
 _STOP = frozenset({
     "a", "an", "the", "and", "or", "of", "in", "at", "for", "to", "with",
     "as", "is", "be", "are", "was", "were", "it", "on", "by", "from",
@@ -291,28 +295,73 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
     ]
 
 
-def _parse_llm_response(content: str) -> dict:
-    if not content:
-        return {"score": 0, "reasoning": "Parse error: empty response", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
+def _extract_json_object(text: str) -> dict:
+    """
+    Find the scoring object in a model response.
 
-    text = content.strip()
-    # strip ```json ... ``` or ``` ... ```
+    Plain `json.loads` on the whole reply only works for models that emit
+    nothing but JSON. Reasoning models wrap it in thinking, and chattier ones
+    add a sentence either side, so fall back to the first balanced {...} span.
+    """
+    text = (text or "").strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    text = text.strip()
+    text = re.sub(r"\s*```$", "", text).strip()
+    if not text:
+        raise ResponseParseError("empty response")
 
     try:
         data = json.loads(text)
-        return {
-            "score": int(data.get("score", 0)),
-            "reasoning": str(data.get("reasoning", "")),
-            "matched_skills": list(data.get("matched_skills", [])),
-            "missing_skills": list(data.get("missing_skills", [])),
-            "seniority_fit": bool(data.get("seniority_fit", False)),
-        }
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(text[start:i + 1])
+                    except Exception:
+                        break
+                    if isinstance(data, dict):
+                        return data
+                    break
+        start = text.find("{", start + 1)
+
+    raise ResponseParseError(f"no JSON object found in {text[:120]!r}")
+
+
+def _parse_llm_response(content: str) -> dict:
+    """
+    The scoring fields, or ResponseParseError.
+
+    Deliberately not "score 0 on failure": that flowed straight into the
+    minimum-score check and filtered the job out with the reason "AI scored
+    this 0/100", so a formatting hiccup silently discarded a job and blamed the
+    score for it. An unparseable reply means we don't know, and the caller
+    leaves the job to be retried.
+    """
+    data = _extract_json_object(content)
+    if "score" not in data:
+        raise ResponseParseError(f"no score field in {sorted(data)[:8]}")
+    try:
+        score = int(float(data["score"]))
     except Exception as exc:
-        logger.warning("_parse_llm_response failed: %s | raw: %.200s", exc, content)
-        return {"score": 0, "reasoning": f"Parse error: {exc}", "matched_skills": [], "missing_skills": [], "seniority_fit": False}
+        raise ResponseParseError(f"score {data['score']!r} is not a number") from exc
+
+    return {
+        "score": max(0, min(100, score)),
+        "reasoning": str(data.get("reasoning", "")),
+        "matched_skills": [str(s) for s in (data.get("matched_skills") or [])],
+        "missing_skills": [str(s) for s in (data.get("missing_skills") or [])],
+        "seniority_fit": bool(data.get("seniority_fit", True)),
+    }
 
 
 def chat_completion(
@@ -396,6 +445,12 @@ def llm_score_job(
             return result
         except RateLimitError as exc:
             last_exc = exc
+        except ResponseParseError as exc:
+            # Fall through to the other providers rather than scoring 0: the
+            # model is reachable, it just isn't answering in the agreed shape.
+            logger.warning("llm_score_job: unreadable reply from %s: %s", model, exc)
+            last_exc = exc
+            break
         except Exception as exc:
             logger.error("llm_score_job failed for job %s: %s", getattr(job, "id", "?"), exc)
             last_exc = exc

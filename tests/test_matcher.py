@@ -342,18 +342,20 @@ class TestParseLlmResponse:
         result = _parse_llm_response(raw)
         assert result["score"] == 60
 
-    def test_returns_zero_score_on_parse_failure(self):
-        from app.services.matcher import _parse_llm_response
-        result = _parse_llm_response("This is not JSON at all.")
-        assert result["score"] == 0
-        assert "Parse error" in result["reasoning"]
-        assert result["matched_skills"] == []
-        assert result["missing_skills"] == []
+    # These two previously asserted score 0 on an unreadable reply. That was the
+    # bug: 0 fell below the match threshold, so the job was filtered out with
+    # the reason "AI scored this 0/100" — a formatting hiccup silently
+    # discarding a job and blaming the score. Not knowing is now distinct from
+    # scoring badly, and the caller leaves the job to be retried.
+    def test_unreadable_reply_raises_rather_than_scoring_zero(self):
+        from app.services.matcher import ResponseParseError, _parse_llm_response
+        with pytest.raises(ResponseParseError):
+            _parse_llm_response("This is not JSON at all.")
 
-    def test_returns_zero_score_on_empty_string(self):
-        from app.services.matcher import _parse_llm_response
-        result = _parse_llm_response("")
-        assert result["score"] == 0
+    def test_empty_reply_raises_rather_than_scoring_zero(self):
+        from app.services.matcher import ResponseParseError, _parse_llm_response
+        with pytest.raises(ResponseParseError):
+            _parse_llm_response("")
 
     def test_handles_extra_whitespace_around_json(self):
         from app.services.matcher import _parse_llm_response
