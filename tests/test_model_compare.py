@@ -297,6 +297,32 @@ class TestComparisonTask:
         assert stored["status"] == "done"
         assert db.query(Profile).first().data["target_roles"] == ["Backend Engineer"]
 
+    def test_the_record_is_marked_running_before_the_scoring_starts(self, db):
+        """
+        A comparison is minutes long, so the panel needs to know it's underway
+        rather than only finding out when the result lands.
+        """
+        import app.tasks.compare_models as task
+        from app.models.profile import Profile
+        from app.services.model_compare import load_state
+
+        db.add(Profile(data={}))
+        db.commit()
+        seen = {}
+
+        def record_then_fail(*args, **kwargs):
+            seen["status"] = load_state(db)["status"]
+            raise RuntimeError("stop here")
+
+        with patch.object(task, "acquire", return_value=True), \
+             patch.object(task, "release"), \
+             patch.object(task, "SessionLocal", return_value=db), \
+             patch.object(db, "close"), \
+             patch.object(task, "compare_models", side_effect=record_then_fail):
+            task.run_comparison.apply(kwargs={"models": ["m", "n"], "limit": 4})
+
+        assert seen["status"] == "running"
+
     def test_no_jobs_is_reported_rather_than_stored_as_an_empty_success(self, db):
         import app.tasks.compare_models as task
         from app.models.profile import Profile
@@ -340,81 +366,141 @@ class TestComparisonTask:
         release.assert_called_once()
 
 
+_TWO = ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]
+
+
 class TestCompareRoutes:
     """The panel is how this gets used; the command line was the stopgap."""
 
-    def _idle(self):
-        return patch("app.services.fetch_lock.state",
-                     return_value={"running": False, "seconds_left": None})
+    def _profile(self, db, comparison=None):
+        from app.models.profile import Profile
+        data = {"target_roles": ["Backend Engineer"]}
+        if comparison is not None:
+            data["model_comparison"] = comparison
+        db.add(Profile(data=data))
+        db.commit()
 
     def test_the_panel_renders_on_the_runs_page(self, client):
         from app.config import settings
-        with self._idle():
-            body = client.get("/runs").text
+        body = client.get("/runs").text
         assert "Compare matching models" in body
         assert 'hx-post="/runs/compare"' in body
         # The model in use is pre-checked so a comparison is one click.
         assert settings.NVIDIA_NIM_MODEL in body
 
-    def test_one_model_is_refused_with_a_reason(self, client):
-        with self._idle(), \
-             patch("app.tasks.compare_models.run_comparison") as task:
+    def test_one_model_is_refused_with_a_reason(self, client, db):
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison") as task:
             body = client.post("/runs/compare",
                                data={"models": ["meta/llama-3.3-70b-instruct"]}).text
         task.delay.assert_not_called()
         assert "at least two models" in body
 
-    def test_unknown_model_ids_are_dropped(self, client):
+    def test_unknown_model_ids_are_dropped(self, client, db):
         """The id goes straight to the provider, so only the curated list runs."""
-        with self._idle(), \
-             patch("app.tasks.compare_models.run_comparison") as task:
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison") as task:
             client.post("/runs/compare", data={"models": [
                 "meta/llama-3.3-70b-instruct", "attacker/whatever",
                 "meta/llama-3.1-70b-instruct"]})
-        assert task.delay.call_args.kwargs["models"] == [
-            "meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]
+        assert task.delay.call_args.kwargs["models"] == _TWO
 
-    def test_a_valid_request_is_queued_and_the_panel_starts_polling(self, client):
-        with self._idle(), \
-             patch("app.tasks.compare_models.run_comparison") as task:
-            body = client.post("/runs/compare", data={
-                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"],
-                "limit": 5,
-            }).text
-        assert task.delay.call_args.kwargs == {
-            "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"],
-            "limit": 5,
-        }
+    def test_a_valid_request_is_queued_and_the_panel_starts_polling(self, client, db):
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison") as task:
+            body = client.post("/runs/compare",
+                               data={"models": _TWO, "limit": 5}).text
+        assert task.delay.call_args.kwargs == {"models": _TWO, "limit": 5}
         assert 'hx-get="/runs/compare/status"' in body
-        assert "Running" in body
+        assert "waiting for a worker" in body
 
-    def test_the_limit_is_clamped(self, client):
+    def test_the_request_is_recorded_before_the_task_is_published(self, client, db):
+        """
+        The gap between queueing and a worker starting is where this used to
+        show nothing at all: the Redis lock isn't held yet, so the panel saw
+        "not running", stopped polling, and left the page looking untouched.
+        """
+        from app.services.model_compare import load_state, progress
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison"):
+            client.post("/runs/compare", data={"models": _TWO, "limit": 5})
+        record = load_state(db)
+        assert record["status"] == "queued"
+        assert record["models"] == _TWO
+        assert progress(record)["active"] is True
+
+    def test_the_panel_keeps_polling_while_the_task_is_only_queued(self, client, db):
+        from datetime import datetime, timezone
+        self._profile(db, {"status": "queued", "models": _TWO, "job_count": 5,
+                           "queued_at": datetime.now(timezone.utc).isoformat(),
+                           "rows": [], "summary": [], "flips": []})
+        body = client.get("/runs/compare/status").text
+        assert 'hx-trigger="every 5s"' in body
+        assert "waiting for a worker" in body
+
+    def test_a_running_comparison_says_what_it_is_working_through(self, client, db):
+        from datetime import datetime, timezone
+        self._profile(db, {"status": "running", "models": _TWO, "job_count": 7,
+                           "started_at": datetime.now(timezone.utc).isoformat(),
+                           "rows": [], "summary": [], "flips": []})
+        body = client.get("/runs/compare/status").text
+        assert 'hx-trigger="every 5s"' in body
+        assert "Scoring for" in body
+        assert "7 jobs" in body
+
+    def test_a_worker_that_died_mid_run_is_called_out_not_polled_forever(self, client, db):
+        from datetime import datetime, timedelta, timezone
+        stale = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        self._profile(db, {"status": "running", "models": _TWO, "job_count": 5,
+                           "started_at": stale,
+                           "rows": [], "summary": [], "flips": []})
+        body = client.get("/runs/compare/status").text
+        assert 'hx-trigger="every 5s"' not in body
+        assert "never reported" in body
+
+    def test_the_limit_is_clamped(self, client, db):
         """Each job costs one call per model; an unbounded limit is real money."""
-        with self._idle(), \
-             patch("app.tasks.compare_models.run_comparison") as task:
-            client.post("/runs/compare", data={
-                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"],
-                "limit": 5000,
-            })
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison") as task:
+            client.post("/runs/compare", data={"models": _TWO, "limit": 5000})
         assert task.delay.call_args.kwargs["limit"] == 50
 
-    def test_a_second_request_while_one_runs_is_refused(self, client):
-        with patch("app.services.fetch_lock.state",
-                   return_value={"running": True, "seconds_left": 300}), \
-             patch("app.tasks.compare_models.run_comparison") as task:
-            body = client.post("/runs/compare", data={
-                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]}).text
+    def test_a_second_request_while_one_is_pending_is_refused(self, client, db):
+        from datetime import datetime, timezone
+        self._profile(db, {"status": "running", "models": _TWO, "job_count": 5,
+                           "started_at": datetime.now(timezone.utc).isoformat(),
+                           "rows": [], "summary": [], "flips": []})
+        with patch("app.tasks.compare_models.run_comparison") as task:
+            body = client.post("/runs/compare", data={"models": _TWO}).text
         task.delay.assert_not_called()
-        assert "already running" in body
+        assert "already queued or running" in body
 
-    def test_a_broken_broker_says_so_instead_of_500ing(self, client):
-        with self._idle(), \
-             patch("app.tasks.compare_models.run_comparison") as task:
+    def test_a_stalled_record_does_not_block_a_new_comparison(self, client, db):
+        from datetime import datetime, timedelta, timezone
+        stale = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        self._profile(db, {"status": "running", "models": _TWO, "job_count": 5,
+                           "started_at": stale,
+                           "rows": [], "summary": [], "flips": []})
+        with patch("app.tasks.compare_models.run_comparison") as task:
+            client.post("/runs/compare", data={"models": _TWO})
+        assert task.delay.called
+
+    def test_a_broken_broker_says_so_instead_of_500ing(self, client, db):
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison") as task:
             task.delay.side_effect = RuntimeError("redis is down")
-            response = client.post("/runs/compare", data={
-                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]})
+            response = client.post("/runs/compare", data={"models": _TWO})
         assert response.status_code == 200
         assert "redis is down" in response.text
+
+    def test_a_broken_broker_does_not_leave_a_phantom_queued_run(self, client, db):
+        """Otherwise the panel polls forever for a task that was never published."""
+        from app.services.model_compare import load_state, progress
+        self._profile(db)
+        with patch("app.tasks.compare_models.run_comparison") as task:
+            task.delay.side_effect = RuntimeError("redis is down")
+            client.post("/runs/compare", data={"models": _TWO})
+        assert progress(load_state(db))["active"] is False
 
     def test_the_status_endpoint_stops_polling_once_the_run_finishes(self, client, db):
         from app.models.profile import Profile
@@ -434,10 +520,9 @@ class TestCompareRoutes:
         }})) 
         db.commit()
 
-        with self._idle():
-            body = client.get("/runs/compare/status").text
+        body = client.get("/runs/compare/status").text
 
-        assert 'hx-trigger="every 8s"' not in body
+        assert 'hx-trigger="every 5s"' not in body
         assert "now matches" in body
         assert "Backend Engineer" in body
         # The unreadable count is the number that decides usability.
@@ -451,12 +536,11 @@ class TestCompareRoutes:
             "rows": [], "summary": [], "flips": [],
         }}))
         db.commit()
-        with self._idle():
-            body = client.get("/runs/compare/status").text
+        body = client.get("/runs/compare/status").text
         assert "nim returned 401" in body
 
     def test_the_status_endpoint_survives_never_having_run(self, client):
-        with self._idle():
-            response = client.get("/runs/compare/status")
+        response = client.get("/runs/compare/status")
         assert response.status_code == 200
-        assert "Compare" in response.text
+        # A blank panel reads the same as one whose result went missing.
+        assert "No comparison has run yet" in response.text

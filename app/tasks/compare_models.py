@@ -15,7 +15,6 @@ model is usable here at all.
 """
 
 import argparse
-import copy
 import logging
 from datetime import datetime, timezone
 
@@ -23,28 +22,18 @@ from app.celery_app import celery_app
 from app.config import settings
 from app.database import SessionLocal
 from app.services.fetch_lock import COMPARE_LOCK_KEY, acquire, release
-from app.services.model_compare import compare_models, format_report, report_dict
+from app.services.model_compare import (
+    compare_models,
+    format_report,
+    mark_running,
+    report_dict,
+    store_state,
+)
 
 logger = logging.getLogger(__name__)
 
 # The current model plus the strongest same-shape alternative on NIM.
 DEFAULT_MODELS = "meta/llama-3.1-70b-instruct,meta/llama-3.3-70b-instruct"
-
-# A comparison is minutes of LLM calls; the page that starts it is rarely the
-# page that reads it, so the result lives on the profile.
-RESULT_KEY = "model_comparison"
-
-
-def _store(db, payload: dict) -> None:
-    from app.models.profile import Profile
-
-    profile = db.query(Profile).first()
-    if profile is None:
-        return
-    data = copy.deepcopy(profile.data)
-    data[RESULT_KEY] = payload
-    profile.data = data
-    db.commit()
 
 
 @celery_app.task(name="app.tasks.compare_models.run_comparison", bind=True, max_retries=0)
@@ -62,19 +51,25 @@ def run_comparison(self, models: list[str], limit: int = 10,
 
     db = SessionLocal()
     started = datetime.now(timezone.utc).isoformat()
+    logger.info("run_comparison: scoring %d jobs through %s", limit, ", ".join(models))
     try:
+        mark_running(db, models, limit)
         jobs, results = compare_models(db, models, limit, pace)
         payload = report_dict(jobs, results, settings.MIN_MATCH_SCORE)
         payload.update({"at": started, "status": "done"})
         if not jobs:
             payload["status"] = "no jobs"
-        _store(db, payload)
+        store_state(db, payload)
+        logger.info("run_comparison: %s over %d jobs", payload["status"], len(jobs))
         return {"status": payload["status"], "models": models}
     except Exception as exc:
         logger.error("run_comparison failed: %s", exc)
         try:
-            _store(db, {"at": started, "status": "failed", "error": str(exc)[:300],
-                        "models": models, "rows": [], "summary": [], "flips": []})
+            db.rollback()
+            store_state(db, {"at": started, "status": "failed",
+                             "error": str(exc)[:300], "models": models,
+                             "job_count": limit,
+                             "rows": [], "summary": [], "flips": []})
         except Exception:
             db.rollback()
         return {"status": "failed", "error": str(exc)}

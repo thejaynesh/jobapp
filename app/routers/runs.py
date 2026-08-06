@@ -90,16 +90,26 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
 
 
 def _compare_context(request: Request, db: Session, queued: dict | None = None) -> dict:
-    """State for the model-comparison panel."""
-    from app.models.profile import Profile
-    from app.services.fetch_lock import COMPARE_LOCK_KEY, state
+    """
+    State for the model-comparison panel.
 
-    profile = db.query(Profile).first()
-    result = (profile.data.get("model_comparison") if profile else None) or None
+    Liveness comes from the stored record, not from the Redis lock: the lock is
+    only held while a worker is executing, so between the click and the worker
+    picking the task up "not running" and "never asked for" look identical —
+    the panel would stop polling and show nothing at all.
+    """
+    from app.services.model_compare import load_state, progress
+
+    try:
+        record = load_state(db)
+    except Exception as exc:
+        logger.warning("runs: comparison state unavailable: %s", exc)
+        record = None
+
     return {
         "request": request,
-        "compare_state": state(key=COMPARE_LOCK_KEY),
-        "compare_result": result,
+        "compare_result": record,
+        "compare_progress": progress(record),
         "compare_models_available": NIM_MODELS,
         "current_model": settings.NVIDIA_NIM_MODEL,
         "queued": queued,
@@ -124,42 +134,48 @@ def trigger_compare(request: Request, models: list[str] = Form(default=[]),
     accept threshold between the first two, which is the only difference that
     changes what you actually see.
     """
-    from app.services.fetch_lock import COMPARE_LOCK_KEY, state
+    from app.services.model_compare import (
+        load_state, mark_queued, progress, store_state,
+    )
+
+    def panel(message: str, ok: bool = False):
+        return templates.TemplateResponse(
+            "runs/partials/compare.html",
+            _compare_context(request, db, {"ok": ok, "message": message}),
+        )
 
     wanted = [m for m in models if m in NIM_MODELS]
     if len(wanted) < 2:
-        return templates.TemplateResponse(
-            "runs/partials/compare.html",
-            _compare_context(request, db, {
-                "ok": False, "message": "Pick at least two models to compare."}),
-        )
+        return panel("Pick at least two models to compare.")
 
-    if state(key=COMPARE_LOCK_KEY).get("running"):
-        return templates.TemplateResponse(
-            "runs/partials/compare.html",
-            _compare_context(request, db, {
-                "ok": False, "message": "A comparison is already running."}),
-        )
+    if progress(load_state(db))["active"]:
+        return panel("A comparison is already queued or running.")
 
     limit = max(1, min(limit, 50))
+    # Recorded before the task is published so the panel has something to show
+    # the moment it swaps in, rather than between then and the worker starting.
+    mark_queued(db, wanted, limit)
     try:
         from app.tasks.compare_models import run_comparison
         run_comparison.delay(models=wanted, limit=limit)
     except Exception as exc:
         logger.error("runs: could not queue comparison: %s", exc)
-        return templates.TemplateResponse(
-            "runs/partials/compare.html",
-            _compare_context(request, db, {
-                "ok": False, "message": f"Could not queue it: {exc}"}),
-        )
+        # Clear the queued record, or the panel polls forever for a task that
+        # was never published.
+        store_state(db, {"status": "failed", "error": f"could not queue it: {exc}",
+                         "models": wanted, "job_count": limit,
+                         "rows": [], "summary": [], "flips": []})
+        return panel(f"Could not queue it: {exc}")
 
-    context = _compare_context(request, db, {
-        "ok": True,
-        "message": f"Comparing {len(wanted)} models over {limit} jobs — "
-                   f"this takes a few minutes.",
-    })
-    context["compare_state"] = {"running": True, "seconds_left": None}
-    return templates.TemplateResponse("runs/partials/compare.html", context)
+    return templates.TemplateResponse(
+        "runs/partials/compare.html",
+        _compare_context(request, db, {
+            "ok": True,
+            "message": f"Queued: {len(wanted)} models over {limit} jobs. "
+                       f"That's {len(wanted) * limit} LLM calls, so give it a "
+                       f"few minutes — this panel updates itself.",
+        }),
+    )
 
 
 @router.get("/status", response_class=HTMLResponse)

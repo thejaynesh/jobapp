@@ -12,9 +12,11 @@ doesn't get scored at all. A model that reasons beautifully but never emits
 clean JSON is useless here, and this is what shows that up front.
 """
 
+import copy
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -23,6 +25,15 @@ from app.models.job import Job
 from app.models.profile import Profile
 
 logger = logging.getLogger(__name__)
+
+# A comparison takes minutes, so the page that starts it is rarely the page that
+# reads it: the whole lifecycle lives on the profile rather than in the request.
+RESULT_KEY = "model_comparison"
+ACTIVE_STATUSES = ("queued", "running")
+
+# Past this, a record still claiming to be queued or running is a worker that
+# died, not one that's slow — the lock it would have held expires sooner.
+STALE_AFTER_SECONDS = 2700
 
 
 @dataclass
@@ -166,6 +177,93 @@ def report_dict(jobs: list[Job], results: list[ModelResult], threshold: int) -> 
         } for r in results],
         "flips": flips,
     }
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_state(db: Session) -> dict | None:
+    """The stored comparison record, whatever stage it's at."""
+    profile = db.query(Profile).first()
+    return (profile.data.get(RESULT_KEY) if profile else None) or None
+
+
+def store_state(db: Session, payload: dict) -> None:
+    """Replace the comparison record. A missing profile means nowhere to put it."""
+    profile = db.query(Profile).first()
+    if profile is None:
+        logger.warning("compare: no profile to store the result on")
+        return
+    data = copy.deepcopy(profile.data)
+    data[RESULT_KEY] = payload
+    profile.data = data
+    db.commit()
+
+
+def _blank(status: str, models: list[str], limit: int) -> dict:
+    # The empty collections matter: the panel renders this record directly, and
+    # a half-populated one would have it reaching for keys that aren't there.
+    return {"status": status, "models": list(models), "job_count": limit,
+            "rows": [], "summary": [], "flips": []}
+
+
+def mark_queued(db: Session, models: list[str], limit: int) -> None:
+    """
+    Record the request before the worker sees it.
+
+    Without this the panel has nothing to show between the click and the worker
+    picking the task up — the lock isn't held yet, so "not running" and "never
+    asked for" look identical.
+    """
+    store_state(db, {**_blank("queued", models, limit), "queued_at": _now()})
+
+
+def mark_running(db: Session, models: list[str], limit: int) -> None:
+    previous = load_state(db) or {}
+    store_state(db, {**_blank("running", models, limit),
+                     "queued_at": previous.get("queued_at"),
+                     "started_at": _now()})
+
+
+def _age_seconds(stamp: str | None) -> int | None:
+    if not stamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - moment).total_seconds()))
+
+
+def _humanise(seconds: int | None) -> str:
+    if seconds is None:
+        return "a moment"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+def progress(record: dict | None) -> dict:
+    """
+    What the panel should say about a record, and whether to keep polling.
+
+    `stalled` is the case worth naming: a worker that was killed mid-comparison
+    leaves a record claiming to run forever, and polling that silently would be
+    indistinguishable from a slow model.
+    """
+    if not record or record.get("status") not in ACTIVE_STATUSES:
+        return {"active": False, "stalled": False, "stage": None, "waiting": ""}
+
+    stage = record["status"]
+    age = _age_seconds(record.get("started_at") or record.get("queued_at"))
+    stalled = age is not None and age > STALE_AFTER_SECONDS
+    return {"active": not stalled, "stalled": stalled, "stage": stage,
+            "waiting": _humanise(age)}
 
 
 def format_report(jobs: list[Job], results: list[ModelResult], threshold: int) -> str:

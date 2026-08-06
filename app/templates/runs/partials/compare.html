@@ -1,7 +1,9 @@
-{# Polls itself while a comparison runs, then renders the stored result. #}
+{# Polls itself while a comparison is queued or running, then renders the
+   stored result. Liveness comes from the stored record rather than the Redis
+   lock, which is only held once a worker actually picks the task up. #}
 <div id="compare-panel"
-     {% if compare_state.running %}
-     hx-get="/runs/compare/status" hx-trigger="every 8s" hx-swap="outerHTML"
+     {% if compare_progress.active %}
+     hx-get="/runs/compare/status" hx-trigger="every 5s" hx-swap="outerHTML"
      {% endif %}>
 
   {% if queued %}
@@ -31,14 +33,23 @@
                class="border border-gray-300 rounded px-2 py-1 text-sm w-20 ml-1">
       </label>
       <button type="submit"
-              class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700"
-              {% if compare_state.running %}disabled{% endif %}>
+              class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700
+                     disabled:bg-gray-300"
+              {% if compare_progress.active %}disabled{% endif %}>
         Compare
       </button>
-      {% if compare_state.running %}
+      {% if compare_progress.active %}
       <span class="flex items-center gap-2 text-sm text-blue-700">
         <span class="inline-block h-2 w-2 rounded-full bg-blue-500 animate-pulse"></span>
-        Running… refreshes every 8s.
+        {% if compare_progress.stage == 'queued' %}
+        {# Named separately from "running": a task stuck here means the worker
+           isn't picking it up, which is a different problem from a slow model. #}
+        Queued {{ compare_progress.waiting }} ago, waiting for a worker…
+        {% else %}
+        Scoring for {{ compare_progress.waiting }} —
+        {{ compare_result.job_count }} jobs ×
+        {{ compare_result.models | length }} models…
+        {% endif %}
       </span>
       {% else %}
       <span class="text-xs text-gray-400">
@@ -48,7 +59,12 @@
     </div>
   </form>
 
-  {% if compare_result and compare_result.status == 'failed' %}
+  {% if compare_progress.stalled %}
+  <p class="text-sm text-red-600 mt-4">
+    A comparison started {{ compare_progress.waiting }} ago and never reported
+    back — the worker was probably restarted mid-run. Start another one.
+  </p>
+  {% elif compare_result and compare_result.status == 'failed' %}
   <p class="text-sm text-red-600 mt-4">Last comparison failed: {{ compare_result.error }}</p>
   {% elif compare_result and compare_result.status == 'no jobs' %}
   <p class="text-sm text-gray-500 mt-4">No jobs with descriptions to score yet.</p>
@@ -145,5 +161,9 @@
       </table>
     </details>
   </div>
+  {% elif not compare_progress.active %}
+  {# Say so explicitly: a blank panel reads the same whether nothing has run or
+     something ran and vanished. #}
+  <p class="text-xs text-gray-400 mt-4">No comparison has run yet.</p>
   {% endif %}
 </div>
