@@ -8,6 +8,9 @@ numbers meaningless.
 
 The lock lives in Redis (already required for Celery) with a TTL, so a worker
 killed mid-cycle can't wedge fetching forever.
+
+Model comparisons use the same mechanism under their own key: they don't
+conflict with a fetch, so sharing one key would have each block the other.
 """
 
 import logging
@@ -17,6 +20,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 LOCK_KEY = "jobapp:fetch:running"
+COMPARE_LOCK_KEY = "jobapp:compare:running"
 # Comfortably longer than a slow cycle, short enough that a crashed worker
 # doesn't block the next scheduled run for long.
 DEFAULT_TTL_SECONDS = 3600
@@ -27,7 +31,8 @@ def _client():
     return redis.Redis.from_url(settings.REDIS_URL, socket_timeout=5)
 
 
-def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str = "1") -> bool:
+def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str = "1",
+            key: str = LOCK_KEY) -> bool:
     """
     Claim the lock. False means a fetch is already running.
 
@@ -35,26 +40,26 @@ def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str = "1") -> bool:
     lock service is down would be worse than the overlap it prevents.
     """
     try:
-        return bool(_client().set(LOCK_KEY, token, nx=True, ex=ttl))
+        return bool(_client().set(key, token, nx=True, ex=ttl))
     except Exception as exc:
         logger.warning("fetch_lock: cannot reach Redis (%s); proceeding unlocked", exc)
         return True
 
 
-def release() -> None:
+def release(key: str = LOCK_KEY) -> None:
     try:
-        _client().delete(LOCK_KEY)
+        _client().delete(key)
     except Exception as exc:
         logger.warning("fetch_lock: could not release lock: %s", exc)
 
 
-def state() -> dict:
+def state(key: str = LOCK_KEY) -> dict:
     """{"running": bool, "seconds_left": int | None} for the UI."""
     try:
         client = _client()
-        if not client.exists(LOCK_KEY):
+        if not client.exists(key):
             return {"running": False, "seconds_left": None}
-        ttl = client.ttl(LOCK_KEY)
+        ttl = client.ttl(key)
         return {"running": True, "seconds_left": ttl if ttl and ttl > 0 else None}
     except Exception as exc:
         logger.warning("fetch_lock: cannot read lock state: %s", exc)

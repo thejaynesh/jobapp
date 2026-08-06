@@ -1,0 +1,149 @@
+{# Polls itself while a comparison runs, then renders the stored result. #}
+<div id="compare-panel"
+     {% if compare_state.running %}
+     hx-get="/runs/compare/status" hx-trigger="every 8s" hx-swap="outerHTML"
+     {% endif %}>
+
+  {% if queued %}
+  <div class="text-sm mb-3 {% if queued.ok %}text-green-700{% else %}text-red-600{% endif %}">
+    {{ queued.message }}
+  </div>
+  {% endif %}
+
+  <form hx-post="/runs/compare" hx-target="#compare-panel" hx-swap="outerHTML">
+    <div class="flex flex-wrap gap-x-4 gap-y-1.5 mb-3">
+      {% for model in compare_models_available %}
+      <label class="text-xs text-gray-600 flex items-center gap-1 whitespace-nowrap">
+        <input type="checkbox" name="models" value="{{ model }}"
+               class="rounded border-gray-300"
+               {% if model == current_model %}checked{% endif %}>
+        {{ model }}
+        {% if model == current_model %}
+        <span class="text-[10px] text-blue-600">(in use)</span>
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="flex flex-wrap items-center gap-3">
+      <label class="text-xs text-gray-500">
+        Jobs to score
+        <input type="number" name="limit" value="10" min="1" max="50"
+               class="border border-gray-300 rounded px-2 py-1 text-sm w-20 ml-1">
+      </label>
+      <button type="submit"
+              class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700"
+              {% if compare_state.running %}disabled{% endif %}>
+        Compare
+      </button>
+      {% if compare_state.running %}
+      <span class="flex items-center gap-2 text-sm text-blue-700">
+        <span class="inline-block h-2 w-2 rounded-full bg-blue-500 animate-pulse"></span>
+        Running… refreshes every 8s.
+      </span>
+      {% else %}
+      <span class="text-xs text-gray-400">
+        Each model scores the same jobs. Costs one LLM call per job per model.
+      </span>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if compare_result and compare_result.status == 'failed' %}
+  <p class="text-sm text-red-600 mt-4">Last comparison failed: {{ compare_result.error }}</p>
+  {% elif compare_result and compare_result.status == 'no jobs' %}
+  <p class="text-sm text-gray-500 mt-4">No jobs with descriptions to score yet.</p>
+  {% elif compare_result and compare_result.rows %}
+  <div class="mt-5 border-t border-gray-100 pt-4">
+    <p class="text-xs text-gray-400 mb-3">
+      Last run {{ compare_result.at[:16] | replace("T", " ") }} ·
+      {{ compare_result.job_count }} jobs · threshold {{ compare_result.threshold }}
+    </p>
+
+    <div class="overflow-x-auto mb-4">
+      <table class="w-full text-xs border border-gray-200 rounded">
+        <thead class="bg-gray-50 text-gray-500 uppercase">
+          <tr>
+            <th class="text-left px-3 py-2">Model</th>
+            <th class="text-right px-3 py-2">Scored</th>
+            <th class="text-right px-3 py-2">Avg</th>
+            <th class="text-right px-3 py-2">Unreadable</th>
+            <th class="text-right px-3 py-2">Errors</th>
+            <th class="text-right px-3 py-2">Time</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 bg-white">
+          {% for s in compare_result.summary %}
+          <tr>
+            <td class="px-3 py-2 font-medium text-gray-700">{{ s.model }}</td>
+            <td class="px-3 py-2 text-right text-gray-600">{{ s.scored }}/{{ compare_result.job_count }}</td>
+            <td class="px-3 py-2 text-right text-gray-700 font-medium">{{ s.average }}</td>
+            {# Unreadable is the number that decides usability: those jobs
+               don't get scored at all, whatever the averages look like. #}
+            <td class="px-3 py-2 text-right {% if s.unreadable %}text-red-600 font-semibold{% else %}text-gray-300{% endif %}">
+              {{ s.unreadable }}
+            </td>
+            <td class="px-3 py-2 text-right {% if s.errors %}text-red-500{% else %}text-gray-300{% endif %}">
+              {{ s.errors }}
+            </td>
+            <td class="px-3 py-2 text-right text-gray-400">{{ s.seconds }}s</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if compare_result.summary | selectattr("unreadable") | list %}
+    <p class="text-xs text-red-600 mb-4">
+      A model with unreadable replies leaves those jobs unscored — it's a poor
+      fit for this prompt regardless of how its scores look.
+    </p>
+    {% endif %}
+
+    {% if compare_result.flips %}
+    <p class="text-xs font-medium text-gray-600 mb-1">
+      Jobs that change verdict ({{ compare_result.models[0] }} → {{ compare_result.models[1] }})
+    </p>
+    <ul class="text-xs text-gray-600 mb-4 space-y-0.5">
+      {% for f in compare_result.flips %}
+      <li>
+        <span class="{% if f.direction == 'gained' %}text-green-700{% else %}text-red-600{% endif %}">
+          {{ "now matches" if f.direction == 'gained' else "now rejected" }}
+        </span>
+        — {{ f.title }} @ {{ f.company }} ({{ f["from"] }} → {{ f.to }})
+      </li>
+      {% endfor %}
+    </ul>
+    {% elif compare_result.models | length > 1 %}
+    <p class="text-xs text-gray-400 mb-4">
+      No job changes verdict between the first two models at this threshold.
+    </p>
+    {% endif %}
+
+    <details class="text-xs">
+      <summary class="cursor-pointer text-blue-600">Per-job scores</summary>
+      <table class="w-full mt-2 border border-gray-200 rounded">
+        <thead class="bg-gray-50 text-gray-500 uppercase">
+          <tr>
+            <th class="text-left px-3 py-1.5">Job</th>
+            {% for m in compare_result.models %}
+            <th class="text-right px-3 py-1.5">{{ m.split("/")[-1][:20] }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100 bg-white">
+          {% for row in compare_result.rows %}
+          <tr>
+            <td class="px-3 py-1.5 text-gray-700">{{ row.title[:40] }} @ {{ row.company[:18] }}</td>
+            {% for m in compare_result.models %}
+            <td class="px-3 py-1.5 text-right {% if row.scores.get(m) is none %}text-gray-300{% else %}text-gray-600{% endif %}">
+              {{ row.scores.get(m) if row.scores.get(m) is not none else "—" }}
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  </div>
+  {% endif %}
+</div>

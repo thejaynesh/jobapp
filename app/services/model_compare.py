@@ -125,6 +125,49 @@ def compare_models(
     return jobs, results
 
 
+def report_dict(jobs: list[Job], results: list[ModelResult], threshold: int) -> dict:
+    """
+    The same comparison as `format_report`, shaped for the UI and for storage.
+
+    Kept as plain data so it can sit on the profile and be rendered later —
+    a comparison takes minutes, so the page that starts it is rarely the page
+    that reads it.
+    """
+    rows = []
+    for job in jobs:
+        rows.append({
+            "title": job.title,
+            "company": job.company,
+            "scores": {r.model: r.scores.get(str(job.id)) for r in results},
+        })
+
+    flips = []
+    if len(results) >= 2:
+        base, other = results[0], results[1]
+        for job in jobs:
+            a, b = base.scores.get(str(job.id)), other.scores.get(str(job.id))
+            if a is None or b is None:
+                continue
+            if (a >= threshold) != (b >= threshold):
+                flips.append({
+                    "title": job.title, "company": job.company,
+                    "from": a, "to": b,
+                    "direction": "gained" if b >= threshold else "lost",
+                })
+
+    return {
+        "threshold": threshold,
+        "job_count": len(jobs),
+        "models": [r.model for r in results],
+        "rows": rows,
+        "summary": [{
+            "model": r.model, "scored": r.scored, "average": r.average,
+            "unreadable": r.unreadable, "errors": r.errors, "seconds": r.seconds,
+        } for r in results],
+        "flips": flips,
+    }
+
+
 def format_report(jobs: list[Job], results: list[ModelResult], threshold: int) -> str:
     """A side-by-side table, plus the disagreements that actually matter."""
     if not jobs or not results:

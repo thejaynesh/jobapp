@@ -41,6 +41,17 @@
   </div>
 </div>
 
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-8 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Compare matching models</h2>
+    <p class="text-xs text-gray-400">
+      Scores the same stored jobs through each model, so the difference you see
+      is the model and not a different batch of jobs.
+    </p>
+  </div>
+  {% include "runs/partials/compare.html" %}
+</div>
+
 {% if not runs %}
 <div class="text-sm text-gray-400">
   No runs recorded yet. History starts with the next fetch cycle.

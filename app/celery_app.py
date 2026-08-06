@@ -9,7 +9,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         "app.tasks.fetch", "app.tasks.match", "app.tasks.generate",
-        "app.tasks.backfill",
+        "app.tasks.backfill", "app.tasks.compare_models",
     ],
 )
 

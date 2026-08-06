@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,22 @@ templates = Jinja2Templates(directory="app/templates")
 # Enough to see a trend without turning the page into a wall.
 DEFAULT_RUNS_SHOWN = 15
 ROLLUP_WINDOW = 20
+
+# NIM models worth comparing for job matching. Instruct-tuned ones first: the
+# reasoning models below them wrap their answer in thinking, which the parser
+# now survives but which still costs tokens and can hit the 512-token ceiling.
+NIM_MODELS = [
+    "meta/llama-3.3-70b-instruct",
+    "meta/llama-3.1-70b-instruct",
+    "qwen/qwen3-next-80b-a3b-instruct",
+    "mistralai/mistral-medium-3.5-128b",
+    "google/gemma-4-31b-it",
+    "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    "meta/llama-3.1-8b-instruct",
+    "openai/gpt-oss-120b",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "deepseek-ai/deepseek-v4-flash",
+]
 
 # Every source the fetcher knows about, for the manual-trigger picker.
 TRIGGERABLE_SOURCES = [
@@ -66,8 +83,83 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "fetch_state": state(),
             "sources": TRIGGERABLE_SOURCES,
             "triggered": None,
+            **{k: v for k, v in _compare_context(request, db).items()
+               if k != "request"},
         },
     )
+
+
+def _compare_context(request: Request, db: Session, queued: dict | None = None) -> dict:
+    """State for the model-comparison panel."""
+    from app.models.profile import Profile
+    from app.services.fetch_lock import COMPARE_LOCK_KEY, state
+
+    profile = db.query(Profile).first()
+    result = (profile.data.get("model_comparison") if profile else None) or None
+    return {
+        "request": request,
+        "compare_state": state(key=COMPARE_LOCK_KEY),
+        "compare_result": result,
+        "compare_models_available": NIM_MODELS,
+        "current_model": settings.NVIDIA_NIM_MODEL,
+        "queued": queued,
+    }
+
+
+@router.get("/compare/status", response_class=HTMLResponse)
+def compare_status(request: Request, db: Session = Depends(get_db)):
+    """Live comparison state; the panel polls this while one is running."""
+    return templates.TemplateResponse(
+        "runs/partials/compare.html", _compare_context(request, db)
+    )
+
+
+@router.post("/compare", response_class=HTMLResponse)
+def trigger_compare(request: Request, models: list[str] = Form(default=[]),
+                    limit: int = Form(default=10), db: Session = Depends(get_db)):
+    """
+    Queue a model comparison.
+
+    Two models is the useful case — the report highlights which jobs cross the
+    accept threshold between the first two, which is the only difference that
+    changes what you actually see.
+    """
+    from app.services.fetch_lock import COMPARE_LOCK_KEY, state
+
+    wanted = [m for m in models if m in NIM_MODELS]
+    if len(wanted) < 2:
+        return templates.TemplateResponse(
+            "runs/partials/compare.html",
+            _compare_context(request, db, {
+                "ok": False, "message": "Pick at least two models to compare."}),
+        )
+
+    if state(key=COMPARE_LOCK_KEY).get("running"):
+        return templates.TemplateResponse(
+            "runs/partials/compare.html",
+            _compare_context(request, db, {
+                "ok": False, "message": "A comparison is already running."}),
+        )
+
+    limit = max(1, min(limit, 50))
+    try:
+        from app.tasks.compare_models import run_comparison
+        run_comparison.delay(models=wanted, limit=limit)
+    except Exception as exc:
+        logger.error("runs: could not queue comparison: %s", exc)
+        return templates.TemplateResponse(
+            "runs/partials/compare.html",
+            _compare_context(request, db, {
+                "ok": False, "message": f"Could not queue it: {exc}"}),
+        )
+
+    context = _compare_context(request, db, {
+        "ok": True,
+        "message": f"Comparing {len(wanted)} models over {limit} jobs — "
+                   f"this takes a few minutes.",
+    })
+    context["compare_state"] = {"running": True, "seconds_left": None}
+    return templates.TemplateResponse("runs/partials/compare.html", context)
 
 
 @router.get("/status", response_class=HTMLResponse)

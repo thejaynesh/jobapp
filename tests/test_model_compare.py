@@ -117,20 +117,24 @@ class TestUnreadableRepliesDoNotFilterJobs:
         assert job.filter_reason is not MagicMock  # never set to low_score
 
 
+def _stored_job(db, title="Backend Engineer", description="Python and Go."):
+    from app.models.job import Job, JobStatus
+    url = f"https://ex.com/{title}"
+    job = Job(
+        source="linkedin", source_urls=[url], title=title, company="Acme",
+        location="NYC", is_remote=False, url=url, description=description,
+        experience_level="mid", status=JobStatus.new,
+        fetched_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
 class TestModelCompare:
-    def _job(self, db, title="Backend Engineer", description="Python and Go."):
-        from app.models.job import Job, JobStatus
-        url = f"https://ex.com/{title}"
-        job = Job(
-            source="linkedin", source_urls=[url], title=title, company="Acme",
-            location="NYC", is_remote=False, url=url, description=description,
-            experience_level="mid", status=JobStatus.new,
-            fetched_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
-        )
-        db.add(job)
-        db.commit()
-        return job
+    def _job(self, db, **kwargs):
+        return _stored_job(db, **kwargs)
 
     def test_only_jobs_with_descriptions_are_sampled(self, db):
         from app.services.model_compare import sample_jobs
@@ -201,3 +205,258 @@ class TestModelCompare:
         from app.services.model_compare import compare_models, format_report
         jobs, results = compare_models(db, ["m"], limit=5)
         assert "fetch some first" in format_report(jobs, results, 70)
+
+
+class TestReportDict:
+    """The UI renders stored plain data, so the shape is part of the contract."""
+
+    def _result(self, model, job_id, score):
+        from app.services.model_compare import ModelResult
+        return ModelResult(model=model, scores={str(job_id): score}, seconds=1.5)
+
+    def test_rows_carry_a_score_per_model(self, db):
+        from app.services.model_compare import report_dict
+        job = _stored_job(db, title="A")
+        payload = report_dict(
+            [job], [self._result("old", job.id, 60), self._result("new", job.id, 90)],
+            threshold=70,
+        )
+        assert payload["models"] == ["old", "new"]
+        assert payload["rows"][0]["scores"] == {"old": 60, "new": 90}
+        assert payload["job_count"] == 1
+
+    def test_a_missing_score_is_none_rather_than_absent(self, db):
+        """The template renders an em dash for these; a KeyError would 500."""
+        from app.services.model_compare import ModelResult, report_dict
+        job = _stored_job(db, title="A")
+        payload = report_dict([job], [ModelResult(model="chatty", unreadable=1)], 70)
+        assert payload["rows"][0]["scores"]["chatty"] is None
+        assert payload["summary"][0]["unreadable"] == 1
+
+    def test_flips_record_direction_across_the_threshold(self, db):
+        from app.services.model_compare import report_dict
+        job = _stored_job(db, title="Borderline")
+        payload = report_dict(
+            [job], [self._result("old", job.id, 65), self._result("new", job.id, 80)],
+            threshold=70,
+        )
+        assert payload["flips"] == [{
+            "title": "Borderline", "company": "Acme",
+            "from": 65, "to": 80, "direction": "gained",
+        }]
+
+    def test_the_payload_is_json_serialisable(self, db):
+        """It gets stored in a JSONB column, so anything exotic would fail late."""
+        import json
+        from app.services.model_compare import report_dict
+        job = _stored_job(db, title="A")
+        payload = report_dict([job], [self._result("old", job.id, 60)], 70)
+        assert json.loads(json.dumps(payload))["rows"][0]["title"] == "A"
+
+
+class TestComparisonTask:
+    def test_it_refuses_to_overlap_another_comparison(self):
+        """Two at once would double the LLM spend for no extra information."""
+        import app.tasks.compare_models as task
+        with patch.object(task, "acquire", return_value=False), \
+             patch.object(task, "compare_models") as work:
+            result = task.run_comparison.apply(kwargs={"models": ["a", "b"]}).result
+        work.assert_not_called()
+        assert result["status"] == "already running"
+
+    def test_it_takes_the_comparison_lock_not_the_fetch_lock(self):
+        """A comparison and a fetch don't conflict; sharing a key would block both."""
+        import app.tasks.compare_models as task
+        from app.services.fetch_lock import COMPARE_LOCK_KEY
+        with patch.object(task, "acquire", return_value=False) as acquire:
+            task.run_comparison.apply(kwargs={"models": ["a", "b"]})
+        assert acquire.call_args.kwargs["key"] == COMPARE_LOCK_KEY
+
+    def test_the_result_lands_on_the_profile(self, db):
+        import app.tasks.compare_models as task
+        from app.models.profile import Profile
+        from app.services.model_compare import ModelResult
+
+        db.add(Profile(data={"target_roles": ["Backend Engineer"]}))
+        db.commit()
+        job = _stored_job(db, title="A")
+
+        with patch.object(task, "acquire", return_value=True), \
+             patch.object(task, "release"), \
+             patch.object(task, "SessionLocal", return_value=db), \
+             patch.object(db, "close"), \
+             patch.object(task, "compare_models",
+                          return_value=([job], [ModelResult(model="m",
+                                                            scores={str(job.id): 88})])):
+            result = task.run_comparison.apply(kwargs={"models": ["m"]}).result
+
+        assert result["status"] == "done"
+        stored = db.query(Profile).first().data["model_comparison"]
+        assert stored["summary"][0]["average"] == 88.0
+        # The rest of the profile has to survive being written alongside it.
+        assert stored["status"] == "done"
+        assert db.query(Profile).first().data["target_roles"] == ["Backend Engineer"]
+
+    def test_no_jobs_is_reported_rather_than_stored_as_an_empty_success(self, db):
+        import app.tasks.compare_models as task
+        from app.models.profile import Profile
+
+        db.add(Profile(data={}))
+        db.commit()
+        with patch.object(task, "acquire", return_value=True), \
+             patch.object(task, "release"), \
+             patch.object(task, "SessionLocal", return_value=db), \
+             patch.object(db, "close"), \
+             patch.object(task, "compare_models", return_value=([], [])):
+            result = task.run_comparison.apply(kwargs={"models": ["m"]}).result
+        assert result["status"] == "no jobs"
+        assert db.query(Profile).first().data["model_comparison"]["status"] == "no jobs"
+
+    def test_a_failure_is_stored_so_the_page_can_say_what_happened(self, db):
+        import app.tasks.compare_models as task
+        from app.models.profile import Profile
+
+        db.add(Profile(data={}))
+        db.commit()
+        with patch.object(task, "acquire", return_value=True), \
+             patch.object(task, "release"), \
+             patch.object(task, "SessionLocal", return_value=db), \
+             patch.object(db, "close"), \
+             patch.object(task, "compare_models", side_effect=RuntimeError("nim down")):
+            result = task.run_comparison.apply(kwargs={"models": ["m"]}).result
+
+        assert result["status"] == "failed"
+        stored = db.query(Profile).first().data["model_comparison"]
+        assert stored["status"] == "failed"
+        assert "nim down" in stored["error"]
+
+    def test_the_lock_is_released_even_when_the_comparison_raises(self, db):
+        import app.tasks.compare_models as task
+        with patch.object(task, "acquire", return_value=True), \
+             patch.object(task, "release") as release, \
+             patch.object(task, "SessionLocal", return_value=MagicMock()), \
+             patch.object(task, "compare_models", side_effect=RuntimeError("boom")):
+            task.run_comparison.apply(kwargs={"models": ["m"]})
+        release.assert_called_once()
+
+
+class TestCompareRoutes:
+    """The panel is how this gets used; the command line was the stopgap."""
+
+    def _idle(self):
+        return patch("app.services.fetch_lock.state",
+                     return_value={"running": False, "seconds_left": None})
+
+    def test_the_panel_renders_on_the_runs_page(self, client):
+        from app.config import settings
+        with self._idle():
+            body = client.get("/runs").text
+        assert "Compare matching models" in body
+        assert 'hx-post="/runs/compare"' in body
+        # The model in use is pre-checked so a comparison is one click.
+        assert settings.NVIDIA_NIM_MODEL in body
+
+    def test_one_model_is_refused_with_a_reason(self, client):
+        with self._idle(), \
+             patch("app.tasks.compare_models.run_comparison") as task:
+            body = client.post("/runs/compare",
+                               data={"models": ["meta/llama-3.3-70b-instruct"]}).text
+        task.delay.assert_not_called()
+        assert "at least two models" in body
+
+    def test_unknown_model_ids_are_dropped(self, client):
+        """The id goes straight to the provider, so only the curated list runs."""
+        with self._idle(), \
+             patch("app.tasks.compare_models.run_comparison") as task:
+            client.post("/runs/compare", data={"models": [
+                "meta/llama-3.3-70b-instruct", "attacker/whatever",
+                "meta/llama-3.1-70b-instruct"]})
+        assert task.delay.call_args.kwargs["models"] == [
+            "meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]
+
+    def test_a_valid_request_is_queued_and_the_panel_starts_polling(self, client):
+        with self._idle(), \
+             patch("app.tasks.compare_models.run_comparison") as task:
+            body = client.post("/runs/compare", data={
+                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"],
+                "limit": 5,
+            }).text
+        assert task.delay.call_args.kwargs == {
+            "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"],
+            "limit": 5,
+        }
+        assert 'hx-get="/runs/compare/status"' in body
+        assert "Running" in body
+
+    def test_the_limit_is_clamped(self, client):
+        """Each job costs one call per model; an unbounded limit is real money."""
+        with self._idle(), \
+             patch("app.tasks.compare_models.run_comparison") as task:
+            client.post("/runs/compare", data={
+                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"],
+                "limit": 5000,
+            })
+        assert task.delay.call_args.kwargs["limit"] == 50
+
+    def test_a_second_request_while_one_runs_is_refused(self, client):
+        with patch("app.services.fetch_lock.state",
+                   return_value={"running": True, "seconds_left": 300}), \
+             patch("app.tasks.compare_models.run_comparison") as task:
+            body = client.post("/runs/compare", data={
+                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]}).text
+        task.delay.assert_not_called()
+        assert "already running" in body
+
+    def test_a_broken_broker_says_so_instead_of_500ing(self, client):
+        with self._idle(), \
+             patch("app.tasks.compare_models.run_comparison") as task:
+            task.delay.side_effect = RuntimeError("redis is down")
+            response = client.post("/runs/compare", data={
+                "models": ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct"]})
+        assert response.status_code == 200
+        assert "redis is down" in response.text
+
+    def test_the_status_endpoint_stops_polling_once_the_run_finishes(self, client, db):
+        from app.models.profile import Profile
+        db.add(Profile(data={"model_comparison": {
+            "at": "2026-08-06T10:30:00+00:00", "status": "done", "threshold": 70,
+            "job_count": 1, "models": ["old", "new"],
+            "rows": [{"title": "Backend Engineer", "company": "Acme",
+                      "scores": {"old": 65, "new": 80}}],
+            "summary": [
+                {"model": "old", "scored": 1, "average": 65.0, "unreadable": 0,
+                 "errors": 0, "seconds": 2.0},
+                {"model": "new", "scored": 1, "average": 80.0, "unreadable": 2,
+                 "errors": 0, "seconds": 3.0},
+            ],
+            "flips": [{"title": "Backend Engineer", "company": "Acme",
+                       "from": 65, "to": 80, "direction": "gained"}],
+        }})) 
+        db.commit()
+
+        with self._idle():
+            body = client.get("/runs/compare/status").text
+
+        assert 'hx-trigger="every 8s"' not in body
+        assert "now matches" in body
+        assert "Backend Engineer" in body
+        # The unreadable count is the number that decides usability.
+        assert "leaves those jobs unscored" in body
+
+    def test_a_failed_comparison_is_shown_rather_than_silently_missing(self, client, db):
+        from app.models.profile import Profile
+        db.add(Profile(data={"model_comparison": {
+            "at": "2026-08-06T10:30:00+00:00", "status": "failed",
+            "error": "nim returned 401", "models": ["m"],
+            "rows": [], "summary": [], "flips": [],
+        }}))
+        db.commit()
+        with self._idle():
+            body = client.get("/runs/compare/status").text
+        assert "nim returned 401" in body
+
+    def test_the_status_endpoint_survives_never_having_run(self, client):
+        with self._idle():
+            response = client.get("/runs/compare/status")
+        assert response.status_code == 200
+        assert "Compare" in response.text
