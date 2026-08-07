@@ -1,4 +1,5 @@
 import copy
+import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -10,12 +11,15 @@ from app.database import get_db
 from app.services.locations import REGION_OPTIONS, normalize_prefs
 from app.services.profile_service import get_or_create_profile
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/profile", tags=["profile"])
 templates = Jinja2Templates(directory="app/templates")
 templates.env.globals["region_options"] = REGION_OPTIONS
 templates.env.globals["location_prefs"] = normalize_prefs
 
-TABS = ["personal", "experience", "projects", "skills", "education", "templates", "narrative"]
+TABS = ["personal", "experience", "projects", "skills", "education",
+        "templates", "narrative", "ai prompt"]
 
 
 @router.get("", response_class=HTMLResponse)
@@ -24,9 +28,30 @@ def get_profile(request: Request, tab: str = "personal", db: Session = Depends(g
         tab = "personal"
     profile = get_or_create_profile(db)
     db.commit()
+    context = {"request": request, "profile": profile.data, "active_tab": tab}
+    if tab == "ai prompt":
+        context["preview"] = _preview(db)
+    return templates.TemplateResponse("profile/index.html", context)
+
+
+def _preview(db: Session, job_id: str | None = None) -> dict | None:
+    from app.services.prompt_preview import build
+    try:
+        return build(db, job_id)
+    except Exception as exc:
+        logger.warning("profile: prompt preview unavailable: %s", exc)
+        return None
+
+
+@router.get("/prompt-preview", response_class=HTMLResponse)
+def prompt_preview(request: Request, job_id: str | None = None,
+                   db: Session = Depends(get_db)):
+    """Re-render the preview, optionally against a specific job."""
+    profile = get_or_create_profile(db)
     return templates.TemplateResponse(
-        "profile/index.html",
-        {"request": request, "profile": profile.data, "active_tab": tab},
+        "profile/partials/prompt_preview.html",
+        {"request": request, "profile": profile.data,
+         "preview": _preview(db, job_id)},
     )
 
 

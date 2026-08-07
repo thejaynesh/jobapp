@@ -1,0 +1,92 @@
+{# The exact messages the matcher sends, so "is my profile filled in?" has a
+   readable answer instead of an inferred one. #}
+<div id="prompt-preview">
+{% if not preview %}
+<p class="text-sm text-red-600">
+  Couldn't build the preview — see the application log.
+</p>
+{% else %}
+
+<p class="text-sm text-gray-500 mb-4">
+  This is what gets sent to the model for every job it scores. Anything absent
+  here is absent from the scoring, however it looks on the other tabs.
+</p>
+
+{% if preview.gaps %}
+<div class="border border-amber-200 bg-amber-50 rounded-lg p-4 mb-6">
+  <h3 class="text-sm font-semibold text-amber-900 mb-2">
+    Gaps that cost you points
+  </h3>
+  <ul class="text-sm text-amber-800 space-y-1 list-disc list-inside">
+    {% for gap in preview.gaps %}<li>{{ gap }}</li>{% endfor %}
+  </ul>
+</div>
+{% else %}
+<p class="text-sm text-green-700 mb-6">
+  Every section the rubric scores against is populated.
+</p>
+{% endif %}
+
+<div class="border border-gray-200 rounded-lg p-4 mb-6">
+  <div class="flex items-baseline justify-between mb-2">
+    <h3 class="text-sm font-semibold text-gray-800">Experience, as counted</h3>
+    <span class="text-sm text-gray-600">
+      Total
+      <span class="font-semibold {% if not preview.total_years %}text-red-600{% endif %}">
+        {{ preview.total_years }}
+      </span>
+      years
+    </span>
+  </div>
+  {# Derived from the dates rather than typed, so it's worth showing the working
+     — a date the parser can't read shows up here as a blank, not as a wrong
+     total the model then scores against. #}
+  <p class="text-xs text-gray-400 mb-3">
+    Worked out from your start and end dates. Overlapping roles count once.
+  </p>
+  {% if preview.per_role %}
+  <table class="w-full text-xs">
+    <tbody class="divide-y divide-gray-100">
+      {% for role in preview.per_role %}
+      <tr>
+        <td class="py-1.5 text-gray-700">{{ role.label }}</td>
+        <td class="py-1.5 text-gray-400">{{ role.dates or "no dates" }}</td>
+        <td class="py-1.5 text-right {% if role.years is none %}text-red-600{% else %}text-gray-600{% endif %}">
+          {% if role.years is none %}unreadable{% else %}{{ role.years }} yrs{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-xs text-gray-400">No experience entries yet.</p>
+  {% endif %}
+</div>
+
+<div class="mb-2 flex items-baseline justify-between">
+  <h3 class="text-sm font-semibold text-gray-800">The messages</h3>
+  <span class="text-xs text-gray-400">
+    Previewed against
+    {% if preview.job.is_sample %}
+    a sample job (nothing fetched yet)
+    {% else %}
+    {{ preview.job.title }} @ {{ preview.job.company }}
+    {% endif %}
+  </span>
+</div>
+
+<div class="mb-4">
+  <p class="text-xs uppercase text-gray-400 mb-1">System</p>
+  <pre class="bg-gray-50 border border-gray-200 rounded p-3 text-xs text-gray-700 whitespace-pre-wrap">{{ preview.system }}</pre>
+</div>
+
+<div>
+  <p class="text-xs uppercase text-gray-400 mb-1">User</p>
+  <pre class="bg-gray-50 border border-gray-200 rounded p-3 text-xs text-gray-700 whitespace-pre-wrap">{{ preview.user }}</pre>
+</div>
+
+<p class="text-xs text-gray-400 mt-3">
+  The job description is truncated to 4000 characters before it goes in.
+</p>
+{% endif %}
+</div>

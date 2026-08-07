@@ -91,9 +91,9 @@ def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
     """
     if not getattr(settings, "FILTER_SENIOR_TITLES", True):
         return False
-    total_years = sum(
-        float(e.get("years", 0) or 0) for e in profile_data.get("experience", [])
-    )
+    from app.services.experience import total_years as _total_years
+
+    total_years = _total_years(profile_data.get("experience", []))
     if total_years >= getattr(settings, "JUNIOR_MAX_YEARS", 3.0):
         return False
 
@@ -220,10 +220,22 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
 
     projects = profile_data.get("projects", [])
 
-    total_years = sum(float(e.get("years", 0) or 0) for e in experience)
+    # Derived from the start/end dates rather than asked for separately: the
+    # rubric leans on the total, and no form ever collected a years field.
+    from app.services.experience import entry_years, total_years as sum_years
+
+    total_years = sum_years(experience)
+
+    def _span(entry) -> str:
+        years = entry_years(entry)
+        if years is not None:
+            return f"{years} years"
+        dates = " to ".join(x for x in (entry.get("start_date"),
+                                        entry.get("end_date")) if x)
+        return dates or "dates not given"
 
     exp_lines = "\n".join(
-        f"- {e.get('title') or e.get('role') or ''} at {e.get('company', '')} ({e.get('years', 'N/A')} years)"
+        f"- {e.get('title') or e.get('role') or ''} at {e.get('company', '')} ({_span(e)})"
         + (f" — tech: {', '.join(e.get('tech'))}" if e.get("tech") else "")
         for e in experience
     )
@@ -242,7 +254,10 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
 
     extras = []
     if total_years:
-        extras.append(f"Total experience: {total_years:.0f} years")
+        # One decimal, not rounded to whole years: 2.6 shown as "3" would push
+        # the candidate over thresholds the rubric is asked to police.
+        extras.append(f"Total experience: {total_years:g} years "
+                      f"(overlapping roles counted once)")
     if remote_pref and remote_pref != "any":
         extras.append(f"Work preference: {remote_pref}")
     if salary_min:
