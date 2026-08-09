@@ -82,6 +82,21 @@ def profile(db):
     db.flush()
 
 
+@pytest.fixture(autouse=True)
+def no_outbound_calls():
+    """
+    Keep discovery off the network by default.
+
+    Team-page mining is on by default in config, so without this every test that
+    reaches discover_contacts really does fetch six URLs from the resolved
+    domain — slow, flaky, and rude to whoever owns acme.com. Tests that care
+    about a source patch it themselves, and an inner patch wins over this one.
+    """
+    with patch("app.services.outreach.team_page_contacts", return_value=[]), \
+         patch("app.services.outreach.github_contacts", return_value=[]):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Text handling
 # ---------------------------------------------------------------------------
@@ -396,6 +411,58 @@ class TestDiscoverContacts:
                             contacts = discover_contacts(db, app, use_linkedin=False, verify=True)
         assert contacts[0].email_status == "invalid"
 
+    def test_pulls_profiles_off_the_company_team_page(self, db):
+        app = _make_application(db, description="")
+        team = [{"name": "Dana Lead", "linkedin_url": "https://linkedin.com/in/dana-lead",
+                 "role": "hiring_manager", "source": "team_page"}]
+        with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "url")):
+            with patch("app.services.outreach.team_page_contacts", return_value=team):
+                contacts = discover_contacts(db, app, use_linkedin=False, verify=False)
+        stored = {c.name: c for c in contacts}
+        assert stored["Dana Lead"].linkedin_url == "https://linkedin.com/in/dana-lead"
+        assert stored["Dana Lead"].source == "team_page"
+
+    def test_keeps_a_github_contact_reachable_only_by_profile(self, db):
+        # No email and no LinkedIn, but a GitHub page and an X handle is still a
+        # way to reach someone — the old filter would have dropped them.
+        app = _make_application(db, description="")
+        people = [{"name": "Ada Engineer", "role": "engineer", "source": "github",
+                   "profile_url": "https://github.com/ada", "twitter": "ada"}]
+        with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "url")):
+            with patch("app.services.outreach.github_contacts", return_value=people):
+                with patch.object(outreach_service.settings, "GITHUB_TOKEN", "tok"):
+                    contacts = discover_contacts(db, app, use_linkedin=False, verify=False)
+        found = {c.name: c for c in contacts}
+        assert found["Ada Engineer"].profile_url == "https://github.com/ada"
+        assert found["Ada Engineer"].twitter == "ada"
+
+    def test_github_is_skipped_without_a_token(self, db):
+        app = _make_application(db, description="")
+        with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "url")):
+            with patch("app.services.outreach.github_contacts") as gh:
+                with patch.object(outreach_service.settings, "GITHUB_TOKEN", ""):
+                    discover_contacts(db, app, use_linkedin=False, verify=False)
+        gh.assert_not_called()
+
+    def test_a_failing_source_does_not_sink_the_others(self, db):
+        app = _make_application(db, description="Email talent@acme.com")
+        with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "url")):
+            with patch("app.services.outreach.team_page_contacts", side_effect=Exception("timeout")):
+                contacts = discover_contacts(db, app, use_linkedin=False, verify=False)
+        assert [c.email for c in contacts] == ["talent@acme.com"]
+
+    def test_the_linkedin_scrape_is_capped(self, db):
+        app = _make_application(db, description="")
+        with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "url")):
+            with patch("app.services.outreach.find_linkedin_contacts", return_value=[]) as scrape:
+                with patch.object(outreach_service.settings, "LINKEDIN_SESSION_COOKIE", "cookie"):
+                    with patch.object(outreach_service.settings, "OUTREACH_TARGET_TITLES",
+                                      "recruiter,manager,engineer,designer"):
+                        with patch.object(outreach_service.settings,
+                                          "OUTREACH_LINKEDIN_MAX_SEARCHES", 2):
+                            discover_contacts(db, app, use_linkedin=True, verify=False)
+        assert scrape.call_count == 2
+
     def test_records_when_the_search_ran(self, db):
         app = _make_application(db, description="Email talent@acme.com")
         with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "url")):
@@ -638,6 +705,31 @@ class TestRunOutreach:
         app = _make_application(db)
         with patch.object(outreach_service.settings, "OUTREACH_ENABLED", False):
             assert run_outreach(db, app) == []
+
+
+class TestSearchLinks:
+    def test_offers_the_standard_angles(self, db, profile):
+        app = _make_application(db)
+        labels = [l["label"] for l in outreach_service.search_links(db, app)]
+        assert "Recruiters at Acme Corp" in labels
+        assert "Engineering managers at Acme Corp" in labels
+
+    def test_leads_with_the_alumni_angle(self, db):
+        db.add(Profile(data={**PROFILE, "education": [{"school": "Northeastern University"}]}))
+        db.flush()
+        app = _make_application(db)
+        first = outreach_service.search_links(db, app)[0]
+        assert first["label"] == "Northeastern University alumni at Acme Corp"
+
+    def test_uses_a_slug_quoted_in_the_posting(self, db, profile):
+        app = _make_application(
+            db, description="We're at https://linkedin.com/company/acme-hq/ — say hi"
+        )
+        assert all("/company/acme-hq/" in l["url"] for l in outreach_service.search_links(db, app))
+
+    def test_every_link_is_a_real_url(self, db, profile):
+        app = _make_application(db)
+        assert all(l["url"].startswith("https://") for l in outreach_service.search_links(db, app))
 
 
 class TestDiscoveryStale:

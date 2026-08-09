@@ -392,23 +392,29 @@ def contacts_from_description(text: str, domain: str = "") -> list[dict]:
 # LinkedIn people search
 # ---------------------------------------------------------------------------
 
-# LinkedIn has rewritten these class names before and will again; each selector
-# is tried in turn and an empty result is reported rather than raised.
-_PEOPLE_CARD_SELECTORS = (
-    "li.reusable-search__result-container",
-    ".entity-result__item",
-    "div[data-chameleon-result-urn]",
-    ".search-results-container li",
+# Anchoring on the profile link rather than on card class names: LinkedIn
+# rewrites its cosmetic classes constantly, but a result is always an <a> to
+# /in/<slug>, and the visible name is always inside it in an aria-hidden span
+# (the sibling text is the screen-reader duplicate). That structure has outlived
+# several redesigns; `.entity-result__*` has not.
+_PROFILE_ANCHOR = "a[href*='/in/']"
+_NAME_IN_ANCHOR = ("span[aria-hidden='true']", "span.t-16", "span")
+# Subtitle lives beside the anchor's card; these are ordered newest markup first.
+_TITLE_SELECTORS = (
+    "div.t-14.t-black.t-normal",
+    ".entity-result__primary-subtitle",
+    ".entity-result__summary",
 )
-_NAME_SELECTORS = (".entity-result__title-text a span[aria-hidden='true']",
-                   ".entity-result__title-text", "span.entity-result__title-line")
-_TITLE_SELECTORS = (".entity-result__primary-subtitle", ".entity-result__summary")
+
+_NON_PERSON_NAMES = {"linkedin member", "member", "", "linkedin"}
 
 
 async def _scrape_people(company: str, title_query: str, cookie: str, limit: int) -> list[dict]:
     from playwright.async_api import async_playwright
 
-    from app.services.sources.playwright_base import CONTEXT_OPTIONS, LAUNCH_OPTIONS, encode
+    from app.services.sources.playwright_base import (
+        CONTEXT_OPTIONS, LAUNCH_OPTIONS, describe_page, encode, safe_inner_text,
+    )
 
     keywords = f"{company} {title_query}".strip()
     search_url = (
@@ -426,30 +432,49 @@ async def _scrape_people(company: str, title_query: str, cookie: str, limit: int
             }])
             page = await context.new_page()
             await page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(3500)
+            # Results render client-side; wait for the anchors rather than a
+            # fixed sleep, so a fast page isn't penalised and a slow one isn't cut off.
+            try:
+                await page.wait_for_selector(_PROFILE_ANCHOR, timeout=12000)
+            except Exception:
+                pass
 
-            cards = []
-            for selector in _PEOPLE_CARD_SELECTORS:
-                cards = await page.query_selector_all(selector)
-                if cards:
-                    break
-            if not cards:
-                logger.info("linkedin people search for %r returned no cards", keywords)
+            anchors = await page.query_selector_all(_PROFILE_ANCHOR)
+            if not anchors:
+                # "No results" and "you have been challenged" look identical from
+                # an empty selector, and they need opposite fixes — one needs new
+                # selectors, the other needs to stop and back off.
+                logger.warning(
+                    "linkedin people search for %r found nobody: %s",
+                    keywords, await describe_page(page),
+                )
                 return []
 
-            from app.services.sources.playwright_base import safe_inner_text
-
-            for card in cards[:limit]:
-                name = await safe_inner_text(card, *_NAME_SELECTORS)
-                position = await safe_inner_text(card, *_TITLE_SELECTORS)
-                profile_url = ""
-                link = await card.query_selector("a[href*='/in/']")
-                if link:
-                    href = await link.get_attribute("href") or ""
-                    profile_url = href.split("?")[0]
-                name = (name or "").strip()
-                if not name or name.lower() in ("linkedin member", "member"):
+            seen: set[str] = set()
+            for anchor in anchors:
+                if len(results) >= limit:
+                    break
+                href = (await anchor.get_attribute("href")) or ""
+                profile_url = href.split("?")[0]
+                if not profile_url or "/in/" not in profile_url or profile_url in seen:
                     continue
+
+                name = (await safe_inner_text(anchor, *_NAME_IN_ANCHOR)).strip()
+                if not name:
+                    name = ((await anchor.inner_text()) or "").strip().split("\n")[0]
+                # The same profile is linked from the photo and the name; the
+                # photo anchor has no text, so a nameless hit is a duplicate.
+                if name.lower() in _NON_PERSON_NAMES:
+                    continue
+                seen.add(profile_url)
+
+                position = ""
+                card = await anchor.evaluate_handle("el => el.closest('li') || el.parentElement")
+                if card:
+                    element = card.as_element()
+                    if element:
+                        position = await safe_inner_text(element, *_TITLE_SELECTORS)
+
                 first, last = split_name(name)
                 results.append({
                     "name": name,
@@ -458,7 +483,8 @@ async def _scrape_people(company: str, title_query: str, cookie: str, limit: int
                     "title": position.strip() or None,
                     "department": None,
                     "role": classify_role(position),
-                    "linkedin_url": profile_url or None,
+                    "linkedin_url": profile_url if profile_url.startswith("http")
+                    else f"https://www.linkedin.com{profile_url}",
                     "source": "linkedin",
                 })
         finally:

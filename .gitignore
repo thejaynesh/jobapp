@@ -26,3 +26,4 @@ alembic/versions/*.py
 !alembic/versions/0010_fetch_run_history.py
 !alembic/versions/0011_job_filter_reason.py
 !alembic/versions/0012_outreach_contacts_and_messages.py
+!alembic/versions/0013_contact_profile_url.py

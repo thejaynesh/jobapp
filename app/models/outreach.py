@@ -91,6 +91,8 @@ class Contact(Base):
     )
 
     linkedin_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Any other public profile — a GitHub page, a personal site.
+    profile_url: Mapped[str | None] = mapped_column(String, nullable=True)
     twitter: Mapped[str | None] = mapped_column(String, nullable=True)
     phone: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -119,7 +121,7 @@ class Contact(Base):
 
     @property
     def is_reachable(self) -> bool:
-        return bool(self.email or self.linkedin_url)
+        return bool(self.email or self.linkedin_url or self.profile_url or self.twitter)
 
 
 class OutreachMessage(Base):

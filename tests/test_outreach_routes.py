@@ -125,6 +125,36 @@ class TestApplicationPanel:
         response = client.get(f"/outreach/apps/{app_record.id}/panel")
         assert "Already written to about Platform Engineer" in response.text
 
+    def test_panel_offers_linkedin_searches(self, client, app_record):
+        response = client.get(f"/outreach/apps/{app_record.id}/panel")
+        assert "Find people on LinkedIn" in response.text
+        assert "Recruiters at Acme Corp" in response.text
+        assert "linkedin.com/company/acme/people/" in response.text
+
+    def test_panel_leads_with_alumni_when_the_profile_has_a_school(self, client, db, app_record):
+        db.query(Profile).delete()
+        db.add(Profile(data={**PROFILE, "education": [{"school": "Northeastern University"}]}))
+        db.flush()
+        response = client.get(f"/outreach/apps/{app_record.id}/panel")
+        assert "Northeastern University alumni at Acme Corp" in response.text
+
+    def test_a_contact_without_a_profile_gets_a_search_link(self, client, db, app_record):
+        db.add(Contact(application_id=app_record.id, company="Acme Corp", company_key="acme",
+                       name="Dana Lead", email="dana@acme.com", email_status="verified"))
+        db.flush()
+        response = client.get(f"/outreach/apps/{app_record.id}/panel")
+        assert "Find on LinkedIn" in response.text
+        assert "Dana+Lead" in response.text
+
+    def test_a_github_contact_shows_its_profile_and_handle(self, client, db, app_record):
+        db.add(Contact(application_id=app_record.id, company="Acme Corp", company_key="acme",
+                       name="Ada Engineer", source="github",
+                       profile_url="https://github.com/ada", twitter="ada"))
+        db.flush()
+        response = client.get(f"/outreach/apps/{app_record.id}/panel")
+        assert "https://github.com/ada" in response.text
+        assert "https://x.com/ada" in response.text
+
     def test_panel_404s_for_an_unknown_application(self, client):
         assert client.get(f"/outreach/apps/{uuid.uuid4()}/panel").status_code == 404
 

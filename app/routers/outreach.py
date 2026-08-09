@@ -67,7 +67,9 @@ def panel_context(db: Session, app_obj: Application) -> dict:
     Shared with the application detail page, which embeds the same partial —
     two copies of this dict would drift the moment either gained a field.
     """
-    from app.services.outreach import discovery_stale, prior_conversations
+    from app.services.outreach import (
+        contact_message_link, discovery_stale, prior_conversations, search_links,
+    )
     from app.services.outreach_sender import sending_blocked_reason
 
     contacts = [c for c in app_obj.contacts if not c.archived]
@@ -75,6 +77,10 @@ def panel_context(db: Session, app_obj: Application) -> dict:
         "app": app_obj,
         "contacts": contacts,
         "archived_count": sum(1 for c in app_obj.contacts if c.archived),
+        # Pre-built LinkedIn searches — the path that works with no API key and
+        # no risk to the user's account.
+        "search_links": search_links(db, app_obj),
+        "contact_links": {c.id: contact_message_link(c) for c in contacts},
         # A "discovering" status older than the task's own time limit means the
         # worker never came back; the panel must stop polling and re-offer the button.
         "discovery_stale": discovery_stale(app_obj),

@@ -34,6 +34,9 @@ from app.services.contact_finder import (
     find_linkedin_contacts, guess_emails, hunter_contacts, hunter_domain_search,
     hunter_email_finder, split_name, verify_email,
 )
+from app.services.github_contacts import github_contacts
+from app.services.linkedin_links import company_links, contact_link
+from app.services.team_pages import team_page_contacts
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +46,7 @@ __all__ = [
     "run_outreach", "discover_contacts", "draft_message", "regenerate_message",
     "compose_message", "mark_sent", "mark_replied", "set_message_status",
     "due_follow_ups", "draft_due_follow_ups", "outreach_stats", "channel_spec",
-    "prior_conversations", "discovery_stale",
+    "prior_conversations", "discovery_stale", "search_links", "contact_message_link",
 ]
 
 
@@ -663,7 +666,7 @@ def upsert_contact(db, application, data: dict) -> Contact:
             contact.source = data.get("source") or contact.source
 
     for field in ("name", "first_name", "last_name", "title", "department",
-                  "linkedin_url", "twitter", "phone", "domain"):
+                  "linkedin_url", "profile_url", "twitter", "phone", "domain"):
         value = data.get(field)
         if value and not getattr(contact, field, None):
             setattr(contact, field, value)
@@ -710,7 +713,9 @@ def discover_contacts(
     candidates: list[dict] = []
     pattern = ""
 
-    # The posting's own addresses first: they are free and the most reliable.
+    # Ordered by how much each source's output can be trusted, because _dedupe
+    # keeps the first non-empty value for every field. The posting's own
+    # addresses come first: free, deliberate, and aimed at applicants.
     candidates.extend(contacts_from_description(job.description or "", domain))
 
     if domain and hunter_key:
@@ -718,11 +723,32 @@ def discover_contacts(
         pattern = data.get("pattern") or ""
         candidates.extend(hunter_contacts(domain, hunter_key, limit=10, data=data))
 
+    # The company's own site: LinkedIn profile links and published addresses.
+    if settings.OUTREACH_USE_TEAM_PAGES and domain:
+        try:
+            candidates.extend(team_page_contacts(domain, limit=max_contacts))
+        except Exception as exc:
+            logger.error("discover_contacts: team pages failed for %s: %s", domain, exc)
+
+    # Public GitHub org members — named engineers, which is who referrals come from.
+    if settings.OUTREACH_USE_GITHUB and settings.GITHUB_TOKEN:
+        try:
+            candidates.extend(
+                github_contacts(job.company, domain, settings.GITHUB_TOKEN, limit=max_contacts)
+            )
+        except Exception as exc:
+            logger.error("discover_contacts: github failed for %s: %s", job.company, exc)
+
     if use_linkedin and settings.LINKEDIN_SESSION_COOKIE:
         titles = [t.strip() for t in settings.OUTREACH_TARGET_TITLES.split(",") if t.strip()]
-        candidates.extend(
-            find_linkedin_contacts(job.company, titles, settings.LINKEDIN_SESSION_COOKIE, limit=3)
-        )
+        # Capped hard: every extra authenticated search from a datacenter IP is
+        # another chance at an account restriction, and one good query beats five.
+        for query in titles[:max(1, settings.OUTREACH_LINKEDIN_MAX_SEARCHES)]:
+            candidates.extend(
+                find_linkedin_contacts(
+                    job.company, [query], settings.LINKEDIN_SESSION_COOKIE, limit=3
+                )
+            )
 
     candidates = _dedupe(candidates)
     _attach_guessed_emails(candidates, domain, pattern, hunter_key)
@@ -746,7 +772,12 @@ def discover_contacts(
                     )
 
     candidates.sort(key=contact_score, reverse=True)
-    kept = [c for c in candidates if c.get("email") or c.get("linkedin_url")][:max_contacts]
+    # A GitHub profile or an X handle is a way to reach someone even with no
+    # address, so "reachable" is broader than email plus LinkedIn.
+    kept = [
+        c for c in candidates
+        if c.get("email") or c.get("linkedin_url") or c.get("profile_url") or c.get("twitter")
+    ][:max_contacts]
 
     stored = [upsert_contact(db, application, c | {"domain": c.get("domain") or domain})
               for c in kept]
@@ -1025,6 +1056,31 @@ def run_outreach(db, application, draft: bool = True) -> list[Contact]:
             logger.error("run_outreach: draft for contact %s failed: %s", contact.id, exc)
             db.rollback()
     return contacts
+
+
+def search_links(db, application) -> list[dict]:
+    """
+    Ready-made LinkedIn searches for this employer.
+
+    The reliable half of LinkedIn outreach: the server never calls LinkedIn, the
+    user clicks through already logged in, and there is nothing to block or get
+    an account restricted for. Alumni angles come first when the profile has an
+    education history.
+    """
+    job = getattr(application, "job", None)
+    if job is None:
+        return []
+    return company_links(
+        job.company,
+        profile_data=_profile_data(db),
+        description=job.description or "",
+        url=getattr(job, "apply_url", "") or job.url or "",
+    )
+
+
+def contact_message_link(contact: Contact) -> str:
+    """The best LinkedIn URL for one person — their profile, or a search for them."""
+    return contact_link(contact)
 
 
 def prior_conversations(db, contact: Contact, limit: int = 5) -> list[dict]:

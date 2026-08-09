@@ -42,6 +42,28 @@
   <p class="text-[11px] text-gray-400 mb-3">{{ send_blocked }} Drafts can still be copied or opened in your mail app.</p>
   {% endif %}
 
+  {% if search_links %}
+  <details class="mb-4" open>
+    <summary class="text-xs font-medium text-gray-600 cursor-pointer hover:text-blue-600">
+      Find people on LinkedIn
+    </summary>
+    <p class="text-[11px] text-gray-400 mt-1 mb-2">
+      Opens in your own logged-in LinkedIn &mdash; nothing is scraped, so nothing gets blocked.
+    </p>
+    <div class="flex flex-wrap gap-1.5">
+      {% for link in search_links %}
+      <a href="{{ link.url }}" target="_blank" rel="noopener"
+         {% if link.hint %}title="{{ link.hint }}"{% endif %}
+         class="text-[11px] border rounded px-2 py-1
+           {% if link.primary %}bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100
+           {% else %}bg-white border-gray-300 text-gray-700 hover:bg-gray-100{% endif %}">
+        {{ link.label }} &nearr;
+      </a>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
   {% if contacts %}
   <div class="space-y-5">
     {% for contact in contacts %}
@@ -76,10 +98,20 @@
         {% else %}
         <span class="text-gray-400">No email found</span>
         {% endif %}
-        {% if contact.linkedin_url %}
-        <a href="{{ contact.linkedin_url }}" target="_blank" class="text-blue-600 hover:underline">LinkedIn &nearr;</a>
+        {% set li = contact_links.get(contact.id) %}
+        {% if li %}
+        <a href="{{ li }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline"
+           {% if not contact.linkedin_url %}title="We don't have their profile URL — this searches LinkedIn for them by name"{% endif %}>
+          {% if contact.linkedin_url %}LinkedIn &nearr;{% else %}Find on LinkedIn &nearr;{% endif %}
+        </a>
         {% endif %}
-        <span class="text-[10px] text-gray-400">via {{ contact.source }}</span>
+        {% if contact.profile_url %}
+        <a href="{{ contact.profile_url }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">Profile &nearr;</a>
+        {% endif %}
+        {% if contact.twitter %}
+        <a href="https://x.com/{{ contact.twitter }}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">@{{ contact.twitter }}</a>
+        {% endif %}
+        <span class="text-[10px] text-gray-400">via {{ contact.source | replace("_", " ") }}</span>
       </div>
 
       {% for earlier in prior.get(contact.id, []) %}

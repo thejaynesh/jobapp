@@ -37,8 +37,23 @@ class Settings(BaseSettings):
     # than a handful is noise — the point is two or three good people.
     OUTREACH_MAX_CONTACTS_PER_APP: int = 5
     # Use the LinkedIn people search (needs LINKEDIN_SESSION_COOKIE and costs a
-    # browser launch). Off by default: it is the slowest and most fragile leg.
+    # browser launch). Off by default, and worth understanding before switching
+    # on: it is an authenticated scrape from a datacenter IP, which is the
+    # pattern LinkedIn restricts accounts for. The deep links below get you to
+    # the same profiles with no account risk at all.
     OUTREACH_USE_LINKEDIN: bool = False
+    # Hard ceiling on people searches per discovery run. The account risk scales
+    # with volume, so this stays low whatever else is configured.
+    OUTREACH_LINKEDIN_MAX_SEARCHES: int = 1
+
+    # Public members of the company's GitHub org — real engineers with names and
+    # often a published email. Needs a token: unauthenticated GitHub allows 60
+    # requests an hour, which one cycle exhausts.
+    OUTREACH_USE_GITHUB: bool = True
+    GITHUB_TOKEN: str = ""
+    # Mine the company's own /team and /about pages for LinkedIn profile links
+    # and published addresses. No key, no quota.
+    OUTREACH_USE_TEAM_PAGES: bool = True
     # Titles the LinkedIn search looks for, in priority order.
     OUTREACH_TARGET_TITLES: str = (
         "technical recruiter,talent acquisition,engineering manager,hiring manager"
