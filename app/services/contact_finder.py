@@ -70,9 +70,17 @@ _DEPARTMENT_SCORES = {
     "finance": -15, "legal": -15, "support": -10,
 }
 
+# Ranked by what actually converts, not by who is easiest to identify.
+# Referred candidates convert at roughly 30% against 0.1-2% for a cold
+# application, and the person who files a referral is a peer engineer — so they
+# outrank everyone. Reaching a hiring manager directly is the next best thing
+# (about 3x the interview rate of applying alone). Recruiters sit below both:
+# their inbox is the most contested in the company and they are gatekeepers
+# rather than advocates. A generic mailbox is scored below nothing at all,
+# because it is the resume black hole reached by a different route.
 _ROLE_SCORES = {
-    "recruiter": 45, "hiring_manager": 35, "executive": 20,
-    "engineer": 15, "generic": 5, "unknown": 0,
+    "engineer": 50, "hiring_manager": 45, "recruiter": 25,
+    "executive": 20, "unknown": 0, "generic": -30,
 }
 
 # Address shapes to try when we know a name but not the address. Ordered by how

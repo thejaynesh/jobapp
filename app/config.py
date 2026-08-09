@@ -64,9 +64,16 @@ class Settings(BaseSettings):
     OUTREACH_GUESS_EMAILS: bool = True
     # Spend a Hunter verifier credit per discovered address.
     OUTREACH_VERIFY_EMAILS: bool = False
-    # Days after a message is sent before its follow-up comes due, one entry per
-    # step. Running out of entries ends the sequence.
-    OUTREACH_FOLLOWUP_DAYS: str = "4,7,10"
+    # A careers@ mailbox invented when no person could be found. Off by design:
+    # it routes into the same ATS the application form does, so it converts like
+    # a cold application rather than like reaching someone. "Found nobody" is
+    # the more useful answer.
+    OUTREACH_INCLUDE_GENERIC_MAILBOX: bool = False
+    # BUSINESS days after a message is sent before its follow-up comes due, one
+    # entry per step. Three to five is where measured reply rates sit, and a
+    # sequence of three or four messages roughly doubles the chance of an answer
+    # over a single one. Running out of entries ends the sequence.
+    OUTREACH_FOLLOWUP_DAYS: str = "3,5,8"
     # Draft due follow-ups automatically on the beat schedule. Drafts only —
     # nothing is ever sent without an explicit click.
     OUTREACH_AUTO_DRAFT_FOLLOWUPS: bool = True

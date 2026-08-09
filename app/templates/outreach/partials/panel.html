@@ -8,7 +8,18 @@
      {% endif %}>
 
   <div class="flex justify-between items-center mb-1">
-    <h2 class="text-base font-semibold text-gray-800">Outreach</h2>
+    <div class="flex items-center gap-2">
+      <h2 class="text-base font-semibold text-gray-800">Outreach</h2>
+      {% if priority %}
+      <span class="text-[10px] px-1.5 py-0.5 rounded font-medium
+        {% if priority.level == 2 %}bg-green-100 text-green-700
+        {% elif priority.level == 1 %}bg-amber-100 text-amber-700
+        {% else %}bg-gray-100 text-gray-500{% endif %}"
+        title="{{ priority.reasons | join('; ') }}">
+        {{ priority.label }}
+      </span>
+      {% endif %}
+    </div>
     <form hx-post="/outreach/apps/{{ app.id }}/discover" hx-target="#outreach-panel" hx-swap="outerHTML">
       <button type="submit"
         {% if searching %}disabled{% endif %}
@@ -140,11 +151,13 @@
           </option>
           {% endfor %}
         </select>
-        {# Only a message that actually went out warrants following up on. #}
+        {# Only a message that actually went out warrants following up on;
+           otherwise ask this person for whatever converts best from them. #}
         {% set has_sent = contact.messages | selectattr("sent_at") | list | length > 0 %}
+        {% set suggested = 'follow_up' if has_sent else default_kinds.get(contact.id, 'initial') %}
         <select name="kind" class="border border-gray-300 rounded px-2 py-1 text-xs">
           {% for kind in kinds %}
-          <option value="{{ kind }}" {% if kind == 'follow_up' and has_sent %}selected{% endif %}>
+          <option value="{{ kind }}" {% if kind == suggested %}selected{% endif %}>
             {{ kind | replace("_", " ") | title }}
           </option>
           {% endfor %}
@@ -200,9 +213,20 @@
     {% endfor %}
   </div>
   {% elif not searching %}
-  <p class="text-sm text-gray-400">
-    No contacts yet. &ldquo;Find contacts&rdquo; searches the posting and Hunter.io, or add someone below.
-  </p>
+  <div class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded p-3">
+    {% if app.outreach_checked_at %}
+      <p class="font-medium text-gray-700">No individual worth contacting turned up.</p>
+      <p class="text-xs mt-1">
+        That's a real answer, not a failure &mdash; a generic <code>careers@</code> inbox feeds the
+        same ATS the application form does, so writing to it converts about as well as not writing.
+        The LinkedIn searches above are the path that works: a referral from someone inside is
+        worth roughly an order of magnitude more than any cold message.
+      </p>
+    {% else %}
+      <p>No contacts yet. &ldquo;Find contacts&rdquo; searches the posting, the company's own site,
+         GitHub, and Hunter &mdash; or add someone by hand below.</p>
+    {% endif %}
+  </div>
   {% endif %}
 
   {% if archived_count %}

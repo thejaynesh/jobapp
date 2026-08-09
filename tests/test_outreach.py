@@ -373,12 +373,20 @@ class TestDiscoverContacts:
         assert contacts[0].email == "sam.recruiter@acme.com"
         assert contacts[0].email_status == "guessed"
 
-    def test_falls_back_to_the_careers_mailbox(self, db):
+    def test_does_not_invent_a_careers_mailbox(self, db):
+        # Writing to careers@ feeds the same ATS the application form does, so
+        # "found nobody" is the more useful answer than a contact worth nothing.
         app = _make_application(db, description="")
         with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "name")):
-            contacts = discover_contacts(db, app, use_linkedin=False, verify=False)
+            assert discover_contacts(db, app, use_linkedin=False, verify=False) == []
+
+    def test_the_generic_mailbox_can_be_switched_back_on(self, db):
+        app = _make_application(db, description="")
+        with patch("app.services.outreach.resolve_company_domain", return_value=("acme.com", "name")):
+            with patch.object(outreach_service.settings,
+                              "OUTREACH_INCLUDE_GENERIC_MAILBOX", True):
+                contacts = discover_contacts(db, app, use_linkedin=False, verify=False)
         assert [c.email for c in contacts] == ["careers@acme.com"]
-        assert contacts[0].email_status == "guessed"
 
     def test_no_domain_means_no_invented_contacts(self, db):
         app = _make_application(db, description="")
@@ -705,6 +713,146 @@ class TestRunOutreach:
         app = _make_application(db)
         with patch.object(outreach_service.settings, "OUTREACH_ENABLED", False):
             assert run_outreach(db, app) == []
+
+
+class TestReferralFirstDefaults:
+    def test_a_peer_engineer_is_asked_for_a_referral(self, db):
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="engineer")
+        assert outreach_service.default_kind(contact) == "referral_request"
+
+    def test_an_unidentified_contact_is_asked_for_a_referral(self, db):
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="unknown")
+        assert outreach_service.default_kind(contact) == "referral_request"
+
+    def test_a_recruiter_gets_a_direct_approach(self, db):
+        # They own the req — there is nothing for them to refer you to.
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="recruiter")
+        assert outreach_service.default_kind(contact) == "initial"
+
+    def test_a_hiring_manager_gets_a_direct_approach(self, db):
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="hiring_manager")
+        assert outreach_service.default_kind(contact) == "initial"
+
+    def test_drafting_uses_the_suggested_kind(self, db, profile):
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="engineer")
+        with patch("app.services.outreach.generation_chat", return_value="Hi Sam, " + "x " * 30):
+            assert draft_message(db, contact).kind == "referral_request"
+
+    def test_an_explicit_kind_still_wins(self, db, profile):
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="engineer")
+        with patch("app.services.outreach.generation_chat", return_value="Hi Sam, " + "x " * 30):
+            assert draft_message(db, contact, kind="thank_you").kind == "thank_you"
+
+
+class TestSubjectLines:
+    def test_never_uses_the_ats_shape(self, db):
+        # "Backend Engineer - Jane Doe" is what every autoresponder sends.
+        subject = outreach_service._fallback_subject(
+            {"title": "Backend Engineer", "company": "Acme"}, "initial"
+        )
+        assert "—" not in subject
+        assert subject.startswith("Question about")
+
+    def test_a_referral_ask_is_framed_as_a_question(self):
+        subject = outreach_service._fallback_subject({"company": "Acme"}, "referral_request")
+        assert "Acme" in subject
+
+    def test_stays_within_the_length_budget(self):
+        subject = outreach_service._fallback_subject(
+            {"title": "Staff Software Engineer, Payments Platform" * 3, "company": "A" * 80},
+            "initial",
+        )
+        assert len(subject) <= outreach_service.MAX_SUBJECT_CHARS
+
+    def test_the_prompt_bans_the_ats_shape(self):
+        with patch("app.services.outreach.generation_chat", return_value="Hi, " + "x " * 30) as chat:
+            compose_message(PROFILE, {"name": "Sam"}, {"title": "X", "company": "Acme"},
+                            channel="email")
+        system = chat.call_args.kwargs["messages"][0]["content"]
+        assert "Job Title - Candidate Name" in system
+
+
+class TestBusinessDays:
+    def test_skips_the_weekend(self):
+        friday = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+        assert friday.weekday() == 4
+        # Three business days on from Friday is Wednesday, not Monday.
+        assert outreach_service.add_business_days(friday, 3).day == 12
+
+    def test_a_midweek_interval_is_unchanged(self):
+        monday = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+        assert outreach_service.add_business_days(monday, 2).day == 5
+
+    def test_zero_is_a_no_op(self):
+        when = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+        assert outreach_service.add_business_days(when, 0) == when
+
+    def test_a_follow_up_never_lands_on_a_weekend(self, db):
+        app = _make_application(db)
+        contact = _make_contact(db, app)
+        message = OutreachMessage(contact_id=contact.id, body="x", status="draft")
+        db.add(message)
+        db.flush()
+        # Thursday: three calendar days would be Sunday.
+        mark_sent(db, message, when=datetime(2026, 8, 6, 12, 0, tzinfo=timezone.utc))
+        assert message.follow_up_due_at.weekday() < 5
+
+
+class TestOutreachPriority:
+    def test_a_named_referrer_and_a_strong_match_is_worth_it(self, db):
+        app = _make_application(db)
+        app.job.llm_score = 88
+        contact = _make_contact(db, app, role="engineer", name="Ada Engineer")
+        result = outreach_service.outreach_priority(app, [contact])
+        assert result["level"] == 2
+        assert result["label"] == "Worth a message"
+
+    def test_a_strong_match_with_no_contacts_is_still_worth_pursuing(self, db):
+        # Nobody found yet doesn't mean drop it — it means go and find someone
+        # through the LinkedIn searches, which a strong match justifies.
+        app = _make_application(db)
+        app.job.llm_score = 90
+        result = outreach_service.outreach_priority(app, [])
+        assert result["level"] == 1
+        assert "no contacts found yet" in result["reasons"]
+
+    def test_a_weak_match_with_no_contacts_is_a_skip(self, db):
+        app = _make_application(db)
+        app.job.llm_score = 45
+        result = outreach_service.outreach_priority(app, [])
+        assert result["level"] == 0
+
+    def test_a_generic_mailbox_alone_does_not_earn_the_effort(self, db):
+        app = _make_application(db)
+        app.job.llm_score = 90
+        contact = _make_contact(db, app, role="generic", name=None, email="careers@acme.com")
+        result = outreach_service.outreach_priority(app, [contact])
+        assert result["level"] < 2
+        assert any("generic mailbox" in r for r in result["reasons"])
+
+    def test_a_weak_match_is_penalised(self, db):
+        app = _make_application(db)
+        app.job.llm_score = 40
+        contact = _make_contact(db, app, role="engineer", name="Ada")
+        assert outreach_service.outreach_priority(app, [contact])["level"] < 2
+
+    def test_archived_contacts_do_not_count(self, db):
+        app = _make_application(db)
+        contact = _make_contact(db, app, role="engineer", name="Ada")
+        contact.archived = True
+        assert outreach_service.outreach_priority(app, [contact])["level"] == 0
+
+    def test_a_naive_posted_date_does_not_crash_it(self, db):
+        app = _make_application(db)
+        app.job.posted_at = datetime(2026, 8, 1, 12, 0)  # no tzinfo, as older rows have
+        contact = _make_contact(db, app, role="engineer", name="Ada")
+        assert outreach_service.outreach_priority(app, [contact])["label"]
 
 
 class TestSearchLinks:

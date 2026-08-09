@@ -68,7 +68,8 @@ def panel_context(db: Session, app_obj: Application) -> dict:
     two copies of this dict would drift the moment either gained a field.
     """
     from app.services.outreach import (
-        contact_message_link, discovery_stale, prior_conversations, search_links,
+        contact_message_link, default_kind, discovery_stale, outreach_priority,
+        prior_conversations, search_links,
     )
     from app.services.outreach_sender import sending_blocked_reason
 
@@ -81,6 +82,9 @@ def panel_context(db: Session, app_obj: Application) -> dict:
         # no risk to the user's account.
         "search_links": search_links(db, app_obj),
         "contact_links": {c.id: contact_message_link(c) for c in contacts},
+        # Whether this one is worth the effort, and what to ask each person for.
+        "priority": outreach_priority(app_obj, contacts),
+        "default_kinds": {c.id: default_kind(c) for c in contacts},
         # A "discovering" status older than the task's own time limit means the
         # worker never came back; the panel must stop polling and re-offer the button.
         "discovery_stale": discovery_stale(app_obj),

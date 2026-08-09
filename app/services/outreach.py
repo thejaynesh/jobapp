@@ -47,6 +47,7 @@ __all__ = [
     "compose_message", "mark_sent", "mark_replied", "set_message_status",
     "due_follow_ups", "draft_due_follow_ups", "outreach_stats", "channel_spec",
     "prior_conversations", "discovery_stale", "search_links", "contact_message_link",
+    "outreach_priority", "default_kind", "add_business_days",
 ]
 
 
@@ -61,9 +62,11 @@ CHANNEL_SPECS: dict[str, dict] = {
         "label": "Email",
         "has_subject": True,
         "max_chars": 1600,
-        "target_words": (90, 150),
+        # 50-125 words is where measured reply rates peak; longer reads as a
+        # cover letter nobody asked for.
+        "target_words": (60, 125),
         "guidance": (
-            "A short email. Three or four short paragraphs at most, each one or two "
+            "A short email. Three short paragraphs at most, each one or two "
             "sentences. No bullet points."
         ),
     },
@@ -112,9 +115,14 @@ KIND_GUIDANCE = {
         "guilt-trip or imply they were rude not to reply."
     ),
     "referral_request": (
-        "Asking someone already at the company to refer the candidate. Be direct that "
-        "this is what is being asked, make it low-effort (offer to send a blurb and "
-        "the resume), and give them an easy way to decline."
+        "Asking someone already at the company to refer the candidate — the highest "
+        "converting thing they can do, and the biggest thing to ask for. A referral is "
+        "a reputation bet: they are putting their name on a stranger. So earn it in "
+        "three sentences. Lead with the specific, checkable reason the candidate can "
+        "do this job. Say plainly that you are asking for a referral for the named "
+        "role. Make saying yes almost free — offer to send a short blurb they can "
+        "paste and the resume — and make saying no completely painless, explicitly. "
+        "Never imply they owe a reply, and never call it a 'quick favour'."
     ),
     "thank_you": (
         "A thank-you after a conversation or interview. Reference something specific "
@@ -333,9 +341,18 @@ def build_messages(
         "- Never leave a placeholder to fill in. Write the finished text.\n"
         "- One clear ask, at the end.\n"
         + (
-            "Return ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}. The "
-            f"subject is at most {MAX_SUBJECT_CHARS} characters, specific, and is not a "
-            "sentence about yourself. No markdown."
+            "Return ONLY a JSON object: {\"subject\": \"...\", \"body\": \"...\"}.\n"
+            "The subject decides whether any of this is read. Six to ten words, "
+            "written like one person emailing another. Use one of these shapes:\n"
+            "  - a specific question about their team or work "
+            "('Question about how your platform team is split')\n"
+            "  - a concrete point of overlap "
+            "('Northeastern grad working on the same problem you are')\n"
+            "  - the role plus a real reason, never the role alone\n"
+            "Never write a subject shaped like 'Job Title - Candidate Name', and never "
+            "use 'Application', 'Opportunity', 'Resume', or 'Following up' — those read "
+            "as an automated ATS mail and get deleted unopened. "
+            f"At most {MAX_SUBJECT_CHARS} characters. No markdown."
             if spec["has_subject"] else
             "Return ONLY the message text. No subject line, no markdown, no commentary."
         )
@@ -367,6 +384,25 @@ def build_messages(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+
+def _fallback_subject(job: dict, kind: str) -> str:
+    """
+    A subject line for when the model didn't supply one.
+
+    Deliberately not "Backend Engineer — Jane Doe": that shape is what every
+    ATS autoresponder uses, so it gets filed unread. A question about the team
+    reads as a person and gets opened.
+    """
+    company = job.get("company") or "your team"
+    title = job.get("title") or "the role"
+    if kind == "referral_request":
+        return f"Question about {company} — and a small ask"[:MAX_SUBJECT_CHARS]
+    if kind == "thank_you":
+        return f"Thanks for the conversation about {title}"[:MAX_SUBJECT_CHARS]
+    if kind in ("follow_up", "reconnect"):
+        return f"Circling back on {title} at {company}"[:MAX_SUBJECT_CHARS]
+    return f"Question about the {title} role at {company}"[:MAX_SUBJECT_CHARS]
 
 
 def fallback_message(profile_data: dict, contact: dict, job: dict, channel: str, kind: str) -> dict:
@@ -411,14 +447,19 @@ def fallback_message(profile_data: dict, contact: dict, job: dict, channel: str,
             "of you rather than only through the form."
         )
 
-    ask = "Would you be open to a short conversation?"
+    if kind == "referral_request":
+        ask = ("No pressure at all if it's not something you'd do for someone you "
+               "haven't worked with — happy to send a short blurb and my resume if it is.")
+    else:
+        ask = "Would you be open to a short conversation?"
+
     if spec["has_subject"]:
         body = f"{hello}\n\n{core}\n\n{ask}\n\nThanks,\n{name}"
     else:
         body = f"{hello} {core} {ask}"
 
     return {
-        "subject": f"{title} — {name}" if spec["has_subject"] else None,
+        "subject": _fallback_subject(job, kind) if spec["has_subject"] else None,
         "body": enforce_limit(body, channel),
         "generated_by": None,
     }
@@ -467,7 +508,7 @@ def compose_message(
         return fallback_message(profile_data, contact, job, channel, kind)
 
     if spec["has_subject"] and not subject:
-        subject = f"{job.get('title', 'Your role')} — {candidate_name(profile_data)}"
+        subject = _fallback_subject(job, kind)
     if subject:
         subject = scrub(subject, candidate_name(profile_data)).replace("\n", " ")[:MAX_SUBJECT_CHARS]
 
@@ -753,9 +794,13 @@ def discover_contacts(
     candidates = _dedupe(candidates)
     _attach_guessed_emails(candidates, domain, pattern, hunter_key)
 
-    if not candidates and domain and settings.OUTREACH_GUESS_EMAILS:
-        # Nothing at all — the careers mailbox is a real, commonly monitored
-        # address and is better than an empty panel.
+    if not candidates and domain and settings.OUTREACH_INCLUDE_GENERIC_MAILBOX:
+        # Off by default, and deliberately so. A careers@ mailbox is the resume
+        # black hole with extra steps: it routes into the same ATS the form
+        # does, so a message there converts like a cold application (0.1-2%)
+        # rather than like reaching a person. Finding nobody is the honest
+        # answer, and the panel says so and points at the LinkedIn searches,
+        # which is the path that actually works from here.
         candidates = [{
             "name": None, "title": None, "role": "generic", "email": f"careers@{domain}",
             "email_status": "guessed", "email_confidence": 25, "source": "pattern",
@@ -807,6 +852,20 @@ def default_channel(contact: Contact) -> str:
     return "email"
 
 
+def default_kind(contact: Contact) -> str:
+    """
+    What to ask this person for.
+
+    A peer engineer is the referral path, which converts an order of magnitude
+    better than anything else available, so that is what we ask them for rather
+    than opening with a generic introduction. A hiring manager or recruiter owns
+    the req itself — there is nothing to refer, so it is a direct approach.
+    """
+    if (contact.role or "unknown") in ("engineer", "executive", "unknown"):
+        return "referral_request"
+    return "initial"
+
+
 def next_step(contact: Contact) -> int:
     steps = [m.sequence_step for m in (contact.messages or [])]
     return (max(steps) + 1) if steps else 1
@@ -816,14 +875,14 @@ def draft_message(
     db,
     contact: Contact,
     channel: str | None = None,
-    kind: str = "initial",
+    kind: str | None = None,
     tone: str = "warm",
     feedback: str | None = None,
     application=None,
 ) -> OutreachMessage:
     """Write and store one message for a contact."""
     channel = channel if channel in MESSAGE_CHANNELS else default_channel(contact)
-    kind = kind if kind in MESSAGE_KINDS else "initial"
+    kind = kind if kind in MESSAGE_KINDS else default_kind(contact)
     application = application or contact.application
     job = application.job if application else None
 
@@ -899,8 +958,25 @@ def regenerate_message(db, message: OutreachMessage, feedback: str | None = None
 # The follow-up sequence
 # ---------------------------------------------------------------------------
 
+def add_business_days(start: datetime, days: int) -> datetime:
+    """
+    Advance a date by working days, skipping weekends.
+
+    Follow-up intervals are quoted in business days wherever they are measured,
+    and the difference isn't cosmetic: three calendar days after a Thursday send
+    lands on Sunday, where the message is buried by Monday morning.
+    """
+    result = start
+    remaining = max(0, days)
+    while remaining > 0:
+        result += timedelta(days=1)
+        if result.weekday() < 5:
+            remaining -= 1
+    return result
+
+
 def followup_days() -> list[int]:
-    """Days after sending that each successive follow-up comes due."""
+    """Business days after sending that each successive follow-up comes due."""
     days: list[int] = []
     for part in (settings.OUTREACH_FOLLOWUP_DAYS or "").split(","):
         part = part.strip()
@@ -929,7 +1005,7 @@ def mark_sent(db, message: OutreachMessage, when: datetime | None = None) -> Out
     days = followup_days()
     index = message.sequence_step - 1
     if index < len(days):
-        message.follow_up_due_at = when + timedelta(days=days[index])
+        message.follow_up_due_at = add_business_days(when, days[index])
     else:
         message.follow_up_due_at = None
     db.commit()
@@ -1081,6 +1157,69 @@ def search_links(db, application) -> list[dict]:
 def contact_message_link(contact: Contact) -> str:
     """The best LinkedIn URL for one person — their profile, or a search for them."""
     return contact_link(contact)
+
+
+# Outreach that works is a few dozen researched messages, not hundreds of
+# generic ones — so the scarce resource is the user's attention, and the job of
+# this score is to spend it on the applications where a message can actually
+# change the outcome.
+PRIORITY_LABELS = {2: "Worth a message", 1: "Maybe", 0: "Skip"}
+
+
+def outreach_priority(application, contacts: list[Contact] | None = None) -> dict:
+    """
+    Whether this application deserves the effort, and why.
+
+    Returns {"level", "label", "reasons"}. The dominant signal is whether we
+    found a real, named human: a message to a person converts; a message to a
+    generic mailbox converts like the application form it feeds into.
+    """
+    contacts = [c for c in (contacts or []) if not c.archived]
+    reasons: list[str] = []
+    score = 0
+
+    referrers = [c for c in contacts if c.role in ("engineer", "hiring_manager") and c.name]
+    named = [c for c in contacts if c.name]
+    if referrers:
+        score += 3
+        reasons.append(f"{len(referrers)} named person who could refer or decide")
+    elif named:
+        score += 2
+        reasons.append(f"{len(named)} named contact")
+    elif contacts:
+        reasons.append("only a generic mailbox — converts like the application form")
+    else:
+        reasons.append("no contacts found yet")
+
+    job = getattr(application, "job", None)
+    match = getattr(job, "llm_score", None) if job else None
+    if match is not None:
+        if match >= 80:
+            score += 2
+            reasons.append(f"strong match ({match:.0f})")
+        elif match >= 65:
+            score += 1
+            reasons.append(f"decent match ({match:.0f})")
+        else:
+            score -= 1
+            reasons.append(f"weak match ({match:.0f})")
+
+    posted = getattr(job, "posted_at", None) if job else None
+    if posted is not None:
+        try:
+            age = (_now() - posted).days
+        except TypeError:  # naive datetime from an older row
+            age = None
+        if age is not None:
+            if age <= 7:
+                score += 1
+                reasons.append("posted this week — the req is still warm")
+            elif age > 30:
+                score -= 1
+                reasons.append(f"posted {age} days ago")
+
+    level = 2 if score >= 4 else (1 if score >= 2 else 0)
+    return {"level": level, "label": PRIORITY_LABELS[level], "reasons": reasons}
 
 
 def prior_conversations(db, contact: Contact, limit: int = 5) -> list[dict]:

@@ -75,10 +75,24 @@ class TestClassifyRole:
 
 
 class TestContactScore:
-    def test_recruiter_outranks_engineer(self):
+    def test_engineer_outranks_recruiter(self):
+        # A peer engineer is the referral path, which converts roughly an order
+        # of magnitude better than any message into a recruiter's inbox.
         recruiter = {"role": "recruiter", "email": "a@x.com", "email_status": "verified"}
         engineer = {"role": "engineer", "email": "b@x.com", "email_status": "verified"}
-        assert contact_score(recruiter) > contact_score(engineer)
+        assert contact_score(engineer) > contact_score(recruiter)
+
+    def test_hiring_manager_outranks_recruiter(self):
+        manager = {"role": "hiring_manager", "email": "a@x.com", "email_status": "verified"}
+        recruiter = {"role": "recruiter", "email": "b@x.com", "email_status": "verified"}
+        assert contact_score(manager) > contact_score(recruiter)
+
+    def test_a_generic_mailbox_ranks_below_an_unknown_person(self):
+        # careers@ feeds the same ATS as the application form; an unidentified
+        # human is still a human.
+        generic = {"role": "generic", "email": "careers@x.com", "email_status": "verified"}
+        unknown = {"role": "unknown", "email": "b@x.com", "email_status": "verified"}
+        assert contact_score(generic) < contact_score(unknown)
 
     def test_verified_outranks_guessed(self):
         verified = {"role": "recruiter", "email": "a@x.com", "email_status": "verified"}
