@@ -52,13 +52,24 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
         key=lambda d: d.version,
         reverse=True,
     )
+    from app.routers.outreach import panel_context
+
     return templates.TemplateResponse(
         "apps/detail.html",
         {
             "request": request,
-            "app": app_obj,
             "resumes": resumes,
             "cover_letters": cover_letters,
+            # The page embeds the outreach panel partial, so it needs the same
+            # context that /outreach/apps/{id}/panel builds.
+            **panel_context(db, app_obj),
+            # Pre-0012 discoveries, which only ever lived on the application.
+            # Entries with neither a name nor an address are empty shells the
+            # old code wrote when Hunter and LinkedIn both came back with nothing.
+            "legacy_contacts": [
+                c for c in (app_obj.outreach_contacts or [])
+                if isinstance(c, dict) and (c.get("name") or c.get("email"))
+            ],
         },
     )
 

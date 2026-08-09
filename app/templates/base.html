@@ -15,6 +15,7 @@
         <a href="/profile" class="text-gray-600 hover:text-blue-600 text-sm">Profile</a>
         <a href="/jobs" class="text-gray-600 hover:text-blue-600 text-sm">Jobs</a>
         <a href="/apps" class="text-gray-600 hover:text-blue-600 text-sm">Applications</a>
+        <a href="/outreach" class="text-gray-600 hover:text-blue-600 text-sm">Outreach</a>
         <a href="/runs" class="text-gray-600 hover:text-blue-600 text-sm">Fetch runs</a>
         <a href="/settings" class="text-gray-600 hover:text-blue-600 text-sm">Settings</a>
     </nav>
@@ -31,6 +32,20 @@
     </div>
 
     <script>
+      // Outreach drafts are copied out to a mail client or LinkedIn by hand, so
+      // the text is kept in a <template> next to each message: it survives the
+      // panel being swapped, and copies the sent version rather than whatever
+      // is currently in the edit box.
+      function copyOutreachMessage(button) {
+        var tpl = document.getElementById("msg-text-" + button.dataset.messageId);
+        if (!tpl) return;
+        navigator.clipboard.writeText(tpl.content.textContent.trim()).then(function() {
+          var original = button.textContent;
+          button.textContent = "Copied!";
+          setTimeout(function(){ button.textContent = original; }, 1500);
+        });
+      }
+
       document.body.addEventListener("htmx:responseError", function(evt) {
         var status = evt.detail.xhr.status;
         var msg = "Request failed (" + status + ")";

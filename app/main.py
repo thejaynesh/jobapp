@@ -17,7 +17,7 @@ from app.routers.docs import router as docs_router
 from app.routers.jobs import router as jobs_router
 from app.routers.apps import router as apps_router
 from app.routers.settings import router as settings_router
-from app.routers.outreach import router as outreach_router
+from app.routers.outreach import router as outreach_router  # /outreach pages + /api/apps trigger
 from app.routers.runs import router as runs_router
 
 # ---------------------------------------------------------------------------

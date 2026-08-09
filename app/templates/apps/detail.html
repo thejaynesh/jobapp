@@ -251,50 +251,31 @@
       </dl>
     </div>
 
-    <!-- Outreach contacts -->
-    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
-      <div class="flex justify-between items-center mb-3">
-        <h2 class="text-base font-semibold text-gray-800">Outreach</h2>
-        <form hx-post="/api/apps/{{ app.id }}/outreach" hx-swap="none">
-          <button type="submit"
-            class="text-xs bg-gray-100 border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-200">
-            Find contacts
-          </button>
-        </form>
-      </div>
+    <!-- Outreach: contacts, drafts, and the follow-up sequence -->
+    {% include "outreach/partials/panel.html" %}
 
-      {% if app.outreach_contacts %}
-        <div class="space-y-4">
-          {% for contact in app.outreach_contacts %}
-          <div class="border border-gray-100 rounded p-3 text-sm">
-            <p class="font-medium text-gray-800">{{ contact.name or "Unknown" }}</p>
-            <p class="text-xs text-gray-500 mb-2">{{ contact.title or "" }}</p>
-            {% if contact.email %}
-              <p class="text-xs text-gray-600 mb-1">
-                <span class="font-medium">Email:</span>
-                <a href="mailto:{{ contact.email }}" class="text-blue-600 hover:underline">{{ contact.email }}</a>
-              </p>
-            {% endif %}
-            {% if contact.message %}
-              <div class="mt-2">
-                <p class="text-xs font-medium text-gray-600 mb-1">Draft message</p>
-                <div class="bg-gray-50 rounded p-2 text-xs text-gray-700 leading-relaxed">
-                  {{ contact.message }}
-                </div>
-                <button
-                  onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent.trim()); this.textContent='Copied!';"
-                  class="mt-1 text-xs text-blue-600 hover:underline">
-                  Copy
-                </button>
-              </div>
-            {% endif %}
-          </div>
-          {% endfor %}
+    {% if legacy_contacts %}
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-1">Earlier outreach</h2>
+      <p class="text-[11px] text-gray-400 mb-3">Found before contacts were tracked properly. Read-only.</p>
+      <div class="space-y-3">
+        {% for contact in legacy_contacts %}
+        <div class="border border-gray-100 rounded p-3 text-sm">
+          <p class="font-medium text-gray-800">{{ contact.name or "Unknown" }}</p>
+          <p class="text-xs text-gray-500 mb-2">{{ contact.title or "" }}</p>
+          {% if contact.email %}
+          <p class="text-xs text-gray-600 mb-1">
+            <a href="mailto:{{ contact.email }}" class="text-blue-600 hover:underline">{{ contact.email }}</a>
+          </p>
+          {% endif %}
+          {% if contact.message %}
+          <div class="bg-gray-50 rounded p-2 text-xs text-gray-700 leading-relaxed mt-2 whitespace-pre-wrap">{{ contact.message }}</div>
+          {% endif %}
         </div>
-      {% else %}
-        <p class="text-sm text-gray-400">No contacts found yet. Click "Find contacts" to search.</p>
-      {% endif %}
+        {% endfor %}
+      </div>
     </div>
+    {% endif %}
 
     <!-- Notes -->
     <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">

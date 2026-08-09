@@ -30,7 +30,47 @@ class Settings(BaseSettings):
     # and the cap is hit, remaining jobs simply stay `new` and retry next cycle.
     MAX_PAID_MATCH_CALLS_PER_CYCLE: int = 150
 
+    # ---- Outreach -------------------------------------------------------
     HUNTER_IO_API_KEY: str = ""
+    OUTREACH_ENABLED: bool = True
+    # How many contacts one discovery run may store for an application. More
+    # than a handful is noise — the point is two or three good people.
+    OUTREACH_MAX_CONTACTS_PER_APP: int = 5
+    # Use the LinkedIn people search (needs LINKEDIN_SESSION_COOKIE and costs a
+    # browser launch). Off by default: it is the slowest and most fragile leg.
+    OUTREACH_USE_LINKEDIN: bool = False
+    # Titles the LinkedIn search looks for, in priority order.
+    OUTREACH_TARGET_TITLES: str = (
+        "technical recruiter,talent acquisition,engineering manager,hiring manager"
+    )
+    # Derive likely addresses (first.last@domain and friends) when nobody hands
+    # us a real one. Guesses are stored as email_status="guessed" and never sent
+    # automatically.
+    OUTREACH_GUESS_EMAILS: bool = True
+    # Spend a Hunter verifier credit per discovered address.
+    OUTREACH_VERIFY_EMAILS: bool = False
+    # Days after a message is sent before its follow-up comes due, one entry per
+    # step. Running out of entries ends the sequence.
+    OUTREACH_FOLLOWUP_DAYS: str = "4,7,10"
+    # Draft due follow-ups automatically on the beat schedule. Drafts only —
+    # nothing is ever sent without an explicit click.
+    OUTREACH_AUTO_DRAFT_FOLLOWUPS: bool = True
+    OUTREACH_FOLLOWUP_INTERVAL_HOURS: int = 6  # how often the scheduler looks
+
+    # SMTP. Sending stays off until OUTREACH_SEND_ENABLED is flipped on AND a
+    # host is configured, so a misconfigured deploy cannot mail strangers.
+    OUTREACH_SEND_ENABLED: bool = False
+    OUTREACH_MAX_SENDS_PER_DAY: int = 20
+    OUTREACH_ATTACH_DOCUMENTS: bool = True  # attach the current resume/cover letter
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = True   # STARTTLS on a submission port
+    SMTP_USE_SSL: bool = False  # implicit TLS (port 465); takes precedence
+    SMTP_FROM_EMAIL: str = ""   # defaults to the profile's email
+    SMTP_FROM_NAME: str = ""    # defaults to the profile's name
+    SMTP_TIMEOUT: int = 30
 
     # Job source API keys
     ADZUNA_APP_ID: str = ""

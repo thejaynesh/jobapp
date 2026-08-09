@@ -1,0 +1,202 @@
+{# The outreach panel on an application. Swapped whole after every action. #}
+{% set searching = app.outreach_status == 'discovering' and not discovery_stale %}
+<div id="outreach-panel" class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm"
+     {% if searching %}
+     hx-get="/outreach/apps/{{ app.id }}/panel"
+     hx-trigger="load delay:3s"
+     hx-swap="outerHTML"
+     {% endif %}>
+
+  <div class="flex justify-between items-center mb-1">
+    <h2 class="text-base font-semibold text-gray-800">Outreach</h2>
+    <form hx-post="/outreach/apps/{{ app.id }}/discover" hx-target="#outreach-panel" hx-swap="outerHTML">
+      <button type="submit"
+        {% if searching %}disabled{% endif %}
+        class="text-xs bg-gray-100 border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-200 disabled:opacity-50">
+        {% if app.contacts %}Find more{% else %}Find contacts{% endif %}
+      </button>
+    </form>
+  </div>
+
+  <p class="text-[11px] text-gray-400 mb-3">
+    {% if app.outreach_checked_at %}
+      Last searched {{ app.outreach_checked_at.strftime('%b %d, %H:%M') }}
+    {% else %}
+      Searches the posting, Hunter.io, and (if configured) LinkedIn.
+    {% endif %}
+  </p>
+
+  {% if notice %}
+  <p class="text-xs mb-3 {% if notice.ok %}text-green-600{% else %}text-red-600{% endif %}">{{ notice.message }}</p>
+  {% endif %}
+
+  {% if searching %}
+  <p class="text-xs text-blue-600 mb-3">Searching for contacts&hellip;</p>
+  {% elif discovery_stale %}
+  <p class="text-xs text-red-500 mb-3">The last search never finished &mdash; the worker may have restarted. Try again.</p>
+  {% elif app.outreach_status == 'failed' and app.outreach_error %}
+  <p class="text-xs text-red-500 mb-3">Last search failed: {{ app.outreach_error[:200] }}</p>
+  {% endif %}
+
+  {% if send_blocked %}
+  <p class="text-[11px] text-gray-400 mb-3">{{ send_blocked }} Drafts can still be copied or opened in your mail app.</p>
+  {% endif %}
+
+  {% if contacts %}
+  <div class="space-y-5">
+    {% for contact in contacts %}
+    <div class="border border-gray-200 rounded p-3">
+
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0">
+          <p class="font-medium text-gray-800 text-sm break-words">{{ contact.display_name }}</p>
+          <p class="text-xs text-gray-500 break-words">{{ contact.title or "" }}</p>
+        </div>
+        <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded
+          {% if contact.role == 'recruiter' %}bg-purple-50 text-purple-700
+          {% elif contact.role == 'hiring_manager' %}bg-blue-50 text-blue-700
+          {% elif contact.role == 'executive' %}bg-amber-50 text-amber-700
+          {% elif contact.role == 'engineer' %}bg-emerald-50 text-emerald-700
+          {% else %}bg-gray-100 text-gray-500{% endif %}">
+          {{ contact.role | replace("_", " ") | title }}
+        </span>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2 mt-2 text-xs">
+        {% if contact.email %}
+        <a href="mailto:{{ contact.email }}" class="text-blue-600 hover:underline break-all">{{ contact.email }}</a>
+        <span class="text-[10px] px-1.5 py-0.5 rounded
+          {% if contact.email_status == 'verified' %}bg-green-100 text-green-700
+          {% elif contact.email_status == 'guessed' %}bg-amber-100 text-amber-700
+          {% elif contact.email_status == 'invalid' %}bg-red-100 text-red-600
+          {% else %}bg-gray-100 text-gray-500{% endif %}"
+          title="{% if contact.email_status == 'guessed' %}Derived from the company's address pattern — it may bounce{% else %}Confidence {{ contact.email_confidence }}{% endif %}">
+          {{ contact.email_status | replace("_", " ") }}
+        </span>
+        {% else %}
+        <span class="text-gray-400">No email found</span>
+        {% endif %}
+        {% if contact.linkedin_url %}
+        <a href="{{ contact.linkedin_url }}" target="_blank" class="text-blue-600 hover:underline">LinkedIn &nearr;</a>
+        {% endif %}
+        <span class="text-[10px] text-gray-400">via {{ contact.source }}</span>
+      </div>
+
+      {% for earlier in prior.get(contact.id, []) %}
+      <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1 mt-2">
+        Already written to about {{ earlier.title }} on {{ earlier.sent_at.strftime('%b %d') }}{% if earlier.status == 'replied' %} &mdash; they replied{% endif %}.
+      </p>
+      {% endfor %}
+
+      {% if contact.messages %}
+      <div class="space-y-3 mt-3">
+        {% for msg in contact.messages %}
+          {% include "outreach/partials/message.html" %}
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-xs text-gray-400 mt-3">No message drafted yet.</p>
+      {% endif %}
+
+      <form hx-post="/outreach/contacts/{{ contact.id }}/draft" hx-target="#outreach-panel" hx-swap="outerHTML"
+            class="flex flex-wrap items-center gap-2 mt-3">
+        <select name="channel" class="border border-gray-300 rounded px-2 py-1 text-xs">
+          {% for channel in channels %}
+          <option value="{{ channel }}"
+            {% if (channel == 'email' and contact.email) or (channel == 'linkedin' and not contact.email and contact.linkedin_url) %}selected{% endif %}>
+            {{ channel | replace("_", " ") | title }}
+          </option>
+          {% endfor %}
+        </select>
+        {# Only a message that actually went out warrants following up on. #}
+        {% set has_sent = contact.messages | selectattr("sent_at") | list | length > 0 %}
+        <select name="kind" class="border border-gray-300 rounded px-2 py-1 text-xs">
+          {% for kind in kinds %}
+          <option value="{{ kind }}" {% if kind == 'follow_up' and has_sent %}selected{% endif %}>
+            {{ kind | replace("_", " ") | title }}
+          </option>
+          {% endfor %}
+        </select>
+        <select name="tone" class="border border-gray-300 rounded px-2 py-1 text-xs">
+          {% for tone in tones %}
+          <option value="{{ tone }}">{{ tone | title }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="text-xs bg-gray-800 text-white px-2.5 py-1 rounded hover:bg-gray-700">
+          Draft message
+        </button>
+      </form>
+
+      <details class="mt-2">
+        <summary class="text-[11px] text-gray-400 cursor-pointer hover:text-blue-600">Edit contact</summary>
+        <form hx-post="/outreach/contacts/{{ contact.id }}/update" hx-target="#outreach-panel" hx-swap="outerHTML"
+              class="mt-2 space-y-2">
+          <input type="text" name="name" value="{{ contact.name or '' }}" placeholder="Name"
+                 class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+          <input type="text" name="title" value="{{ contact.title or '' }}" placeholder="Title"
+                 class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+          <input type="email" name="email" value="{{ contact.email or '' }}" placeholder="Email"
+                 class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+          <input type="url" name="linkedin_url" value="{{ contact.linkedin_url or '' }}" placeholder="LinkedIn URL"
+                 class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+          <select name="role" class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+            {% for role in roles %}
+            <option value="{{ role }}" {% if contact.role == role %}selected{% endif %}>
+              {{ role | replace("_", " ") | title }}
+            </option>
+            {% endfor %}
+          </select>
+          <textarea name="notes" rows="2" placeholder="Notes"
+            class="w-full border border-gray-300 rounded px-2 py-1 text-xs resize-none">{{ contact.notes or '' }}</textarea>
+          <div class="flex items-center gap-3">
+            <button type="submit" class="text-xs bg-gray-100 border border-gray-300 px-2.5 py-1 rounded hover:bg-gray-200">
+              Save
+            </button>
+            <button type="button"
+                    hx-post="/outreach/contacts/{{ contact.id }}/verify"
+                    hx-target="#outreach-panel" hx-swap="outerHTML"
+                    class="text-xs text-gray-500 hover:text-blue-600">Verify address</button>
+            <button type="button"
+                    hx-post="/outreach/contacts/{{ contact.id }}/archive"
+                    hx-target="#outreach-panel" hx-swap="outerHTML"
+                    hx-confirm="Archive {{ contact.display_name }}? Pending drafts are dropped."
+                    class="text-xs text-gray-400 hover:text-red-600">Archive</button>
+          </div>
+        </form>
+      </details>
+    </div>
+    {% endfor %}
+  </div>
+  {% elif not searching %}
+  <p class="text-sm text-gray-400">
+    No contacts yet. &ldquo;Find contacts&rdquo; searches the posting and Hunter.io, or add someone below.
+  </p>
+  {% endif %}
+
+  {% if archived_count %}
+  <p class="text-[11px] text-gray-400 mt-3">{{ archived_count }} archived contact(s) hidden.</p>
+  {% endif %}
+
+  <details class="mt-4">
+    <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">Add a contact by hand</summary>
+    <form hx-post="/outreach/apps/{{ app.id }}/contacts" hx-target="#outreach-panel" hx-swap="outerHTML"
+          class="mt-2 space-y-2">
+      <input type="text" name="name" placeholder="Name"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+      <input type="text" name="title" placeholder="Title (e.g. Engineering Manager)"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+      <input type="email" name="email" placeholder="Email"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+      <input type="url" name="linkedin_url" placeholder="LinkedIn URL"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+      <select name="role" class="w-full border border-gray-300 rounded px-2 py-1 text-xs">
+        {% for role in roles %}
+        <option value="{{ role }}">{{ role | replace("_", " ") | title }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="text-xs bg-gray-100 border border-gray-300 px-3 py-1 rounded hover:bg-gray-200">
+        Add contact
+      </button>
+    </form>
+  </details>
+</div>

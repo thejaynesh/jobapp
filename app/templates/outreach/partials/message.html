@@ -1,0 +1,123 @@
+{# One drafted or sent message. `msg` is an OutreachMessage. #}
+{% set spec = {'email': 'Email', 'linkedin': 'LinkedIn', 'linkedin_note': 'Connection note', 'twitter': 'X DM'} %}
+<div class="border border-gray-100 rounded p-3 bg-gray-50/60">
+
+  <div class="flex flex-wrap items-center gap-2 mb-2">
+    <span class="text-[10px] uppercase tracking-wide bg-white border border-gray-200 text-gray-600 rounded px-1.5 py-0.5">
+      {{ spec.get(msg.channel, msg.channel) }}
+    </span>
+    <span class="text-[10px] text-gray-500">{{ msg.kind | replace("_", " ") | title }} &middot; step {{ msg.sequence_step }}</span>
+    <span class="text-[10px] px-1.5 py-0.5 rounded font-medium
+      {% if msg.status == 'sent' %}bg-blue-100 text-blue-700
+      {% elif msg.status == 'replied' %}bg-green-100 text-green-700
+      {% elif msg.status == 'approved' %}bg-amber-100 text-amber-700
+      {% elif msg.status == 'bounced' %}bg-red-100 text-red-600
+      {% elif msg.status == 'skipped' %}bg-gray-200 text-gray-500
+      {% else %}bg-gray-100 text-gray-600{% endif %}">
+      {{ msg.status | title }}
+    </span>
+    {% if msg.sent_at %}
+      <span class="text-[10px] text-gray-400">sent {{ msg.sent_at.strftime('%b %d') }}</span>
+    {% endif %}
+    {% if msg.follow_up_due_at %}
+      <span class="text-[10px] text-amber-600" title="A follow-up is drafted automatically after this date">
+        follow up {{ msg.follow_up_due_at.strftime('%b %d') }}
+      </span>
+    {% endif %}
+    {% if msg.edited %}<span class="text-[10px] text-gray-400">edited</span>{% endif %}
+    <span class="ml-auto text-[10px] text-gray-400">{{ msg.char_count }} chars</span>
+  </div>
+
+  {% if msg.send_error %}
+  <p class="text-xs text-red-600 mb-2">{{ msg.send_error }}</p>
+  {% endif %}
+
+  {% if msg.status in ('sent', 'replied') %}
+    {% if msg.subject %}<p class="text-xs font-medium text-gray-700 mb-1">{{ msg.subject }}</p>{% endif %}
+    <div class="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">{{ msg.body }}</div>
+  {% else %}
+    <form hx-post="/outreach/messages/{{ msg.id }}/save"
+          hx-trigger="change delay:600ms"
+          hx-target="#msg-save-{{ msg.id }}"
+          hx-swap="innerHTML"
+          class="space-y-2">
+      {% if msg.channel == 'email' %}
+      <input type="text" name="subject" value="{{ msg.subject or '' }}" placeholder="Subject"
+             class="w-full border border-gray-300 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">
+      {% endif %}
+      <textarea name="body" rows="7"
+        class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs leading-relaxed focus:outline-none focus:ring-1 focus:ring-blue-500 resize-y">{{ msg.body }}</textarea>
+      <span id="msg-save-{{ msg.id }}" class="text-xs text-gray-400"></span>
+    </form>
+  {% endif %}
+
+  <div class="flex flex-wrap items-center gap-2 mt-2">
+    <button type="button"
+      data-message-id="{{ msg.id }}"
+      onclick="copyOutreachMessage(this)"
+      class="text-xs text-blue-600 hover:underline">Copy</button>
+
+    {% if msg.channel == 'email' and msg.contact.email %}
+    <a class="text-xs text-blue-600 hover:underline"
+       href="mailto:{{ msg.contact.email }}?subject={{ (msg.subject or '') | urlencode }}&body={{ (msg.body or '') | urlencode }}">
+      Open in mail app
+    </a>
+    {% endif %}
+    {% if msg.channel in ('linkedin', 'linkedin_note') and msg.contact.linkedin_url %}
+    <a class="text-xs text-blue-600 hover:underline" target="_blank" href="{{ msg.contact.linkedin_url }}">
+      Open profile &nearr;
+    </a>
+    {% endif %}
+
+    {% if msg.status not in ('sent', 'replied') %}
+      {% if msg.channel == 'email' and not send_blocked and msg.contact.email %}
+      <form hx-post="/outreach/messages/{{ msg.id }}/send"
+            hx-target="#outreach-panel" hx-swap="outerHTML"
+            hx-confirm="Send this email to {{ msg.contact.email }}?">
+        {% if msg.contact.email_status == 'guessed' %}
+        <input type="hidden" name="allow_guessed" value="true">
+        {% endif %}
+        <button type="submit" class="text-xs bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700">
+          Send{% if msg.contact.email_status == 'guessed' %} (unconfirmed address){% endif %}
+        </button>
+      </form>
+      {% endif %}
+
+      <form hx-post="/outreach/messages/{{ msg.id }}/status" hx-target="#outreach-panel" hx-swap="outerHTML">
+        <input type="hidden" name="status" value="sent">
+        <button type="submit" class="text-xs border border-gray-300 bg-white text-gray-700 px-2.5 py-1 rounded hover:bg-gray-100">
+          I sent this
+        </button>
+      </form>
+
+      <form hx-post="/outreach/messages/{{ msg.id }}/regenerate" hx-target="#outreach-panel" hx-swap="outerHTML"
+            {% if msg.edited %}hx-confirm="Your edits will be replaced. Rewrite it?"{% endif %}>
+        <button type="submit" class="text-xs text-gray-600 hover:text-blue-600">Rewrite</button>
+      </form>
+
+      <form hx-post="/outreach/messages/{{ msg.id }}/delete" hx-target="#outreach-panel" hx-swap="outerHTML">
+        <button type="submit" class="text-xs text-gray-400 hover:text-red-600">Delete</button>
+      </form>
+    {% else %}
+      <form hx-post="/outreach/messages/{{ msg.id }}/status" hx-target="#outreach-panel" hx-swap="outerHTML">
+        <input type="hidden" name="status" value="replied">
+        <button type="submit" class="text-xs text-green-700 hover:underline"
+                {% if msg.status == 'replied' %}disabled{% endif %}>
+          {% if msg.status == 'replied' %}Replied{% else %}They replied{% endif %}
+        </button>
+      </form>
+      {% if msg.status == 'sent' %}
+      <form hx-post="/outreach/messages/{{ msg.id }}/status" hx-target="#outreach-panel" hx-swap="outerHTML">
+        <input type="hidden" name="status" value="bounced">
+        <button type="submit" class="text-xs text-gray-400 hover:text-red-600">Bounced</button>
+      </form>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  {# Held out of the textarea so "Copy" works for sent messages too. #}
+  <template id="msg-text-{{ msg.id }}">{{ msg.body }}</template>
+  {% if msg.generated_by %}
+  <p class="text-[10px] text-gray-400 mt-1.5" title="AI model(s) that wrote this">{{ msg.generated_by }}</p>
+  {% endif %}
+</div>

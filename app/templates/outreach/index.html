@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Outreach — JobApp{% endblock %}
+{% block content %}
+
+<div class="flex flex-wrap justify-between items-center gap-2 mb-5">
+  <h1 class="text-2xl font-bold text-gray-800">Outreach</h1>
+  <span class="text-sm text-gray-500">{{ stats.contacts }} contact(s)</span>
+</div>
+
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
+  {% for label, value, colour in [
+      ('Drafts', stats.drafts, 'text-gray-800'),
+      ('Sent', stats.sent, 'text-blue-600'),
+      ('Replied', stats.replied, 'text-green-600'),
+      ('Reply rate', stats.reply_rate ~ '%', 'text-green-600'),
+      ('Follow-ups due', stats.due, 'text-amber-600')] %}
+  <div class="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
+    <p class="text-[11px] uppercase tracking-wide text-gray-400">{{ label }}</p>
+    <p class="text-xl font-bold {{ colour }}">{{ value }}</p>
+  </div>
+  {% endfor %}
+</div>
+
+{% if send_blocked %}
+<p class="text-xs text-gray-500 bg-gray-100 border border-gray-200 rounded px-3 py-2 mb-6">
+  {{ send_blocked }} Drafts can still be copied or opened in your mail app, and marked sent by hand.
+</p>
+{% endif %}
+
+{% macro message_row(msg) %}
+<div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+  <div class="flex flex-wrap justify-between items-start gap-2">
+    <div class="min-w-0">
+      <p class="text-sm font-medium text-gray-800 break-words">
+        {{ msg.contact.display_name }}
+        {% if msg.contact.title %}<span class="font-normal text-gray-500">&middot; {{ msg.contact.title }}</span>{% endif %}
+      </p>
+      <p class="text-xs text-gray-500 break-words">
+        {{ msg.contact.company }}
+        {% if msg.application %}
+          &middot; <a href="/apps/{{ msg.application.id }}" class="text-blue-600 hover:underline">{{ msg.application.job.title }}</a>
+        {% endif %}
+      </p>
+    </div>
+    <div class="flex items-center gap-2 shrink-0">
+      <span class="text-[10px] uppercase tracking-wide bg-gray-100 text-gray-600 rounded px-1.5 py-0.5">
+        {{ msg.channel | replace("_", " ") }}
+      </span>
+      <span class="text-[10px] text-gray-400">{{ msg.kind | replace("_", " ") }}</span>
+    </div>
+  </div>
+
+  {% if msg.subject %}
+  <p class="text-xs font-medium text-gray-700 mt-2">{{ msg.subject }}</p>
+  {% endif %}
+  <div class="text-xs text-gray-600 whitespace-pre-wrap leading-relaxed mt-1 max-h-40 overflow-y-auto">{{ msg.body }}</div>
+
+  <div class="flex flex-wrap items-center gap-3 mt-2">
+    <button type="button" data-message-id="{{ msg.id }}" onclick="copyOutreachMessage(this)"
+            class="text-xs text-blue-600 hover:underline">Copy</button>
+    {% if msg.application %}
+    <a href="/apps/{{ msg.application.id }}#outreach-panel" class="text-xs text-gray-500 hover:text-blue-600">
+      Open application
+    </a>
+    {% endif %}
+    {% if msg.sent_at %}<span class="text-[10px] text-gray-400">sent {{ msg.sent_at.strftime('%b %d') }}</span>{% endif %}
+    {% if msg.follow_up_due_at %}
+      <span class="text-[10px] text-amber-600">follow up {{ msg.follow_up_due_at.strftime('%b %d') }}</span>
+    {% endif %}
+  </div>
+  <template id="msg-text-{{ msg.id }}">{{ msg.body }}</template>
+</div>
+{% endmacro %}
+
+{% macro section(title, hint, items) %}
+<section class="mb-8">
+  <div class="flex items-baseline gap-2 mb-2">
+    <h2 class="text-base font-semibold text-gray-800">{{ title }}</h2>
+    <span class="text-xs text-gray-400">{{ items | length }}</span>
+  </div>
+  {% if items %}
+  <div class="space-y-3">
+    {% for msg in items %}{{ message_row(msg) }}{% endfor %}
+  </div>
+  {% else %}
+  <p class="text-sm text-gray-400">{{ hint }}</p>
+  {% endif %}
+</section>
+{% endmacro %}
+
+{{ section(
+    "Drafts waiting on you",
+    "Nothing drafted. Open an application and use the outreach panel to find contacts.",
+    drafts) }}
+
+{{ section(
+    "Sent, no reply yet",
+    "Nothing awaiting a reply.",
+    awaiting) }}
+
+{% if due %}
+<section class="mb-8">
+  <div class="flex items-baseline gap-2 mb-2">
+    <h2 class="text-base font-semibold text-gray-800">Follow-ups due</h2>
+    <span class="text-xs text-gray-400">{{ due | length }}</span>
+  </div>
+  <p class="text-xs text-gray-500 mb-2">
+    These are past their follow-up date. A draft is written automatically on the next scheduler pass,
+    or open the application to write one now.
+  </p>
+  <div class="space-y-3">
+    {% for msg in due %}{{ message_row(msg) }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{{ section("Replied", "No replies yet.", replied) }}
+
+{% if no_message_contacts %}
+<section class="mb-8">
+  <div class="flex items-baseline gap-2 mb-2">
+    <h2 class="text-base font-semibold text-gray-800">Contacts with no message</h2>
+    <span class="text-xs text-gray-400">{{ no_message_contacts | length }}</span>
+  </div>
+  <div class="bg-white border border-gray-200 rounded-lg divide-y divide-gray-100">
+    {% for contact in no_message_contacts %}
+    <div class="flex flex-wrap justify-between items-center gap-2 px-4 py-2.5">
+      <div class="min-w-0">
+        <p class="text-sm text-gray-800 break-words">{{ contact.display_name }}</p>
+        <p class="text-xs text-gray-500 break-words">
+          {{ contact.company }}{% if contact.title %} &middot; {{ contact.title }}{% endif %}
+        </p>
+      </div>
+      {% if contact.application %}
+      <a href="/apps/{{ contact.application.id }}#outreach-panel"
+         class="text-xs text-blue-600 hover:underline shrink-0">Draft a message</a>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if closed %}
+<details class="mb-8">
+  <summary class="text-sm text-gray-500 cursor-pointer hover:text-blue-600">
+    Bounced and skipped ({{ closed | length }})
+  </summary>
+  <div class="space-y-3 mt-3">
+    {% for msg in closed %}{{ message_row(msg) }}{% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{% endblock %}

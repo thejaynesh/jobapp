@@ -1,12 +1,16 @@
 import uuid
 import enum
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import String, Boolean, Text, DateTime, Integer, Enum as SAEnum, ForeignKey, func, text, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:  # relationship targets, resolved by SQLAlchemy at mapper config
+    from app.models.outreach import Contact, OutreachMessage
 
 
 class ApplicationStatus(enum.Enum):
@@ -42,13 +46,34 @@ class Application(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Superseded by the `contacts` table; kept so the pre-0012 discoveries that
+    # were only ever written here stay readable.
     outreach_contacts: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
     generation_status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle", server_default="idle")
     generation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # idle | discovering | done | failed — mirrors generation_status so the
+    # outreach panel can poll while contact discovery runs on a worker.
+    outreach_status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle", server_default="idle")
+    outreach_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outreach_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     job = relationship("Job", backref="applications")
     documents: Mapped[list["ApplicationDocument"]] = relationship(
         "ApplicationDocument", back_populates="application"
+    )
+    contacts: Mapped[list["Contact"]] = relationship(
+        "Contact",
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="Contact.created_at",
+    )
+    outreach_messages: Mapped[list["OutreachMessage"]] = relationship(
+        "OutreachMessage",
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="OutreachMessage.created_at",
     )
 
 

@@ -9,7 +9,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         "app.tasks.fetch", "app.tasks.match", "app.tasks.generate",
-        "app.tasks.backfill", "app.tasks.compare_models",
+        "app.tasks.backfill", "app.tasks.compare_models", "app.tasks.outreach",
     ],
 )
 
@@ -27,6 +27,12 @@ celery_app.conf.beat_schedule = {
     "fetch-jobs-every-5-hours": {
         "task": "app.tasks.fetch.fetch_jobs",
         "schedule": celery_schedule(settings.FETCH_INTERVAL_HOURS * 3600),
+    },
+    # Drafts follow-ups that have come due. Drafting only — sending is always a
+    # deliberate click, so this never mails anyone on its own.
+    "draft-due-outreach-followups": {
+        "task": "app.tasks.outreach.process_followups",
+        "schedule": celery_schedule(settings.OUTREACH_FOLLOWUP_INTERVAL_HOURS * 3600),
     },
 }
 
