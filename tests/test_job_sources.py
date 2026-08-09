@@ -1,3 +1,4 @@
+import re
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -1213,3 +1214,122 @@ class TestCareerjetAdapter:
         import httpx
         with patch("httpx.get", side_effect=httpx.HTTPError("down")):
             assert fetch(affid="A", query="SWE", location="NYC") == []
+
+
+def _li_card_without_date(job_id: str) -> str:
+    """A search card with no <time> element — the case that skips age checks."""
+    return re.sub(r"<time[^>]*>.*?</time>", "", _li_card(job_id))
+
+
+def _linkedin_router(search: str, posting=None):
+    """Answer by URL — detail fetches run concurrently, so order isn't fixed."""
+    def _resp(text, status=200):
+        resp = MagicMock()
+        resp.text = text
+        resp.status_code = status
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def _get(url, **kwargs):
+        if "jobPosting" in url:
+            if posting is None:
+                import httpx
+                raise httpx.HTTPError("blocked")
+            return _resp(posting)
+        return _resp(search)
+    return _get
+
+
+class TestLinkedInPostingDates:
+    """
+    An undated job skips the fetcher's age check entirely, so a year-old
+    posting that stopped taking applications lands in the list looking fresh.
+    The posting page is already fetched for the description — the date is free.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_description_cache(self):
+        from app.services.sources import linkedin
+        linkedin._DESC_CACHE.clear()
+        yield
+        linkedin._DESC_CACHE.clear()
+
+    def test_a_card_datetime_with_a_time_component_still_parses(self):
+        """Requiring the quote straight after the date dropped these silently."""
+        from app.services.sources.linkedin import _parse_card
+        card = _li_card("4012345678", posted="2026-08-01T09:30:00")
+        assert _parse_card(card)["posted_at"] == "2026-08-01"
+
+    def test_a_card_with_no_time_element_has_no_date(self):
+        from app.services.sources.linkedin import _parse_card
+        assert _parse_card(_li_card_without_date("4012345678"))["posted_at"] is None
+
+    def test_json_ld_date_is_preferred(self):
+        from app.services.sources.linkedin import _extract_posted_at
+        html = '<script type="application/ld+json">{"datePosted": "2025-03-14T00:00:00.000Z"}</script>'
+        assert _extract_posted_at(html) == "2025-03-14"
+
+    def test_a_datetime_attribute_is_read(self):
+        from app.services.sources.linkedin import _extract_posted_at
+        assert _extract_posted_at('<time datetime="2026-07-04"></time>') == "2026-07-04"
+
+    def test_a_relative_phrase_becomes_a_date(self):
+        """
+        Approximate beats absent: absent means no age check at all, which is
+        exactly how a year-old posting gets through.
+        """
+        from datetime import date, timedelta
+        from app.services.sources.linkedin import _extract_posted_at
+        html = '<span class="posted-time-ago__text">1 year ago</span>'
+        expected = (date.today() - timedelta(days=365)).isoformat()
+        assert _extract_posted_at(html) == expected
+
+    @pytest.mark.parametrize("phrase,days", [
+        ("3 days ago", 3), ("2 weeks ago", 14), ("6 months ago", 180),
+        ("1 hour ago", 0), ("45 minutes ago", 0),
+    ])
+    def test_the_relative_units_convert(self, phrase, days):
+        from datetime import date, timedelta
+        from app.services.sources.linkedin import _extract_posted_at
+        expected = (date.today() - timedelta(days=days)).isoformat()
+        assert _extract_posted_at(f"<span>{phrase}</span>") == expected
+
+    def test_a_page_with_no_date_gives_none_rather_than_today(self):
+        """Guessing "today" would make a stale posting look brand new."""
+        from app.services.sources.linkedin import _extract_posted_at
+        assert _extract_posted_at("<div>no dates here</div>") is None
+
+    def test_the_detail_page_fills_a_date_the_card_lacked(self):
+        from datetime import date, timedelta
+        from app.services.sources.linkedin import fetch
+        posting = ('<div class="show-more-less-html__markup">Build APIs.</div>'
+                   '<span class="posted-time-ago__text">2 weeks ago</span>')
+        with patch("httpx.get",
+                   side_effect=_linkedin_router(_li_card_without_date("4012345678"),
+                                                posting)):
+            results = fetch(session_cookie="", query="SWE", location="NYC")
+        assert results[0]["posted_at"] == (date.today() - timedelta(days=14)).isoformat()
+
+    def test_the_cards_exact_date_beats_the_pages_approximation(self):
+        from app.services.sources.linkedin import fetch
+        posting = ('<div class="show-more-less-html__markup">Build APIs.</div>'
+                   '<span class="posted-time-ago__text">2 weeks ago</span>')
+        with patch("httpx.get",
+                   side_effect=_linkedin_router(_li_card("4012345678",
+                                                         posted="2026-08-01"), posting)):
+            results = fetch(session_cookie="", query="SWE", location="NYC")
+        assert results[0]["posted_at"] == "2026-08-01"
+
+    def test_a_failed_detail_fetch_leaves_the_date_alone(self):
+        from app.services.sources.linkedin import fetch
+        with patch("httpx.get",
+                   side_effect=_linkedin_router(_li_card("4012345678",
+                                                         posted="2026-08-01"), None)):
+            results = fetch(session_cookie="", query="SWE", location="NYC")
+        assert results[0]["posted_at"] == "2026-08-01"
+
+    def test_the_cache_carries_the_date_too(self):
+        """A second job id hitting the cache must not lose the date."""
+        from app.services.sources import linkedin
+        linkedin._cache_description("42", "text", "2026-05-01")
+        assert linkedin._fetch_description("42", {}) == ("text", "2026-05-01")

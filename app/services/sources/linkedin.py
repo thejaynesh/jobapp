@@ -18,6 +18,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 
 import httpx
 
@@ -54,16 +55,18 @@ _MAX_CONSECUTIVE_THROTTLES = 3
 _THROTTLE_BACKOFF_SECONDS = 5
 
 # Descriptions never change, and the same posting recurs across queries and
-# cycles, so cache them for the life of the worker process.
-_DESC_CACHE: dict[str, str] = {}
+# cycles, so cache them for the life of the worker process. The posting date
+# rides along: it comes from the same response.
+_DESC_CACHE: dict[str, tuple[str, str | None]] = {}
 _DESC_CACHE_MAX = 5000
 
 
-def _cache_description(job_id: str, description: str) -> None:
+def _cache_description(job_id: str, description: str,
+                       posted_at: str | None = None) -> None:
     if len(_DESC_CACHE) >= _DESC_CACHE_MAX:
         for stale in list(_DESC_CACHE)[: _DESC_CACHE_MAX // 5]:
             _DESC_CACHE.pop(stale, None)
-    _DESC_CACHE[job_id] = description
+    _DESC_CACHE[job_id] = (description, posted_at)
 
 
 def _cfg(name: str, default):
@@ -111,7 +114,10 @@ _CARD_COMPANY_FALLBACK_RE = re.compile(
 _CARD_LOCATION_RE = re.compile(
     r'class="job-search-card__location[^"]*"[^>]*>(.*?)</span>', re.DOTALL
 )
-_CARD_DATE_RE = re.compile(r'datetime="(\d{4}-\d{2}-\d{2})"')
+# A time component is allowed to follow: requiring the closing quote straight
+# after the date silently dropped any card that carried one, and a card with no
+# date at all is not filtered for age by the fetcher.
+_CARD_DATE_RE = re.compile(r'datetime="(\d{4}-\d{2}-\d{2})(?:[T ][^"]*)?"')
 
 
 def _split_cards(html: str) -> list[str]:
@@ -178,8 +184,8 @@ def _search_page(query: str, location: str, start: int, headers: dict,
     return parsed
 
 
-def _fetch_description(job_id: str, headers: dict) -> str:
-    """Fetch the full JD from the guest job-posting endpoint (plain text)."""
+def _fetch_description(job_id: str, headers: dict) -> tuple[str, str | None]:
+    """The JD and posting date from the guest job-posting endpoint."""
     if job_id in _DESC_CACHE:
         return _DESC_CACHE[job_id]
     try:
@@ -195,11 +201,12 @@ def _fetch_description(job_id: str, headers: dict) -> str:
         raise
     except Exception as exc:
         logger.warning("LinkedIn posting fetch error (%s): %s", job_id, exc)
-        return ""
+        return "", None
 
     text = _extract_description(html)
-    _cache_description(job_id, text)
-    return text
+    posted_at = _extract_posted_at(html)
+    _cache_description(job_id, text, posted_at)
+    return text, posted_at
 
 
 _MARKUP_RE = re.compile(
@@ -208,6 +215,37 @@ _MARKUP_RE = re.compile(
 _DESC_TEXT_RE = re.compile(
     r'class="description__text[^"]*"[^>]*>(.*?)</section>', re.DOTALL
 )
+
+# The posting page carries the date in up to three forms. Search cards often
+# carry none at all, and an undated job isn't age-filtered — so a year-old
+# posting that stopped taking applications lands in the list looking fresh.
+# This page is already being fetched for the description; the date is free.
+_LD_DATE_RE = re.compile(r'"datePosted"\s*:\s*"(\d{4}-\d{2}-\d{2})')
+_POSTING_DATETIME_RE = re.compile(r'datetime="(\d{4}-\d{2}-\d{2})(?:[T ][^"]*)?"')
+_AGO_RE = re.compile(
+    r"(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago", re.I
+)
+_AGO_DAYS = {"minute": 0, "hour": 0, "day": 1, "week": 7, "month": 30, "year": 365}
+
+
+def _extract_posted_at(html: str) -> str | None:
+    """
+    The posting date as YYYY-MM-DD, or None.
+
+    Exact dates win. The "3 weeks ago" phrase is a fallback because it's what
+    the guest fragment usually shows, and an approximate date is far better
+    than none: none means the age filter is skipped entirely.
+    """
+    for pattern in (_LD_DATE_RE, _POSTING_DATETIME_RE):
+        match = pattern.search(html)
+        if match:
+            return match.group(1)
+
+    match = _AGO_RE.search(html)
+    if not match:
+        return None
+    days = int(match.group(1)) * _AGO_DAYS[match.group(2).lower()]
+    return (date.today() - timedelta(days=days)).isoformat()
 
 
 def _extract_description(html: str) -> str:
@@ -307,9 +345,11 @@ def fetch_all(
     _enrich_descriptions(jobs, headers, max_details, detail_workers)
 
     with_desc = sum(1 for j in jobs if j["description"])
+    undated = sum(1 for j in jobs if not j.get("posted_at"))
     logger.info(
-        "LinkedIn: %d unique jobs from %d searches (%d with descriptions)",
-        len(jobs), searches, with_desc,
+        "LinkedIn: %d unique jobs from %d searches (%d with descriptions, "
+        "%d with no posting date)",
+        len(jobs), searches, with_desc, undated,
     )
     return jobs
 
@@ -323,10 +363,15 @@ def _enrich_descriptions(jobs: list[dict], headers: dict, max_details: int,
 
     def _one(job: dict) -> None:
         try:
-            job["description"] = _fetch_description(job["source_job_id"], headers)
+            description, posted_at = _fetch_description(job["source_job_id"], headers)
         except _Throttled as exc:
             logger.warning("LinkedIn description throttled: %s", exc)
             raise
+        job["description"] = description
+        # The card's own date wins when it has one — it's exact, whereas the
+        # posting page may only offer "3 weeks ago".
+        if posted_at and not job.get("posted_at"):
+            job["posted_at"] = posted_at
         job["experience_level"] = parse_experience_level(job["title"], job["description"])
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets)))) as pool:

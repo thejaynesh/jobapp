@@ -45,6 +45,17 @@
         </option>
       {% endfor %}
     </select>
+
+    {# A job with no posting date skips the fetcher's age check, so some of
+       these are long-closed listings passing as fresh. #}
+    <select name="dated" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            title="Jobs whose source never reported when they were posted aren't age-checked">
+      <option value="" {% if not dated_filter %}selected{% endif %}>Any posting date</option>
+      <option value="1" {% if dated_filter == "1" %}selected{% endif %}>Has a posting date</option>
+      <option value="0" {% if dated_filter == "0" %}selected{% endif %}>
+        No posting date ({{ undated_count }})
+      </option>
+    </select>
   </div>
 
   <!-- Row 2: region + location + min score + remote + sort + buttons -->
@@ -123,7 +134,7 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&sort=" ~ sort %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&dated=" ~ dated_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"

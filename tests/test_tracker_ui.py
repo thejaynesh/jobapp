@@ -780,3 +780,73 @@ class TestAppDetailRouter:
         client = self._make_client(mock_db)
         response = client.get(f"/apps/docs/{uuid.uuid4()}/download")
         assert response.status_code == 404
+
+
+class TestUndatedJobVisibility:
+    """
+    A job with no posting date skips the fetcher's age check entirely, so some
+    of them are long-closed listings passing as fresh. Being able to see them
+    as a group is the difference between suspecting that and knowing.
+    """
+
+    def _job(self, db, *, title, posted_at=None):
+        import hashlib
+        from app.models.job import Job, JobStatus
+        url = f"https://ex.com/{title}"
+        job = Job(
+            source="linkedin", source_urls=[url], title=title, company="Acme",
+            location="NYC", is_remote=False, url=url, description="d",
+            experience_level="mid", status=JobStatus.new,
+            fetched_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            posted_at=posted_at,
+            dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
+        )
+        db.add(job)
+        db.commit()
+        return job
+
+    def test_undated_jobs_can_be_isolated(self, db, client):
+        self._job(db, title="No Date Role")
+        self._job(db, title="Dated Role",
+                  posted_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        body = client.get("/jobs?dated=0").text
+        assert "No Date Role" in body
+        assert "Dated Role" not in body
+
+    def test_dated_jobs_can_be_isolated(self, db, client):
+        self._job(db, title="No Date Role")
+        self._job(db, title="Dated Role",
+                  posted_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        body = client.get("/jobs?dated=1").text
+        assert "Dated Role" in body
+        assert "No Date Role" not in body
+
+    def test_no_filter_shows_both(self, db, client):
+        self._job(db, title="No Date Role")
+        self._job(db, title="Dated Role",
+                  posted_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        body = client.get("/jobs").text
+        assert "No Date Role" in body and "Dated Role" in body
+
+    def test_the_count_tells_you_how_big_the_problem_is(self, db, client):
+        for n in range(3):
+            self._job(db, title=f"Undated {n}")
+        self._job(db, title="Dated Role",
+                  posted_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        assert "No posting date (3)" in client.get("/jobs").text
+
+    def test_the_filter_survives_pagination(self, db, client):
+        """Page links rebuild the query string; a filter left out is a filter lost."""
+        import hashlib
+        from app.models.job import Job, JobStatus
+        for n in range(51):
+            url = f"https://ex.com/undated-{n}"
+            db.add(Job(
+                source="linkedin", source_urls=[url], title=f"Undated {n}",
+                company="Acme", location="NYC", is_remote=False, url=url,
+                description="d", experience_level="mid", status=JobStatus.new,
+                fetched_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+                dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
+            ))
+        db.commit()
+        assert "dated=0" in client.get("/jobs?dated=0").text

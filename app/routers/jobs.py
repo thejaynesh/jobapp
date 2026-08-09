@@ -82,6 +82,15 @@ def _filter_reason_counts(db: Session) -> list[tuple[str, int]]:
 # bottom under a recent-looking date. Sort on the same expression we display.
 _EFFECTIVE_DATE = func.coalesce(Job.posted_at, Job.fetched_at)
 
+
+def _undated_count(db: Session) -> int:
+    """How many visible jobs never reported a posting date."""
+    return (
+        db.query(func.count(Job.id))
+        .filter(Job.status.in_(_FILTERABLE_STATUSES), Job.posted_at.is_(None))
+        .scalar()
+    ) or 0
+
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),
     "score_asc": Job.llm_score.asc().nullsfirst(),
@@ -103,6 +112,7 @@ def get_jobs(
     min_score: str = "",
     exp_level: str = "",
     filter_reason: str = "",
+    dated: str = "",
     sort: str = "score_desc",
     page: int = 0,
     db: Session = Depends(get_db),
@@ -147,6 +157,13 @@ def get_jobs(
             pass
     if filter_reason:
         query = query.filter(Job.filter_reason == filter_reason)
+    # A job with no posting date skips the fetcher's age check entirely, so
+    # some of these are long-closed listings passing as fresh. Being able to
+    # see them as a group is the difference between suspecting that and knowing.
+    if dated == "1":
+        query = query.filter(Job.posted_at.isnot(None))
+    elif dated == "0":
+        query = query.filter(Job.posted_at.is_(None))
 
     order = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["score_desc"])
     total = query.count()
@@ -168,6 +185,8 @@ def get_jobs(
             "remote_filter": remote,
             "min_score_filter": min_score,
             "exp_level_filter": exp_level,
+            "dated_filter": dated,
+            "undated_count": _undated_count(db),
             "sort": sort,
             "page": page,
             "total": total,
