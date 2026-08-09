@@ -190,7 +190,13 @@ def save_skills(
     # keep the legacy field in sync (derived search strings) for older code/UI
     save_section(db, "target_locations", search_locations(prefs))
     save_section(db, "excluded_companies", [x.strip() for x in excluded_companies.splitlines() if x.strip()])
-    profile = save_section(db, "min_match_score", min_match_score)
+    # Written through the tunables helper so this and the settings page can't
+    # drift apart — the same number lived in two keys, and only one was read.
+    from app.services import tunables
+    profile = get_or_create_profile(db)
+    profile.data = tunables.apply_to_profile(
+        profile.data, {"min_match_score": min_match_score}
+    )
     db.commit()
     return templates.TemplateResponse("profile/partials/skills.html", {"request": request, "profile": profile.data, "saved": True})
 

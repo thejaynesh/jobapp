@@ -1,8 +1,7 @@
-import copy
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -15,11 +14,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
 templates = Jinja2Templates(directory="app/templates")
 
-_DEFAULTS = {
-    "min_match_score": 70,
-    "fetch_interval_hours": 5,
-    "min_keyword_skills": 2,
-}
+
+def _settings_context(profile) -> dict:
+    """
+    Current value and env default for every tunable, grouped for the page.
+
+    Declared once in `services.tunables` and rendered from that declaration —
+    the previous hand-written trio of fields was written to a key nothing read,
+    so all three did nothing at all.
+    """
+    from app.services import tunables
+
+    data = profile.data if profile else {}
+    return {
+        "tunable_groups": [
+            (group, [
+                {
+                    "spec": t,
+                    "value": tunables.value(data, t.key),
+                    "default": tunables.default(t),
+                    "overridden": tunables.is_overridden(data, t.key),
+                }
+                for t in tunables.TUNABLES if t.group == group
+            ])
+            for group in tunables.GROUPS
+        ],
+    }
 
 
 def _board_registry(db: Session) -> dict:
@@ -44,12 +64,11 @@ def _retired_boards(db: Session) -> list:
         return []
 
 
-def _page_context(request: Request, profile, db: Session, settings_data: dict,
-                  saved: bool) -> dict:
+def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
     return {
         "request": request,
-        "settings": settings_data,
         "saved": saved,
+        **_settings_context(profile),
         "last_fetch": profile.data.get("last_fetch"),
         "board_registry": _board_registry(db),
         "retired_boards": _retired_boards(db),
@@ -63,9 +82,8 @@ def _page_context(request: Request, profile, db: Session, settings_data: dict,
 def get_settings(request: Request, db: Session = Depends(get_db)):
     profile = get_or_create_profile(db)
     db.commit()
-    current = {**_DEFAULTS, **profile.data.get("settings", {})}
     return templates.TemplateResponse(
-        "settings/index.html", _page_context(request, profile, db, current, False)
+        "settings/index.html", _page_context(request, profile, db, False)
     )
 
 
@@ -83,23 +101,20 @@ def reactivate_board(board_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.post("", response_class=HTMLResponse)
-def save_settings(
-    request: Request,
-    min_match_score: int = Form(70),
-    fetch_interval_hours: int = Form(5),
-    min_keyword_skills: int = Form(2),
-    db: Session = Depends(get_db),
-):
+async def save_settings(request: Request, db: Session = Depends(get_db)):
+    """
+    Save whatever tunables the form submitted.
+
+    Read from the raw form rather than declared as parameters: the fields come
+    from the `TUNABLES` declaration, and duplicating them here is exactly how
+    the old version ended up saving three values nobody read.
+    """
+    from app.services import tunables
+
+    form = dict(await request.form())
     profile = get_or_create_profile(db)
-    new_data = copy.deepcopy(profile.data)
-    new_data["settings"] = {
-        "min_match_score": min_match_score,
-        "fetch_interval_hours": fetch_interval_hours,
-        "min_keyword_skills": min_keyword_skills,
-    }
-    profile.data = new_data
+    profile.data = tunables.apply_to_profile(profile.data, tunables.parse_form(form))
     db.commit()
     return templates.TemplateResponse(
-        "settings/index.html",
-        _page_context(request, profile, db, new_data["settings"], True),
+        "settings/index.html", _page_context(request, profile, db, True)
     )

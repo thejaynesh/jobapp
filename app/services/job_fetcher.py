@@ -275,6 +275,10 @@ def _run_all_adapters(
             jobs = li_fetch_all(
                 session_cookie=cfg.LINKEDIN_SESSION_COOKIE, queries=roles,
                 locations=locations,
+                # Read off cfg rather than left to the adapter's own settings
+                # lookup, so the UI overrides in the overlay actually reach it.
+                max_pages=getattr(cfg, "LINKEDIN_MAX_PAGES", None),
+                recency_hours=getattr(cfg, "LINKEDIN_RECENCY_HOURS", None),
             )
             _record(stats, "linkedin", jobs)
             all_jobs.extend(jobs)
@@ -724,9 +728,13 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
     # search that genuinely had no matches.
     from app.services.source_diagnostics import SourceLogCapture, merge_into_stats
     try:
+        # The overlay is `settings` with the profile's UI overrides on top, so
+        # every adapter picks them up through the `cfg.X` reads it already does.
+        from app.services.tunables import effective_settings
+        cfg = effective_settings(profile.data)
         with SourceLogCapture() as capture:
             raw_jobs, source_stats = _run_all_adapters(
-                queries, locations, settings, ats_slugs, loc_prefs, only
+                queries, locations, cfg, ats_slugs, loc_prefs, only
             )
         merge_into_stats(source_stats, capture.messages)
     except Exception as exc:
@@ -812,7 +820,8 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed
 
-    max_age_days = getattr(settings, "MAX_JOB_AGE_DAYS", 30)
+    from app.services.tunables import value as tunable
+    max_age_days = tunable(profile.data, "max_job_age_days")
 
     # Per-source outcomes. "Fetched" alone flatters a source that returns the
     # same postings every cycle; what matters is how many were actually new.

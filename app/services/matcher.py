@@ -89,12 +89,14 @@ def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
     count — 'senior' in a description is too noisy. Words that appear in the
     candidate's own target roles are never blocked.
     """
-    if not getattr(settings, "FILTER_SENIOR_TITLES", True):
-        return False
     from app.services.experience import total_years as _total_years
+    from app.services.tunables import value as tunable
+
+    if not tunable(profile_data, "filter_senior_titles"):
+        return False
 
     total_years = _total_years(profile_data.get("experience", []))
-    if total_years >= getattr(settings, "JUNIOR_MAX_YEARS", 3.0):
+    if total_years >= tunable(profile_data, "junior_max_years"):
         return False
 
     role_words = {
@@ -181,7 +183,8 @@ def evaluate_keyword_filter(job, profile_data: dict) -> FilterOutcome:
     if not skills_flat:
         return FilterOutcome(True, 1.0)
 
-    min_skills = getattr(settings, "MIN_KEYWORD_SKILLS", MIN_KEYWORD_SKILLS)
+    from app.services.tunables import value as tunable
+    min_skills = tunable(profile_data, "min_keyword_skills")
     description = job.description or ""
     matched = _count_skill_matches(description, skills_flat)
     if matched < min_skills:
@@ -513,7 +516,8 @@ def match_job(
     if not llm_result.get("seniority_fit", True):
         score = max(0, score - 15)
 
-    min_score = profile_data.get("min_match_score", getattr(settings, "MIN_MATCH_SCORE", 70))
+    from app.services.tunables import value as tunable
+    min_score = tunable(profile_data, "min_match_score")
 
     job.llm_score = score
     job.llm_reasoning = llm_result["reasoning"]
@@ -542,13 +546,15 @@ def match_job(
 
 
 def match_all_new_jobs(db) -> dict[str, int]:
+    from app.services.tunables import value as tunable
+
     api_key = settings.NVIDIA_NIM_API_KEY
     base_url = settings.NVIDIA_NIM_BASE_URL
-    model = settings.NVIDIA_NIM_MODEL
     pace_interval = _rpm_interval()
 
     profile = db.query(Profile).first()
     profile_data = profile.data if profile else {}
+    model = tunable(profile_data, "nvidia_nim_model")
 
     new_jobs = db.query(Job).filter(Job.status == JobStatus.new).all()
 
