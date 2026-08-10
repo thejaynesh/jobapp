@@ -88,10 +88,13 @@ gracefully rather than inventing.
 
 **4a. Immigration status is not an input.**
 It is not stored on the profile, never written into a resume or cover letter, and
-never passed to an LLM for matching, scoring, or ranking. The single exception is
-a deterministic text filter that removes postings *explicitly stating* the role is
-restricted to US citizens — reading the posting's own words, inferring nothing
-about the user (§6.2).
+never passed to an LLM for matching, scoring, or ranking.
+
+What the *posting* says about itself is a different thing, and is read: postings
+explicitly restricted to US citizens are filtered, and sponsorship statements in
+either direction are surfaced as a badge that never affects the score (§6.2). The
+line is that the system reads the employer's stated terms and never models the
+user's status.
 
 **5. Harvest before you crawl.**
 The default mode for anything behind a login is to capture what the user is
@@ -154,15 +157,26 @@ discovery and compounds into more API-tier sources over time.
 **Quality gating.** Ghost-job detection (reposted, stale, no ATS ID, vague),
 applicant counts, cross-board duplicate guard.
 
-**Citizens-only filter.** One narrow, deterministic text filter removes postings
-that *explicitly state* the role is restricted to US citizens — "must be a US
-citizen", "citizens only", an active clearance requirement, ITAR / US Person
-language. It reads the posting's own words and infers nothing about the user. The
-triggering sentence is quoted back, and every match can be overridden in one click.
+**Eligibility scan.** One deterministic text pass over the posting, with two
+tiers that have different consequences. Both quote the posting's own sentence back
+and infer nothing about the user.
 
-Deliberately out of scope: sponsorship inference, employer immigration datasets,
-and any status-aware weighting. Postings that say they will not sponsor stay in
-the list and are ranked on merit like everything else.
+*Blocking — citizenship-restricted.* Postings stating the role is closed to
+non-citizens ("must be a US citizen", "citizens only", an active clearance
+requirement, ITAR / US Person language) are filtered. Unwinnable regardless of
+merit. Overridable in one click.
+
+*Advisory — sponsorship statements.* Postings that say something about
+sponsorship, **in either direction** — "will not sponsor now or in the future" as
+readily as "visa sponsorship available" — get a badge carrying the quoted
+sentence. The job **stays in the list, keeps its score, and ranks exactly as if
+the statement were absent.** It is shown so you can weigh it; it is never acted
+on. The badge appears on the job list, the detail page, the apply queue, and the
+extension overlay on the posting itself, which is where the decision actually gets
+made.
+
+Deliberately out of scope: employer immigration datasets, status-aware weighting,
+and any inference beyond what the posting itself says.
 
 ### 6.3 Tells you what to do first
 
@@ -266,7 +280,7 @@ Principle 1 in concrete form. Every row has both columns filled.
 | Fetch jobs | 5-hour beat | "Fetch now" — `/runs` *(v1)* |
 | Fetch one source | — | "Fetch just this source" |
 | Match / score jobs | After fetch | "Rescore" per job or in bulk |
-| Citizens-only filter | During match | "Re-check" · **"Apply anyway"** override per job |
+| Eligibility scan | During match | "Re-scan" · **"Apply anyway"** override per blocked job |
 | Resolve aggregator link | During fetch | "Resolve this link now" |
 | Generate documents | On match above threshold | "Generate" / "Regenerate with feedback" *(v1)* |
 | Verify resume parseability | After generation | "Check parseability" |
@@ -326,6 +340,7 @@ Beyond the v1 schema (`jobs`, `applications`, `application_documents`, `contacts
 | `browser_tasks` | The laptop work queue — kind, payload, status, result, TTL |
 | `outreach_messages.message_id` | Stored RFC Message-ID → deterministic reply matching |
 | `jobs.restricted_flag` | Citizens-only verdict, with the triggering sentence in `filter_detail` |
+| `jobs.sponsorship_note` | Quoted sponsorship sentence plus direction — displayed only, never scored |
 | `interview_reports` | Company-scoped: source, URL, posted date, rounds, questions, outcome, difficulty, quality score |
 | `interview_dossiers` | Cached per company × role, ~30-day TTL |
 | `application_events` | Timeline of everything that happened, with evidence links — powers undo and the audit trail |
@@ -377,7 +392,7 @@ when it lands.
 
 | Phase | Items |
 |---|---|
-| **1 — Filters** | Citizens-only filter · drop work authorization from the matcher rubric |
+| **1 — Filters** | Eligibility scan (blocking + advisory tiers) · drop work authorization from the matcher rubric |
 | **2 — Foundation** | API authentication (prerequisite for everything holding credentials) |
 | **3 — Email loop** | `message_id` column · IMAP reply/bounce detection · Gmail SMTP + warmup ramp |
 | **4 — Agent** | `BrowserTask` protocol · extension skeleton · link resolution · passive harvest |

@@ -131,38 +131,58 @@ discovered → more jobs arriving through clean APIs that never need a browser
 again. The browser tier is not just a scraper, it is a *bootstrapper for the API
 tier*, and that flywheel compounds while everything else is a per-fetch cost.
 
-### Stage 2 — Qualification (citizenship-restricted roles)
+### Stage 2 — Qualification (what the posting says about eligibility)
 
-**Scope: one narrow filter, and nothing else.** Some postings state outright that
-the role is restricted to US citizens. Those are unwinnable and get filtered. That
-is the entire feature.
+One deterministic scan of `Job.description`, producing **two tiers with different
+consequences**. Both quote the posting's own sentence back; neither infers anything
+about the user, and neither reaches an LLM.
 
-Detected by pattern match over `Job.description`, writing `filter_reason` /
-`filter_detail` (existing columns) so the triggering sentence is quoted back:
+#### Tier 1 — Blocking: citizenship-restricted
+
+Postings that state outright the role is closed to non-citizens. Unwinnable
+regardless of merit, so they are filtered, writing `filter_reason` /
+`filter_detail` (existing columns).
 
 - `must be a US citizen` / `US citizenship required` / `citizens only`
 - `active security clearance` / `Secret` / `Top Secret` / `TS/SCI` — clearance is
   not grantable without citizenship, so the posting is closed either way
-- `US Person` / `ITAR` / `EAR` / `export control` — an explicit legal eligibility
-  statement of the same kind
+- `US Person` / `ITAR` / `EAR` / `export control`
 
-Deterministic string matching, not an LLM call. The filter reads the posting's own
-words and nothing more.
+Overridable per job in one click, like every other filter.
 
-**Explicit non-goals for this stage.** These were considered and deliberately cut:
+#### Tier 2 — Advisory: sponsorship statements
 
-- **No sponsorship inference.** Postings saying "will not sponsor now or in the
-  future" are *not* filtered. They stay in the list and are ranked on merit.
-- **No employer immigration datasets.** No E-Verify enrolment lookup, no H-1B
-  filing history, no PERM records, no cap-exempt classification.
-- **No timeline modelling.** No OPT dates, no clock, no status-aware weighting.
+Postings that say something about sponsorship, **in either direction**. These are
+**surfaced, never acted on** — the job stays in the list, keeps its score, and is
+ranked exactly as if the statement were absent. The user reads it and decides.
 
-**Immigration status never reaches an LLM.**
+Stored as the quoted sentence plus a direction, in `jobs.sponsorship_note`:
+
+| Direction | Example phrasings |
+|---|---|
+| **Negative** | `will not sponsor`, `unable to sponsor`, `no visa sponsorship`, `without sponsorship now or in the future`, `must not require sponsorship` |
+| **Positive** | `sponsorship available`, `we sponsor visas`, `visa sponsorship provided`, `open to sponsoring` |
+
+Positive statements matter as much as negative ones — a posting that volunteers
+"we sponsor" is useful information, and the same scan catches both for free.
+
+**Where it shows.** As a small badge with the quoted sentence on hover: the `/jobs`
+list, the job detail page, the `/today` apply queue, and — most importantly — the
+extension overlay on the posting itself, which is where the decision actually gets
+made.
+
+**What it must never do.** Not a filter. Not a score input. Not a ranking input.
+Not in any LLM prompt. Not in a generated document. It is a label on a card.
+
+#### Immigration status never reaches an LLM
 
 - Not stored on the profile
 - Never written into a resume or cover letter
 - Never included in a matching or scoring prompt
 - Never used as a ranking input
+
+The Tier 2 note is the posting's statement about itself, not a statement about the
+user, which is what keeps it on the right side of this rule.
 
 **This requires a change to existing v1 behaviour.** `matcher.py:286` currently
 allocates 0–15 points to *"Location/remote/work-authorization compatibility"*.
@@ -170,12 +190,18 @@ Work authorization comes out of that criterion; the points go to location and
 remote fit alone. Today the model is being asked to reason about a status it has
 no information about, which can only produce noise.
 
-**Rationale.** The value of this stage is avoiding applications that cannot
-succeed regardless of merit. A posting that says "citizens only" is a closed door
-stated in plain text. Everything beyond that — predicting a given employer's
-future sponsorship behaviour — is speculation about a company's posture years from
-now, and letting it shape the resume or the score risks filtering out good jobs on
-a guess. One deterministic filter, applied to explicit statements only.
+#### Still out of scope
+
+- **No employer immigration datasets** — no E-Verify lookup, no H-1B filing
+  history, no PERM records, no cap-exempt classification
+- **No timeline modelling** — no OPT dates, no clock, no status-aware weighting
+- **No inference beyond the text** — if the posting says nothing about
+  sponsorship, the system says nothing about it either
+
+**Rationale.** Blocking is for doors the posting says are closed. Everything else
+is information the user is better placed to weigh than a scoring rubric is —
+surfacing it costs one regex pass and preserves the judgement call, where filtering
+on it would silently discard jobs that are often still worth applying to.
 
 ### Stage 2b — Qualification (job quality)
 
@@ -462,7 +488,7 @@ valuable when it lands.
 
 | # | Item | Effort | Why here |
 |---|---|---|---|
-| 1 | **Citizens-only filter** (Stage 2) | hours | Small, deterministic, removes unwinnable postings every cycle |
+| 1 | **Eligibility scan** (Stage 2) | hours | One pass, two tiers: filter citizens-only, surface sponsorship statements as advisory badges |
 | 2 | **Drop work-auth from the matcher rubric** | minutes | `matcher.py:286` scores a status the model knows nothing about — pure noise |
 | 3 | **Auth on the API** | small | Hard prerequisite — the app currently has none, and everything below adds credentials and personal history to it |
 | 4 | **`message_id` column + IMAP reply/bounce detection** | small | Fixes a live nagging risk; repairs `reply_rate` |
