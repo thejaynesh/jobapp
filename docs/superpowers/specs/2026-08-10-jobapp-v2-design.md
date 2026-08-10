@@ -300,11 +300,90 @@ Currently nonexistent. `ApplicationStatus.interviewing` leads nowhere.
 
 | Feature | Notes |
 |---|---|
-| Interview dossier | Likely questions from the JD, your STAR stories from the profile narrative mapped to their stated requirements, questions to ask, red flags. Every input already exists. |
+| **Interview intelligence corpus** | Reported interview experiences, per company, per role. See below — this is the substrate for everything else in this stage. |
+| Interview dossier | Reported rounds and questions + JD + your STAR stories from the profile narrative + the interviewer's background. Fires automatically when Stage 6 sees the invite. |
 | Interviewer research | The invite names them → extension pulls their LinkedIn → "4 years there, ex-Stripe, posts about Rust" |
+| Mock interview | Run the *actual reported questions* for that company in the reported format. Only possible with the corpus. |
 | Thank-you notes | `thank_you` is already in `MESSAGE_KINDS` |
-| Question bank | Capture questions actually asked; prep against real history instead of generic lists |
+| Question bank | Capture questions actually asked; prep against real history instead of generic lists. Also validates the corpus — you learn which sources are accurate for which companies. |
 | Offer / comp comparison | Against salary data harvested from postings (CA/NY/CO/WA mandate ranges — this becomes a comp dataset filtered to *your* exact segment, more relevant than levels.fyi) |
+
+#### Interview intelligence corpus
+
+People publish extremely detailed interview writeups — rounds, questions, timeline,
+outcome. Aggregated per company and kept fresh, that turns interview prep from
+generic grinding into a targeted, time-boxed plan.
+
+**Triggered by the pipeline, not by hand.** Stage 6's IMAP poller detects the
+interview invite; that fires a research task automatically. By the time you read
+the email, the dossier exists.
+
+**Sources, in build order (effort ascending, not value):**
+
+| Source | Access | Notes |
+|---|---|---|
+| **GeeksforGeeks Interview Experiences** | Plain HTML, no auth, no blocking | One of the largest archives, already organised by company. Start here. |
+| **Reddit** | Append `.json` to any URL — free, no key | r/leetcode, r/cscareerquestions, company subs |
+| **GitHub interview repos** | API, token you already have | Large curated collections |
+| **LeetCode Discuss** | `leetcode.com/graphql` — prefer over DOM | Cloudflare-walled from a datacenter IP → **Engine B or the extension**. This is the extension's value proposition again. |
+| **LeetCode company tags** | Extension, **Premium only** | Problems tagged by company with frequency and recency. The single highest-value dataset here — if the account has Premium. |
+| **Glassdoor interview questions** | Extension (login wall, aggressive blocking) | Large per-company corpus |
+| **Blind** | Extension, needs a verified work email | Optional — may not be available |
+
+**Retrieval is the hard part, not ingestion.** Three things decide whether a
+retrieved report is useful:
+
+- **Recency, weighted hard.** Loops change. A 2019 report is noise; a report from
+  last quarter is gold. Down-weight past ~18 months, discard past ~3 years unless
+  there is nothing else. A report with no date is nearly worthless — require one.
+- **Level and org match.** "Amazon SDE-1 University Grad" and "Amazon SDE-2
+  lateral" are different loops. Some companies vary by org and site.
+- **Company match** — fuzzy, via the existing `company_domain.company_key`.
+
+**The output is a practice plan, not a summary.** Not *"they ask graph
+problems"* but:
+
+> *5 rounds: OA (2 problems, 90 min) → phone screen → 3 onsite. Reported
+> questions map to 18 LeetCode problems; these 6 appeared more than once since
+> January. Median process length 4 weeks. Two reports mention a system design
+> round at your level — your profile has no distributed systems experience, so
+> that's the gap to close.*
+
+Problem titles get extracted from post text by the LLM and mapped to LeetCode
+slugs, so the plan is clickable. With Premium, company tag frequency supplies the
+same thing directly and more reliably.
+
+**Useful before the interview too.** Round count, take-home vs. not, reported
+process length, and "ghosted after final round" reports are all *ranking* signals
+at Stage 3 — worth knowing which loops cost four weeks before you apply.
+
+**Also feeds the OA path.** Stage 6 parses online-assessment deadlines; the corpus
+usually says exactly what a given company's OA contains. Very targeted prep on a
+tight clock.
+
+**Storage.** A company-scoped `InterviewReport` table (`company_key`, `role`,
+`level`, `source`, `source_url`, `posted_at`, `rounds` JSONB, `questions`,
+`outcome`, `difficulty`, `quality_score`) — scoped to the company rather than to
+an application, so it accumulates and is reused, mirroring the `Contact.company_key`
+pattern. Plus a cached `InterviewDossier` per company × role on a ~30-day TTL.
+
+Caching matters more than it looks: you interview at maybe twenty companies, so a
+per-company cache means very low request volume and almost no detection surface.
+
+**Honest limits:**
+
+- **Coverage collapses for small companies.** A 30-person startup has zero posts.
+  Degrade gracefully to JD analysis + interviewer LinkedIn + the company's
+  engineering blog + role-based prep. Never fabricate a loop.
+- **Forum posts are wildly variable** — from "got rejected :(" to 2000-word
+  writeups. LLM-extract into the structured schema and score quality; store
+  structured, never raw dumps.
+- **Every claim must cite its source, with a link.** A hallucinated interview
+  question is worse than no dossier, because it is acted on. Nothing enters the
+  dossier without a traceable post behind it.
+- **Reports are self-selected.** People who bombed post less than people who
+  passed, and hard loops get written up more than easy ones. Treat difficulty
+  signals as directional.
 
 ### Stage 8 — Learning (what makes it compound)
 
@@ -404,7 +483,9 @@ valuable when it lands.
 | 10 | **Autofill + submit detection** | large | The daily-hours saver |
 | 11 | **Authenticated search** (LinkedIn/Handshake/Indeed/Dice) | large | Highest account risk; do it last, after the harvest-first habits are established |
 | 12 | **Alumni + referral finder** | medium | Highest response rate of any channel available |
-| 13 | **Interview stage** (Stage 7) | medium | Only matters once interviews are arriving |
+| 13a | **Interview corpus — free sources** (GfG, Reddit, GitHub) | small | No auth, no blocking, no extension needed. Jumps the queue entirely if interviews are already scheduled. |
+| 13b | **Interview corpus — walled sources** (LeetCode, Glassdoor) | medium | Needs the extension; add once 13a proves the retrieval and scoring work |
+| 13c | **Dossier, mock interview, question bank** (rest of Stage 7) | medium | Only matters once interviews are arriving |
 | 14 | **Calibration + reranker** (Stage 8) | medium | Needs accumulated outcome data first |
 | 15 | **Local agent + selector-learning tier** | large | The long tail |
 
