@@ -314,9 +314,12 @@ People publish extremely detailed interview writeups — rounds, questions, time
 outcome. Aggregated per company and kept fresh, that turns interview prep from
 generic grinding into a targeted, time-boxed plan.
 
-**Triggered by the pipeline, not by hand.** Stage 6's IMAP poller detects the
-interview invite; that fires a research task automatically. By the time you read
-the email, the dossier exists.
+**Triggered by the pipeline, and by hand.** Stage 6's IMAP poller detects the
+interview invite and fires a research task automatically, so the dossier exists by
+the time you read the email. It is also a button on any application — automation
+decides when this *usually* happens, the user decides when it happens *now*. See
+`docs/PRODUCT.md` §7 for the full trigger matrix; this rule applies to every
+automatic behaviour in the system, not just this one.
 
 **Sources, in build order (effort ascending, not value):**
 
@@ -326,7 +329,7 @@ the email, the dossier exists.
 | **Reddit** | Append `.json` to any URL — free, no key | r/leetcode, r/cscareerquestions, company subs |
 | **GitHub interview repos** | API, token you already have | Large curated collections |
 | **LeetCode Discuss** | `leetcode.com/graphql` — prefer over DOM | Cloudflare-walled from a datacenter IP → **Engine B or the extension**. This is the extension's value proposition again. |
-| **LeetCode company tags** | Extension, **Premium only** | Problems tagged by company with frequency and recency. The single highest-value dataset here — if the account has Premium. |
+| **LeetCode company tags** | Extension, Premium — **available** | Problems tagged by company with frequency and recency. The single highest-value dataset here, and the account has Premium, so treat it as a first-class source rather than a maybe. |
 | **Glassdoor interview questions** | Extension (login wall, aggressive blocking) | Large per-company corpus |
 | **Blind** | Extension, needs a verified work email | Optional — may not be available |
 
