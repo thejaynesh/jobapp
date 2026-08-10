@@ -10,10 +10,10 @@ is built*.
 
 ## 1. What this is
 
-A self-hosted job search system that finds roles you are actually eligible for,
-gets you in front of them early, connects you to someone on the inside, applies
-with tailored documents, tracks every outcome without bookkeeping, and prepares
-you for the interviews that result.
+A self-hosted job search system that finds roles worth your time, gets you in
+front of them early, connects you to someone on the inside, applies with tailored
+documents, tracks every outcome without bookkeeping, and prepares you for the
+interviews that result.
 
 It runs as three cooperating tiers: a VPS that thinks, a laptop that acts with
 your identity, and a mailbox that observes what happened.
@@ -25,14 +25,12 @@ fixed amount of weekly effort where that effort converts.
 
 ## 2. Who it is for
 
-**Primary user (today):** one person conducting a serious job search — currently
-an F-1 student on OPT heading to STEM OPT, with a hard 36-month work-authorization
-clock and a need to distinguish employers who can carry them past it from
-employers who cannot.
+**Primary user (today):** one person conducting a serious job search, with limited
+weekly hours and a strong preference for spending them where they convert.
 
-**Generalization (later):** anyone whose job search is constrained rather than
-casual — visa clocks, layoffs with severance runway, career changes, or a return
-to work. The constraint is what makes systematic effort worth more than volume.
+**Generalization (later):** anyone whose job search is systematic rather than
+casual. The architecture makes no assumptions about the user's circumstances
+beyond a profile and a mailbox.
 
 The architecture is deliberately kept multi-tenant-shaped even while there is one
 tenant, because pushing execution to each user's own browser is the only design
@@ -49,13 +47,13 @@ specific ways, and each has a fix:
 
 | Failure | What it costs | Fix |
 |---|---|---|
-| **Applying to roles you're legally ineligible for** | Silent auto-rejection, no feedback, wasted effort | Work-authorization gating (§6.2) |
 | **Applying late** | Applicant #400 instead of #25 | Speed lane on fresh postings (§6.3) |
 | **Applying cold** | ~2–5% response instead of several times that | Referral and alumni paths (§6.5) |
+| **Applying to noise** | Ghost jobs, duplicate postings, roles that were never real | Quality gating (§6.2) |
 | **Losing track** | Stale tracker, missed deadlines, duplicate applications, follow-ups sent to people who already replied | Automatic tracking from email and submit detection (§6.6) |
 | **Never learning** | The same mistakes for months; no idea which sources or documents work | Outcome-driven calibration (§6.8) |
 
-The through-line: **`eligible × early × warm` beats volume.** Every feature in
+The through-line: **`early × warm × well-matched` beats volume.** Every feature in
 this product serves one of those three, or serves the loop that measures them.
 
 ---
@@ -77,16 +75,23 @@ without explicit approval.** `outreach_sender` already enforces this on email;
 it extends to application submission and LinkedIn messages.
 
 **3. Every automatic decision shows its evidence and can be undone.**
-"Marked rejected" links to the email that said so. "Filtered out — ITAR" quotes
-the sentence that triggered it. Every filter has an override. A regex hard-reject
-*will* have false positives, and the user needs an escape hatch that takes one
-click.
+"Marked rejected" links to the email that said so. "Filtered out — citizens only"
+quotes the sentence that triggered it. Every filter has an override. A pattern
+match *will* have false positives, and the user needs an escape hatch that takes
+one click.
 
 **4. Never fabricate. Always cite.**
-Interview questions, sponsorship history, company facts — every claim traces to a
+Interview questions, company facts, match reasoning — every claim traces to a
 source with a link. A hallucinated interview question is worse than no dossier
 because it gets acted on. When there is no data, the product says so and degrades
 gracefully rather than inventing.
+
+**4a. Immigration status is not an input.**
+It is not stored on the profile, never written into a resume or cover letter, and
+never passed to an LLM for matching, scoring, or ranking. The single exception is
+a deterministic text filter that removes postings *explicitly stating* the role is
+restricted to US citizens — reading the posting's own words, inferring nothing
+about the user (§6.2).
 
 **5. Harvest before you crawl.**
 The default mode for anything behind a login is to capture what the user is
@@ -110,7 +115,7 @@ credentials. Everything lives on the user's own VPS and their own machine.
 ```
         ┌──────────────────── VPS (thinks) ────────────────────┐
         │  Postgres · Celery · LLM · matching · documents      │
-        │  API-tier sources · eligibility data · analytics     │
+        │  API-tier sources · interview corpus · analytics     │
         └───────┬─────────────────────────────────┬────────────┘
                 │ BrowserTask queue               │ IMAP (beat)
                 ▼                                 ▼
@@ -133,17 +138,12 @@ credentials. Everything lives on the user's own VPS and their own machine.
 
 - **Profile** — experience, projects, skills, education, narrative answers *(v1)*
 - **One-click import from your own LinkedIn** — replaces manual profile entry
-- **Work-authorization status** — F-1 OPT → STEM OPT with real dates, so the
-  system reasons about *your* clock rather than generic advice
-- **Precomputed ATS answers** — "authorized to work? yes / require sponsorship?
-  eventually" are fixed facts; you never answer them again
-- **Documents state your status up front** — *"Authorized through [date] under
-  F-1 STEM OPT; no sponsorship required at this time"* preempts the most common
-  silent rejection
 - **Market-driven skill gaps** — "61% of your matched jobs want Kubernetes; you
   don't list it"
 
-### 6.2 Finds jobs you can actually take
+Immigration status is not a profile field. See §4a.
+
+### 6.2 Finds jobs worth your time
 
 **Discovery.** 25+ API sources *(v1)*, plus everything a datacenter IP can't
 reach: LinkedIn, Handshake, Indeed, Dice, Wellfound, ZipRecruiter — through your
@@ -151,30 +151,24 @@ own browser, with your own session. Plus passive harvest of every job page you
 browse, and in-browser resolution of aggregator redirect links, which feeds ATS
 discovery and compounds into more API-tier sources over time.
 
-**Eligibility gating — two filters on two clocks.**
-
-*Can I start here at all?* (hard reject, with override)
-- `"without sponsorship now or in the future"` — you're fine today, excluded anyway
-- ITAR / export control / US Person / security clearance
-- Bench-and-place consultancies that won't sign an I-983
-
-*Will I still be here in year three?* (ranking, not reject)
-- **E-Verify enrolment** — required for the STEM OPT extension. Not enrolled means
-  the job caps out at 12 months.
-- **Initial (not continuing) H-1B approvals** — distinguishes companies that
-  sponsor newcomers from companies that merely transfer existing holders
-- **PERM history** — commitment past the H-1B ceiling
-- **Cap-exempt employers** get an explicit bonus — universities, affiliated
-  nonprofits and research organisations skip the lottery entirely
-
 **Quality gating.** Ghost-job detection (reposted, stale, no ATS ID, vague),
 applicant counts, cross-board duplicate guard.
 
+**Citizens-only filter.** One narrow, deterministic text filter removes postings
+that *explicitly state* the role is restricted to US citizens — "must be a US
+citizen", "citizens only", an active clearance requirement, ITAR / US Person
+language. It reads the posting's own words and infers nothing about the user. The
+triggering sentence is quoted back, and every match can be overridden in one click.
+
+Deliberately out of scope: sponsorship inference, employer immigration datasets,
+and any status-aware weighting. Postings that say they will not sponsor stay in
+the list and are ranked on merit like everything else.
+
 ### 6.3 Tells you what to do first
 
-- **Speed lane** — high match, posted within hours, eligibility clean → notify now
-- **Ranking** — LLM match score *(v1)* weighted by work-auth timeline fit, warm
-  connections, and eventually a reranker learned from your own outcomes
+- **Speed lane** — high match, posted within hours → notify now
+- **Ranking** — LLM match score *(v1)* weighted by warm connections, and eventually
+  a reranker learned from your own outcomes
 - **Interview-loop cost** — round count and reported process length as a *ranking*
   signal, so you know a four-week loop before you spend an application on it
 
@@ -272,7 +266,7 @@ Principle 1 in concrete form. Every row has both columns filled.
 | Fetch jobs | 5-hour beat | "Fetch now" — `/runs` *(v1)* |
 | Fetch one source | — | "Fetch just this source" |
 | Match / score jobs | After fetch | "Rescore" per job or in bulk |
-| Eligibility filter | During match | "Re-check eligibility" · **"Apply anyway"** override per job |
+| Citizens-only filter | During match | "Re-check" · **"Apply anyway"** override per job |
 | Resolve aggregator link | During fetch | "Resolve this link now" |
 | Generate documents | On match above threshold | "Generate" / "Regenerate with feedback" *(v1)* |
 | Verify resume parseability | After generation | "Check parseability" |
@@ -289,7 +283,6 @@ Principle 1 in concrete form. Every row has both columns filled.
 | Build interview dossier | On interview invite email | **"Build dossier"** on any application |
 | Refresh interview corpus | 30-day TTL per company | "Refresh corpus for this company" |
 | Run mock interview | — | "Start mock interview" |
-| Refresh sponsorship datasets | Monthly beat | "Refresh E-Verify / H-1B data" |
 | Recalibrate scoring | Monthly beat | "Recalibrate now" |
 | Dispatch task to laptop | When a browser-tier task is queued | "Run on laptop now" |
 
@@ -308,7 +301,6 @@ Principle 1 in concrete form. Every row has both columns filled.
 | `/profile` | Profile editor, narrative, prompt preview | v1 |
 | `/runs` | Fetch history, source diagnostics, model comparison | v1 |
 | `/settings` | Thresholds, schedule, sources, keys | v1 |
-| **`/eligibility`** | Work-auth clock, OPT dates, company sponsorship lookup, E-Verify/H-1B data | New |
 | **`/interviews`** | Dossiers, prep plans, question bank, mock interview | New |
 | **`/insights`** | Funnel metrics, calibration, source ROI, resume A/B | New |
 | **Agent status** | Laptop last-seen, queued tasks, engine health — extends `/runs` | New |
@@ -317,7 +309,7 @@ Principle 1 in concrete form. Every row has both columns filled.
 
 | Surface | Purpose |
 |---|---|
-| **Overlay panel** | On any job page anywhere: match score, matched/missing skills, eligibility verdict, "already applied ✓ Mar 3", save / generate docs / find contacts |
+| **Overlay panel** | On any job page anywhere: match score, matched/missing skills, "already applied ✓ Mar 3", save / generate docs / find contacts |
 | **Autofill widget** | On recognised ATS forms: fill, highlight what was filled, draft answers to custom questions |
 | **Popup** | Agent status, quick capture of the current page, recent activity |
 | **Options page** | VPS URL, bearer token, per-site enable/disable, harvest mode |
@@ -333,8 +325,7 @@ Beyond the v1 schema (`jobs`, `applications`, `application_documents`, `contacts
 |---|---|
 | `browser_tasks` | The laptop work queue — kind, payload, status, result, TTL |
 | `outreach_messages.message_id` | Stored RFC Message-ID → deterministic reply matching |
-| `jobs.work_auth_flag` | Eligibility verdict, with the triggering sentence in `filter_detail` |
-| `company_sponsorship` | Per `company_key`: E-Verify enrolment, initial/continuing H-1B by year, PERM filings, cap-exempt status |
+| `jobs.restricted_flag` | Citizens-only verdict, with the triggering sentence in `filter_detail` |
 | `interview_reports` | Company-scoped: source, URL, posted date, rounds, questions, outcome, difficulty, quality score |
 | `interview_dossiers` | Cached per company × role, ~30-day TTL |
 | `application_events` | Timeline of everything that happened, with evidence links — powers undo and the audit trail |
@@ -361,7 +352,7 @@ Measured on `/insights`, reviewed weekly.
 
 | Metric | Target direction |
 |---|---|
-| Applications to ineligible roles | → 0 |
+| Applications to citizens-only postings | → 0 |
 | Median hours from posting to application | ↓ (target: same-day for speed-lane) |
 | Share of applications with a warm connection | ↑ |
 | Response rate, interview rate | ↑ |
@@ -380,22 +371,21 @@ ranked view of which employers can carry you past month 12 and month 30.
 
 ## 12. Build order
 
-Full detail in the spec. Summary: **the first six items need no extension at
+Full detail in the spec. Summary: **the first three phases need no extension at
 all** — they are server-side, small, and make the extension work more valuable
 when it lands.
 
 | Phase | Items |
 |---|---|
-| **1 — Eligibility** | JD hard-reject filter · resume work-auth line · precomputed ATS answers |
+| **1 — Filters** | Citizens-only filter · drop work authorization from the matcher rubric |
 | **2 — Foundation** | API authentication (prerequisite for everything holding credentials) |
 | **3 — Email loop** | `message_id` column · IMAP reply/bounce detection · Gmail SMTP + warmup ramp |
-| **4 — Sponsorship data** | E-Verify · H-1B initial approvals · PERM · cap-exempt bonus |
-| **5 — Agent** | `BrowserTask` protocol · extension skeleton · link resolution · passive harvest |
-| **6 — On-page** | Overlay · autofill · submit detection |
-| **7 — Authenticated search** | LinkedIn · Handshake · Indeed · Dice (highest account risk — last) |
-| **8 — Warm paths** | Alumni finder · referral finder |
-| **9 — Interview** | Corpus (free sources → LeetCode Premium/Glassdoor) · dossier · mock · question bank |
-| **10 — Learning** | Calibration · reranker · source ROI |
+| **4 — Agent** | `BrowserTask` protocol · extension skeleton · link resolution · passive harvest |
+| **5 — On-page** | Overlay · autofill · submit detection |
+| **6 — Authenticated search** | LinkedIn · Handshake · Indeed · Dice (highest account risk — last) |
+| **7 — Warm paths** | Alumni finder · referral finder |
+| **8 — Interview** | Corpus (free sources → LeetCode Premium tags, Glassdoor) · dossier · mock · question bank |
+| **9 — Learning** | Calibration · reranker · source ROI |
 
-Phase 9's free sources have no dependency on any earlier phase and can be pulled
+Phase 8's free sources have no dependency on any earlier phase and can be pulled
 forward at any point interviews start arriving.

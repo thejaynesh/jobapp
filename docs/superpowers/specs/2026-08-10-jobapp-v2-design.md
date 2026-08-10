@@ -104,15 +104,16 @@ descriptions inline. The cap disappears.
 Features are organized by where they sit in the path from "job exists somewhere"
 to "offer signed."
 
-### Stage 0 — Profile & eligibility
+### Stage 0 — Profile
 
 | Feature | Tier | Notes |
 |---|---|---|
 | Import profile from your own LinkedIn | Extension | One click; kills the worst part of onboarding |
-| **Work-authorization model** | VPS | F-1 OPT → STEM OPT, with dates. See below. |
-| Precomputed ATS answers | VPS | "Authorized to work? yes / Require sponsorship? eventually" — fixed for you, never think about them again |
 | Market-driven skill gaps | VPS | "61% of your 340 matched jobs want Kubernetes; you don't list it" |
-| Resume states work auth explicitly | VPS | *"Authorized through [date] under F-1 STEM OPT; no sponsorship required at this time"* — preempts the most common silent rejection |
+
+**Immigration status is out of scope for the profile.** It is not stored as a
+profile field, never appears in a generated resume or cover letter, and is never
+passed to an LLM. See Stage 2.
 
 ### Stage 1 — Discovery
 
@@ -123,7 +124,6 @@ to "offer signed."
 | **Passive harvest** | Extension | Everything you browse is captured. Zero detection risk: you *are* the traffic. Default mode. |
 | **Link resolution in-browser** | Engine B | Adzuna/Jooble/Careerjet interstitials that `link_resolver`'s httpx client can't follow |
 | Selector-learning fallback | Engine C | Unknown career site → LLM figures out the structure once → cached as a generated adapter |
-| Cap-exempt employer seeding | VPS | Universities, affiliated nonprofits, research orgs — see Stage 2 |
 
 **Link resolution deserves priority out of proportion to its size.** Every
 resolved interstitial feeds ATS auto-discovery: more Greenhouse/Lever/Ashby slugs
@@ -131,62 +131,51 @@ discovered → more jobs arriving through clean APIs that never need a browser
 again. The browser tier is not just a scraper, it is a *bootstrapper for the API
 tier*, and that flywheel compounds while everything else is a per-fetch cost.
 
-### Stage 2 — Qualification (work authorization)
+### Stage 2 — Qualification (citizenship-restricted roles)
 
-This is a two-stage filter on two different clocks. A binary "does this company
-sponsor" test would be wrong — it would discard three years of perfectly viable
-jobs.
-
-**Gate 1 — can I legally start here? (hard reject, today)**
+**Scope: one narrow filter, and nothing else.** Some postings state outright that
+the role is restricted to US citizens. Those are unwinnable and get filtered. That
+is the entire feature.
 
 Detected by pattern match over `Job.description`, writing `filter_reason` /
-`filter_detail` (existing columns):
+`filter_detail` (existing columns) so the triggering sentence is quoted back:
 
-- **`"without sponsorship now or in the future"`** — the important one, and it is
-  everywhere. Fine today, excluded anyway. Note that plain "must be authorized to
-  work in the US" is *acceptable*; a naive filter drops both.
-- **US Person / ITAR / EAR / export control / security clearance** — requires
-  citizenship or permanent residency. A large, invisible share of US engineering
-  roles: defense, aerospace, gov contractors, some hardware and semiconductor.
-- **Third-party placement / consultancy** — STEM OPT requires a bona fide
-  employer-employee relationship and an employer-signed I-983 training plan.
-  Bench-and-place staffing shops are a bad fit and often refuse the paperwork.
+- `must be a US citizen` / `US citizenship required` / `citizens only`
+- `active security clearance` / `Secret` / `Top Secret` / `TS/SCI` — clearance is
+  not grantable without citizenship, so the posting is closed either way
+- `US Person` / `ITAR` / `EAR` / `export control` — an explicit legal eligibility
+  statement of the same kind
 
-**Gate 2 — will I still be here in year 3? (ranking signal, not a reject)**
+Deterministic string matching, not an LLM call. The filter reads the posting's own
+words and nothing more.
 
-Two cliffs, all data public and free:
+**Explicit non-goals for this stage.** These were considered and deliberately cut:
 
-| Cliff | When | Data source | Signal |
-|---|---|---|---|
-| **E-Verify** | month ~12 | USCIS E-Verify employer list (downloadable) | STEM OPT extension *requires* employer E-Verify enrollment. Not enrolled → the job caps at 12 months. Startups frequently aren't. |
-| **H-1B** | month ~30 | USCIS H-1B Employer Data Hub | **Initial vs. continuing approvals.** A company with 400 continuing and 2 initial is transferring existing holders, not sponsoring newcomers. LCA data alone hides this distinction, and it's the one that predicts the outcome. |
-| Long-term | year 6+ | DOL PERM disclosure | Green-card sponsorship history — commitment past the H-1B ceiling |
+- **No sponsorship inference.** Postings saying "will not sponsor now or in the
+  future" are *not* filtered. They stay in the list and are ranked on merit.
+- **No employer immigration datasets.** No E-Verify enrolment lookup, no H-1B
+  filing history, no PERM records, no cap-exempt classification.
+- **No timeline modelling.** No OPT dates, no clock, no status-aware weighting.
 
-**Cap-exempt employers get an explicit scoring bonus.** Universities,
-university-affiliated nonprofits, and nonprofit/government research organizations
-are exempt from the H-1B lottery entirely — no 25% coin flip, file any time of
-year. For someone on a hard clock this is worth a large boost, and Boston is
-unusually dense with them. Almost nobody filters for this.
+**Immigration status never reaches an LLM.**
 
-Employer-name matching across these datasets reuses `company_domain.company_key`,
-which already normalizes "Acme, Inc." and "Acme Inc" into one company.
+- Not stored on the profile
+- Never written into a resume or cover letter
+- Never included in a matching or scoring prompt
+- Never used as a ranking input
 
-**Timeline-aware, not static.** Store the OPT start date and the system reasons
-about the actual clock:
+**This requires a change to existing v1 behaviour.** `matcher.py:286` currently
+allocates 0–15 points to *"Location/remote/work-authorization compatibility"*.
+Work authorization comes out of that criterion; the points go to location and
+remote fit alone. Today the model is being asked to reason about a status it has
+no information about, which can only produce noise.
 
-> *"STEM OPT window opens in 8 months. Anduril: ITAR — hard reject. Ramp:
-> E-Verify ✓, 12 initial H-1B approvals FY25 ✓. Northeastern Research Computing:
-> cap-exempt, no lottery."*
-
-The weighting shifts as the clock runs down — E-Verify matters enormously at month
-6 and is settled by month 20.
-
-Feed the structured status into the matcher. `matcher.py:286` currently allocates
-0–15 points to "work-authorization compatibility" while telling the model nothing
-about the actual status; those points become meaningful once it knows.
-
-*(Timing-sensitive immigration details should be confirmed with a DSO. Rules shift
-and individual circumstances govern.)*
+**Rationale.** The value of this stage is avoiding applications that cannot
+succeed regardless of merit. A posting that says "citizens only" is a closed door
+stated in plain text. Everything beyond that — predicting a given employer's
+future sponsorship behaviour — is speculation about a company's posture years from
+now, and letting it shape the resume or the score risks filtering out good jobs on
+a guess. One deterministic filter, applied to explicit statements only.
 
 ### Stage 2b — Qualification (job quality)
 
@@ -202,7 +191,6 @@ and individual circumstances govern.)*
 | Signal | Source |
 |---|---|
 | LLM match score | Existing |
-| Work-auth timeline fit | Stage 2 |
 | **Referral / warm path** | Extension — largest single multiplier available |
 | **Alumni at company** | Extension — LinkedIn alumni tool |
 | Speed lane | `posted_at` — high match + under 2h old → notify immediately |
@@ -420,21 +408,23 @@ So 100 cold applications and 20 well-chosen warm ones land in the same place —
 the warm path costs a fifth of the effort and produces conversations rather than
 form submissions.
 
-**Therefore the system optimizes for `eligible × early × warm`, not raw volume.**
-Every feature above serves one of those three:
+**Therefore the system optimizes for `early × warm × well-matched`, not raw
+volume.** Every feature above serves one of those three:
 
-- **Eligible** — Stage 2. Not wasting a single application on an ITAR role, a
-  "no sponsorship ever" posting, or a company that has never filed an initial
-  H-1B.
 - **Early** — Stages 1 and 3. Speed lane, fresh postings, applicant counts.
 - **Warm** — Stage 5. Alumni, referrals, 2nd-degree paths, and outreach that
   actually gets delivered and actually gets followed up.
+- **Well-matched** — Stages 2b, 3 and 8. Real matches, not ghost jobs, ranked by a
+  score that has been calibrated against actual callbacks.
+
+Stage 2 sits underneath all three as a cheap correctness check: don't spend an
+application on a posting that says citizens only.
 
 ### The daily loop
 
 **Morning, ~10 minutes.** Check speed-lane notifications — high match, posted in
-the last two hours, work-auth clean. These get applied to *now*, because applicant
-position is the cheapest edge available.
+the last two hours. These get applied to *now*, because applicant position is the
+cheapest edge available.
 
 **Apply session, ~30 minutes, 3× a week.** Work the shadow queue. Extension
 pre-fills; you review, adjust the LLM's answers to custom questions, submit.
@@ -447,55 +437,52 @@ cold**. Drafts are already written; you review and send. Follow-ups draft
 themselves on the `4,7,10` schedule and stop automatically when someone replies.
 
 **Weekly review, ~20 minutes.** The funnel numbers: applications sent, response
-rate, interview rate, by source and by work-auth tier. This is where you find out
-that Handshake produces interviews and Adzuna produces noise, or that your resume
-variant B is doing twice as well.
+rate, interview rate, by source. This is where you find out that Handshake
+produces interviews and Adzuna produces noise, or that your resume variant B is
+doing twice as well.
 
 **Monthly.** Recalibrate. Re-run scoring against realized outcomes, adjust the
-rubric, prune dead sources, refresh the E-Verify and H-1B datasets.
+rubric, prune dead sources.
 
 ### What good looks like at 90 days
 
-- Zero applications wasted on roles you're not legally eligible for
 - Most applications submitted within hours of posting rather than days
 - A meaningful share carrying a referral or alumni connection
 - Every application's status accurate without you ever clicking a status button
 - A calibrated match score that actually predicts callbacks
-- A ranked, evidence-backed view of which companies can carry you past month 12
-  and month 30
+- No applications spent on postings that stated citizens-only in the text
 
 ---
 
 ## Build order
 
-Ordered by value-per-effort, not architectural tidiness. Items 1–6 need **no
+Ordered by value-per-effort, not architectural tidiness. Items 1–5 need **no
 extension at all** — they are server-side, small, and make the extension work more
 valuable when it lands.
 
 | # | Item | Effort | Why here |
 |---|---|---|---|
-| 1 | **JD hard-reject filter** (Gate 1) | hours | Immediate waste reduction on every cycle. Best ratio on the list. |
-| 2 | **Resume work-auth line + precomputed ATS answers** | hours | Trivial; removes the most common silent rejection |
+| 1 | **Citizens-only filter** (Stage 2) | hours | Small, deterministic, removes unwinnable postings every cycle |
+| 2 | **Drop work-auth from the matcher rubric** | minutes | `matcher.py:286` scores a status the model knows nothing about — pure noise |
 | 3 | **Auth on the API** | small | Hard prerequisite — the app currently has none, and everything below adds credentials and personal history to it |
 | 4 | **`message_id` column + IMAP reply/bounce detection** | small | Fixes a live nagging risk; repairs `reply_rate` |
 | 5 | **`SMTP_HOST=smtp.gmail.com` + warmup ramp** | one line + small | Unblocks deliverability and threading |
-| 6 | **E-Verify + H-1B + PERM datasets, cap-exempt bonus** (Gate 2) | medium | The ranking layer; all data is free and public |
-| 7 | **Agent protocol + extension skeleton** | medium | `BrowserTask`, `/api/agent/*`, MV3 shell, options page |
-| 8 | **Link resolution in-browser + passive harvest** | medium | ATS discovery flywheel; zero account risk |
-| 9 | **On-page overlay** | medium | Match score, already-applied warning, save, generate — where it starts feeling like a product |
-| 10 | **Autofill + submit detection** | large | The daily-hours saver |
-| 11 | **Authenticated search** (LinkedIn/Handshake/Indeed/Dice) | large | Highest account risk; do it last, after the harvest-first habits are established |
-| 12 | **Alumni + referral finder** | medium | Highest response rate of any channel available |
-| 13a | **Interview corpus — free sources** (GfG, Reddit, GitHub) | small | No auth, no blocking, no extension needed. Jumps the queue entirely if interviews are already scheduled. |
-| 13b | **Interview corpus — walled sources** (LeetCode, Glassdoor) | medium | Needs the extension; add once 13a proves the retrieval and scoring work |
-| 13c | **Dossier, mock interview, question bank** (rest of Stage 7) | medium | Only matters once interviews are arriving |
-| 14 | **Calibration + reranker** (Stage 8) | medium | Needs accumulated outcome data first |
-| 15 | **Local agent + selector-learning tier** | large | The long tail |
+| 6 | **Agent protocol + extension skeleton** | medium | `BrowserTask`, `/api/agent/*`, MV3 shell, options page |
+| 7 | **Link resolution in-browser + passive harvest** | medium | ATS discovery flywheel; zero account risk |
+| 8 | **On-page overlay** | medium | Match score, already-applied warning, save, generate — where it starts feeling like a product |
+| 9 | **Autofill + submit detection** | large | The daily-hours saver |
+| 10 | **Authenticated search** (LinkedIn/Handshake/Indeed/Dice) | large | Highest account risk; do it last, after the harvest-first habits are established |
+| 11 | **Alumni + referral finder** | medium | Highest response rate of any channel available |
+| 12a | **Interview corpus — free sources** (GfG, Reddit, GitHub) | small | No auth, no blocking, no extension needed. Jumps the queue entirely if interviews are already scheduled. |
+| 12b | **Interview corpus — walled sources** (LeetCode Premium tags, Glassdoor) | medium | Needs the extension; add once 12a proves the retrieval and scoring work |
+| 12c | **Dossier, mock interview, question bank** (rest of Stage 7) | medium | Only matters once interviews are arriving |
+| 13 | **Calibration + reranker** (Stage 8) | medium | Needs accumulated outcome data first |
+| 14 | **Local agent + selector-learning tier** | large | The long tail |
 
 **Note on calibration data.** A retroactive mailbox backfill would supply hundreds
 of labeled outcomes immediately — but only against a mailbox with history. The
 dedicated job-search Gmail is new, so this depends on whether earlier applications
-went to a prior address worth scanning read-only, one time. If not, item 14 is a
+went to a prior address worth scanning read-only, one time. If not, item 13 is a
 spring project.
 
 ---
