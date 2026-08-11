@@ -71,6 +71,17 @@
         {{ app.status.value | replace("_", " ") | title }}
       </span>
       {% endif %}
+      {# What the posting itself said about sponsorship, quoted on hover.
+         Advisory only — it never filters, scores or reorders anything. #}
+      {% if job.sponsorship_note %}
+      <span title="The posting says: &ldquo;{{ job.sponsorship_note }}&rdquo;"
+        class="text-xs px-2 py-1 rounded font-medium cursor-help
+        {% if job.sponsorship_direction == 'positive' %}bg-emerald-50 text-emerald-700
+        {% else %}bg-amber-50 text-amber-700{% endif %}">
+        {% if job.sponsorship_direction == 'positive' %}Sponsors visas
+        {% else %}No sponsorship{% endif %}
+      </span>
+      {% endif %}
       {% if job.source %}
       <span class="text-xs px-2 py-1 rounded font-medium
         {% if job.source == 'adzuna' %}bg-orange-50 text-orange-600

@@ -49,6 +49,11 @@ class Job(Base):
     # sentence naming the actual values that triggered it.
     filter_reason: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     filter_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What the posting said about visa sponsorship, quoted. Advisory only: it is
+    # displayed beside the job and never filters, scores or ranks it, and never
+    # reaches an LLM. `direction` is "negative" or "positive".
+    sponsorship_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sponsorship_direction: Mapped[str | None] = mapped_column(String, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

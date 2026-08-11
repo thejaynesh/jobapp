@@ -157,6 +157,102 @@ class TestKeywordFilter:
         assert passes is False
 
 
+class TestCitizenshipRestriction:
+    """
+    Postings that say outright they are closed to non-citizens are unwinnable,
+    so they filter. Sponsorship statements are a different tier entirely and
+    must not reach this decision — see TestSponsorshipIsAdvisoryOnly.
+    """
+
+    def _evaluate(self, job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+        return evaluate_keyword_filter(job, profile_data)
+
+    def test_filters_a_citizens_only_posting(self, mock_job, profile_data):
+        mock_job.description += " Applicants must be a US citizen."
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.passed is False
+        assert outcome.reason == "restricted"
+
+    def test_detail_quotes_the_posting(self, mock_job, profile_data):
+        mock_job.description += " US citizenship is required for this position."
+        outcome = self._evaluate(mock_job, profile_data)
+        assert "US citizenship is required for this position." in outcome.detail
+
+    def test_ordinary_posting_is_untouched(self, mock_job, profile_data):
+        outcome = self._evaluate(mock_job, profile_data)
+        assert outcome.passed is True
+        assert outcome.reason is None
+
+    def test_restricted_is_a_known_filter_reason(self):
+        from app.services.matcher import FILTER_REASON_LABELS
+        assert "restricted" in FILTER_REASON_LABELS
+
+
+class TestSponsorshipIsAdvisoryOnly:
+    """
+    The note is recorded and never acted on. If any of these start failing, an
+    advisory signal has quietly become a filter.
+    """
+
+    def _match(self, job, profile_data):
+        from app.services.matcher import match_job
+        with patch("app.services.matcher.llm_score_job") as scorer:
+            scorer.return_value = {
+                "score": 88, "reasoning": "Strong fit.",
+                "matched_skills": ["Python"], "missing_skills": [],
+                "seniority_fit": True, "scored_by": "test",
+            }
+            return match_job(MagicMock(), job, profile_data, "k", "url", "model")
+
+    def test_negative_statement_does_not_filter(self, mock_job, profile_data):
+        mock_job.description += " We will not sponsor visas for this position."
+        result = self._match(mock_job, profile_data)
+        assert result == "matched"
+        assert mock_job.sponsorship_direction == "negative"
+
+    def test_note_is_recorded_with_the_quote(self, mock_job, profile_data):
+        mock_job.description += " This role is not eligible for visa sponsorship."
+        self._match(mock_job, profile_data)
+        assert "not eligible for visa sponsorship" in mock_job.sponsorship_note
+
+    def test_positive_statement_is_recorded(self, mock_job, profile_data):
+        mock_job.description += " Visa sponsorship is available for this role."
+        self._match(mock_job, profile_data)
+        assert mock_job.sponsorship_direction == "positive"
+
+    def test_silent_posting_gets_no_note(self, mock_job, profile_data):
+        self._match(mock_job, profile_data)
+        assert mock_job.sponsorship_note is None
+        assert mock_job.sponsorship_direction is None
+
+    def test_note_is_recorded_even_when_filtered_for_another_reason(
+        self, mock_job, profile_data
+    ):
+        # The note is a fact about the posting, not a step in judging it, so a
+        # job rejected on title still carries what it said about sponsorship.
+        mock_job.title = "Marketing Manager"
+        mock_job.description += " We are unable to sponsor visas."
+        result = self._match(mock_job, profile_data)
+        assert result == "filtered_out"
+        assert mock_job.sponsorship_direction == "negative"
+
+
+class TestWorkAuthorizationIsNotScored:
+    """Status must not reach the model — it has no information to score with."""
+
+    def test_rubric_does_not_mention_work_authorization(self, mock_job, profile_data):
+        from app.services.matcher import _build_match_prompt
+        system = _build_match_prompt(mock_job, profile_data)[0]["content"]
+        assert "work-authorization compatibility" not in system
+        assert "Location/remote compatibility" in system
+
+    def test_rubric_tells_the_model_to_ignore_it(self, mock_job, profile_data):
+        from app.services.matcher import _build_match_prompt
+        system = _build_match_prompt(mock_job, profile_data)[0]["content"]
+        assert "Ignore visa, work-authorization and sponsorship" in system
+
+
 class TestFilterReasons:
     """Each rejection has to name itself — they were all (False, 0.0) before."""
 

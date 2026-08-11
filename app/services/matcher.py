@@ -9,6 +9,7 @@ from openai import OpenAI, RateLimitError
 
 from app.config import settings
 from app.llm.providers import call_provider, matching_fallbacks
+from app.services import eligibility
 from app.services.locations import describe_prefs, location_allowed, normalize_prefs
 from app.models.application import Application
 from app.models.job import Job, JobStatus
@@ -127,11 +128,12 @@ FILTER_REASON_LABELS = {
     "few_skills": "Too few skills in description",
     "no_description": "No job description available",
     "low_score": "AI score below your minimum",
+    "restricted": "Restricted to US citizens",
     "manual": "You filtered it manually",
 }
 
 
-def evaluate_keyword_filter(job, profile_data: dict) -> FilterOutcome:
+def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome:
     """
     The keyword prefilter, with its reasoning.
 
@@ -139,6 +141,10 @@ def evaluate_keyword_filter(job, profile_data: dict) -> FilterOutcome:
     (False, 0.0) — so a filtered job gave no clue whether the title was wrong,
     the location was, or the description simply never arrived. Each now names
     itself and the values that triggered it.
+
+    `scan` is an already-computed `eligibility.scan()` result. Callers that need
+    the advisory half of it anyway pass theirs in rather than paying for a
+    second pass over the description.
     """
     target_roles = profile_data.get("target_roles", [])
     if not _title_matches_roles(job.title, target_roles):
@@ -177,6 +183,17 @@ def evaluate_keyword_filter(job, profile_data: dict) -> FilterOutcome:
         return FilterOutcome(
             False, 0.0, "excluded_company",
             f"{job.company} is on your excluded-companies list.",
+        )
+
+    # Postings that say outright they are closed to non-citizens. Checked after
+    # the cheap title/location tests so it only runs on jobs that were otherwise
+    # worth considering, which is also the only case where the answer matters.
+    if scan is None:
+        scan = eligibility.scan(job.description)
+    if scan.blocked:
+        return FilterOutcome(
+            False, 0.0, "restricted",
+            f"{scan.restriction_label}. The posting says: “{scan.restriction_quote}”",
         )
 
     skills_flat = _flatten_skills(profile_data.get("skills", {}))
@@ -283,11 +300,13 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         "A recent or soon-graduating Master's candidate is a fit for entry/new-grad/junior roles "
         "and roles asking up to ~3 years; heavily penalize roles demanding 5+ years or 'senior/staff/lead' titles.\n"
         "  - Domain and role-type fit (backend vs mobile vs data etc., industry): 0-20\n"
-        "  - Location/remote/work-authorization compatibility: 0-15. Reward remote-friendly jobs "
+        "  - Location/remote compatibility: 0-15. Reward remote-friendly jobs "
         "when the candidate prefers remote.\n"
         "Treat transferable skills generously (e.g. strong Java experience for a Kotlin role), "
-        "but never ignore explicit hard requirements stated in the job (clearances, specific "
-        "degrees, must-have technologies).\n"
+        "but never ignore explicit hard requirements stated in the job (specific degrees, "
+        "must-have technologies).\n"
+        "Ignore visa, work-authorization and sponsorship considerations entirely: they are "
+        "handled outside this scoring step and must not affect the score or the reasoning.\n"
         "Return ONLY the JSON object, no markdown, no explanation."
     )
 
@@ -493,7 +512,15 @@ def match_job(
     budget: dict | None = None,
 ) -> str:
     """Returns 'matched', 'filtered_out', or 'rate_limited'."""
-    outcome = evaluate_keyword_filter(job, profile_data)
+    # One pass over the description feeds both halves of the eligibility read.
+    # The advisory half is recorded whatever happens next — including on jobs
+    # that go on to be filtered for an unrelated reason — because the note is a
+    # fact about the posting rather than a step in deciding its fate.
+    scan = eligibility.scan(job.description)
+    job.sponsorship_note = scan.sponsorship_note
+    job.sponsorship_direction = scan.sponsorship_direction
+
+    outcome = evaluate_keyword_filter(job, profile_data, scan=scan)
 
     if not outcome.passed:
         job.status = JobStatus.filtered_out
