@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     # Separate from APP_PASSWORD so revoking one does not revoke the other.
     AGENT_TOKEN: str = ""
     SESSION_MAX_AGE_SECONDS: int = 60 * 60 * 24 * 14
+
+    # Agent queue (/api/agent/*). The laptop leases work, runs it, posts back.
+    # How long a lease holds before the task returns to the queue. Long enough
+    # for slow page work, short enough that a closed laptop is not a long stall.
+    AGENT_LEASE_SECONDS: int = 120
+    # Poll ceiling. Stays under the ~30s idle timeout that terminates an MV3
+    # service worker, since a poll outliving its own client wakes nobody.
+    AGENT_POLL_MAX_WAIT_SECONDS: int = 25
+    # When queued work stops being worth doing. Resolving a job link matters
+    # today and not next week.
+    AGENT_TASK_TTL_HOURS: int = 24
+    AGENT_MAX_LEASE_BATCH: int = 10
     # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
     # On by default. Set false ONLY while the deployment is still on plain
     # http:// — with it on, the browser accepts the cookie at login and then

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>JobApp Agent</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      margin: 0; padding: 20px; min-width: 380px; max-width: 560px;
+    }
+    h1 { font-size: 17px; margin: 0 0 4px; }
+    .sub { color: #666; margin: 0 0 20px; font-size: 13px; }
+    label { display: block; font-weight: 600; margin: 14px 0 4px; }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 7px 9px; box-sizing: border-box;
+      border: 1px solid #bbb; border-radius: 5px; font: inherit;
+    }
+    .hint { color: #666; font-size: 12px; margin-top: 3px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 18px 0; }
+    .row label { margin: 0; font-weight: 600; }
+    button {
+      padding: 7px 14px; border-radius: 5px; border: 1px solid #bbb;
+      background: #f6f6f6; font: inherit; cursor: pointer;
+    }
+    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+    button:disabled { opacity: .55; cursor: default; }
+    .actions { display: flex; gap: 8px; margin-top: 18px; }
+    #message { margin-top: 14px; padding: 9px 11px; border-radius: 5px; display: none; }
+    #message.ok { display: block; background: #dcfce7; color: #14532d; }
+    #message.err { display: block; background: #fee2e2; color: #7f1d1d; }
+    #status { margin-top: 20px; border-top: 1px solid #e5e5e5; padding-top: 14px; font-size: 13px; }
+    #status dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; }
+    #status dt { color: #666; }
+    #status dd { margin: 0; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <h1>JobApp Agent</h1>
+  <p class="sub">Runs browser work for your server using this browser's own sessions.</p>
+
+  <label for="serverUrl">Server URL</label>
+  <input type="text" id="serverUrl" placeholder="https://your-domain.example" autocomplete="off" spellcheck="false">
+  <div class="hint">The address you open the app at, including https://</div>
+
+  <label for="token">Agent token</label>
+  <input type="password" id="token" placeholder="AGENT_TOKEN" autocomplete="off" spellcheck="false">
+  <div class="hint">The <code>AGENT_TOKEN</code> value from your server's .env — not your login password.</div>
+
+  <div class="row">
+    <input type="checkbox" id="enabled">
+    <label for="enabled">Poll for work</label>
+  </div>
+
+  <div class="actions">
+    <button id="save" class="primary">Save</button>
+    <button id="test">Test connection</button>
+  </div>
+
+  <div id="message"></div>
+
+  <div id="status">
+    <dl>
+      <dt>Agent ID</dt><dd id="s-agent">—</dd>
+      <dt>Last poll</dt><dd id="s-poll">never</dd>
+      <dt>Last error</dt><dd id="s-error">none</dd>
+    </dl>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

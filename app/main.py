@@ -24,6 +24,7 @@ from app.routers.apps import router as apps_router
 from app.routers.settings import router as settings_router
 from app.routers.outreach import router as outreach_router  # /outreach pages + /api/apps trigger
 from app.routers.runs import router as runs_router
+from app.routers.agent import router as agent_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -122,6 +123,7 @@ if _cors_origins:
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth_router)
+app.include_router(agent_router)
 app.include_router(profile_router.router)
 app.include_router(docs_router)
 app.include_router(jobs_router)
