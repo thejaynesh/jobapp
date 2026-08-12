@@ -83,9 +83,77 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "fetch_state": state(),
             "sources": TRIGGERABLE_SOURCES,
             "triggered": None,
+            "system": _system_context(db),
             **{k: v for k, v in _compare_context(request, db).items()
                if k != "request"},
         },
+    )
+
+
+def _system_context(db: Session) -> dict:
+    """
+    The state of the subsystems that have no page of their own.
+
+    Each of these previously required shelling into a container to inspect,
+    which meant nobody inspected them. Every lookup is wrapped: a panel that
+    cannot render its own status should degrade to a note, not take down the
+    fetch history it sits beside.
+    """
+    from app.services import browser_tasks, interview_corpus, mailbox
+
+    context: dict = {"agent": None, "mailbox": None, "corpus": None, "errors": []}
+
+    try:
+        context["agent"] = {
+            "queue": browser_tasks.queue_stats(db),
+            "recent": browser_tasks.recent(db, 8),
+            "last_agent": browser_tasks.last_agent(db),
+            "configured": bool((settings.AGENT_TOKEN or "").strip()),
+        }
+    except Exception as exc:
+        logger.warning("runs: agent status unavailable: %s", exc)
+        context["errors"].append(f"agent queue: {exc}")
+
+    try:
+        context["mailbox"] = mailbox.status(db)
+    except Exception as exc:
+        logger.warning("runs: mailbox status unavailable: %s", exc)
+        context["errors"].append(f"mailbox: {exc}")
+
+    try:
+        context["corpus"] = interview_corpus.coverage(db)
+    except Exception as exc:
+        logger.warning("runs: corpus coverage unavailable: %s", exc)
+        context["errors"].append(f"interview corpus: {exc}")
+
+    return context
+
+
+@router.post("/agent/ping", response_class=HTMLResponse)
+def queue_ping(request: Request, db: Session = Depends(get_db)):
+    """
+    Queue a ping task, so the extension can be tested from a page.
+
+    `ping` depends on nothing — no site reachable, no session valid — so a
+    completed one proves the whole round trip and a stuck one narrows the
+    problem to the agent rather than to whatever it was asked to do.
+    """
+    from app.services import browser_tasks
+
+    try:
+        browser_tasks.enqueue(db, "ping", {"from": "runs page"})
+    except Exception as exc:
+        logger.error("runs: could not queue ping: %s", exc)
+    return templates.TemplateResponse(
+        "runs/_system.html", {"request": request, "system": _system_context(db)}
+    )
+
+
+@router.get("/system", response_class=HTMLResponse)
+def system_status(request: Request, db: Session = Depends(get_db)):
+    """The system panel on its own, for polling while a task is in flight."""
+    return templates.TemplateResponse(
+        "runs/_system.html", {"request": request, "system": _system_context(db)}
     )
 
 

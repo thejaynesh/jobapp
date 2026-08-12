@@ -103,6 +103,27 @@ def mailbox_blocked_reason() -> str:
     return ""
 
 
+def status(db) -> dict:
+    """
+    What the poller has been doing, for the status panel.
+
+    Reads the stored state rather than touching the mail server: rendering a
+    page should not open an IMAP connection, and "when did it last run" is a
+    question about the past.
+    """
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    state = dict(((profile.data if profile else {}) or {}).get("mailbox") or {})
+    return {
+        "configured": mailbox_configured(),
+        "blocked": mailbox_blocked_reason(),
+        "last_poll": state.get("last_poll"),
+        "last_counts": state.get("last_counts") or {},
+        "username": imap_username(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------------

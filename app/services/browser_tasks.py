@@ -254,6 +254,36 @@ def heartbeat(db, task_id, *, agent_id: str = "") -> BrowserTask:
 # Visibility
 # ---------------------------------------------------------------------------
 
+def recent(db, limit: int = 10) -> list[BrowserTask]:
+    """The last few tasks, newest first, for the status panel."""
+    return (
+        db.query(BrowserTask)
+        .order_by(BrowserTask.created_at.desc())
+        .limit(max(1, min(limit, 50)))
+        .all()
+    )
+
+
+def last_agent(db) -> dict | None:
+    """
+    Which agent was last seen, and when.
+
+    The question behind the panel is "is anything out there listening", and a
+    lease is the only evidence of that — an agent that polls an empty queue
+    leaves no trace at all, so silence here means "no work has been claimed",
+    not necessarily "nobody is running".
+    """
+    task = (
+        db.query(BrowserTask)
+        .filter(BrowserTask.leased_at.isnot(None))
+        .order_by(BrowserTask.leased_at.desc())
+        .first()
+    )
+    if not task:
+        return None
+    return {"agent_id": task.agent_id or "anonymous", "at": task.leased_at}
+
+
 def queue_stats(db) -> dict:
     """Counts by status, for the options page and for debugging."""
     rows = (

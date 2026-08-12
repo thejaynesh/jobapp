@@ -70,6 +70,75 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
                 c for c in (app_obj.outreach_contacts or [])
                 if isinstance(c, dict) and (c.get("name") or c.get("email"))
             ],
+            **_interview_context(db, app_obj),
+        },
+    )
+
+
+def _interview_context(db: Session, app_obj) -> dict:
+    """
+    What the corpus knows about interviewing at this company.
+
+    Wrapped, like every other panel: an empty corpus is the normal state for a
+    long time, and a lookup that fails should cost a note rather than the
+    application page somebody was actually trying to read.
+    """
+    from app.services.interview_corpus import coverage, reports_for
+
+    company = (app_obj.job.company if app_obj.job else "") or ""
+    if not company:
+        return {"interview_reports": [], "interview_coverage": None, "interview_company": ""}
+    try:
+        return {
+            "interview_company": company,
+            "interview_reports": reports_for(db, company, limit=8),
+            "interview_coverage": coverage(db, company),
+        }
+    except Exception as exc:
+        logger.warning("apps: interview corpus unavailable: %s", exc)
+        return {"interview_reports": [], "interview_coverage": None, "interview_company": company}
+
+
+@router.post("/{app_id}/interview-research", response_class=HTMLResponse)
+def research_interviews(app_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    """
+    Gather interview writeups for this company, now.
+
+    The design rule this follows: automation decides when something usually
+    happens, the user decides when it happens now. The mailbox poller is meant
+    to fire this on an interview invite; this is the same work on demand,
+    because "I have an interview on Thursday" arrives before any automation
+    notices.
+
+    Runs inline rather than through Celery. It is a handful of HTTP calls, the
+    user is waiting on the answer, and a queued job that fails silently is a
+    worse experience than a slow button.
+    """
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    if not app_obj:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    company = (app_obj.job.company if app_obj.job else "") or ""
+    outcome = None
+    if company:
+        try:
+            from app.services.interview_corpus import ingest
+            from app.services.interview_sources import fetch_all
+
+            fetched = fetch_all(company)
+            counts = ingest(db, fetched["reports"])
+            outcome = {**counts, "sources": fetched["sources"]}
+        except Exception as exc:
+            logger.error("apps: interview research failed for %s: %s", company, exc)
+            outcome = {"error": str(exc)}
+
+    return templates.TemplateResponse(
+        "apps/partials/interview_panel.html",
+        {
+            "request": request,
+            "app": app_obj,
+            "research_outcome": outcome,
+            **_interview_context(db, app_obj),
         },
     )
 

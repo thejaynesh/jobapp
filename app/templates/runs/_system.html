@@ -1,0 +1,160 @@
+{# The subsystems that have no page of their own.
+
+   Each of these previously needed a container shell to inspect, which meant
+   nobody inspected them. Rendered as its own partial so it can be swapped in
+   place while a queued task is in flight, rather than reloading the page. #}
+<div id="system-panel"
+     class="bg-white border border-gray-200 rounded-lg p-4 mb-8 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+    <h2 class="text-base font-semibold text-gray-800">System</h2>
+    <p class="text-xs text-gray-400">
+      The parts that run without a page of their own. A zero here is worth
+      reading twice — it means either nothing to do, or something broken.
+    </p>
+  </div>
+
+  {% if system.errors %}
+  <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mb-4">
+    {% for err in system.errors %}<div>{{ err }}</div>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="grid gap-4 md:grid-cols-3">
+
+    {# ---- Browser agent ------------------------------------------------ #}
+    <div class="border border-gray-100 rounded p-3">
+      <div class="flex items-baseline justify-between mb-2">
+        <h3 class="text-sm font-semibold text-gray-700">Browser agent</h3>
+        {% if system.agent and system.agent.configured %}
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">token set</span>
+        {% else %}
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">no token</span>
+        {% endif %}
+      </div>
+
+      {% if not system.agent %}
+        <p class="text-xs text-gray-400">Queue unavailable.</p>
+      {% elif not system.agent.configured %}
+        <p class="text-xs text-gray-500">
+          Set <code>AGENT_TOKEN</code> in <code>.env</code> to open the agent API.
+        </p>
+      {% else %}
+        <dl class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs mb-2">
+          {% for label, key in [('Waiting','queued'), ('In progress','leased'),
+                                ('Done','done'), ('Failed','failed'), ('Expired','expired')] %}
+          <dt class="text-gray-500">{{ label }}</dt>
+          <dd class="text-gray-800 tabular-nums text-right">{{ system.agent.queue[key] }}</dd>
+          {% endfor %}
+        </dl>
+
+        {% if system.agent.last_agent %}
+          <p class="text-[11px] text-gray-500 mb-2">
+            Last claimed by <span class="font-mono">{{ system.agent.last_agent.agent_id }}</span>
+            at {{ system.agent.last_agent.at.strftime('%d %b %H:%M') }}
+          </p>
+        {% else %}
+          {# An agent polling an empty queue leaves no trace, so this is not
+             the same as "nobody is running". Say which. #}
+          <p class="text-[11px] text-gray-500 mb-2">
+            No task has ever been claimed. An agent that polls an empty queue
+            leaves no trace, so queue a ping to find out whether one is there.
+          </p>
+        {% endif %}
+
+        <button hx-post="/runs/agent/ping"
+                hx-target="#system-panel"
+                hx-swap="outerHTML"
+                class="w-full text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
+          Queue a test ping
+        </button>
+
+        {% if system.agent.recent %}
+        <table class="w-full text-[11px] mt-3">
+          <tbody>
+            {% for task in system.agent.recent %}
+            <tr class="border-t border-gray-100">
+              <td class="py-0.5 text-gray-600">{{ task.kind }}</td>
+              <td class="py-0.5">
+                <span class="px-1 rounded
+                  {% if task.status == 'done' %}bg-emerald-50 text-emerald-700
+                  {% elif task.status == 'queued' %}bg-blue-50 text-blue-700
+                  {% elif task.status == 'leased' %}bg-amber-50 text-amber-700
+                  {% else %}bg-gray-100 text-gray-500{% endif %}">{{ task.status }}</span>
+              </td>
+              <td class="py-0.5 text-gray-400 text-right">
+                {{ task.created_at.strftime('%H:%M') }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    {# ---- Mailbox ------------------------------------------------------ #}
+    <div class="border border-gray-100 rounded p-3">
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">Mailbox</h3>
+      {% if not system.mailbox %}
+        <p class="text-xs text-gray-400">Status unavailable.</p>
+      {% elif system.mailbox.blocked %}
+        <p class="text-xs text-gray-500">{{ system.mailbox.blocked }}</p>
+      {% else %}
+        <p class="text-[11px] text-gray-500 mb-2">
+          Reading <span class="font-mono">{{ system.mailbox.username }}</span>, read-only.
+        </p>
+        {% if system.mailbox.last_poll %}
+          <p class="text-[11px] text-gray-500 mb-2">
+            Last poll {{ system.mailbox.last_poll[:16].replace('T', ' ') }}
+          </p>
+          <dl class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+            {% for label, key in [('Scanned','scanned'), ('Replies','replies'),
+                                  ('Bounces','bounces'), ('Skipped','skipped')] %}
+            <dt class="text-gray-500">{{ label }}</dt>
+            <dd class="text-gray-800 tabular-nums text-right">
+              {{ system.mailbox.last_counts.get(key, 0) }}
+            </dd>
+            {% endfor %}
+          </dl>
+        {% else %}
+          <p class="text-xs text-gray-500">
+            Configured, but has not run yet. It polls every
+            {{ config.IMAP_POLL_INTERVAL_MINUTES if config else 15 }} minutes.
+          </p>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    {# ---- Interview corpus --------------------------------------------- #}
+    <div class="border border-gray-100 rounded p-3">
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">Interview corpus</h3>
+      {% if not system.corpus %}
+        <p class="text-xs text-gray-400">Coverage unavailable.</p>
+      {% else %}
+        <dl class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs mb-2">
+          <dt class="text-gray-500">Reports</dt>
+          <dd class="text-gray-800 tabular-nums text-right">{{ system.corpus.total }}</dd>
+          <dt class="text-gray-500">Last 6 months</dt>
+          <dd class="text-gray-800 tabular-nums text-right">{{ system.corpus.recent }}</dd>
+        </dl>
+        <table class="w-full text-[11px]">
+          <tbody>
+            {% for source, stats in system.corpus.by_source.items() %}
+            <tr class="border-t border-gray-100">
+              <td class="py-0.5 text-gray-600">{{ source }}</td>
+              <td class="py-0.5 tabular-nums text-right
+                  {% if stats.count == 0 %}text-amber-600{% else %}text-gray-800{% endif %}">
+                {{ stats.count }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <p class="text-[11px] text-gray-400 mt-2">
+          Gathered per company from an application, not on a schedule.
+        </p>
+      {% endif %}
+    </div>
+
+  </div>
+</div>

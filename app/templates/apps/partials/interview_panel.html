@@ -1,0 +1,83 @@
+{# What people have written about interviewing here.
+
+   Worth reading before applying, not just before an interview: round count and
+   reported process length are how you tell a two-week loop from a four-week one
+   while you can still decide whether to spend the time. #}
+<div id="interview-panel"
+     class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Interview reports</h2>
+    {% if interview_coverage and interview_coverage.total %}
+    <p class="text-xs text-gray-400">
+      {{ interview_coverage.total }} for {{ interview_company }},
+      {{ interview_coverage.recent }} from the last six months
+    </p>
+    {% endif %}
+  </div>
+
+  {% if research_outcome %}
+    {% if research_outcome.error %}
+    <div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2 mb-3">
+      {{ research_outcome.error }}
+    </div>
+    {% else %}
+    <div class="text-xs bg-gray-50 border border-gray-200 rounded p-2 mb-3">
+      <div class="text-gray-700 mb-1">
+        Stored {{ research_outcome.stored }}.
+        {{ research_outcome.duplicate }} already had,
+        {{ research_outcome.undated }} undated and skipped.
+      </div>
+      {# Per-source counts, because a source returning zero and a company nobody
+         wrote about look identical in a total. #}
+      <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
+        {% for source, stats in (research_outcome.sources or {}).items() %}
+        <span class="{% if stats.error %}text-amber-700{% else %}text-gray-500{% endif %}">
+          {{ source }}: {{ stats.count }}{% if stats.error %} — {{ stats.error }}{% endif %}
+        </span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  {% endif %}
+
+  {% if interview_reports %}
+  <ul class="divide-y divide-gray-100 mb-3">
+    {% for report in interview_reports %}
+    <li class="py-2">
+      <div class="flex items-baseline gap-2">
+        <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 shrink-0">
+          {{ report.source }}
+        </span>
+        <a href="{{ report.url }}" target="_blank" rel="noopener"
+           class="text-sm text-blue-600 hover:underline">{{ report.title[:110] }}</a>
+      </div>
+      <div class="text-[11px] text-gray-400 mt-0.5">
+        {{ report.posted_at.strftime('%b %Y') }}
+        {% if report.role_hint %} · {{ report.role_hint }}{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="text-xs text-gray-500 mb-3">
+    Nothing gathered for {{ interview_company or "this company" }} yet.
+    Worth doing before you apply — round count and reported process length tell
+    you whether this is a two-week loop or a four-week one.
+  </p>
+  {% endif %}
+
+  <button hx-post="/apps/{{ app.id }}/interview-research"
+          hx-target="#interview-panel"
+          hx-swap="outerHTML"
+          hx-indicator="#interview-spinner"
+          class="text-xs border border-blue-600 text-blue-600 rounded px-3 py-1 hover:bg-blue-50">
+    {% if interview_reports %}Look for more{% else %}Gather reports{% endif %}
+  </button>
+  <span id="interview-spinner" class="htmx-indicator text-xs text-gray-400 ml-2">
+    searching…
+  </span>
+  <p class="text-[11px] text-gray-400 mt-2">
+    Reddit, GeeksforGeeks and GitHub. Ranked by recency — loops change, so a
+    report from last quarter is worth several from three years ago.
+  </p>
+</div>
