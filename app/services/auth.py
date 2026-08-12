@@ -159,18 +159,35 @@ def session_max_age() -> int:
     return int(getattr(settings, "SESSION_MAX_AGE_SECONDS", 60 * 60 * 24 * 14))
 
 
-def cookie_kwargs() -> dict:
+def cookie_secure() -> bool:
     """
-    Cookie flags for `Response.set_cookie`.
+    Whether the session cookie is restricted to HTTPS.
 
-    `secure` follows DEBUG so that local http development still works, while a
-    real deployment — which terminates TLS at nginx — refuses to send the
-    session over plaintext.
+    Its own setting rather than a reading of DEBUG: "am I debugging" and "is
+    this connection encrypted" are unrelated questions, and tying them together
+    means a deployment silently loses cookie protection the day DEBUG acquires
+    any other meaning.
     """
+    return bool(getattr(settings, "SESSION_COOKIE_SECURE", True))
+
+
+def insecure_cookie_warning() -> str | None:
+    """Why the session cookie is travelling in the clear, when it is."""
+    if auth_enabled() and not cookie_secure():
+        return (
+            "SESSION_COOKIE_SECURE=false — the login cookie is sent over plain "
+            "HTTP and anyone able to observe the connection can copy it and "
+            "become you. Acceptable only until TLS is in front of this app."
+        )
+    return None
+
+
+def cookie_kwargs() -> dict:
+    """Cookie flags for `Response.set_cookie`."""
     return {
         "httponly": True,
         "samesite": "lax",
-        "secure": not bool(getattr(settings, "DEBUG", False)),
+        "secure": cookie_secure(),
         "max_age": session_max_age(),
         "path": "/",
     }

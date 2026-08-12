@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # Separate from APP_PASSWORD so revoking one does not revoke the other.
     AGENT_TOKEN: str = ""
     SESSION_MAX_AGE_SECONDS: int = 60 * 60 * 24 * 14
+    # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
+    # On by default. Set false ONLY while the deployment is still on plain
+    # http:// — with it on, the browser accepts the cookie at login and then
+    # refuses to send it back, which reads as an endless login loop rather than
+    # as an error. Turn it back on the moment TLS is in front of the app.
+    SESSION_COOKIE_SECURE: bool = True
     # Origins allowed to call the API cross-origin, comma-separated. The
     # extension's is `chrome-extension://<id>`, which is stable per install.
     CORS_ALLOW_ORIGINS: str = ""

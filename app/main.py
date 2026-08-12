@@ -95,6 +95,9 @@ async def lifespan(app: FastAPI):
             "AUTH_ENABLED=false — every route is open. Only do this when the app "
             "is not reachable from the internet."
         )
+    insecure_cookie = auth.insecure_cookie_warning()
+    if insecure_cookie:
+        logger.warning(insecure_cookie)
     yield
 
 

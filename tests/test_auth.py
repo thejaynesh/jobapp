@@ -29,7 +29,7 @@ def secured(monkeypatch, db):
     monkeypatch.setattr(settings, "APP_PASSWORD", PASSWORD)
     monkeypatch.setattr(settings, "AGENT_TOKEN", TOKEN)
     monkeypatch.setattr(settings, "SECRET_KEY", SIGNING_KEY)
-    monkeypatch.setattr(settings, "DEBUG", True)  # so cookies aren't Secure-only
+    monkeypatch.setattr(settings, "SESSION_COOKIE_SECURE", False)  # TestClient speaks http
     auth.reset_throttle()
 
     app.dependency_overrides[get_db] = lambda: db
@@ -189,8 +189,29 @@ class TestSessionCookie:
         assert "HttpOnly" in header
         assert "SameSite=lax" in header.lower().replace("samesite=lax", "SameSite=lax")
 
-    def test_cookie_is_secure_outside_debug(self, monkeypatch):
-        monkeypatch.setattr(settings, "DEBUG", False)
+    def test_cookie_is_secure_by_default(self, monkeypatch):
+        monkeypatch.delattr(settings, "SESSION_COOKIE_SECURE", raising=False)
+        assert auth.cookie_secure() is True
+
+    def test_secure_flag_can_be_turned_off_for_plain_http(self, monkeypatch):
+        monkeypatch.setattr(settings, "SESSION_COOKIE_SECURE", False)
+        assert auth.cookie_kwargs()["secure"] is False
+
+    def test_turning_it_off_is_warned_about(self, monkeypatch):
+        monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_SECURE", False)
+        assert "SESSION_COOKIE_SECURE=false" in auth.insecure_cookie_warning()
+
+    def test_no_warning_when_secure(self, monkeypatch):
+        monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_SECURE", True)
+        assert auth.insecure_cookie_warning() is None
+
+    def test_debug_no_longer_affects_cookie_security(self, monkeypatch):
+        # The two used to share a switch; a deployment must not lose cookie
+        # protection just because someone turned on debugging.
+        monkeypatch.setattr(settings, "DEBUG", True)
+        monkeypatch.setattr(settings, "SESSION_COOKIE_SECURE", True)
         assert auth.cookie_kwargs()["secure"] is True
 
     def test_a_tampered_signature_is_rejected(self, monkeypatch):
