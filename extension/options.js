@@ -13,13 +13,24 @@ const els = {
   serverUrl: document.getElementById("serverUrl"),
   token: document.getElementById("token"),
   enabled: document.getElementById("enabled"),
+  resolveLinks: document.getElementById("resolveLinks"),
   save: document.getElementById("save"),
   test: document.getElementById("test"),
   message: document.getElementById("message"),
   agent: document.getElementById("s-agent"),
   poll: document.getElementById("s-poll"),
   error: document.getElementById("s-error"),
+  kinds: document.getElementById("s-kinds"),
 };
+
+/**
+ * Reading arbitrary sites, which `resolve_link` needs and nothing else does.
+ *
+ * Kept separate from the server origin so that setting the agent up does not
+ * silently buy access to every page on the web, and so turning it off later is
+ * one click rather than a reinstall.
+ */
+const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
 
 function say(text, kind = "ok") {
   els.message.textContent = text;
@@ -46,6 +57,12 @@ async function load() {
   els.token.value = stored.token;
   els.enabled.checked = stored.enabled;
   els.agent.textContent = stored.agentId || "—";
+  els.resolveLinks.checked = await chrome.permissions.contains(BROAD_HOSTS);
+  chrome.runtime.sendMessage({ type: "supported-kinds" }, (reply) => {
+    // A dead service worker leaves no reply; that is not worth surfacing.
+    if (chrome.runtime.lastError || !reply) return;
+    els.kinds.textContent = (reply.kinds || []).join(", ") || "nothing";
+  });
   els.poll.textContent = stored.status.lastPoll
     ? new Date(stored.status.lastPoll).toLocaleString()
     : "never";
@@ -76,6 +93,22 @@ async function save() {
 
   await chrome.storage.local.set({ serverUrl, token, enabled: els.enabled.checked });
   els.serverUrl.value = serverUrl;
+
+  // Broad host access follows the checkbox in both directions. Requesting must
+  // happen in this click handler — Chrome refuses a permission prompt that is
+  // not a direct response to a gesture — and removing it here means the toggle
+  // is a real switch rather than a one-way door.
+  const hasBroad = await chrome.permissions.contains(BROAD_HOSTS);
+  if (els.resolveLinks.checked && !hasBroad) {
+    const granted = await chrome.permissions.request(BROAD_HOSTS);
+    if (!granted) {
+      els.resolveLinks.checked = false;
+      say("Saved, but link resolving stays off without permission to read sites.", "err");
+      return true;
+    }
+  } else if (!els.resolveLinks.checked && hasBroad) {
+    await chrome.permissions.remove(BROAD_HOSTS);
+  }
 
   if (els.enabled.checked) {
     // Start now rather than up to a minute from now, so switching it on and

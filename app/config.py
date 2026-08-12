@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # today and not next week.
     AGENT_TASK_TTL_HOURS: int = 24
     AGENT_MAX_LEASE_BATCH: int = 10
+    # Per-cycle ceiling on aggregator links handed to the browser to resolve.
+    # The server tries first and gets most of them; this is the remainder.
+    AGENT_LINK_RESOLVE_MAX_QUEUED: int = 100
     # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
     # On by default. Set false ONLY while the deployment is still on plain
     # http:// — with it on, the browser accepts the cookie at login and then

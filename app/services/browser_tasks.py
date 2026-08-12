@@ -207,6 +207,13 @@ def complete(db, task_id, result: dict | None = None, *, agent_id: str = "") -> 
     task.lease_expires_at = None
     db.commit()
     db.refresh(task)
+
+    # Acting on the result happens after it is durably recorded, so an ingestion
+    # bug cannot lose work the agent already did. `ingest` swallows its own
+    # failures for the same reason.
+    from app.services.agent_work import ingest
+
+    ingest(db, task)
     return task
 
 

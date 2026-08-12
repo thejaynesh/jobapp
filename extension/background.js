@@ -108,19 +108,88 @@ async function api(path, body, { timeoutMs = 40000 } = {}) {
 /**
  * What this agent can actually run.
  *
- * Only `ping` for now, deliberately: it proves the whole round trip — lease,
- * execute, report — without depending on any website being reachable or any
- * session being valid. When the real handlers land, a broken one is then
- * distinguishable from a broken protocol.
+ * `ping` earns its place by depending on nothing: it proves lease → execute →
+ * report works without any website being reachable or any session being valid,
+ * so a broken handler stays distinguishable from a broken protocol.
  */
 const HANDLERS = {
   async ping(payload) {
     return { pong: true, echo: payload ?? {}, at: new Date().toISOString() };
   },
+
+  /**
+   * Follow an aggregator redirect to the employer's real apply page.
+   *
+   * The server tries this first and gets most of them. What reaches here is
+   * what a datacenter IP could not follow — Indeed and Glassdoor answer those
+   * with an interstitial or a challenge rather than a redirect. From here it is
+   * an ordinary browser making an ordinary request, which is the entire point.
+   *
+   * `fetch` follows redirects on its own and `response.url` is where it landed,
+   * so the hop chain needs no manual walking. The body comes back too: even
+   * when the landing page is another aggregator and therefore not an apply
+   * link, it often names the company's Greenhouse or Lever board, which the
+   * server mines separately.
+   */
+  async resolve_link(payload) {
+    const url = payload && payload.url;
+    if (!url) throw new Error("resolve_link needs a url.");
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        // No cookies. Resolving a public redirect does not need the user's
+        // sessions, and sending them to an arbitrary aggregator would be a
+        // gratuitous widening of what this handler can leak.
+        credentials: "omit",
+        signal: controller.signal,
+      });
+
+      const contentType = response.headers.get("content-type") || "";
+      // Cap the body. Some landing pages are enormous, and everything the
+      // server mines out of one is in the markup near the top.
+      const html = contentType.includes("html")
+        ? (await response.text()).slice(0, 400000)
+        : "";
+
+      return { final_url: response.url, status: response.status, html };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
 };
 
-function supportedKinds() {
-  return Object.keys(HANDLERS);
+/**
+ * The permission `resolve_link` needs: fetching arbitrary job sites.
+ *
+ * Deliberately not requested at install. Reaching your own server is one thing;
+ * reading any page on the web is a materially larger ask, and it should be a
+ * separate, revocable decision rather than something bundled into setup.
+ */
+const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
+
+async function canReachTheWeb() {
+  try {
+    return await chrome.permissions.contains(BROAD_HOSTS);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * What this agent will actually claim right now.
+ *
+ * Permission-aware on purpose: leasing a kind we cannot run would take the task
+ * out of the queue only to fail it, three times, until it retires. Not asking
+ * for it leaves it queued for an engine that can.
+ */
+async function supportedKinds() {
+  const kinds = ["ping"];
+  if (await canReachTheWeb()) kinds.push("resolve_link");
+  return kinds;
 }
 
 async function runTask(task) {
@@ -147,7 +216,7 @@ async function pollOnce() {
 
     const id = await agentId();
     const { tasks } = await api("/api/agent/lease", {
-      kinds: supportedKinds(),
+      kinds: await supportedKinds(),
       agent_id: id,
       max: 5,
       wait: 25,
@@ -201,7 +270,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true; // keep the channel open for the async reply
   }
   if (message?.type === "supported-kinds") {
-    sendResponse({ kinds: supportedKinds() });
+    supportedKinds().then((kinds) => sendResponse({ kinds }));
+    return true;
   }
   return false;
 });

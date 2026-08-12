@@ -788,6 +788,15 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
             logger.error("job_fetcher: board registry update failed: %s", exc)
             board_stats = {}
 
+    # Hand what the server could not follow to the browser. Never blocks and
+    # never fails the cycle: if no agent is listening the tasks simply expire.
+    if settings.RESOLVE_APPLY_LINKS:
+        try:
+            from app.services.agent_work import enqueue_unresolved_links
+            counts["links_queued_to_browser"] = enqueue_unresolved_links(db)
+        except Exception as exc:
+            logger.error("job_fetcher: queueing browser link resolution failed: %s", exc)
+
     updated_data["last_fetch"] = {
         "at": now.isoformat(),
         "fetched": len(raw_jobs),

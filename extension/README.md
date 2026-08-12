@@ -4,9 +4,14 @@ The hands. The server decides what work exists; this runs the part that needs
 *your* browser — your residential IP, your logged-in sessions, your real
 fingerprint — and posts the results back.
 
-This is the skeleton: the protocol, the polling loop, and the settings page. It
-runs one task kind (`ping`) end to end. Link resolution, job harvesting and
-autofill are items 7–9 in the build order and slot into `HANDLERS` in
+It runs two task kinds today:
+
+| Kind | What it does | Needs |
+|---|---|---|
+| `ping` | Echoes its payload back. Proves the round trip without depending on any site being up. | nothing |
+| `resolve_link` | Follows an aggregator redirect to the employer's real apply page. | **Resolve job links** ticked |
+
+Job harvesting and autofill are items 8–9 and slot into `HANDLERS` in
 `background.js` without changing anything else.
 
 ## Installing
@@ -27,6 +32,24 @@ Then fill in:
 
 Click **Test connection**. A green line reporting queue depth means the token
 works and the server is reachable. Tick **Poll for work** and save.
+
+### Resolve job links
+
+A second, separate toggle. Aggregators (Adzuna, Jooble, Indeed) link to their
+own redirect page rather than the employer, and following those from your VPS is
+exactly the request a datacenter IP gets blocked on. Your browser is not
+blocked, so the server hands over what it could not follow and the real apply
+link comes back.
+
+It is off by default and asks separately because it needs permission to read any
+site — a materially larger ask than reaching your own server, and one that
+should not be bundled into setup. Untick it and the permission is revoked; the
+extension then stops claiming `resolve_link` work, leaving it queued for an
+engine that can run it.
+
+Those requests are sent **without cookies**. Resolving a public redirect does
+not need your sessions, and sending them to an arbitrary aggregator would widen
+what this can leak for no benefit.
 
 The browser will ask permission to access your server's address. It is requested
 at save time rather than declared in the manifest because the address is
@@ -92,10 +115,13 @@ counted against it, since a closed laptop is not a failed attempt.
 
 1. Add the name to `TASK_KINDS` in `app/models/browser_task.py`
 2. Add a handler to `HANDLERS` in `background.js`, keyed by that name
+3. If the server should act on the result, add an entry to `RESULT_HANDLERS` in
+   `app/services/agent_work.py`
 
-`supportedKinds()` reads the handler map, so the agent automatically stops
-leasing kinds it cannot run. An older extension and a newer server coexist
-safely: unknown kinds are simply never claimed by that install.
+`supportedKinds()` reports only what this install can currently run, so an agent
+never claims work it would just fail. An older extension and a newer server
+coexist safely: unknown kinds are simply never leased by that install, and stay
+queued for one that understands them.
 
 ## Testing it end to end
 
@@ -119,7 +145,18 @@ print(db.get(type(task), task.id).result)
 
 ## Privacy
 
-The extension talks to one server: the one you configure. It has no analytics,
-no third-party requests, and no remote code. The permission it requests covers
-your own deployment's origin and nothing else until a future item needs more —
-at which point it will ask again, for the specific sites involved.
+The extension reports to exactly one server: the one you configure. No
+analytics, no third-party requests, no remote code.
+
+Two permissions, asked for separately because they are not the same ask:
+
+- **Your server's origin**, requested when you save settings. Needed to reach
+  the API at all.
+- **Any site**, requested only when you tick **Resolve job links**, and removed
+  when you untick it. Used to follow aggregator redirects, with cookies
+  omitted, and for nothing else — the extension never leases a task kind it
+  cannot run, so declining this leaves that work queued rather than attempted.
+
+Nothing is read from pages you browse. `resolve_link` fetches only URLs the
+server explicitly queued, all of them aggregator links that came from your own
+job results.

@@ -52,6 +52,17 @@
     <label for="enabled">Poll for work</label>
   </div>
 
+  <div class="row">
+    <input type="checkbox" id="resolveLinks">
+    <label for="resolveLinks">Resolve job links</label>
+  </div>
+  <div class="hint">
+    Lets this extension open aggregator redirect pages (Adzuna, Jooble, Indeed)
+    to find the employer's real apply link — the step your server gets blocked
+    on. Requires permission to read any site, requested when you tick it, and
+    revocable here at any time. Requests are sent without cookies.
+  </div>
+
   <div class="actions">
     <button id="save" class="primary">Save</button>
     <button id="test">Test connection</button>
@@ -64,6 +75,7 @@
       <dt>Agent ID</dt><dd id="s-agent">—</dd>
       <dt>Last poll</dt><dd id="s-poll">never</dd>
       <dt>Last error</dt><dd id="s-error">none</dd>
+      <dt>Runs</dt><dd id="s-kinds">—</dd>
     </dl>
   </div>
 
