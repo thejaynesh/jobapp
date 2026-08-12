@@ -210,3 +210,74 @@ class TestRoundTrip:
         db.refresh(task)
         assert task.status == "done"
         assert task.result["echo"] == {"n": 1}
+
+
+class TestHarvest:
+    """Job JSON the browser offers, rather than work it was given."""
+
+    PAYLOAD = {
+        "elements": [
+            {
+                "jobPostingId": 8812345,
+                "title": "Platform Engineer",
+                "companyName": "Initech",
+                "formattedLocation": "Remote",
+                "description": {"text": "Kubernetes, mostly."},
+            }
+        ]
+    }
+
+    def test_needs_the_agent_token(self, agent):
+        response = agent.post("/api/agent/harvest", json={"payload": self.PAYLOAD})
+        assert response.status_code == 401
+
+    def test_stores_what_it_finds(self, agent, db):
+        from app.models.job import Job
+
+        body = agent.post(
+            "/api/agent/harvest",
+            json={"payload": self.PAYLOAD, "source_url": "https://www.linkedin.com/jobs/"},
+            headers=auth_header(),
+        ).json()
+        assert body["found"] == 1
+        assert body["inserted"] == 1
+        assert db.query(Job).one().company == "Initech"
+
+    def test_a_payload_with_no_jobs_is_a_normal_outcome(self, agent):
+        # The interceptor forwards indiscriminately on purpose, so "nothing in
+        # this one" is the common case rather than a client error.
+        response = agent.post(
+            "/api/agent/harvest",
+            json={"payload": {"feed": ["nothing relevant"]}},
+            headers=auth_header(),
+        )
+        assert response.status_code == 200
+        assert response.json()["found"] == 0
+
+    def test_a_missing_payload_is_refused(self, agent):
+        response = agent.post("/api/agent/harvest", json={}, headers=auth_header())
+        assert response.status_code == 400
+
+    def test_offering_the_same_page_twice_stores_one_job(self, agent, db):
+        from app.models.job import Job
+
+        for _ in range(2):
+            agent.post(
+                "/api/agent/harvest", json={"payload": self.PAYLOAD}, headers=auth_header()
+            )
+        assert db.query(Job).count() == 1
+
+    def test_an_ingestion_failure_is_not_charged_to_the_browser(self, agent, monkeypatch):
+        # The browser volunteered this and has nothing to retry; a parsing bug
+        # of ours must not come back to it as an error.
+        from app.services import harvest as harvest_service
+
+        def explode(payload):
+            raise RuntimeError("parser is broken")
+
+        monkeypatch.setattr(harvest_service, "extract_jobs", explode)
+        response = agent.post(
+            "/api/agent/harvest", json={"payload": self.PAYLOAD}, headers=auth_header()
+        )
+        assert response.status_code == 200
+        assert response.json()["found"] == 0

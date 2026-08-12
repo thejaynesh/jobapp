@@ -252,19 +252,119 @@ async function pollOnce() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Passive harvest
+// ---------------------------------------------------------------------------
+
+/**
+ * Harvest reads job JSON from LinkedIn pages you visit anyway. Narrow on
+ * purpose — one site, not the whole web — and registered at runtime rather than
+ * declared in the manifest, so installing the extension does not ask for
+ * LinkedIn access on behalf of a feature that is off.
+ */
+const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
+const HARVEST_SCRIPTS = [
+  {
+    id: "jobapp-interceptor",
+    matches: ["https://www.linkedin.com/*"],
+    js: ["interceptor.js"],
+    runAt: "document_start",
+    // MAIN shares the page's globals, which is the only way to patch the
+    // `fetch` the page itself calls. It also means no chrome.* here.
+    world: "MAIN",
+  },
+  {
+    id: "jobapp-relay",
+    matches: ["https://www.linkedin.com/*"],
+    js: ["relay.js"],
+    runAt: "document_start",
+  },
+];
+
+async function harvestRegistered() {
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts({
+      ids: HARVEST_SCRIPTS.map((s) => s.id),
+    });
+    return existing.length === HARVEST_SCRIPTS.length;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function syncHarvestScripts() {
+  const wanted =
+    (await chrome.storage.local.get({ harvest: false })).harvest &&
+    (await chrome.permissions.contains(HARVEST_HOSTS));
+  const registered = await harvestRegistered();
+
+  try {
+    if (wanted && !registered) {
+      // Unregister first: a half-registered pair from an interrupted run would
+      // otherwise make register() throw on the duplicate id.
+      await chrome.scripting
+        .unregisterContentScripts({ ids: HARVEST_SCRIPTS.map((s) => s.id) })
+        .catch(() => {});
+      await chrome.scripting.registerContentScripts(HARVEST_SCRIPTS);
+    } else if (!wanted && registered) {
+      await chrome.scripting.unregisterContentScripts({
+        ids: HARVEST_SCRIPTS.map((s) => s.id),
+      });
+    }
+  } catch (error) {
+    await setStatus({ lastError: `harvest scripts: ${error.message}` });
+  }
+}
+
+async function forwardHarvest(payload, sourceUrl) {
+  const config = await getConfig();
+  if (!config.serverUrl || !config.token) return;
+  try {
+    const counts = await api("/api/agent/harvest", { payload, source_url: sourceUrl });
+    if (counts && counts.found) {
+      await setStatus({
+        lastHarvest: new Date().toISOString(),
+        lastHarvestFound: counts.found,
+        lastHarvestNew: counts.inserted || 0,
+      });
+    }
+  } catch (error) {
+    await setStatus({ lastError: `harvest: ${error.message}` });
+  }
+}
+
 function ensureAlarm() {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
 }
 
-chrome.runtime.onInstalled.addListener(ensureAlarm);
-chrome.runtime.onStartup.addListener(ensureAlarm);
+chrome.runtime.onInstalled.addListener(() => {
+  ensureAlarm();
+syncHarvestScripts();
+  syncHarvestScripts();
+});
+chrome.runtime.onStartup.addListener(() => {
+  ensureAlarm();
+syncHarvestScripts();
+  syncHarvestScripts();
+});
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) pollOnce();
 });
 
 // The options page asks for an immediate poll after you enable the agent, so
 // that "on" and "working" are the same moment rather than a minute apart.
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "harvest") {
+    // Only from a tab we injected into. A message with no tab came from an
+    // extension page, which has no business offering harvested jobs.
+    if (!sender.tab) return false;
+    forwardHarvest(message.payload, message.sourceUrl);
+    return false;
+  }
+  if (message?.type === "sync-harvest") {
+    syncHarvestScripts().then(() => sendResponse({ ok: true }));
+    return true;
+  }
   if (message?.type === "poll-now") {
     pollOnce().then(() => sendResponse({ ok: true }));
     return true; // keep the channel open for the async reply
@@ -277,3 +377,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 ensureAlarm();
+syncHarvestScripts();

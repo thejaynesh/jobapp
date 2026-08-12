@@ -14,6 +14,7 @@ const els = {
   token: document.getElementById("token"),
   enabled: document.getElementById("enabled"),
   resolveLinks: document.getElementById("resolveLinks"),
+  harvest: document.getElementById("harvest"),
   save: document.getElementById("save"),
   test: document.getElementById("test"),
   message: document.getElementById("message"),
@@ -21,6 +22,7 @@ const els = {
   poll: document.getElementById("s-poll"),
   error: document.getElementById("s-error"),
   kinds: document.getElementById("s-kinds"),
+  harvestStatus: document.getElementById("s-harvest"),
 };
 
 /**
@@ -31,6 +33,9 @@ const els = {
  * one click rather than a reinstall.
  */
 const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
+
+/** Harvest needs one site, not the web. Asked for separately for that reason. */
+const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
 
 function say(text, kind = "ok") {
   els.message.textContent = text;
@@ -51,13 +56,19 @@ function originPattern(url) {
 
 async function load() {
   const stored = await chrome.storage.local.get({
-    serverUrl: "", token: "", enabled: false, agentId: "", status: {},
+    serverUrl: "", token: "", enabled: false, harvest: false, agentId: "", status: {},
   });
   els.serverUrl.value = stored.serverUrl;
   els.token.value = stored.token;
   els.enabled.checked = stored.enabled;
   els.agent.textContent = stored.agentId || "—";
   els.resolveLinks.checked = await chrome.permissions.contains(BROAD_HOSTS);
+  els.harvest.checked =
+    stored.harvest && (await chrome.permissions.contains(HARVEST_HOSTS));
+  els.harvestStatus.textContent = stored.status.lastHarvest
+    ? `${new Date(stored.status.lastHarvest).toLocaleString()} ` +
+      `(${stored.status.lastHarvestFound} found, ${stored.status.lastHarvestNew} new)`
+    : "never";
   chrome.runtime.sendMessage({ type: "supported-kinds" }, (reply) => {
     // A dead service worker leaves no reply; that is not worth surfacing.
     if (chrome.runtime.lastError || !reply) return;
@@ -109,6 +120,23 @@ async function save() {
   } else if (!els.resolveLinks.checked && hasBroad) {
     await chrome.permissions.remove(BROAD_HOSTS);
   }
+
+  // Harvest, same shape: the permission follows the checkbox both ways, and
+  // the content scripts follow the permission.
+  const hasHarvest = await chrome.permissions.contains(HARVEST_HOSTS);
+  if (els.harvest.checked && !hasHarvest) {
+    if (!(await chrome.permissions.request(HARVEST_HOSTS))) {
+      els.harvest.checked = false;
+    }
+  } else if (!els.harvest.checked && hasHarvest && !els.resolveLinks.checked) {
+    // Broad access already covers linkedin.com, so only give this one back
+    // when it is not being kept alive by the other toggle anyway.
+    await chrome.permissions.remove(HARVEST_HOSTS);
+  }
+  await chrome.storage.local.set({ harvest: els.harvest.checked });
+  chrome.runtime.sendMessage({ type: "sync-harvest" }, () => {
+    void chrome.runtime.lastError;
+  });
 
   if (els.enabled.checked) {
     // Start now rather than up to a minute from now, so switching it on and

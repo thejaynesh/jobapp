@@ -11,8 +11,9 @@ It runs two task kinds today:
 | `ping` | Echoes its payload back. Proves the round trip without depending on any site being up. | nothing |
 | `resolve_link` | Follows an aggregator redirect to the employer's real apply page. | **Resolve job links** ticked |
 
-Job harvesting and autofill are items 8–9 and slot into `HANDLERS` in
-`background.js` without changing anything else.
+It also harvests passively — see below. Autofill and the on-page overlay are
+items 8–9 and slot into `HANDLERS` in `background.js` without changing anything
+else.
 
 ## Installing
 
@@ -50,6 +51,53 @@ engine that can run it.
 Those requests are sent **without cookies**. Resolving a public redirect does
 not need your sessions, and sending them to an arbitrary aggregator would widen
 what this can leak for no benefit.
+
+### Harvest jobs from LinkedIn
+
+A third toggle, and the only feature that reads pages you visit.
+
+While you browse LinkedIn normally, the page asks its own API for job cards and
+receives far more than it renders — full descriptions, applicant counts, salary
+bands. This reads those responses as they arrive and forwards them to your
+server. **No extra requests are made.** Nothing is fetched, nothing is clicked,
+nothing is automated; the traffic is a person using the site, because it is.
+
+That matters most for LinkedIn specifically. The guest API your server polls
+returns ten cards a page and needs a separate request per description, which is
+what makes `LINKEDIN_MAX_DETAIL_FETCHES` the real ceiling on that source.
+Voyager returns descriptions inline, so the ceiling disappears — and harvested
+copies merge into jobs you already have, filling in descriptions the guest API
+never returned.
+
+It asks for **linkedin.com only** — not the broad access that link resolving
+needs. The content scripts are registered when you tick it and unregistered when
+you untick it, rather than declared in the manifest, so installing the extension
+does not request LinkedIn access for a feature that is off.
+
+#### Why two content scripts
+
+`interceptor.js` runs in the **MAIN** world, sharing the page's globals, which
+is the only way to patch the `fetch` the page itself calls — a normal content
+script gets an isolated copy of `window` and would patch a `fetch` nobody uses.
+That same sharing means it has no `chrome.*` to reach the extension with. So
+`relay.js` runs in the isolated world, receives findings over `postMessage`, and
+forwards them. Neither half can do the other's job.
+
+`postMessage` is a public channel, so the relay verifies the message came from
+this same window and treats the contents as untrusted. The server decides what
+is job-shaped and stores nothing it cannot recognize.
+
+#### Why it reads JSON rather than the page
+
+Scraping the DOM is the wrong layer. CSS classes are regenerated on every
+redesign, so selector-based extraction rots on someone else's schedule — and it
+rots silently, since a changed class name yields zero jobs, which looks exactly
+like an empty page.
+
+The parser on the server is shape-based for the same reason: it walks the whole
+payload looking for anything with a title, a company, and an identifier, rather
+than following `elements[].jobCardUnion.jobPosting.title`. LinkedIn can
+reorganize its response and the harvest keeps working.
 
 The browser will ask permission to access your server's address. It is requested
 at save time rather than declared in the manifest because the address is
@@ -106,6 +154,7 @@ surface to find.
 | `POST /api/agent/tasks/<id>/result` | Success. `{result, agent_id}` |
 | `POST /api/agent/tasks/<id>/fail` | Failure. `{error, agent_id}` — server decides retry or retire |
 | `POST /api/agent/tasks/<id>/heartbeat` | Extend the lease on long-running work |
+| `POST /api/agent/harvest` | Offer intercepted job JSON. `{payload, source_url}` — a push, not a task |
 
 A lease is exclusive and time-limited. If this browser closes mid-task the lease
 lapses and the task returns to the queue for whoever asks next — no attempt is
@@ -156,7 +205,17 @@ Two permissions, asked for separately because they are not the same ask:
   when you untick it. Used to follow aggregator redirects, with cookies
   omitted, and for nothing else — the extension never leases a task kind it
   cannot run, so declining this leaves that work queued rather than attempted.
+- **linkedin.com**, requested only when you tick **Harvest jobs from
+  LinkedIn**, and removed when you untick it.
 
-Nothing is read from pages you browse. `resolve_link` fetches only URLs the
-server explicitly queued, all of them aggregator links that came from your own
-job results.
+With harvest off, nothing is read from pages you browse at all: `resolve_link`
+fetches only URLs the server queued, every one of them an aggregator link that
+came from your own job results.
+
+With harvest on, job data from LinkedIn pages you visit is sent to your own
+server and nowhere else. Only responses containing job-shaped JSON are
+forwarded; the server discards anything it cannot recognize as a posting.
+Messages, connections and your feed are not job-shaped and do not survive the
+parser — but the honest statement is that the interceptor sees LinkedIn API
+responses on pages you open, and forwards the ones that mention a job title or
+company. Untick it and the scripts are unregistered outright.

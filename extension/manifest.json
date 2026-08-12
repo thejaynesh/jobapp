@@ -1,10 +1,17 @@
 {
   "manifest_version": 3,
   "name": "JobApp Agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Runs browser work for your self-hosted JobApp server, using your own logged-in sessions.",
-  "permissions": ["storage", "alarms"],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "scripting"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"

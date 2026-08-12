@@ -142,6 +142,50 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
+def _harvest(db: Session, payload) -> dict:
+    from app.services.harvest import extract_jobs, save_harvested_jobs
+
+    jobs = extract_jobs(payload)
+    if not jobs:
+        return {"found": 0, "inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
+    counts = save_harvested_jobs(db, jobs)
+    return {"found": len(jobs), **counts}
+
+
+@router.post("/harvest")
+async def harvest(request: Request, db: Session = Depends(get_db)):
+    """
+    Job JSON the browser saw, offered rather than requested.
+
+    A push rather than a task: nobody queued this, the user simply browsed a
+    page and the extension read the response it was already receiving. So there
+    is no task id to report against and no lease to hold.
+
+    Body: {"payload": <the intercepted response>, "source_url": "..."}
+
+    A payload with nothing job-shaped in it is a normal outcome, not an error —
+    the interceptor is deliberately indiscriminate about what it forwards, on
+    the grounds that guessing which endpoints matter is what rots.
+    """
+    body = await _json_body(request)
+    payload = body.get("payload")
+    if payload is None:
+        return JSONResponse({"detail": "No payload."}, status_code=400)
+    try:
+        counts = await run_in_threadpool(_harvest, db, payload)
+    except Exception as exc:
+        # Never charge a parsing bug of ours to the browser that volunteered
+        # the data; it has no way to act on the failure and nothing to retry.
+        logger.error("agent: harvest ingestion failed: %s", exc)
+        return {"found": 0, "error": "ingestion failed"}
+    if counts["found"]:
+        logger.info(
+            "agent: harvested %d job(s) from %s",
+            counts["found"], (body.get("source_url") or "an intercepted response")[:200],
+        )
+    return counts
+
+
 def _report(db: Session, action, task_id: str, agent_id: str, **kwargs) -> dict:
     task = action(db, task_id, agent_id=agent_id, **kwargs)
     return {"id": str(task.id), "status": task.status, "attempts": task.attempts}
