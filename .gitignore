@@ -12,19 +12,10 @@ dist/
 .coverage
 htmlcov/
 storage/
-alembic/versions/*.py
-!alembic/versions/.gitkeep
-!alembic/versions/0001_initial.py
-!alembic/versions/0002_add_posted_at.py
-!alembic/versions/0003_add_job_indexes.py
-!alembic/versions/0004_application_generation_status.py
-!alembic/versions/0005_seed_profile_jaynesh.py
-!alembic/versions/0006_recompute_dedupe_hashes.py
-!alembic/versions/0007_set_location_preferences.py
-!alembic/versions/0008_add_llm_attribution.py
-!alembic/versions/0009_company_boards_and_apply_url.py
-!alembic/versions/0010_fetch_run_history.py
-!alembic/versions/0011_job_filter_reason.py
-!alembic/versions/0012_outreach_contacts_and_messages.py
-!alembic/versions/0013_contact_profile_url.py
-!alembic/versions/0014_job_eligibility_scan.py
+# Migrations are tracked. This used to be an ignore-by-default rule with one
+# `!` exception per file, which meant every new migration needed a matching
+# line and forgetting one dropped it from the commit silently — `git add -A`
+# reports nothing, and the omission only surfaces on deploy as a missing
+# table. Ignore the scratch output of `alembic revision --autogenerate`
+# instead, which is the file that should not be committed unedited.
+alembic/versions/*_autogen_*.py
