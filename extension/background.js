@@ -316,6 +316,84 @@ async function syncHarvestScripts() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// On-page overlay
+// ---------------------------------------------------------------------------
+
+/**
+ * Job sites the overlay draws on. A list rather than a wildcard: it covers the
+ * ATS boards where applications actually happen, and asking for those by name
+ * is a smaller and more legible request than "every site you visit".
+ */
+const OVERLAY_MATCHES = [
+  "https://www.linkedin.com/jobs/*",
+  "https://boards.greenhouse.io/*",
+  "https://job-boards.greenhouse.io/*",
+  "https://jobs.lever.co/*",
+  "https://jobs.ashbyhq.com/*",
+  "https://*.myworkdayjobs.com/*",
+  "https://apply.workable.com/*",
+  "https://jobs.smartrecruiters.com/*",
+  "https://*.recruitee.com/*",
+];
+const OVERLAY_HOSTS = { origins: OVERLAY_MATCHES };
+const OVERLAY_SCRIPTS = [
+  {
+    id: "jobapp-overlay",
+    matches: OVERLAY_MATCHES,
+    js: ["overlay.js"],
+    runAt: "document_idle",
+  },
+];
+
+async function syncOverlayScripts() {
+  const wanted =
+    (await chrome.storage.local.get({ overlay: false })).overlay &&
+    (await chrome.permissions.contains(OVERLAY_HOSTS));
+  let registered = false;
+  try {
+    registered =
+      (await chrome.scripting.getRegisteredContentScripts({ ids: ["jobapp-overlay"] }))
+        .length > 0;
+  } catch (_) {
+    registered = false;
+  }
+
+  try {
+    if (wanted && !registered) {
+      await chrome.scripting
+        .unregisterContentScripts({ ids: ["jobapp-overlay"] })
+        .catch(() => {});
+      await chrome.scripting.registerContentScripts(OVERLAY_SCRIPTS);
+    } else if (!wanted && registered) {
+      await chrome.scripting.unregisterContentScripts({ ids: ["jobapp-overlay"] });
+    }
+  } catch (error) {
+    await setStatus({ lastError: `overlay scripts: ${error.message}` });
+  }
+}
+
+/**
+ * The overlay's only route to the server.
+ *
+ * It cannot call the API itself: the token lives in extension storage, and a
+ * content script that held it would be handing a credential to whatever page it
+ * is running on. So the panel asks, this fetches, and the token never enters
+ * the page's process.
+ */
+async function overlayApi(path, body) {
+  const config = await getConfig();
+  if (!config.serverUrl || !config.token) {
+    return { error: "Set your server URL and token in the extension options." };
+  }
+  try {
+    const data = await api(path, body);
+    return { data, serverUrl: config.serverUrl };
+  } catch (error) {
+    return { error: error.message, serverUrl: config.serverUrl };
+  }
+}
+
 async function forwardHarvest(payload, sourceUrl) {
   const config = await getConfig();
   if (!config.serverUrl || !config.token) return;
@@ -340,11 +418,13 @@ function ensureAlarm() {
 chrome.runtime.onInstalled.addListener(() => {
   ensureAlarm();
 syncHarvestScripts();
+syncOverlayScripts();
   syncHarvestScripts();
 });
 chrome.runtime.onStartup.addListener(() => {
   ensureAlarm();
 syncHarvestScripts();
+syncOverlayScripts();
   syncHarvestScripts();
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -362,7 +442,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (message?.type === "sync-harvest") {
-    syncHarvestScripts().then(() => sendResponse({ ok: true }));
+    Promise.all([syncHarvestScripts(), syncOverlayScripts()]).then(() =>
+      sendResponse({ ok: true }),
+    );
+    return true;
+  }
+  if (message?.type === "overlay-api") {
+    if (!sender.tab) return false;
+    overlayApi(message.path, message.body).then(sendResponse);
     return true;
   }
   if (message?.type === "poll-now") {
@@ -378,3 +465,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 ensureAlarm();
 syncHarvestScripts();
+syncOverlayScripts();

@@ -186,6 +186,74 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
     return counts
 
 
+@router.get("/job-context")
+async def job_context(url: str = "", db: Session = Depends(get_db)):
+    """
+    What we already know about the posting the user is looking at.
+
+    A GET with the URL as a parameter, because it is a read the overlay makes
+    on every job page and caching it is the browser's business, not ours.
+    """
+    from app.services.job_context import context
+
+    if not url.strip():
+        return JSONResponse({"detail": "No url."}, status_code=400)
+    return await run_in_threadpool(context, db, url)
+
+
+def _prepare(db: Session, url: str, posting: dict) -> dict:
+    from app.services.job_context import prepare
+
+    result = prepare(db, url, posting)
+    if not result.get("ok"):
+        return result
+
+    # Only write documents for an application that did not already exist.
+    # Re-queueing on a second click would overwrite a resume the user may have
+    # already edited, which is not what a button called "generate" implies.
+    if result.get("created_application"):
+        try:
+            from app.tasks.generate import generate_docs
+
+            # retry=False because this is on a click path. The default publish
+            # retry policy spends the better part of a minute on an unreachable
+            # broker, which the person waiting on the button reads as a hang;
+            # failing at once and saying so is the more honest answer.
+            generate_docs.apply_async(
+                args=[result["application_id"]], retry=False
+            )
+            result["generating"] = True
+        except Exception as exc:
+            # Celery being unreachable should not lose the application we just
+            # opened; the app's own page can regenerate.
+            logger.error("agent: could not queue generation: %s", exc)
+            result["generating"] = False
+    else:
+        result["generating"] = False
+    return result
+
+
+@router.post("/prepare")
+async def prepare_application(request: Request, db: Session = Depends(get_db)):
+    """
+    Take a posting from "on screen" to "documents being written".
+
+    Body: {"url": "...", "posting": {title, company, location, description}}
+
+    The posting details are a fallback for a job we have never fetched — the
+    overlay reads them off the page it is already on, so a listing the pipeline
+    never found is still one click from an application.
+    """
+    body = await _json_body(request)
+    url = str(body.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"detail": "No url."}, status_code=400)
+    posting = body.get("posting")
+    if not isinstance(posting, dict):
+        posting = {}
+    return await run_in_threadpool(_prepare, db, url, posting)
+
+
 def _report(db: Session, action, task_id: str, agent_id: str, **kwargs) -> dict:
     task = action(db, task_id, agent_id=agent_id, **kwargs)
     return {"id": str(task.id), "status": task.status, "attempts": task.attempts}

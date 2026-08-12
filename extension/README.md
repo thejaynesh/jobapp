@@ -11,8 +11,8 @@ It runs two task kinds today:
 | `ping` | Echoes its payload back. Proves the round trip without depending on any site being up. | nothing |
 | `resolve_link` | Follows an aggregator redirect to the employer's real apply page. | **Resolve job links** ticked |
 
-It also harvests passively — see below. Autofill and the on-page overlay are
-items 8–9 and slot into `HANDLERS` in `background.js` without changing anything
+It also harvests passively and draws an on-page overlay — see below. Autofill is
+item 9 and slots into `HANDLERS` in `background.js` without changing anything
 else.
 
 ## Installing
@@ -99,6 +99,30 @@ payload looking for anything with a title, a company, and an identifier, rather
 than following `elements[].jobCardUnion.jobPosting.title`. LinkedIn can
 reorganize its response and the harvest keeps working.
 
+### Show the overlay on job pages
+
+A small panel on the job posting itself, answering the three things worth
+knowing before you spend an hour on an application: **have I seen this, what did
+it score, did I already apply.** All three were already in your tracker; the
+only reason they were hard to reach is that they lived on a different tab.
+
+It also carries what the eligibility scan found — the amber *no sponsorship* and
+red *US citizens only* flags — and a button that saves the posting and starts
+writing documents for it. That button works on postings your pipeline never
+fetched: it reads the page's own JSON-LD, which is what ATS boards publish for
+Google Jobs, so an employer's careers page you found yourself is one click from
+an application.
+
+It asks for the named boards only — LinkedIn jobs, Greenhouse, Lever, Ashby,
+Workday, Workable, SmartRecruiters, Recruitee — rather than a wildcard.
+
+Two things about how it is built. It draws inside a **closed shadow root**,
+because job sites ship aggressive global CSS and a plain injected div inherits
+all of it; a panel that looks right on Greenhouse would be unreadable on
+Workday. And it **never sees your token** — the panel asks the service worker,
+which makes the request, so the credential never enters the page's process.
+Nothing is requested until you open the panel.
+
 The browser will ask permission to access your server's address. It is requested
 at save time rather than declared in the manifest because the address is
 different for every deployment — declaring it up front would mean an install
@@ -155,6 +179,8 @@ surface to find.
 | `POST /api/agent/tasks/<id>/fail` | Failure. `{error, agent_id}` — server decides retry or retire |
 | `POST /api/agent/tasks/<id>/heartbeat` | Extend the lease on long-running work |
 | `POST /api/agent/harvest` | Offer intercepted job JSON. `{payload, source_url}` — a push, not a task |
+| `GET /api/agent/job-context?url=` | What we know about a posting: score, flags, whether you applied |
+| `POST /api/agent/prepare` | Save a posting and open an application for it. `{url, posting}` |
 
 A lease is exclusive and time-limited. If this browser closes mid-task the lease
 lapses and the task returns to the queue for whoever asks next — no attempt is
@@ -207,6 +233,9 @@ Two permissions, asked for separately because they are not the same ask:
   cannot run, so declining this leaves that work queued rather than attempted.
 - **linkedin.com**, requested only when you tick **Harvest jobs from
   LinkedIn**, and removed when you untick it.
+- **The named job boards**, requested only when you tick **Show the overlay on
+  job pages**. The overlay reads the page it is on only when you open the
+  panel, and only to fill in a posting you asked it to save.
 
 With harvest off, nothing is read from pages you browse at all: `resolve_link`
 fetches only URLs the server queued, every one of them an aggregator link that

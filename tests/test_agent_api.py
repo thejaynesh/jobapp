@@ -30,6 +30,24 @@ def auth_header(token=TOKEN):
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.fixture
+def no_broker(monkeypatch):
+    """
+    Queue tasks into nothing.
+
+    Without this the endpoint really tries to reach Redis and waits out the
+    connect timeout, which makes these tests slow and — worse — makes them
+    depend on whether a broker happens to be reachable from the test host.
+    """
+    from app.tasks import generate
+
+    sent = []
+    monkeypatch.setattr(
+        generate.generate_docs, "apply_async", lambda *a, **k: sent.append((a, k))
+    )
+    return sent
+
+
 class TestAuthentication:
     def test_rejects_a_missing_token(self, agent):
         assert agent.get("/api/agent/hello").status_code == 401
@@ -281,3 +299,80 @@ class TestHarvest:
         )
         assert response.status_code == 200
         assert response.json()["found"] == 0
+
+
+class TestJobContextEndpoint:
+    """What the on-page overlay reads."""
+
+    def _job(self, db):
+        from datetime import datetime, timezone
+        from app.models.job import Job
+        from app.services.deduplication import compute_dedupe_hash
+
+        job = Job(
+            source="linkedin",
+            source_urls=["https://www.linkedin.com/jobs/view/3901234567/"],
+            url="https://www.linkedin.com/jobs/view/3901234567/",
+            title="Senior Backend Engineer",
+            company="Acme Corp",
+            location="Boston, MA",
+            description="A job.",
+            llm_score=77,
+            matched_by="llm",
+            dedupe_hash=compute_dedupe_hash("Acme Corp", "Senior Backend Engineer", "Boston, MA"),
+            fetched_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        return job
+
+    def test_needs_the_agent_token(self, agent):
+        response = agent.get("/api/agent/job-context?url=https://example.com/1")
+        assert response.status_code == 401
+
+    def test_reports_an_unknown_posting(self, agent):
+        body = agent.get(
+            "/api/agent/job-context?url=https://example.com/nope", headers=auth_header()
+        ).json()
+        assert body == {"known": False}
+
+    def test_reports_a_known_posting(self, agent, db):
+        self._job(db)
+        body = agent.get(
+            "/api/agent/job-context?url=https://www.linkedin.com/jobs/view/3901234567/?refId=x",
+            headers=auth_header(),
+        ).json()
+        assert body["known"] is True
+        assert body["job"]["score"] == 77
+
+    def test_a_missing_url_is_refused(self, agent):
+        response = agent.get("/api/agent/job-context", headers=auth_header())
+        assert response.status_code == 400
+
+    def test_prepare_opens_an_application(self, agent, db, no_broker):
+        job = self._job(db)
+        body = agent.post(
+            "/api/agent/prepare",
+            json={"url": job.url},
+            headers=auth_header(),
+        ).json()
+        assert body["ok"] is True
+        assert body["path"].startswith("/apps/")
+
+    def test_prepare_without_a_url_is_refused(self, agent):
+        response = agent.post("/api/agent/prepare", json={}, headers=auth_header())
+        assert response.status_code == 400
+
+    def test_prepare_stores_an_unknown_posting_from_the_page(self, agent, db, no_broker):
+        from app.models.job import Job
+
+        body = agent.post(
+            "/api/agent/prepare",
+            json={
+                "url": "https://boards.greenhouse.io/example/jobs/7",
+                "posting": {"title": "Platform Engineer", "company": "Example Inc"},
+            },
+            headers=auth_header(),
+        ).json()
+        assert body["ok"] is True
+        assert db.query(Job).filter(Job.company == "Example Inc").count() == 1

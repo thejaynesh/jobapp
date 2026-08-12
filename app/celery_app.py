@@ -21,6 +21,13 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    # Fail fast when Redis is unreachable. The default connect timeout is long
+    # enough that a web request queueing a task — the overlay's "write
+    # documents" button, say — reads as a hang rather than as an error. Workers
+    # still retry on their own schedule, so a short timeout here just means
+    # noticing sooner rather than giving up.
+    broker_transport_options={"socket_connect_timeout": 3, "socket_timeout": 3},
+    redis_socket_connect_timeout=3,
 )
 
 celery_app.conf.beat_schedule = {

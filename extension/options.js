@@ -15,6 +15,7 @@ const els = {
   enabled: document.getElementById("enabled"),
   resolveLinks: document.getElementById("resolveLinks"),
   harvest: document.getElementById("harvest"),
+  overlay: document.getElementById("overlay"),
   save: document.getElementById("save"),
   test: document.getElementById("test"),
   message: document.getElementById("message"),
@@ -37,6 +38,21 @@ const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
 /** Harvest needs one site, not the web. Asked for separately for that reason. */
 const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
 
+/** Where the overlay draws. Named boards rather than a wildcard. */
+const OVERLAY_HOSTS = {
+  origins: [
+    "https://www.linkedin.com/jobs/*",
+    "https://boards.greenhouse.io/*",
+    "https://job-boards.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://jobs.ashbyhq.com/*",
+    "https://*.myworkdayjobs.com/*",
+    "https://apply.workable.com/*",
+    "https://jobs.smartrecruiters.com/*",
+    "https://*.recruitee.com/*",
+  ],
+};
+
 function say(text, kind = "ok") {
   els.message.textContent = text;
   els.message.className = kind;
@@ -56,7 +72,8 @@ function originPattern(url) {
 
 async function load() {
   const stored = await chrome.storage.local.get({
-    serverUrl: "", token: "", enabled: false, harvest: false, agentId: "", status: {},
+    serverUrl: "", token: "", enabled: false, harvest: false, overlay: false,
+    agentId: "", status: {},
   });
   els.serverUrl.value = stored.serverUrl;
   els.token.value = stored.token;
@@ -65,6 +82,8 @@ async function load() {
   els.resolveLinks.checked = await chrome.permissions.contains(BROAD_HOSTS);
   els.harvest.checked =
     stored.harvest && (await chrome.permissions.contains(HARVEST_HOSTS));
+  els.overlay.checked =
+    stored.overlay && (await chrome.permissions.contains(OVERLAY_HOSTS));
   els.harvestStatus.textContent = stored.status.lastHarvest
     ? `${new Date(stored.status.lastHarvest).toLocaleString()} ` +
       `(${stored.status.lastHarvestFound} found, ${stored.status.lastHarvestNew} new)`
@@ -133,7 +152,19 @@ async function save() {
     // when it is not being kept alive by the other toggle anyway.
     await chrome.permissions.remove(HARVEST_HOSTS);
   }
-  await chrome.storage.local.set({ harvest: els.harvest.checked });
+  const hasOverlay = await chrome.permissions.contains(OVERLAY_HOSTS);
+  if (els.overlay.checked && !hasOverlay) {
+    if (!(await chrome.permissions.request(OVERLAY_HOSTS))) {
+      els.overlay.checked = false;
+    }
+  } else if (!els.overlay.checked && hasOverlay && !els.resolveLinks.checked) {
+    await chrome.permissions.remove(OVERLAY_HOSTS);
+  }
+
+  await chrome.storage.local.set({
+    harvest: els.harvest.checked,
+    overlay: els.overlay.checked,
+  });
   chrome.runtime.sendMessage({ type: "sync-harvest" }, () => {
     void chrome.runtime.lastError;
   });
