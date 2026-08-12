@@ -44,6 +44,18 @@ def db():
         connection.close()
 
 
+@pytest.fixture(autouse=True)
+def _auth_disabled_by_default(monkeypatch):
+    """
+    Route tests exercise their own subject, not the front door.
+
+    Authentication is enforced by middleware in front of every route, so leaving
+    it on would make every existing route test a login test. `tests/test_auth.py`
+    turns it back on explicitly for the tests that are about the gate itself.
+    """
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+
+
 @pytest.fixture
 def client(db):
     from app.main import app

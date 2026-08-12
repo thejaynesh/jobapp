@@ -9,6 +9,23 @@ class Settings(BaseSettings):
     REDIS_URL: str
     SECRET_KEY: str
 
+    # ---- Authentication -------------------------------------------------
+    # On by default: this application holds a full application history, a
+    # profile, and — once the mailbox integration lands — mail credentials, and
+    # it is normally deployed on a public VPS. Enabling it without configuring
+    # it does not fall back to open access; the app serves 503 until it is set
+    # up (see services.auth.misconfiguration).
+    AUTH_ENABLED: bool = True
+    # The password for the web UI. A long random string; there is no username.
+    APP_PASSWORD: str = ""
+    # Bearer token for /api/agent/* — the browser extension and local agent.
+    # Separate from APP_PASSWORD so revoking one does not revoke the other.
+    AGENT_TOKEN: str = ""
+    SESSION_MAX_AGE_SECONDS: int = 60 * 60 * 24 * 14
+    # Origins allowed to call the API cross-origin, comma-separated. The
+    # extension's is `chrome-extension://<id>`, which is stable per install.
+    CORS_ALLOW_ORIGINS: str = ""
+
     NVIDIA_NIM_API_KEY: str
     NVIDIA_NIM_BASE_URL: str
     NVIDIA_NIM_MODEL: str = "meta/llama-3.3-70b-instruct"

@@ -2,16 +2,21 @@ from contextlib import asynccontextmanager
 import logging
 import subprocess
 import traceback
+from urllib.parse import quote
 
 from fastapi import FastAPI, Depends, Request
 from fastapi.exceptions import HTTPException, RequestValidationError
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from app.config import settings
 from app.database import get_db, SessionLocal
+from app.services import auth
+from app.routers.auth import router as auth_router
 from app.routers import profile as profile_router
 from app.routers.docs import router as docs_router
 from app.routers.jobs import router as jobs_router
@@ -82,11 +87,38 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("alembic upgrade error: %s", exc)
     _seed_profile_if_empty()
+    problem = auth.misconfiguration()
+    if problem:
+        logger.error("AUTHENTICATION NOT ENFORCED — serving 503 until fixed: %s", problem)
+    elif not auth.auth_enabled():
+        logger.warning(
+            "AUTH_ENABLED=false — every route is open. Only do this when the app "
+            "is not reachable from the internet."
+        )
     yield
 
 
 app = FastAPI(title="JobApp", lifespan=lifespan)
+
+_cors_origins = [
+    origin.strip()
+    for origin in (settings.CORS_ALLOW_ORIGINS or "").split(",")
+    if origin.strip()
+]
+if _cors_origins:
+    # For the extension, whose origin is chrome-extension://<id>. Credentials
+    # stay off: the agent authenticates with a bearer token, so allowing cookies
+    # cross-origin would widen the surface for nothing.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.include_router(auth_router)
 app.include_router(profile_router.router)
 app.include_router(docs_router)
 app.include_router(jobs_router)
@@ -98,6 +130,88 @@ app.include_router(runs_router)
 
 def _is_htmx(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
+
+
+# Reachable without a session. /health is here so container health checks and
+# uptime monitors keep working; it reports liveness and nothing about the user.
+_PUBLIC_PATHS = frozenset({"/health", "/login"})
+_PUBLIC_PREFIXES = ("/static/",)
+
+# Served with a bearer token instead of a session — there is no browser here to
+# show a login form to.
+_AGENT_PREFIX = "/api/agent"
+
+
+def _is_public(path: str) -> bool:
+    return path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES)
+
+
+def _unauthenticated(request: Request) -> Response:
+    """
+    Turn away a browser request, in whichever way the caller can act on.
+
+    An HTMX request that gets a 303 will follow it and paste the login page
+    into whatever fragment it was updating, so those get HX-Redirect instead,
+    which makes the browser navigate.
+    """
+    destination = request.url.path
+    if request.url.query:
+        destination = f"{destination}?{request.url.query}"
+    login_url = f"/login?next={quote(destination, safe='')}"
+
+    if _is_htmx(request):
+        return Response(status_code=401, headers={"HX-Redirect": login_url})
+    return RedirectResponse(url=login_url, status_code=303)
+
+
+@app.middleware("http")
+async def require_authentication(request: Request, call_next):
+    """
+    The single gate in front of everything.
+
+    Deliberately middleware rather than a per-router dependency: a dependency
+    protects the routes somebody remembered to add it to, and the failure mode
+    of forgetting is an endpoint that silently serves the user's application
+    history to the internet.
+    """
+    path = request.url.path
+    # Every router builds its own Jinja2Templates, but `request` is in all of
+    # their contexts, so the scope is the one channel that reaches every
+    # template without threading a variable through every route signature.
+    request.scope["auth_enabled"] = auth.auth_enabled()
+
+    problem = auth.misconfiguration()
+    if problem and path != "/health":
+        # Configured to authenticate but unable to. Refusing is the only safe
+        # reading: falling back to open access would make a misconfiguration
+        # indistinguishable from a working deployment.
+        return JSONResponse(
+            {"detail": f"Authentication is not configured. {problem}"},
+            status_code=503,
+        )
+
+    if not auth.auth_enabled() or _is_public(path):
+        return await call_next(request)
+
+    if path.startswith(_AGENT_PREFIX):
+        if not auth.agent_auth_configured():
+            return JSONResponse(
+                {"detail": "AGENT_TOKEN is not set, so the agent API is closed."},
+                status_code=503,
+            )
+        token = auth.bearer_token(request.headers.get("Authorization"))
+        if not auth.verify_agent_token(token):
+            return JSONResponse(
+                {"detail": "Invalid or missing agent token."},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
+    if auth.session_valid(request.cookies.get(auth.SESSION_COOKIE)):
+        return await call_next(request)
+
+    return _unauthenticated(request)
 
 
 @app.exception_handler(HTTPException)

@@ -18,6 +18,11 @@
         <a href="/outreach" class="text-gray-600 hover:text-blue-600 text-sm">Outreach</a>
         <a href="/runs" class="text-gray-600 hover:text-blue-600 text-sm">Fetch runs</a>
         <a href="/settings" class="text-gray-600 hover:text-blue-600 text-sm">Settings</a>
+        {% if request.scope.get("auth_enabled") %}
+        <form method="post" action="/logout" class="ml-auto">
+          <button type="submit" class="text-gray-400 hover:text-blue-600 text-sm">Sign out</button>
+        </form>
+        {% endif %}
     </nav>
     <main class="max-w-5xl mx-auto px-4 py-6 w-full">
         {% block content %}{% endblock %}
