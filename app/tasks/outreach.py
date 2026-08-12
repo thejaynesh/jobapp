@@ -109,6 +109,34 @@ def process_followups() -> dict:
         db.close()
 
 
+@celery_app.task(name="app.tasks.outreach.poll_mailbox", soft_time_limit=300)
+def poll_mailbox() -> dict:
+    """
+    Read the mailbox for replies and bounces.
+
+    Silent when unconfigured. This runs on a schedule whether or not anyone has
+    set up IMAP, and an error every fifteen minutes for a feature nobody turned
+    on is noise that trains you to ignore the log.
+    """
+    from app.database import SessionLocal
+    from app.services.mailbox import MailboxError, mailbox_configured, poll
+
+    if not mailbox_configured():
+        return {"skipped": "not configured"}
+
+    db = SessionLocal()
+    try:
+        return poll(db)
+    except MailboxError as exc:
+        logger.error("poll_mailbox: %s", exc)
+        return {"error": str(exc)}
+    except Exception as exc:
+        logger.error("poll_mailbox failed: %s", exc)
+        return {"error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.outreach.send_message_task", soft_time_limit=120)
 def send_message_task(message_id: str, allow_guessed: bool = False) -> dict:
     """Deliver one already-drafted email. Only ever queued by an explicit send."""

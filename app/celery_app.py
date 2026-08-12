@@ -41,6 +41,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.outreach.process_followups",
         "schedule": celery_schedule(settings.OUTREACH_FOLLOWUP_INTERVAL_HOURS * 3600),
     },
+    "poll-mailbox": {
+        "task": "app.tasks.outreach.poll_mailbox",
+        "schedule": celery_schedule(settings.IMAP_POLL_INTERVAL_MINUTES * 60),
+    },
 }
 
 

@@ -125,6 +125,23 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = ""    # defaults to the profile's name
     SMTP_TIMEOUT: int = 30
 
+    # IMAP. Reading the mailbox is what makes reply and bounce detection a
+    # mechanism rather than a habit — OUTREACH_AUTO_DRAFT_FOLLOWUPS is on by
+    # default, and without this the guard against chasing someone who already
+    # answered depends on remembering to click a button. Off until switched on.
+    IMAP_ENABLED: bool = False
+    IMAP_HOST: str = ""          # imap.gmail.com for Gmail/Workspace
+    IMAP_PORT: int = 993
+    IMAP_USERNAME: str = ""      # defaults to SMTP_USERNAME
+    IMAP_PASSWORD: str = ""      # defaults to SMTP_PASSWORD (a Gmail app password)
+    IMAP_FOLDER: str = "INBOX"
+    IMAP_TIMEOUT: int = 30
+    # How far back the first poll looks. Later polls resume from the last UID,
+    # so this only bounds the initial scan of what may be years of mail.
+    IMAP_LOOKBACK_DAYS: int = 14
+    IMAP_MAX_MESSAGES_PER_POLL: int = 200
+    IMAP_POLL_INTERVAL_MINUTES: int = 15
+
     # Job source API keys
     ADZUNA_APP_ID: str = ""
     ADZUNA_APP_KEY: str = ""

@@ -190,6 +190,12 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
     profile_data = (profile.data if profile else {}) or {}
 
     mail = build_email(message, profile_data, _attachments(db, message.application))
+    # Recorded before delivery, not after: a send that succeeds and then fails to
+    # write the id back would leave a message on the wire whose reply we could
+    # never recognize. A stored id for a message that never left is harmless —
+    # nothing will ever quote it.
+    message.message_id = mail["Message-ID"]
+    db.commit()
     try:
         _deliver(mail)
     except SendError as exc:

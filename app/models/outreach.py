@@ -168,6 +168,11 @@ class OutreachMessage(Base):
     # True once a human edited the body, so regeneration warns before clobbering.
     edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # The RFC 5322 Message-ID this went out with. Kept because a reply quotes it
+    # in In-Reply-To/References, which makes "they answered" a header match
+    # rather than a guess about who a mail is from and what it is about.
+    message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     follow_up_due_at: Mapped[datetime | None] = mapped_column(
