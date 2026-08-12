@@ -1,0 +1,46 @@
+# Caddy terminates TLS in front of the app.
+#
+# Certificates are obtained and renewed automatically from Let's Encrypt on
+# first request for the domain — there is no certbot step and no renewal cron.
+# Two things this depends on, both easy to get wrong:
+#
+#   - APP_DOMAIN must already resolve to this machine. Issuance works by Let's
+#     Encrypt connecting back to the name over port 80, so DNS has to be live
+#     first; starting Caddy before the record propagates just fails and retries.
+#   - The caddy_data volume must persist. It holds the certificates and the
+#     account key, and re-issuing on every restart runs into rate limits.
+#
+# Port 80 stays open on purpose: it carries the renewal challenge, and Caddy
+# uses it to redirect plain http:// visitors to https://.
+
+{$APP_DOMAIN} {
+	request_body {
+		max_size 10MB
+	}
+
+	# Downloads. handle_path strips the /storage prefix, so /storage/x.pdf reads
+	# /storage/x.pdf from the volume. Content-Disposition forces a download
+	# rather than letting the browser render a stored file inline.
+	handle_path /storage/* {
+		root * /storage
+		header Content-Disposition attachment
+		file_server
+	}
+
+	handle {
+		# Caddy sets X-Forwarded-Proto itself, which is how the app knows the
+		# original request was HTTPS even though this hop is plain HTTP.
+		reverse_proxy web:8000 {
+			transport http {
+				dial_timeout 10s
+				read_timeout 60s
+			}
+		}
+	}
+}
+
+# Both spellings of the domain should work; send www to the bare name so there
+# is one canonical URL and one place cookies are set.
+www.{$APP_DOMAIN} {
+	redir https://{$APP_DOMAIN}{uri} permanent
+}
