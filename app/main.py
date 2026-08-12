@@ -74,19 +74,44 @@ def _seed_profile_if_empty() -> None:
         db.close()
 
 
+# Why the schema could not be brought up to date, or None. Set by the lifespan,
+# read by the middleware, which refuses to serve while it is populated.
+#
+# The alternative — log it and carry on — means new code runs against an old
+# schema, and the first symptom is an UndefinedTable traceback from whichever
+# feature happens to touch the missing column first. That reads as a bug in the
+# feature rather than an unapplied migration, which is a long way from the
+# actual problem. Refusing is the same reasoning as the auth 503: a deployment
+# that cannot reach a working state should say so rather than half-serve.
+_migration_failure: str | None = None
+
+
+def migration_failure() -> str | None:
+    return _migration_failure
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _migration_failure
+    _migration_failure = None
     try:
         result = subprocess.run(
             ["alembic", "upgrade", "head"],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
-            logger.error("alembic upgrade failed: %s", result.stderr or result.stdout)
+            # The tail rather than the head: alembic puts the actual cause last,
+            # under the banner lines that are the same for every failure.
+            detail = (result.stderr or result.stdout or "").strip()[-800:]
+            _migration_failure = detail or "alembic exited non-zero with no output."
+            logger.error(
+                "SCHEMA MIGRATION FAILED — serving 503 until fixed: %s", _migration_failure
+            )
         else:
             logger.info("alembic upgrade head: %s", result.stdout.strip() or "up to date")
     except Exception as exc:
-        logger.error("alembic upgrade error: %s", exc)
+        _migration_failure = str(exc)
+        logger.error("SCHEMA MIGRATION FAILED — serving 503 until fixed: %s", exc)
     _seed_profile_if_empty()
     problem = auth.misconfiguration()
     if problem:
@@ -184,6 +209,19 @@ async def require_authentication(request: Request, call_next):
     # their contexts, so the scope is the one channel that reaches every
     # template without threading a variable through every route signature.
     request.scope["auth_enabled"] = auth.auth_enabled()
+
+    # /health stays up so container health checks and uptime monitors keep
+    # working. Restarting would not fix a migration that cannot apply.
+    if _migration_failure and path != "/health":
+        return JSONResponse(
+            {
+                "detail": (
+                    "The database schema is not up to date, so the application "
+                    f"is refusing to serve against it. {_migration_failure}"
+                )
+            },
+            status_code=503,
+        )
 
     problem = auth.misconfiguration()
     if problem and path != "/health":
