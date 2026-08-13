@@ -186,3 +186,92 @@ class TestIngestFailureIsContained:
         monkeypatch.setitem(agent_work.RESULT_HANDLERS, "ping", explode)
         task = browser_tasks.enqueue(db, "ping")
         agent_work.ingest(db, task)  # must not raise
+
+
+class TestRedditViaBrowser:
+    """
+    The queue doing what it was built for.
+
+    Reddit answers a datacenter IP with 403 Blocked — a categorical refusal, not
+    a rate limit, so no retry from the server ever succeeds. The browser is not
+    blocked because it is a browser on a home connection, which is the entire
+    premise.
+    """
+
+    def test_queues_one_task_per_subreddit(self, db):
+        from app.services.interview_sources import reddit_search_urls
+
+        queued = agent_work.enqueue_reddit_search(db, "Amazon")
+        assert queued == len(reddit_search_urls("Amazon"))
+        tasks = db.query(BrowserTask).filter(BrowserTask.kind == "fetch_json").all()
+        assert len(tasks) == queued
+        assert all(t.payload["purpose"] == "interview_reddit" for t in tasks)
+
+    def test_it_outranks_background_link_resolution(self, db):
+        # Somebody pressed a button and is waiting; link resolution is tidying.
+        agent_work.enqueue_reddit_search(db, "Amazon")
+        task = db.query(BrowserTask).filter(BrowserTask.kind == "fetch_json").first()
+        assert task.priority > 0
+
+    def test_an_empty_company_queues_nothing(self, db):
+        assert agent_work.enqueue_reddit_search(db, "  ") == 0
+
+    def _complete_with(self, db, result, company="Amazon"):
+        """Report on whichever task was actually leased, not the first row.
+
+        Leasing takes one task by its own ordering, which need not be the row a
+        separate query returns first — reporting on the wrong id fails with
+        "not leased" and looks like a bug in completion.
+        """
+        agent_work.enqueue_reddit_search(db, company)
+        leased = browser_tasks.lease(db, ["fetch_json"], agent_id="ext-1")
+        assert leased, "nothing was leased"
+        return browser_tasks.complete(db, leased[0].id, result, agent_id="ext-1")
+
+    def _reddit_payload(self, created_days_ago=20):
+        from datetime import datetime, timedelta, timezone
+
+        created = (datetime.now(timezone.utc) - timedelta(days=created_days_ago)).timestamp()
+        return {"data": {"children": [{"data": {
+            "title": "Amazon interview experience — SDE-1",
+            "selftext": "Three rounds: OA, phone screen, onsite. " * 5,
+            "created_utc": created,
+            "permalink": "/r/leetcode/comments/xyz/amazon/",
+        }}]}}
+
+    def test_what_the_browser_fetched_lands_in_the_corpus(self, db):
+        from app.models.interview_report import InterviewReport
+
+        self._complete_with(db, {"status": 200, "json": self._reddit_payload()})
+        report = db.query(InterviewReport).one()
+        assert report.source == "reddit"
+        assert report.company_key == "amazon"
+
+    def test_the_same_parser_runs_as_on_the_direct_path(self, db):
+        # Only the thing that made the request differed, so a post that the
+        # direct path would reject must be rejected here too.
+        from app.models.interview_report import InterviewReport
+
+        payload = {"data": {"children": [{"data": {
+            "title": "How should I prepare for Amazon?",
+            "selftext": "Any tips?",
+            "created_utc": 1750000000,
+            "permalink": "/r/leetcode/comments/q/",
+        }}]}}
+        self._complete_with(db, {"status": 200, "json": payload})
+        assert db.query(InterviewReport).count() == 0
+
+    def test_a_non_json_response_is_harmless(self, db):
+        from app.models.interview_report import InterviewReport
+
+        done = self._complete_with(db, {"status": 200, "json": None, "text": "<html>"})
+        assert done.status == "done"
+        assert db.query(InterviewReport).count() == 0
+
+    def test_an_unknown_purpose_is_ignored(self, db):
+        task = browser_tasks.enqueue(
+            db, "fetch_json", {"url": "https://x/1", "purpose": "something_else"}
+        )
+        browser_tasks.lease(db, ["fetch_json"], agent_id="ext-1")
+        done = browser_tasks.complete(db, task.id, {"json": {"a": 1}}, agent_id="ext-1")
+        assert done.status == "done"

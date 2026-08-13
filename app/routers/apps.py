@@ -128,6 +128,16 @@ def research_interviews(app_id: uuid.UUID, request: Request, db: Session = Depen
             fetched = fetch_all(company)
             counts = ingest(db, fetched["reports"])
             outcome = {**counts, "sources": fetched["sources"]}
+
+            # A source that refused this server for being a server has a
+            # different remedy from one that erred: ask again from the browser.
+            # Nothing waits for it — the answer lands in the corpus whenever the
+            # laptop next polls, and the panel says so rather than appearing to
+            # have found nothing.
+            if any(s.get("blocked") for s in fetched["sources"].values()):
+                from app.services.agent_work import enqueue_reddit_search
+
+                outcome["queued_to_browser"] = enqueue_reddit_search(db, company)
         except Exception as exc:
             logger.error("apps: interview research failed for %s: %s", company, exc)
             outcome = {"error": str(exc)}

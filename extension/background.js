@@ -118,6 +118,46 @@ const HANDLERS = {
   },
 
   /**
+   * Fetch a JSON endpoint the server is walled out of.
+   *
+   * Reddit answers a datacenter IP with 403 Blocked — a categorical refusal
+   * rather than a rate limit, so no amount of retrying from the VPS helps. From
+   * here it is a browser on a home connection asking for a public page, which
+   * is the entire premise of this queue.
+   *
+   * Cookies are omitted. These are public endpoints, and sending the user's
+   * session to them would be an unnecessary widening of what a queued URL can
+   * reach.
+   */
+  async fetch_json(payload) {
+    const url = payload && payload.url;
+    if (!url) throw new Error("fetch_json needs a url.");
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "omit",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`);
+
+      const text = (await response.text()).slice(0, 2000000);
+      try {
+        return { status: response.status, json: JSON.parse(text) };
+      } catch (_) {
+        // Not JSON after all — hand back the text so the server can say why
+        // rather than failing with "unparseable" and nothing to look at.
+        return { status: response.status, json: null, text: text.slice(0, 4000) };
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
    * Follow an aggregator redirect to the employer's real apply page.
    *
    * The server tries this first and gets most of them. What reaches here is
@@ -188,7 +228,7 @@ async function canReachTheWeb() {
  */
 async function supportedKinds() {
   const kinds = ["ping"];
-  if (await canReachTheWeb()) kinds.push("resolve_link");
+  if (await canReachTheWeb()) kinds.push("resolve_link", "fetch_json");
   return kinds;
 }
 

@@ -269,8 +269,25 @@ class TestFetchAll:
         monkeypatch.setitem(sources.FETCHERS, "geeksforgeeks", failing)
 
         outcome = sources.fetch_all("Acme")
-        assert outcome["sources"]["geeksforgeeks"] == {"count": 0, "error": "index moved"}
+        assert outcome["sources"]["geeksforgeeks"]["count"] == 0
+        assert outcome["sources"]["geeksforgeeks"]["error"] == "index moved"
         assert outcome["sources"]["reddit"]["error"] is None
+
+    def test_blocked_is_reported_separately_from_errored(self, monkeypatch):
+        # Refused for being a server is fixable by asking from the browser;
+        # a plain error is not, and the caller acts differently on each.
+        def refused(company, **kwargs):
+            return sources.SourceResult(
+                "reddit", [], error="403 Blocked", blocked=True
+            )
+
+        monkeypatch.setitem(sources.FETCHERS, "reddit", refused)
+        monkeypatch.setitem(sources.FETCHERS, "github", self._stub("github"))
+        monkeypatch.setitem(sources.FETCHERS, "geeksforgeeks", self._stub("geeksforgeeks"))
+
+        outcome = sources.fetch_all("Acme")
+        assert outcome["sources"]["reddit"]["blocked"] is True
+        assert outcome["sources"]["github"]["blocked"] is False
 
     def test_can_be_limited_to_one_source(self, monkeypatch):
         monkeypatch.setitem(sources.FETCHERS, "reddit", self._stub("reddit"))

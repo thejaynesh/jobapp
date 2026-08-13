@@ -39,12 +39,18 @@ from app.database import Base
 #                   anything meaningful; it exists to be diagnostic.
 #   fetch_page    — retrieve a URL using the user's own session and return what
 #                   came back.
+#   fetch_json    — retrieve a JSON endpoint the server is blocked from. Reddit
+#                   answers a datacenter IP with 403 and a browser with data;
+#                   the difference is the residential IP, which is the whole
+#                   reason this queue exists. `purpose` in the payload says what
+#                   the result is for, so one kind serves every blocked source.
 #   resolve_link  — follow an aggregator redirect to the real apply URL.
 #   harvest_jobs  — hand back job JSON the content script intercepted.
 #
-# Only `ping` is implemented by the extension skeleton. The rest are named here
-# so the queue and the protocol are settled before the work that uses them.
-TASK_KINDS = ("ping", "fetch_page", "resolve_link", "harvest_jobs")
+# `harvest_jobs` is named but unused: harvesting is a push from the content
+# script rather than work anyone queues, and the name is kept so a future
+# pull-based variant has somewhere to live.
+TASK_KINDS = ("ping", "fetch_page", "fetch_json", "resolve_link", "harvest_jobs")
 
 # queued  — waiting for an agent
 # leased  — an agent holds it, with a deadline

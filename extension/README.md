@@ -10,6 +10,7 @@ It runs two task kinds today:
 |---|---|---|
 | `ping` | Echoes its payload back. Proves the round trip without depending on any site being up. | nothing |
 | `resolve_link` | Follows an aggregator redirect to the employer's real apply page. | **Resolve job links** ticked |
+| `fetch_json` | Fetches a public JSON endpoint the server is blocked from — Reddit refuses datacenter IPs outright. | **Resolve job links** ticked |
 
 It also harvests passively and draws an on-page overlay — see below. Autofill is
 item 9 and slots into `HANDLERS` in `background.js` without changing anything
@@ -41,6 +42,12 @@ own redirect page rather than the employer, and following those from your VPS is
 exactly the request a datacenter IP gets blocked on. Your browser is not
 blocked, so the server hands over what it could not follow and the real apply
 link comes back.
+
+This toggle also enables `fetch_json`, which fetches public JSON the server is
+walled out of. Reddit answers a datacenter IP with `403 Blocked` — a categorical
+refusal rather than a rate limit, so no amount of retrying from the VPS works,
+while a browser on a home connection gets the data. Interview-report gathering
+depends on it.
 
 It is off by default and asks separately because it needs permission to read any
 site — a materially larger ask than reaching your own server, and one that

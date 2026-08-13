@@ -121,6 +121,71 @@ def enqueue_unresolved_links(db, limit: int | None = None) -> int:
 # Consuming
 # ---------------------------------------------------------------------------
 
+def enqueue_reddit_search(db, company: str) -> int:
+    """
+    Ask the browser for what Reddit refuses to give this server.
+
+    Reddit answers a datacenter IP with `403 Blocked` — a categorical refusal,
+    not a rate limit, so retrying from here never works. The browser is not
+    blocked, because it is a browser on a home connection. This is the queue
+    doing exactly what it was built for.
+    """
+    from app.services import browser_tasks
+    from app.services.interview_sources import reddit_search_urls
+
+    urls = reddit_search_urls(company)
+    if not urls:
+        return 0
+
+    for url in urls:
+        browser_tasks.enqueue(
+            db,
+            "fetch_json",
+            {"url": url, "purpose": "interview_reddit", "company": company},
+            # Above link resolution: somebody is waiting on this, having just
+            # pressed a button, where link resolution is background tidying.
+            priority=5,
+            # A search is worth redoing tomorrow if today's browser was closed,
+            # but not worth carrying for a week.
+            ttl_hours=12,
+        )
+    logger.info("agent_work: queued %d Reddit search(es) for %s", len(urls), company)
+    return len(urls)
+
+
+def _ingest_fetch_json(db, task: BrowserTask) -> None:
+    """
+    Store whatever the browser fetched on our behalf.
+
+    `purpose` in the payload decides how to read it, so one task kind serves
+    every source the server is walled out of rather than needing a new kind —
+    and the parsing is the same function the direct path uses, since only the
+    thing that made the request differed.
+    """
+    from app.services.interview_corpus import ingest
+    from app.services.interview_sources import parse_reddit
+
+    payload = task.payload or {}
+    result = task.result or {}
+    purpose = payload.get("purpose")
+
+    if purpose != "interview_reddit":
+        return
+
+    body = result.get("json")
+    if body is None:
+        return
+
+    reports = parse_reddit(body, payload.get("company") or "")
+    if not reports:
+        return
+    counts = ingest(db, reports)
+    logger.info(
+        "agent_work: %d Reddit report(s) via browser for %s (%d new)",
+        len(reports), payload.get("company"), counts["stored"],
+    )
+
+
 def _ingest_resolve_link(db, task: BrowserTask) -> None:
     """
     Store the apply URL a browser found, and mine the page for ATS boards.
@@ -173,6 +238,7 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
 # its result is recorded.
 RESULT_HANDLERS = {
     "resolve_link": _ingest_resolve_link,
+    "fetch_json": _ingest_fetch_json,
 }
 
 

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import httpx
+from urllib.parse import quote
 
 from app.config import settings
 from app.services.company_domain import company_key as normalize_company
@@ -78,6 +79,10 @@ class SourceResult:
     source: str
     reports: list[dict] = field(default_factory=list)
     error: str | None = None
+    # The server was refused for being a server, not for asking wrongly. A
+    # different outcome from an error, because it has a different remedy: ask
+    # again from the browser rather than fix the request.
+    blocked: bool = False
 
     @property
     def count(self) -> int:
@@ -97,13 +102,70 @@ def _role_hint(text: str) -> str | None:
 # Reddit
 # ---------------------------------------------------------------------------
 
+def reddit_search_urls(company: str, limit: int = 25) -> list[str]:
+    """
+    The search URLs to ask for, whoever ends up asking.
+
+    Separated from fetching because the server is blocked from Reddit and the
+    browser is not, so the same URLs get requested from two places.
+    """
+    if not company.strip():
+        return []
+    per_sub = max(5, limit // len(_SUBREDDITS))
+    query = quote(f'"{company}" interview')
+    return [
+        f"https://www.reddit.com/r/{sub}/search.json"
+        f"?q={query}&restrict_sr=1&sort=new&limit={per_sub}&t=year"
+        for sub in _SUBREDDITS
+    ]
+
+
+def parse_reddit(payload, company: str) -> list[dict]:
+    """
+    Writeups out of one Reddit search response.
+
+    Split from the request so the direct path and the browser path share it —
+    the parsing is identical, only the thing that made the request differs.
+    """
+    reports: list[dict] = []
+    if not isinstance(payload, dict):
+        return reports
+
+    for child in (payload.get("data") or {}).get("children") or []:
+        post = child.get("data") or {}
+        title = post.get("title") or ""
+        body = post.get("selftext") or ""
+        if not _EXPERIENCE_HINTS.search(f"{title}\n{body}"):
+            continue
+        created = post.get("created_utc")
+        if not created:
+            continue
+        permalink = post.get("permalink") or ""
+        try:
+            posted_at = datetime.fromtimestamp(float(created), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            continue
+        reports.append({
+            "source": "reddit",
+            "company": company,
+            "url": f"https://www.reddit.com{permalink}",
+            "title": title,
+            "body": body,
+            "posted_at": posted_at,
+            "role_hint": _role_hint(f"{title} {body[:400]}"),
+        })
+    return reports
+
+
 def fetch_reddit(company: str, limit: int = 25, client: httpx.Client | None = None) -> SourceResult:
     """
-    Search the interview subreddits for writeups about this company.
+    Search the interview subreddits, from this server.
 
-    `.json` on a search URL returns what the site renders from — no key, no
-    scraping, and `created_utc` on every post, which is the field that decides
-    whether a report is usable at all.
+    Usually fails in production, and says so precisely. Reddit answers a
+    datacenter IP with `403 Blocked` — not a rate limit, a categorical refusal —
+    so on a VPS this exists to establish that the browser is needed rather than
+    to succeed. `blocked` on the result is what tells the caller to queue the
+    same URLs to an agent instead of giving up.
     """
     result = SourceResult(source="reddit")
     if not company.strip():
@@ -112,42 +174,22 @@ def fetch_reddit(company: str, limit: int = 25, client: httpx.Client | None = No
     owned = client is None
     client = client or _client()
     try:
-        for subreddit in _SUBREDDITS:
-            url = f"https://www.reddit.com/r/{subreddit}/search.json"
-            params = {
-                "q": f'"{company}" interview',
-                "restrict_sr": "1",
-                "sort": "new",
-                "limit": str(max(5, limit // len(_SUBREDDITS))),
-                "t": "year",
-            }
+        for url in reddit_search_urls(company, limit):
             try:
-                response = client.get(url, params=params)
+                response = client.get(url)
+                if response.status_code in (403, 429):
+                    result.blocked = True
+                    result.error = (
+                        f"Reddit refused this server ({response.status_code}). "
+                        "Datacenter IPs are blocked; queued to your browser instead."
+                    )
+                    continue
                 response.raise_for_status()
                 payload = response.json()
             except Exception as exc:
                 result.error = f"{type(exc).__name__}: {exc}"
                 continue
-
-            for child in (payload.get("data") or {}).get("children") or []:
-                post = child.get("data") or {}
-                title = post.get("title") or ""
-                body = post.get("selftext") or ""
-                if not _EXPERIENCE_HINTS.search(f"{title}\n{body}"):
-                    continue
-                created = post.get("created_utc")
-                if not created:
-                    continue
-                permalink = post.get("permalink") or ""
-                result.reports.append({
-                    "source": "reddit",
-                    "company": company,
-                    "url": f"https://www.reddit.com{permalink}",
-                    "title": title,
-                    "body": body,
-                    "posted_at": datetime.fromtimestamp(float(created), tz=timezone.utc),
-                    "role_hint": _role_hint(f"{title} {body[:400]}"),
-                })
+            result.reports.extend(parse_reddit(payload, company))
     finally:
         if owned:
             client.close()
@@ -195,12 +237,24 @@ def fetch_github(company: str, limit: int = 10, client: httpx.Client | None = No
             result.error = f"{type(exc).__name__}: {exc}"
             return result
 
+        items = payload.get("items") or []
+        if not items:
+            # Zero results and zero survivors of the filter are different
+            # problems with different fixes, and both look like "github: 0".
+            result.error = (
+                f"search returned no repositories "
+                f"(total_count={payload.get('total_count', 'unknown')})"
+            )
+            return result
+
         key = normalize_company(company)
-        for repo in payload.get("items") or []:
+        dropped = 0
+        for repo in items:
             haystack = f"{repo.get('name','')} {repo.get('description','')}".lower()
             # The search is fuzzy enough to return "interview questions" repos
             # that never mention this company; require the name to appear.
             if key and key not in normalize_company(haystack):
+                dropped += 1
                 continue
             pushed = repo.get("pushed_at") or repo.get("updated_at")
             if not pushed:
@@ -218,6 +272,12 @@ def fetch_github(company: str, limit: int = 10, client: httpx.Client | None = No
                 "posted_at": posted_at,
                 "role_hint": None,
             })
+
+        if not result.reports and dropped:
+            result.error = (
+                f"{len(items)} repositories matched the search but none named "
+                f"{company!r}"
+            )
     finally:
         if owned:
             client.close()
@@ -316,12 +376,19 @@ def fetch_geeksforgeeks(
     owned = client is None
     client = client or _client()
     try:
+        # Several shapes, because the site has reorganised more than once and
+        # the archive is worth the retries. Cheapest and most specific first.
         index_urls = [
+            f"https://www.geeksforgeeks.org/tag/{slug}/",
             f"https://www.geeksforgeeks.org/tag/{slug}-interview-experience/",
             f"https://www.geeksforgeeks.org/category/interview-experiences/{slug}/",
+            f"https://www.geeksforgeeks.org/company/{slug}/",
+            f"https://www.geeksforgeeks.org/?s={slug}+interview+experience",
         ]
+        tried: list[str] = []
         links: list[str] = []
         for index_url in index_urls:
+            tried.append(index_url)
             try:
                 response = client.get(index_url)
                 if response.status_code != 200:
@@ -338,10 +405,13 @@ def fetch_geeksforgeeks(
                 break
 
         if not links and not result.error:
-            # Nothing matched. Said explicitly, because a company with no
-            # coverage and a parser that has stopped working are the same
-            # silence otherwise.
-            result.error = "no interview-experience links found on the index pages"
+            # Nothing matched. Naming what was tried, because "the archive has
+            # nothing on this company" and "the index moved again" are the same
+            # silence otherwise, and only one of them is fixable here.
+            result.error = (
+                "no interview-experience links found. Tried: "
+                + ", ".join(u.replace("https://www.geeksforgeeks.org", "") for u in tried)
+            )
 
         for href in links[:limit]:
             try:
@@ -389,9 +459,15 @@ def fetch_all(company: str, only: set[str] | None = None) -> dict:
             outcome = fetcher(company)
         except Exception as exc:
             logger.error("interview_sources: %s raised for %s: %s", name, company, exc)
-            diagnostics[name] = {"count": 0, "error": f"{type(exc).__name__}: {exc}"}
+            diagnostics[name] = {
+                "count": 0, "error": f"{type(exc).__name__}: {exc}", "blocked": False,
+            }
             continue
         reports.extend(outcome.reports)
-        diagnostics[name] = {"count": outcome.count, "error": outcome.error}
+        diagnostics[name] = {
+            "count": outcome.count,
+            "error": outcome.error,
+            "blocked": outcome.blocked,
+        }
 
     return {"reports": reports, "sources": diagnostics}
