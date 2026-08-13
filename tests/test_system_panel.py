@@ -49,11 +49,41 @@ class TestAgentSection:
         browser_tasks.enqueue(db, "ping")
         assert "Waiting" in client.get("/runs/system").text
 
-    def test_distinguishes_never_claimed_from_nobody_running(self, client, db, agent_token):
-        # An agent polling an empty queue leaves no trace, so "no task has been
-        # claimed" must not be presented as "no agent exists".
+    def test_says_plainly_when_no_agent_has_ever_polled(self, client, db, agent_token):
         browser_tasks.enqueue(db, "ping")
-        assert "leaves no trace" in client.get("/runs/system").text
+        body = client.get("/runs/system").text
+        assert "No agent has asked for work yet" in body
+        assert "Poll for work" in body, "should say what to check"
+
+    def test_a_poll_registers_even_with_nothing_to_claim(self, client, db, agent_token):
+        # The fix for the old blind spot: an agent polling an empty queue used
+        # to leave no trace, so "nobody is running" and "nothing to do" were
+        # the same silence.
+        db.add(Profile(data={}))
+        db.commit()
+        browser_tasks.record_agent_seen(db, "extension-abc", ["ping", "resolve_link"])
+        body = client.get("/runs/system").text
+        assert "extension-abc" in body
+        assert "Last polled by" in body
+
+    def test_it_shows_what_the_agent_offers_to_run(self, client, db, agent_token):
+        # The diagnostic that matters: an agent silently not offering a kind
+        # never claims that work, and those tasks sit queued looking like a
+        # server-side problem.
+        db.add(Profile(data={}))
+        db.commit()
+        browser_tasks.record_agent_seen(db, "extension-abc", ["ping", "fetch_json"])
+        body = client.get("/runs/system").text
+        assert "Offers" in body
+        assert "fetch_json" in body
+
+    def test_a_missing_kind_is_visible_by_its_absence(self, client, db, agent_token):
+        db.add(Profile(data={}))
+        db.commit()
+        browser_tasks.record_agent_seen(db, "extension-old", ["ping"])
+        body = client.get("/runs/system").text
+        offers = body.split("Offers", 1)[1][:200]
+        assert "fetch_json" not in offers
 
     def test_names_the_agent_that_last_claimed_work(self, client, db, agent_token):
         browser_tasks.enqueue(db, "ping")

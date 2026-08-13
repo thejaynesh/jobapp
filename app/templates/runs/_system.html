@@ -48,16 +48,31 @@
         </dl>
 
         {% if system.agent.last_agent %}
-          <p class="text-[11px] text-gray-500 mb-2">
-            Last claimed by <span class="font-mono">{{ system.agent.last_agent.agent_id }}</span>
-            at {{ system.agent.last_agent.at.strftime('%d %b %H:%M') }}
+          <p class="text-[11px] text-gray-500">
+            {% if system.agent.last_agent.polled %}Last polled by{% else %}Last claimed work as{% endif %}
+            <span class="font-mono">{{ system.agent.last_agent.agent_id }}</span>
+            at {{ system.agent.last_agent.at[:16].replace('T', ' ') }}
           </p>
+          {# What it offered to run, because an agent that silently does not
+             offer a kind never claims that work, and those tasks then sit
+             queued looking like a server problem. #}
+          {% if system.agent.last_agent.kinds %}
+          <p class="text-[11px] mb-2">
+            <span class="text-gray-500">Offers</span>
+            {% for kind in system.agent.last_agent.kinds %}
+            <span class="font-mono text-gray-700">{{ kind }}</span>{% if not loop.last %}, {% endif %}
+            {% endfor %}
+          </p>
+          {% else %}
+          <p class="text-[11px] text-gray-400 mb-2">
+            Capabilities unknown — this agent has not polled since the extension
+            started reporting them. Reload the extension.
+          </p>
+          {% endif %}
         {% else %}
-          {# An agent polling an empty queue leaves no trace, so this is not
-             the same as "nobody is running". Say which. #}
           <p class="text-[11px] text-gray-500 mb-2">
-            No task has ever been claimed. An agent that polls an empty queue
-            leaves no trace, so queue a ping to find out whether one is there.
+            No agent has asked for work yet. Check the extension's server URL,
+            token, and that "Poll for work" is ticked.
           </p>
         {% endif %}
 

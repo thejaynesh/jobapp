@@ -264,15 +264,55 @@ def recent(db, limit: int = 10) -> list[BrowserTask]:
     )
 
 
+def record_agent_seen(db, agent_id: str, kinds: list[str] | None) -> None:
+    """
+    Note that an agent asked for work, and what it said it could run.
+
+    Recorded on every poll rather than on every lease, because an agent polling
+    an empty queue used to leave no trace at all — so "no agent is running" and
+    "no work has come up" were the same silence, and the wrong one was usually
+    assumed.
+
+    The kinds matter more than the timestamp. An agent that quietly does not
+    offer a kind never claims that work, and the tasks sit queued forever
+    looking like a server-side problem. Writing down what it offered turns that
+    into something visible on a page.
+    """
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return
+    data = dict(profile.data or {})
+    data["agent"] = {
+        "agent_id": agent_id or "anonymous",
+        "kinds": sorted(kinds or []),
+        "at": _now().isoformat(),
+    }
+    profile.data = data
+    db.commit()
+
+
 def last_agent(db) -> dict | None:
     """
-    Which agent was last seen, and when.
+    Which agent last asked for work, when, and what it offered to run.
 
-    The question behind the panel is "is anything out there listening", and a
-    lease is the only evidence of that — an agent that polls an empty queue
-    leaves no trace at all, so silence here means "no work has been claimed",
-    not necessarily "nobody is running".
+    Falls back to the last lease for a deployment whose agent has not polled
+    since this was added — an older record is better than implying nothing has
+    ever connected.
     """
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    seen = ((profile.data if profile else {}) or {}).get("agent")
+    if seen and seen.get("at"):
+        return {
+            "agent_id": seen.get("agent_id") or "anonymous",
+            "at": seen["at"],
+            "kinds": seen.get("kinds") or [],
+            "polled": True,
+        }
+
     task = (
         db.query(BrowserTask)
         .filter(BrowserTask.leased_at.isnot(None))
@@ -281,7 +321,12 @@ def last_agent(db) -> dict | None:
     )
     if not task:
         return None
-    return {"agent_id": task.agent_id or "anonymous", "at": task.leased_at}
+    return {
+        "agent_id": task.agent_id or "anonymous",
+        "at": task.leased_at.isoformat(),
+        "kinds": [],
+        "polled": False,
+    }
 
 
 def queue_stats(db) -> dict:

@@ -12,6 +12,7 @@ email module would test the mock.
 
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import format_datetime
 
 import pytest
 
@@ -81,12 +82,21 @@ def make_message(db, contact, **kwargs):
     return message
 
 
-def reply_bytes(in_reply_to=SENT_ID, sender=THEIR_ADDRESS, **headers):
+def reply_bytes(in_reply_to=SENT_ID, sender=THEIR_ADDRESS, received=None, **headers):
+    """
+    A reply that arrived an hour ago, by default.
+
+    Relative rather than fixed, because `make_message` sends two days ago and
+    the sender fallback rightly refuses a reply that predates the message. A
+    hard-coded date made that comparison depend on the wall clock: the same test
+    passed in the morning and failed in the afternoon.
+    """
+    received = received or (datetime.now(timezone.utc) - timedelta(hours=1))
     mail = EmailMessage()
     mail["From"] = sender
     mail["To"] = "me@example.com"
     mail["Subject"] = "Re: About the Backend Engineer role"
-    mail["Date"] = "Mon, 11 Aug 2026 10:00:00 +0000"
+    mail["Date"] = format_datetime(received)
     if in_reply_to:
         mail["In-Reply-To"] = in_reply_to
     for key, value in headers.items():
@@ -244,11 +254,12 @@ class TestReplyBySender:
         # Otherwise an old thread with the same person retroactively closes a
         # sequence that has not been answered.
         contact = make_contact(db)
-        message = make_message(
-            db, contact, message_id=None,
-            sent_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+        message = make_message(db, contact, message_id=None)  # sent 2 days ago
+        old_mail = reply_bytes(
+            in_reply_to=None,
+            received=datetime.now(timezone.utc) - timedelta(days=10),
         )
-        mailbox._process(db, parse(reply_bytes(in_reply_to=None)), counts)
+        mailbox._process(db, parse(old_mail), counts)
         db.refresh(message)
         assert message.status == "sent"
 

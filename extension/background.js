@@ -211,12 +211,24 @@ const HANDLERS = {
  */
 const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
 
+/**
+ * Whether arbitrary sites are reachable.
+ *
+ * Checked one origin at a time and satisfied by either. `permissions.contains`
+ * with both listed demands both, and Chrome does not always end up holding both
+ * after a request — so asking for the pair answers "false" while https is in
+ * fact granted, and the agent then quietly stops claiming work it could do.
+ * Everything queued here is https in practice.
+ */
 async function canReachTheWeb() {
-  try {
-    return await chrome.permissions.contains(BROAD_HOSTS);
-  } catch (_) {
-    return false;
+  for (const origin of BROAD_HOSTS.origins) {
+    try {
+      if (await chrome.permissions.contains({ origins: [origin] })) return true;
+    } catch (_) {
+      /* asking about one origin failing should not veto the other */
+    }
   }
+  return false;
 }
 
 /**
@@ -255,14 +267,21 @@ async function pollOnce() {
     if (!config.enabled || !config.serverUrl || !config.token) return;
 
     const id = await agentId();
+    const kinds = await supportedKinds();
     const { tasks } = await api("/api/agent/lease", {
-      kinds: await supportedKinds(),
+      kinds,
       agent_id: id,
       max: 5,
       wait: 25,
     });
 
-    await setStatus({ lastPoll: new Date().toISOString(), lastError: null });
+    // Recorded locally as well as sent, so the options page can show what this
+    // install offers without waking the worker to ask.
+    await setStatus({
+      lastPoll: new Date().toISOString(),
+      lastError: null,
+      kinds,
+    });
     if (!tasks || tasks.length === 0) return;
 
     let done = 0;

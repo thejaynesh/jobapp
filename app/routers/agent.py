@@ -125,6 +125,15 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         wait = _max_poll_seconds()
     wait = max(0.0, min(wait, _max_poll_seconds()))
 
+    # Once per request, not per attempt: the poll re-checks the queue every
+    # second and this is a write.
+    try:
+        await run_in_threadpool(browser_tasks.record_agent_seen, db, agent_id, kinds)
+    except Exception as exc:
+        # Presence is a diagnostic, not the job. Failing to note it must not
+        # stop an agent that is asking for work from getting any.
+        logger.warning("agent: could not record presence: %s", exc)
+
     deadline = time.monotonic() + wait
     while True:
         try:
