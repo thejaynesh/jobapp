@@ -49,8 +49,14 @@ class Settings(BaseSettings):
 
     NVIDIA_NIM_API_KEY: str
     NVIDIA_NIM_BASE_URL: str
-    NVIDIA_NIM_MODEL: str = "meta/llama-3.3-70b-instruct"
+    NVIDIA_NIM_MODEL: str = "deepseek-ai/deepseek-v4-flash"
     NVIDIA_NIM_RPM: int = 40  # requests per minute allowed by the API
+    # Output ceiling for a matching call. Generous because the default model
+    # reasons before answering: the scoring JSON itself is a couple of hundred
+    # tokens, but a ceiling that only fits the answer truncates it mid-object
+    # and the parse fails. Costs nothing when a model does not use it — only
+    # tokens actually produced are generated.
+    NIM_MATCH_MAX_TOKENS: int = 1536
 
     # Optional additional LLM providers. When configured, document generation
     # prefers quality-first (Anthropic -> Gemini -> NIM) and job matching uses

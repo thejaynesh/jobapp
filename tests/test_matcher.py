@@ -944,3 +944,89 @@ class TestPaidCallBudget:
                 with patch("app.services.matcher.call_provider", return_value=raw):
                     result = llm_score_job(mock_job, profile_data, "k", "u", "m")
         assert result["score"] == 60
+
+
+class TestMatchingTokenCeiling:
+    """
+    Room for a reasoning model to think before it answers.
+
+    The default NIM model reasons first, so a ceiling sized for the scoring
+    JSON alone cuts the object in half and the parse fails — which looks like
+    the model being bad at the task rather than like a budget that was too
+    small for it.
+    """
+
+    def test_the_default_leaves_room_for_thinking(self):
+        from app.services.matcher import _match_max_tokens
+
+        assert _match_max_tokens() >= 1024
+
+    def test_it_follows_the_setting(self, monkeypatch):
+        from app.config import settings
+        from app.services.matcher import _match_max_tokens
+
+        monkeypatch.setattr(settings, "NIM_MATCH_MAX_TOKENS", 4096)
+        assert _match_max_tokens() == 4096
+
+    def test_an_absurdly_small_setting_is_floored(self, monkeypatch):
+        # Below a few hundred tokens the scoring object cannot fit at all, so
+        # honouring the number would guarantee failure rather than save budget.
+        from app.config import settings
+        from app.services.matcher import _match_max_tokens
+
+        monkeypatch.setattr(settings, "NIM_MATCH_MAX_TOKENS", 10)
+        assert _match_max_tokens() >= 256
+
+    def test_an_explicit_argument_still_wins(self, monkeypatch):
+        # Other callers size their own replies; the default only applies when
+        # nobody said.
+        import app.services.matcher as matcher
+
+        captured = {}
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                self.chat = self
+
+            @property
+            def completions(self):
+                return self
+
+            def create(self, **kwargs):
+                captured.update(kwargs)
+
+                class _R:
+                    choices = [type("C", (), {"message": type("M", (), {"content": "{}"})()})()]
+
+                return _R()
+
+        monkeypatch.setattr(matcher, "OpenAI", _FakeClient)
+        matcher.chat_completion([], "k", "u", "m", max_tokens=99)
+        assert captured["max_tokens"] == 99
+
+    def test_the_ceiling_is_used_when_nobody_says(self, monkeypatch):
+        import app.services.matcher as matcher
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "NIM_MATCH_MAX_TOKENS", 2048)
+        captured = {}
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                self.chat = self
+
+            @property
+            def completions(self):
+                return self
+
+            def create(self, **kwargs):
+                captured.update(kwargs)
+
+                class _R:
+                    choices = [type("C", (), {"message": type("M", (), {"content": "{}"})()})()]
+
+                return _R()
+
+        monkeypatch.setattr(matcher, "OpenAI", _FakeClient)
+        matcher.chat_completion([], "k", "u", "m")
+        assert captured["max_tokens"] == 2048

@@ -401,20 +401,31 @@ def _parse_llm_response(content: str) -> dict:
     }
 
 
+def _match_max_tokens() -> int:
+    """
+    Room for a matching reply, thinking included.
+
+    A reasoning model spends tokens before it emits anything, so a ceiling
+    sized for the JSON alone cuts the object in half and the parse fails —
+    which reads as the model being bad at the task rather than as a budget.
+    """
+    return max(256, int(getattr(settings, "NIM_MATCH_MAX_TOKENS", 1536)))
+
+
 def chat_completion(
     messages: list[dict],
     api_key: str,
     base_url: str,
     model: str,
     temperature: float = 0.1,
-    max_tokens: int = 512,
+    max_tokens: int | None = None,
 ) -> str:
     client = OpenAI(api_key=api_key, base_url=base_url)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=max_tokens if max_tokens is not None else _match_max_tokens(),
         timeout=90,
     )
     return response.choices[0].message.content or ""
@@ -449,7 +460,9 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) 
         try:
             if budget is not None:
                 budget["paid_calls"] = budget.get("paid_calls", 0) + 1
-            raw = call_provider(provider, messages, temperature=0.1, max_tokens=512)
+            raw = call_provider(
+                provider, messages, temperature=0.1, max_tokens=_match_max_tokens()
+            )
             logger.info(
                 "llm_score_job: scored job %s via fallback provider %s (%s)",
                 getattr(job, "id", "?"), provider.name, provider.model,

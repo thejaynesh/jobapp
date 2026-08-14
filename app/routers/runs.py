@@ -17,10 +17,14 @@ templates = Jinja2Templates(directory="app/templates")
 DEFAULT_RUNS_SHOWN = 15
 ROLLUP_WINDOW = 20
 
-# NIM models worth comparing for job matching. Instruct-tuned ones first: the
-# reasoning models below them wrap their answer in thinking, which the parser
-# now survives but which still costs tokens and can hit the 512-token ceiling.
+# NIM models worth comparing for job matching, current default first.
+#
+# Reasoning models spend tokens thinking before they answer. The parser handles
+# the wrapping, and NIM_MATCH_MAX_TOKENS is now sized for it — with a ceiling
+# that only fits the JSON they get truncated mid-object, which reads as the
+# model being bad at scoring rather than as a budget that was too small.
 NIM_MODELS = [
+    "deepseek-ai/deepseek-v4-flash",
     "meta/llama-3.3-70b-instruct",
     "meta/llama-3.1-70b-instruct",
     "qwen/qwen3-next-80b-a3b-instruct",
@@ -30,7 +34,6 @@ NIM_MODELS = [
     "meta/llama-3.1-8b-instruct",
     "openai/gpt-oss-120b",
     "nvidia/nemotron-3-super-120b-a12b",
-    "deepseek-ai/deepseek-v4-flash",
 ]
 
 # Every source the fetcher knows about, for the manual-trigger picker.

@@ -64,6 +64,7 @@ TUNABLES: list[Tunable] = [
     Tunable(
         key="nvidia_nim_model", env="NVIDIA_NIM_MODEL", kind="choice",
         choices=[
+            "deepseek-ai/deepseek-v4-flash",
             "meta/llama-3.3-70b-instruct",
             "meta/llama-3.1-70b-instruct",
             "qwen/qwen3-next-80b-a3b-instruct",
@@ -73,7 +74,6 @@ TUNABLES: list[Tunable] = [
             "meta/llama-3.1-8b-instruct",
             "openai/gpt-oss-120b",
             "nvidia/nemotron-3-super-120b-a12b",
-            "deepseek-ai/deepseek-v4-flash",
         ],
         label="Matching model",
         help="Which NIM model scores your jobs. Compare candidates on the runs "

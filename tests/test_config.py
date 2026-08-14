@@ -32,3 +32,18 @@ def test_settings_defaults():
     assert s.MIN_MATCH_SCORE == 70
     assert s.STORAGE_PATH == "/storage"
     assert s.DEBUG is False
+
+
+def test_the_default_matching_model_is_deepseek():
+    from app.config import Settings
+
+    assert Settings.model_fields["NVIDIA_NIM_MODEL"].default == "deepseek-ai/deepseek-v4-flash"
+
+
+def test_the_matching_ceiling_leaves_room_for_thinking():
+    # A reasoning model spends tokens before it answers; a ceiling sized for
+    # the JSON alone truncates it mid-object and the parse fails, which reads
+    # as the model being bad at scoring rather than as a budget.
+    from app.config import Settings
+
+    assert Settings.model_fields["NIM_MATCH_MAX_TOKENS"].default >= 1024
