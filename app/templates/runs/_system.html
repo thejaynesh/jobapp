@@ -100,6 +100,25 @@
                 {{ task.created_at.strftime('%H:%M') }}
               </td>
             </tr>
+            {# What the server made of it. A task that succeeded and yielded
+               nothing reads the same as one that never ran without this. #}
+            {% set note = (task.result or {}).get('ingest') %}
+            {% if note %}
+            <tr>
+              <td colspan="3" class="pb-1 text-[10px] text-gray-400">
+                {% if note.error %}{{ note.error }}
+                {% else %}{{ note.posts_seen }} posts, {{ note.kept }} kept,
+                  {{ note.stored }} new{% if note.duplicate %}, {{ note.duplicate }} already had{% endif %}
+                {% endif %}
+              </td>
+            </tr>
+            {% elif task.error %}
+            <tr>
+              <td colspan="3" class="pb-1 text-[10px] text-amber-600">
+                {{ task.error[:120] }}
+              </td>
+            </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>

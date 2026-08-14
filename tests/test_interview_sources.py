@@ -63,6 +63,49 @@ class TestReddit:
         client = client_returning(lambda r: httpx.Response(200, json=payload))
         assert sources.fetch_reddit("Acme", client=client).count == 0
 
+
+class TestIsExperienceReport:
+    """
+    Which posts count as evidence.
+
+    The first version gated on a short list of exact phrases and threw away
+    half of what it should have kept — "Just finished my Amazon loop, 4 rounds,
+    got the offer" named none of them. Since the search already asks for the
+    company and "interview" inside interview subreddits, the work left is
+    discarding questions, not re-proving relevance.
+    """
+
+    KEEP = [
+        ("Amazon SDE-1 interview experience", "Round 1 was an OA. " * 20),
+        ("Just finished my Amazon loop last week — 4 rounds, got the offer", "It went well."),
+        ("Rejected by Google after 5 rounds. Here is what they asked.", "They asked graphs."),
+        ("Meta E4 — recruiter reached out, phone screen scheduled", "Details below."),
+        ("Amazon OA questions from yesterday", "Two problems, 90 minutes."),
+        ("My Stripe onsite writeup", "x" * 500),
+    ]
+    DROP = [
+        ("Amazon interview in 2 weeks, what should I expect?", "Any tips appreciated."),
+        ("How do I prepare for Meta?", "I have two weeks."),
+        ("Should I accept this offer?", "Comp details inside."),
+        ("Anyone know if Stripe still does the take-home?", "Asking for a friend."),
+    ]
+
+    @pytest.mark.parametrize("title,body", KEEP)
+    def test_keeps_accounts_of_what_happened(self, title, body):
+        assert sources.is_experience_report(title, body), title
+
+    @pytest.mark.parametrize("title,body", DROP)
+    def test_drops_people_asking(self, title, body):
+        assert not sources.is_experience_report(title, body), title
+
+    def test_a_long_post_that_is_not_a_question_is_taken_at_face_value(self):
+        # No stated signal, but a substantial post in an interview subreddit
+        # that is not asking anything is far more often a writeup than not.
+        assert sources.is_experience_report("Stripe", "y" * 500)
+
+    def test_a_short_post_with_no_signal_is_not_enough(self):
+        assert not sources.is_experience_report("Stripe", "hi")
+
     def test_skips_undated_posts(self):
         payload = reddit_payload(created_utc=None)
         client = client_returning(lambda r: httpx.Response(200, json=payload))

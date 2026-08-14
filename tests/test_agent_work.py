@@ -268,6 +268,38 @@ class TestRedditViaBrowser:
         assert done.status == "done"
         assert db.query(InterviewReport).count() == 0
 
+    def test_it_records_what_ingestion_made_of_the_result(self, db):
+        # The failure this prevents: a task that succeeded and yielded nothing
+        # read exactly like one that never ran, which is what "it did nothing"
+        # turned out to mean the first time this ran for real.
+        done = self._complete_with(db, {"status": 200, "json": self._reddit_payload()})
+        note = (done.result or {}).get("ingest")
+        assert note is not None
+        assert note["posts_seen"] == 1
+        assert note["kept"] == 1
+        assert note["stored"] == 1
+
+    def test_it_distinguishes_nothing_found_from_nothing_kept(self, db):
+        payload = {"data": {"children": [{"data": {
+            "title": "How should I prepare for Amazon?",
+            "selftext": "Any tips?",
+            "created_utc": 1750000000,
+            "permalink": "/r/leetcode/comments/q/",
+        }}]}}
+        done = self._complete_with(db, {"status": 200, "json": payload})
+        note = done.result["ingest"]
+        assert note["posts_seen"] == 1, "the search did return something"
+        assert note["kept"] == 0, "and the filter is what dropped it"
+
+    def test_the_raw_body_is_not_kept_after_ingestion(self, db):
+        # It has served its purpose and a search response is large.
+        done = self._complete_with(db, {"status": 200, "json": self._reddit_payload()})
+        assert "json" not in (done.result or {})
+
+    def test_a_non_json_result_says_so(self, db):
+        done = self._complete_with(db, {"status": 200, "json": None, "text": "<html>"})
+        assert "did not get JSON" in done.result["ingest"]["error"]
+
     def test_an_unknown_purpose_is_ignored(self, db):
         task = browser_tasks.enqueue(
             db, "fetch_json", {"url": "https://x/1", "purpose": "something_else"}

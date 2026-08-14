@@ -174,16 +174,45 @@ def _ingest_fetch_json(db, task: BrowserTask) -> None:
 
     body = result.get("json")
     if body is None:
+        _note(db, task, {"error": "the browser did not get JSON back"})
         return
 
+    # Counted before and after filtering, because "the search found nothing" and
+    # "the filter rejected everything" are the same zero from outside — and
+    # they were, on the first live run, where a filter that was too strict
+    # looked exactly like an agent that never ran.
+    seen = len(((body.get("data") or {}).get("children") or [])) if isinstance(body, dict) else 0
     reports = parse_reddit(body, payload.get("company") or "")
-    if not reports:
-        return
-    counts = ingest(db, reports)
+    counts = ingest(db, reports) if reports else {"stored": 0, "duplicate": 0}
+
+    _note(db, task, {
+        "posts_seen": seen,
+        "kept": len(reports),
+        "stored": counts.get("stored", 0),
+        "duplicate": counts.get("duplicate", 0),
+    })
     logger.info(
-        "agent_work: %d Reddit report(s) via browser for %s (%d new)",
-        len(reports), payload.get("company"), counts["stored"],
+        "agent_work: reddit for %s — %d posts, %d kept, %d new",
+        payload.get("company"), seen, len(reports), counts.get("stored", 0),
     )
+
+
+def _note(db, task: BrowserTask, summary: dict) -> None:
+    """
+    Record what ingestion made of a result, on the task itself.
+
+    A task that succeeded and yielded nothing is otherwise indistinguishable
+    from one that never ran, which is the failure this whole subsystem keeps
+    producing. Writing the outcome next to the result makes the difference
+    readable on a page.
+    """
+    merged = dict(task.result or {})
+    # The raw body has served its purpose and is large; the summary is what
+    # anyone will ever look at.
+    merged.pop("json", None)
+    merged["ingest"] = summary
+    task.result = merged
+    db.commit()
 
 
 def _ingest_resolve_link(db, task: BrowserTask) -> None:

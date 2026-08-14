@@ -53,12 +53,58 @@ DEFAULT_TIMEOUT = 20
 # Subreddits where interview writeups actually appear.
 _SUBREDDITS = ("leetcode", "cscareerquestions", "csMajors", "ExperiencedDevs")
 
-# Phrases that mark a post as an experience report rather than a question.
+# Signs a post is recounting something that happened.
+#
+# Used to rescue short posts rather than to gate every post, because the search
+# already asks for the company and "interview" and the subreddits are about
+# interviewing — so demanding another phrase on top mostly discards writeups
+# that simply worded it differently. "Just finished my Amazon loop, 4 rounds,
+# got the offer" is precisely the post worth keeping and named none of the
+# phrases the first version required.
 _EXPERIENCE_HINTS = re.compile(
-    r"(interview experience|interview process|onsite|oa |online assessment|"
-    r"phone screen|final round|got (an )?offer|rejected after)",
+    r"(interview(ed| experience| process)?|onsite|on-site|oa\b|online assessment|"
+    r"phone screen|final round|loop\b|\d\s*rounds?\b|got (an|the) offer|"
+    r"offer|reject(ed)?|ghosted|hiring manager|recruiter (call|screen|reached))",
     re.I,
 )
+
+# Someone asking rather than reporting. A question about an upcoming interview
+# is not evidence about the loop, and the corpus is built from evidence.
+_ASKING_RE = re.compile(
+    r"(what should i|how (do|should) i (prep|prepare|approach)|any (tips|advice)|"
+    r"is it worth|should i (apply|accept|take)|does anyone know|can someone (help|explain)|"
+    r"looking for (advice|tips|help)|need (help|advice))",
+    re.I,
+)
+
+# A title that opens like a question usually is one.
+_QUESTION_OPENER_RE = re.compile(
+    r"^\s*(how|what|should|is|are|can|could|would|does|do|any(one|body)?|help|advice)\b",
+    re.I,
+)
+
+
+def is_experience_report(title: str, body: str) -> bool:
+    """
+    Whether a post recounts an interview rather than asks about one.
+
+    Negative-first, because the search has already narrowed hard: what is left
+    to do is discard the questions, not re-prove that a post in r/leetcode
+    mentioning a company and "interview" is on topic. A substantial post that
+    is not a question is taken at face value; a short one has to say something
+    that sounds like an account.
+    """
+    text = f"{title}\n{body}"
+    if _ASKING_RE.search(text):
+        return False
+    stripped = (title or "").strip()
+    if _QUESTION_OPENER_RE.match(stripped) and stripped.endswith("?"):
+        return False
+    if _EXPERIENCE_HINTS.search(text):
+        return True
+    # No stated signal, but a long post in an interview subreddit that is not a
+    # question is far more often a writeup than not.
+    return len(body or "") >= 400
 
 # Level hints as people actually write them in titles.
 _ROLE_HINT_RE = re.compile(
@@ -135,7 +181,7 @@ def parse_reddit(payload, company: str) -> list[dict]:
         post = child.get("data") or {}
         title = post.get("title") or ""
         body = post.get("selftext") or ""
-        if not _EXPERIENCE_HINTS.search(f"{title}\n{body}"):
+        if not is_experience_report(title, body):
             continue
         created = post.get("created_utc")
         if not created:
