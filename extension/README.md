@@ -45,9 +45,15 @@ link comes back.
 
 This toggle also enables `fetch_json`, which fetches public JSON the server is
 walled out of. Reddit answers a datacenter IP with `403 Blocked` — a categorical
-refusal rather than a rate limit, so no amount of retrying from the VPS works,
-while a browser on a home connection gets the data. Interview-report gathering
-depends on it.
+refusal rather than a rate limit, so no amount of retrying from the VPS works.
+Interview-report gathering depends on it.
+
+**Log in to Reddit in this browser.** Reddit refuses anonymous JSON whoever is
+asking, so a residential address alone is not enough; the session is what makes
+the request answerable. Requests to reddit.com therefore carry your cookies —
+and only reddit.com does. That list lives in the extension, not in the task, so
+the server cannot queue a URL that causes your cookies to be sent anywhere new.
+Every other queued fetch is anonymous.
 
 It is off by default and asks separately because it needs permission to read any
 site — a materially larger ask than reaching your own server, and one that
@@ -205,7 +211,7 @@ surface to find.
 | `GET /api/agent/hello` | Handshake: supported kinds, timings, queue depth |
 | `POST /api/agent/lease` | Claim work. `{kinds, agent_id, max, wait}` |
 | `POST /api/agent/tasks/<id>/result` | Success. `{result, agent_id}` |
-| `POST /api/agent/tasks/<id>/fail` | Failure. `{error, agent_id}` — server decides retry or retire |
+| `POST /api/agent/tasks/<id>/fail` | Failure. `{error, agent_id, permanent}` — `permanent` skips the retries |
 | `POST /api/agent/tasks/<id>/heartbeat` | Extend the lease on long-running work |
 | `POST /api/agent/harvest` | Offer intercepted job JSON. `{payload, source_url}` — a push, not a task |
 | `GET /api/agent/job-context?url=` | What we know about a posting: score, flags, whether you applied |
@@ -215,6 +221,10 @@ surface to find.
 A lease is exclusive and time-limited. If this browser closes mid-task the lease
 lapses and the task returns to the queue for whoever asks next — no attempt is
 counted against it, since a closed laptop is not a failed attempt.
+
+Failures are retried up to three times, except when the agent marks them
+`permanent`. It does that for a 4xx other than 429: a refused request will be
+refused again, and three identical rows bury whatever else failed that hour.
 
 ## Adding a task kind
 

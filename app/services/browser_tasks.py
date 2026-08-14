@@ -217,7 +217,9 @@ def complete(db, task_id, result: dict | None = None, *, agent_id: str = "") -> 
     return task
 
 
-def fail(db, task_id, error: str, *, agent_id: str = "") -> BrowserTask:
+def fail(
+    db, task_id, error: str, *, agent_id: str = "", permanent: bool = False
+) -> BrowserTask:
     """
     Record a failed attempt.
 
@@ -225,13 +227,17 @@ def fail(db, task_id, error: str, *, agent_id: str = "") -> BrowserTask:
     transient — a page that had not finished loading, a session that needed
     re-auth. Past that, the task is retired with the last error kept, since a
     task retried forever is indistinguishable from a queue that is broken.
+
+    `permanent` skips the retries entirely. A site answering 403 will answer 403
+    again, so trying twice more turns one refusal into three rows of the same
+    message and buries whatever else went wrong that hour.
     """
     task = _held(db, task_id, agent_id)
     task.error = (error or "")[:2000] or "The agent reported a failure with no message."
     task.agent_id = None
     task.lease_expires_at = None
 
-    if task.attempts >= task.max_attempts:
+    if permanent or task.attempts >= task.max_attempts:
         task.status = "failed"
         task.completed_at = _now()
     else:

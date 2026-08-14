@@ -344,9 +344,13 @@ async def post_failure(task_id: str, request: Request, db: Session = Depends(get
     body = await _json_body(request)
     agent_id = str(body.get("agent_id") or "")[:120]
     error = str(body.get("error") or "")[:2000]
+    # The agent knows whether what it hit will change on a retry. A refused
+    # request will be refused again; a timeout might not be.
+    permanent = bool(body.get("permanent"))
     try:
         return await run_in_threadpool(
-            _report, db, browser_tasks.fail, task_id, agent_id, error=error
+            _report, db, browser_tasks.fail, task_id, agent_id,
+            error=error, permanent=permanent,
         )
     except TaskError as exc:
         return _bad_request(exc)

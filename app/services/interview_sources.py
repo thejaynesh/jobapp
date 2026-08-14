@@ -159,8 +159,11 @@ def reddit_search_urls(company: str, limit: int = 25) -> list[str]:
         return []
     per_sub = max(5, limit // len(_SUBREDDITS))
     query = quote(f'"{company}" interview')
+    # old.reddit.com rather than www: it serves the same JSON from the older
+    # stack, which gates anonymous and automated access noticeably less than
+    # the current front end does.
     return [
-        f"https://www.reddit.com/r/{sub}/search.json"
+        f"https://old.reddit.com/r/{sub}/search.json"
         f"?q={query}&restrict_sr=1&sort=new&limit={per_sub}&t=year"
         for sub in _SUBREDDITS
     ]
@@ -203,18 +206,29 @@ def parse_reddit(payload, company: str) -> list[dict]:
     return reports
 
 
+# Whether to spend a server request on Reddit before handing it to the browser.
+# Off, because it has never once succeeded from a VPS: Reddit answers a
+# datacenter IP with 403 categorically, not as a rate limit, so the attempt only
+# adds latency to a button someone is waiting on. Left switchable because a
+# deployment somewhere other than a datacenter might not be refused.
+TRY_REDDIT_FROM_SERVER = False
+
+
 def fetch_reddit(company: str, limit: int = 25, client: httpx.Client | None = None) -> SourceResult:
     """
-    Search the interview subreddits, from this server.
+    Reddit, which this server cannot have.
 
-    Usually fails in production, and says so precisely. Reddit answers a
-    datacenter IP with `403 Blocked` — not a rate limit, a categorical refusal —
-    so on a VPS this exists to establish that the browser is needed rather than
-    to succeed. `blocked` on the result is what tells the caller to queue the
-    same URLs to an agent instead of giving up.
+    Returns `blocked` immediately rather than proving the point four times over
+    — the caller reads that flag and queues the same URLs to the browser, which
+    has the session and the residential address that Reddit will answer.
     """
     result = SourceResult(source="reddit")
     if not company.strip():
+        return result
+
+    if not TRY_REDDIT_FROM_SERVER and client is None:
+        result.blocked = True
+        result.error = "Reddit refuses this server; asking your browser instead."
         return result
 
     owned = client is None
@@ -227,7 +241,7 @@ def fetch_reddit(company: str, limit: int = 25, client: httpx.Client | None = No
                     result.blocked = True
                     result.error = (
                         f"Reddit refused this server ({response.status_code}). "
-                        "Datacenter IPs are blocked; queued to your browser instead."
+                        "Asking your browser instead."
                     )
                     continue
                 response.raise_for_status()

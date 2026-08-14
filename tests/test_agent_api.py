@@ -167,6 +167,17 @@ class TestReporting:
         # dead end without asking again.
         assert body["status"] == "queued"
 
+    def test_an_agent_can_flag_a_failure_as_final(self, agent, db):
+        # Only the agent knows whether a retry could ever help.
+        task_id = self._leased_id(agent, db)
+        body = agent.post(
+            f"/api/agent/tasks/{task_id}/fail",
+            json={"error": "HTTP 403 from reddit.com", "permanent": True,
+                  "agent_id": "ext-1"},
+            headers=auth_header(),
+        ).json()
+        assert body["status"] == "failed"
+
     def test_a_failure_with_no_body_is_accepted(self, agent, db):
         task_id = self._leased_id(agent, db)
         response = agent.post(

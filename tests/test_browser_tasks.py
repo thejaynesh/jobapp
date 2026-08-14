@@ -221,6 +221,30 @@ class TestFail:
         browser_tasks.fail(db, task.id, "no", agent_id="a1")
         assert browser_tasks.lease(db, agent_id="a1") == []
 
+    def test_a_refusal_is_not_retried(self, db):
+        # A 403 will be a 403 again. Three identical rows bury whatever else
+        # failed that hour — which is exactly what four Reddit searches turning
+        # into twelve failures did.
+        task = browser_tasks.enqueue(db, "ping", max_attempts=3)
+        browser_tasks.lease(db, agent_id="a1")
+        failed = browser_tasks.fail(
+            db, task.id, "HTTP 403 from reddit.com", agent_id="a1", permanent=True
+        )
+        assert failed.status == "failed"
+        assert failed.attempts == 1, "retired on the first attempt, not the third"
+
+    def test_a_permanently_failed_task_is_not_leased_again(self, db):
+        task = browser_tasks.enqueue(db, "ping", max_attempts=3)
+        browser_tasks.lease(db, agent_id="a1")
+        browser_tasks.fail(db, task.id, "HTTP 403", agent_id="a1", permanent=True)
+        assert browser_tasks.lease(db, agent_id="a1") == []
+
+    def test_an_ordinary_failure_still_retries(self, db):
+        task = browser_tasks.enqueue(db, "ping", max_attempts=3)
+        browser_tasks.lease(db, agent_id="a1")
+        failed = browser_tasks.fail(db, task.id, "timed out", agent_id="a1")
+        assert failed.status == "queued"
+
     def test_a_failure_with_no_message_still_says_something(self, db):
         task = browser_tasks.enqueue(db, "ping")
         browser_tasks.lease(db, agent_id="a1")

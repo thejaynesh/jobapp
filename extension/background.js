@@ -138,13 +138,27 @@ const HANDLERS = {
     try {
       const response = await fetch(url, {
         method: "GET",
-        credentials: "omit",
+        // Cookies for the sites that need a session to answer at all, omitted
+        // everywhere else. See SESSION_HOSTS — the decision is made here from
+        // the URL rather than taken from the task, so a queued URL can never
+        // ask for your cookies to be sent somewhere new.
+        credentials: sendsCredentialsTo(url) ? "include" : "omit",
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`);
 
       const text = (await response.text()).slice(0, 2000000);
+
+      if (!response.ok) {
+        // The body, not just the status. A 403 is a block page, a rate limit,
+        // or a demand to log in, and those have three different fixes — the
+        // number alone sent us looking in the wrong place once already.
+        const hint = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+        throw new Error(
+          `HTTP ${response.status} from ${new URL(url).host}` + (hint ? ` — ${hint}` : ""),
+        );
+      }
+
       try {
         return { status: response.status, json: JSON.parse(text) };
       } catch (_) {
@@ -210,6 +224,29 @@ const HANDLERS = {
  * separate, revocable decision rather than something bundled into setup.
  */
 const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
+
+/**
+ * Hosts that get the browser's cookies on a queued fetch.
+ *
+ * Reddit refuses anonymous JSON outright — 403 whoever asks, residential IP or
+ * not — so the only thing that makes the browser more useful than the server
+ * here is the session you already have. That is the extension's entire premise,
+ * and omitting cookies threw it away.
+ *
+ * Decided here from the URL rather than read out of the task, so that the
+ * server can never queue a URL that causes your cookies to be sent somewhere
+ * this list does not already name.
+ */
+const SESSION_HOSTS = ["reddit.com", "www.reddit.com", "old.reddit.com"];
+
+function sendsCredentialsTo(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return SESSION_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+  } catch (_) {
+    return false;
+  }
+}
 
 /**
  * Whether arbitrary sites are reachable.
@@ -291,10 +328,14 @@ async function pollOnce() {
         await api(`/api/agent/tasks/${task.id}/result`, { result, agent_id: id });
         done += 1;
       } catch (error) {
-        // Report the failure rather than dropping it. The server decides
-        // whether that means a retry or a dead end; this side does not guess.
+        // Report the failure rather than dropping it. The server decides what
+        // to do with it — but only this side knows whether a retry could ever
+        // help, so a refusal is flagged as final. A 403 will be a 403 again,
+        // and three identical rows bury whatever else failed that hour.
+        const message = String(error && error.message ? error.message : error);
         await api(`/api/agent/tasks/${task.id}/fail`, {
-          error: String(error && error.message ? error.message : error),
+          error: message,
+          permanent: /HTTP 4(0[0-9]|1[0-8])\b/.test(message),
           agent_id: id,
         });
       }
