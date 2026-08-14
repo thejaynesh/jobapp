@@ -156,6 +156,28 @@ class TestIngest:
         self._completed(db, {"final_url": EMPLOYER}, url="https://www.adzuna.com/land/ad/999")
         assert db.query(Job).one().apply_url is None
 
+    def test_it_records_where_the_link_landed(self, db):
+        job = make_job(db)
+        self._completed(db, {"final_url": EMPLOYER, "html": ""})
+        task = db.query(BrowserTask).filter(BrowserTask.kind == "resolve_link").one()
+        note = task.result["ingest"]
+        assert note["jobs_updated"] == 1
+        assert EMPLOYER[:40] in note["landed_on"]
+
+    def test_it_records_when_a_real_page_load_was_needed(self, db):
+        # Worth seeing before every link starts needing a window: it means the
+        # aggregator has started refusing background requests outright.
+        make_job(db)
+        self._completed(db, {"final_url": EMPLOYER, "html": "", "via": "tab"})
+        task = db.query(BrowserTask).filter(BrowserTask.kind == "resolve_link").one()
+        assert task.result["ingest"]["via"] == "tab"
+
+    def test_an_ordinary_fetch_is_recorded_as_such(self, db):
+        make_job(db)
+        self._completed(db, {"final_url": EMPLOYER, "html": ""})
+        task = db.query(BrowserTask).filter(BrowserTask.kind == "resolve_link").one()
+        assert task.result["ingest"]["via"] == "fetch"
+
     def test_ping_results_are_stored_without_ingestion(self, db):
         task = browser_tasks.enqueue(db, "ping")
         browser_tasks.lease(db, agent_id="ext-1")

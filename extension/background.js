@@ -102,6 +102,125 @@ async function api(path, body, { timeoutMs = 40000 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Opening a page for real
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a URL in an actual browser window, when fetching it is refused.
+ *
+ * A `fetch` from a service worker sends no Referer, runs no JavaScript, paints
+ * nothing and follows no meta-refresh. Aggregators screen for exactly that
+ * shape, which is why Jooble and Indeed answer 403 here while the same URL
+ * opens fine in a tab. A real navigation is not an imitation of a browser
+ * visit; it is one.
+ *
+ * The window is created minimized and closed again immediately. That is still
+ * more intrusive than a fetch, so this is an escalation rather than the default
+ * path — cheap and silent first, visible only when that fails.
+ */
+const TAB_LOAD_TIMEOUT_MS = 25000;
+// Time after "complete" for a meta-refresh or JS redirect to happen. The
+// interstitials this exists for very often bounce a moment after painting.
+const TAB_SETTLE_MS = 1800;
+
+// One at a time. Escalating a backlog of link resolutions in parallel would
+// open a dozen windows at once, which is not a thing to do to someone's screen.
+let tabQueue = Promise.resolve();
+
+function withTabLock(fn) {
+  const run = tabQueue.then(fn, fn);
+  // Keep the chain alive whichever way this settles.
+  tabQueue = run.then(() => {}, () => {});
+  return run;
+}
+
+function waitForLoad(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timer);
+      resolve();
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === "complete") finish();
+    };
+    // A page that never finishes must not hold the queue open; whatever has
+    // loaded by then is usually enough to read a redirect target out of.
+    const timer = setTimeout(finish, timeoutMs);
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function openInTab(url) {
+  return withTabLock(async () => {
+    let win;
+    try {
+      win = await chrome.windows.create({
+        url,
+        focused: false,
+        state: "minimized",
+      });
+    } catch (error) {
+      throw new Error(`could not open a window: ${error.message}`);
+    }
+
+    const tabId = win.tabs && win.tabs[0] && win.tabs[0].id;
+    if (!tabId) {
+      await chrome.windows.remove(win.id).catch(() => {});
+      throw new Error("the window opened without a tab.");
+    }
+
+    try {
+      await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS);
+      await new Promise((r) => setTimeout(r, TAB_SETTLE_MS));
+
+      const tab = await chrome.tabs.get(tabId);
+      let html = "";
+      let text = "";
+      try {
+        const [injected] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => ({
+            html: document.documentElement ? document.documentElement.outerHTML : "",
+            text: document.body ? document.body.innerText : "",
+          }),
+        });
+        html = (injected && injected.result && injected.result.html) || "";
+        text = (injected && injected.result && injected.result.text) || "";
+      } catch (_) {
+        // Reading the page failed — a PDF, a download, a page that refuses
+        // injection. The landing URL alone is still worth reporting.
+      }
+
+      return {
+        final_url: tab.url || url,
+        html: html.slice(0, 400000),
+        text: text.slice(0, 400000),
+        via: "tab",
+      };
+    } finally {
+      await chrome.windows.remove(win.id).catch(() => {});
+    }
+  });
+}
+
+/** Whether a failed fetch is worth reopening as a real page. */
+function worthEscalating(message) {
+  // 403/429 and network-level refusals are the shapes that mean "not like
+  // this". A 404 is the page genuinely not being there, and reopening it in a
+  // window would only cost the user a flicker to learn the same thing.
+  return /HTTP (401|403|405|406|429|503)\b|Failed to fetch|NetworkError/i.test(message);
+}
+
+async function tabsAllowed() {
+  const { useTabs } = await chrome.storage.local.get({ useTabs: true });
+  return useTabs;
+}
+
+// ---------------------------------------------------------------------------
 // Doing the work
 // ---------------------------------------------------------------------------
 
@@ -154,9 +273,21 @@ const HANDLERS = {
         // or a demand to log in, and those have three different fixes — the
         // number alone sent us looking in the wrong place once already.
         const hint = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-        throw new Error(
-          `HTTP ${response.status} from ${new URL(url).host}` + (hint ? ` — ${hint}` : ""),
-        );
+        const message =
+          `HTTP ${response.status} from ${new URL(url).host}` + (hint ? ` — ${hint}` : "");
+
+        // Same escalation as resolve_link: a JSON endpoint that refuses a
+        // background fetch will usually render for a real page load, and
+        // `innerText` on the result is the same document.
+        if (worthEscalating(message) && (await tabsAllowed())) {
+          const opened = await openInTab(url);
+          try {
+            return { status: 200, json: JSON.parse(opened.text), via: "tab" };
+          } catch (_) {
+            throw new Error(`${message} (also unreadable when opened as a page)`);
+          }
+        }
+        throw new Error(message);
       }
 
       try {
@@ -189,29 +320,39 @@ const HANDLERS = {
     const url = payload && payload.url;
     if (!url) throw new Error("resolve_link needs a url.");
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
     try {
-      const response = await fetch(url, {
-        method: "GET",
-        redirect: "follow",
-        // No cookies. Resolving a public redirect does not need the user's
-        // sessions, and sending them to an arbitrary aggregator would be a
-        // gratuitous widening of what this handler can leak.
-        credentials: "omit",
-        signal: controller.signal,
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          redirect: "follow",
+          // No cookies. Resolving a public redirect does not need the user's
+          // sessions, and sending them to an arbitrary aggregator would be a
+          // gratuitous widening of what this handler can leak.
+          credentials: "omit",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`);
 
-      const contentType = response.headers.get("content-type") || "";
-      // Cap the body. Some landing pages are enormous, and everything the
-      // server mines out of one is in the markup near the top.
-      const html = contentType.includes("html")
-        ? (await response.text()).slice(0, 400000)
-        : "";
+        const contentType = response.headers.get("content-type") || "";
+        // Cap the body. Some landing pages are enormous, and everything the
+        // server mines out of one is in the markup near the top.
+        const html = contentType.includes("html")
+          ? (await response.text()).slice(0, 400000)
+          : "";
 
-      return { final_url: response.url, status: response.status, html };
-    } finally {
-      clearTimeout(timer);
+        return { final_url: response.url, status: response.status, html };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      // Aggregators refuse the fetch shape, not this browser. Opening the URL
+      // as a real page gets the redirect chain, the JavaScript and the
+      // meta-refresh that a service-worker fetch never sees.
+      const message = String(error && error.message ? error.message : error);
+      if (!worthEscalating(message) || !(await tabsAllowed())) throw error;
+      return await openInTab(url);
     }
   },
 };

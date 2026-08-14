@@ -190,6 +190,7 @@ def _ingest_fetch_json(db, task: BrowserTask) -> None:
         "kept": len(reports),
         "stored": counts.get("stored", 0),
         "duplicate": counts.get("duplicate", 0),
+        "via": result.get("via") or "fetch",
     })
     logger.info(
         "agent_work: reddit for %s — %d posts, %d kept, %d new",
@@ -235,6 +236,7 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     if not original or not final_url:
         return
 
+    updated = 0
     if final_url != original and not is_aggregator(final_url):
         updated = (
             db.query(Job)
@@ -246,6 +248,15 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
                 "agent_work: apply URL for %d job(s) resolved in-browser to %s",
                 updated, final_url,
             )
+
+    # How it was got matters: a resolution that needed a real page load says the
+    # aggregator is refusing background requests, which is worth seeing before
+    # every link starts needing a window.
+    _note(db, task, {
+        "jobs_updated": updated,
+        "landed_on": final_url[:120],
+        "via": result.get("via") or "fetch",
+    })
 
     # Feed the ATS flywheel. Shaped as a job dict because that is what discovery
     # reads, and it scans the URL and the page body for board links alike.

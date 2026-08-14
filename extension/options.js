@@ -15,6 +15,7 @@ const els = {
   enabled: document.getElementById("enabled"),
   resolveLinks: document.getElementById("resolveLinks"),
   harvest: document.getElementById("harvest"),
+  useTabs: document.getElementById("useTabs"),
   overlay: document.getElementById("overlay"),
   save: document.getElementById("save"),
   test: document.getElementById("test"),
@@ -73,7 +74,7 @@ function originPattern(url) {
 async function load() {
   const stored = await chrome.storage.local.get({
     serverUrl: "", token: "", enabled: false, harvest: false, overlay: false,
-    agentId: "", status: {},
+    useTabs: true, agentId: "", status: {},
   });
   els.serverUrl.value = stored.serverUrl;
   els.token.value = stored.token;
@@ -84,6 +85,7 @@ async function load() {
     stored.harvest && (await chrome.permissions.contains(HARVEST_HOSTS));
   els.overlay.checked =
     stored.overlay && (await chrome.permissions.contains(OVERLAY_HOSTS));
+  els.useTabs.checked = stored.useTabs;
   els.harvestStatus.textContent = stored.status.lastHarvest
     ? `${new Date(stored.status.lastHarvest).toLocaleString()} ` +
       `(${stored.status.lastHarvestFound} found, ${stored.status.lastHarvestNew} new)`
@@ -164,6 +166,7 @@ async function save() {
   await chrome.storage.local.set({
     harvest: els.harvest.checked,
     overlay: els.overlay.checked,
+    useTabs: els.useTabs.checked,
   });
   chrome.runtime.sendMessage({ type: "sync-harvest" }, () => {
     void chrome.runtime.lastError;

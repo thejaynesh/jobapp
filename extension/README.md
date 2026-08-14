@@ -87,6 +87,30 @@ needs. The content scripts are registered when you tick it and unregistered when
 you untick it, rather than declared in the manifest, so installing the extension
 does not request LinkedIn access for a feature that is off.
 
+### Open blocked pages in a hidden window
+
+Some sites refuse a background request outright — Jooble and Indeed both answer
+`403` to a `fetch` from the extension while opening the same URL in a tab works
+fine. They are not blocking your browser; they are screening for the *shape* of
+the request. A `fetch` from a service worker sends no Referer, runs no
+JavaScript, paints nothing and follows no meta-refresh.
+
+So when a fetch is refused, the extension reopens the URL as a real page load in
+a **minimized window**, reads where it landed and what it rendered, and closes
+it. A real navigation is not an imitation of a browser visit; it is one.
+
+Deliberately an escalation rather than the default: a fetch is silent and cheap,
+a window is not. It runs **one at a time**, so a backlog of link resolutions
+cannot open a dozen windows at once, and each closes as soon as it has been
+read. `/runs` marks any result obtained this way as *opened as a page*, so you
+can see how often it is needed.
+
+Only refusals escalate — 401, 403, 405, 406, 429, 503 and network errors. A 404
+means the page genuinely is not there, and reopening it would cost a flicker to
+learn the same thing.
+
+Untick the toggle and those tasks simply fail instead.
+
 #### Why two content scripts
 
 `interceptor.js` runs in the **MAIN** world, sharing the page's globals, which

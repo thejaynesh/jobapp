@@ -76,8 +76,17 @@ class TestLease:
         assert leased[0].payload["n"] == "high"
 
     def test_same_priority_is_fifo(self, db):
-        browser_tasks.enqueue(db, "ping", {"n": "first"})
-        browser_tasks.enqueue(db, "ping", {"n": "second"})
+        # created_at is set by Postgres `now()`, which is transaction start
+        # time — and this fixture runs every commit as a savepoint inside one
+        # transaction, so both rows would share a timestamp and the ordering
+        # would be undefined. In production each enqueue is its own
+        # transaction; the timestamps here are set to match that.
+        first = browser_tasks.enqueue(db, "ping", {"n": "first"})
+        second = browser_tasks.enqueue(db, "ping", {"n": "second"})
+        first.created_at = _now() - timedelta(seconds=2)
+        second.created_at = _now() - timedelta(seconds=1)
+        db.commit()
+
         leased = browser_tasks.lease(db, agent_id="a1", limit=2)
         assert [t.payload["n"] for t in leased] == ["first", "second"]
 

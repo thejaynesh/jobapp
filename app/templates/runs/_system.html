@@ -107,8 +107,14 @@
             <tr>
               <td colspan="3" class="pb-1 text-[10px] text-gray-400">
                 {% if note.error %}{{ note.error }}
-                {% else %}{{ note.posts_seen }} posts, {{ note.kept }} kept,
-                  {{ note.stored }} new{% if note.duplicate %}, {{ note.duplicate }} already had{% endif %}
+                {% elif note.posts_seen is defined %}{{ note.posts_seen }} posts,
+                  {{ note.kept }} kept, {{ note.stored }} new{% if note.duplicate %},
+                  {{ note.duplicate }} already had{% endif %}
+                {% elif note.landed_on %}→ {{ note.landed_on }}
+                  {% if note.jobs_updated %}({{ note.jobs_updated }} job{{ '' if note.jobs_updated == 1 else 's' }}){% endif %}
+                {% endif %}
+                {% if note.via == 'tab' %}
+                <span class="text-blue-500">· opened as a page</span>
                 {% endif %}
               </td>
             </tr>
