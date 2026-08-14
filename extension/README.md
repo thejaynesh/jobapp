@@ -123,6 +123,28 @@ an application.
 It asks for the named boards only — LinkedIn jobs, Greenhouse, Lever, Ashby,
 Workday, Workable, SmartRecruiters, Recruitee — rather than a wildcard.
 
+#### Filling a form
+
+On a page with several empty fields, the panel offers **Fill this form**. It
+matches each field against your profile using everything the field is described
+by at once — `autocomplete`, `name`, `id`, `placeholder`, `aria-label`, and the
+visible label — because every ATS names them differently and no single attribute
+is reliable.
+
+Three rules it will not break:
+
+- **It never submits.** It fills and stops. You read it and press apply.
+- **It never overwrites an answer.** A field with anything in it is skipped, so
+  a half-completed form cannot be clobbered.
+- **Everything it wrote is outlined in blue.** You are about to send this to an
+  employer, so what a machine typed has to be obvious at a glance.
+
+Values are fetched when you press the button, not on page load, so your details
+reach a page only when you have asked for them to be typed there. What travels
+is a fixed list — name, email, phone, location, links, and your most recent
+degree. Your narrative, preferences, templates, match scores and application
+history are not part of it.
+
 Two things about how it is built. It draws inside a **closed shadow root**,
 because job sites ship aggressive global CSS and a plain injected div inherits
 all of it; a panel that looks right on Greenhouse would be unreadable on
@@ -187,6 +209,7 @@ surface to find.
 | `POST /api/agent/tasks/<id>/heartbeat` | Extend the lease on long-running work |
 | `POST /api/agent/harvest` | Offer intercepted job JSON. `{payload, source_url}` — a push, not a task |
 | `GET /api/agent/job-context?url=` | What we know about a posting: score, flags, whether you applied |
+| `GET /api/agent/autofill-fields` | The profile values a form asks for — a fixed list, not the profile |
 | `POST /api/agent/prepare` | Save a posting and open an application for it. `{url, posting}` |
 
 A lease is exclusive and time-limited. If this browser closes mid-task the lease

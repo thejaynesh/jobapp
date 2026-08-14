@@ -160,6 +160,7 @@
     if (!data.known) {
       line(box, "Not in your tracker yet.");
       addPrepare(box, serverUrl, "Save and write documents");
+      addFillButton(box);
       return;
     }
 
@@ -215,6 +216,21 @@
     } else {
       addPrepare(box, serverUrl, "Write documents for this");
     }
+
+    addFillButton(box);
+  }
+
+  function addFillButton(box) {
+    if (!looksLikeAForm()) return;
+    const button = document.createElement("button");
+    button.className = "action secondary";
+    button.textContent = "Fill this form";
+    button.addEventListener("click", () => fillForm(box, button));
+    box.append(button);
+    line(
+      box,
+      "Fills what it recognises and stops. It never submits — you read it and press apply.",
+    );
   }
 
   function addLink(box, serverUrl, path, label) {
@@ -256,6 +272,146 @@
       addLink(box, serverUrl, data.path, "Open in JobApp");
     });
     box.append(button);
+  }
+
+  // -------------------------------------------------------------------------
+  // Autofill
+  // -------------------------------------------------------------------------
+
+  /**
+   * Which profile value belongs in a field, worked out from how it is labelled.
+   *
+   * Matched against the field's `autocomplete`, `name`, `id`, `placeholder`,
+   * `aria-label` and its visible label text, all at once. Every ATS names these
+   * differently — Greenhouse ships `job_application[first_name]`, Workday ships
+   * a generated id and a label — so no single attribute is reliable and the
+   * union of them is much harder to defeat than any one.
+   *
+   * Order matters. `first_name` must be tested before `name`, and `linkedin`
+   * before `website`, because the looser pattern would otherwise swallow the
+   * field the stricter one wanted.
+   */
+  const FIELD_RULES = [
+    ["first_name", /(^|[^a-z])(first[\s_-]*name|given[\s_-]*name|fname)/i],
+    ["last_name", /(^|[^a-z])(last[\s_-]*name|family[\s_-]*name|surname|lname)/i],
+    ["email", /e-?mail/i],
+    ["phone", /(phone|mobile|telephone|contact[\s_-]*number)/i],
+    ["linkedin", /linked[\s_-]*in/i],
+    ["github", /(github|git[\s_-]*hub)/i],
+    ["website", /(website|portfolio|personal[\s_-]*site|blog)/i],
+    ["school", /(school|university|college|institution)/i],
+    ["degree", /degree/i],
+    ["field_of_study", /(field[\s_-]*of[\s_-]*study|major|discipline)/i],
+    ["location", /(city|location|address|where.*based)/i],
+    ["full_name", /(^|[^a-z])(full[\s_-]*name|your[\s_-]*name|name)/i],
+  ];
+
+  /** Everything a field is described by, as one lowercase haystack. */
+  function describe(field) {
+    const bits = [
+      field.getAttribute("autocomplete"),
+      field.name,
+      field.id,
+      field.getAttribute("placeholder"),
+      field.getAttribute("aria-label"),
+    ];
+
+    // The visible label, which on Workday is the only thing that says anything.
+    if (field.id) {
+      const label = document.querySelector(`label[for="${CSS.escape(field.id)}"]`);
+      if (label) bits.push(label.textContent);
+    }
+    const wrapping = field.closest("label");
+    if (wrapping) bits.push(wrapping.textContent);
+
+    return bits.filter(Boolean).join(" ").slice(0, 400).toLowerCase();
+  }
+
+  function valueFor(field, values) {
+    const haystack = describe(field);
+    if (!haystack) return null;
+    for (const [key, pattern] of FIELD_RULES) {
+      if (pattern.test(haystack) && values[key]) return [key, values[key]];
+    }
+    return null;
+  }
+
+  /**
+   * Set a value the way a framework will believe.
+   *
+   * React and Angular track the input's value internally and ignore a plain
+   * assignment, so the field looks filled and submits empty — the worst
+   * possible failure here. Writing through the native setter and then
+   * dispatching the events a real keystroke produces is what makes the
+   * framework accept it.
+   */
+  function setValue(field, value) {
+    const proto =
+      field instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(field, value);
+    else field.value = value;
+
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function fillableFields() {
+    return Array.from(
+      document.querySelectorAll("input, textarea"),
+    ).filter((field) => {
+      if (field.disabled || field.readOnly) return false;
+      if (field.type && /hidden|password|file|submit|button|checkbox|radio/i.test(field.type)) {
+        return false;
+      }
+      // Never overwrite something already answered. A half-completed form is
+      // the common case, and clobbering an answer is worse than skipping it.
+      if (field.value && field.value.trim()) return false;
+      const box = field.getBoundingClientRect();
+      return box.width > 0 && box.height > 0;
+    });
+  }
+
+  async function fillForm(box, button) {
+    button.disabled = true;
+    button.textContent = "Filling…";
+
+    const reply = await ask("/api/agent/autofill-fields");
+    if (reply.error) {
+      button.disabled = false;
+      button.textContent = "Fill this form";
+      line(box, reply.error);
+      return;
+    }
+
+    const values = reply.data || {};
+    const filled = [];
+    for (const field of fillableFields()) {
+      const match = valueFor(field, values);
+      if (!match) continue;
+      setValue(field, match[1]);
+      // Marked rather than merely filled: you are about to submit this to an
+      // employer, so what a machine wrote must be obvious at a glance.
+      field.style.outline = "2px solid #2563eb";
+      field.style.outlineOffset = "1px";
+      filled.push(match[0]);
+    }
+
+    button.disabled = false;
+    button.textContent = "Fill this form";
+    line(
+      box,
+      filled.length
+        ? `Filled ${filled.length}: ${filled.join(", ")}. Outlined in blue — check them, then submit yourself.`
+        : "Nothing matched. Either the fields are already filled, or this form names them in a way I do not recognise.",
+    );
+  }
+
+  /** Whether this page looks like something worth offering to fill. */
+  function looksLikeAForm() {
+    return fillableFields().length >= 3;
   }
 
   /**

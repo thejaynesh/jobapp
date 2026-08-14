@@ -210,6 +210,55 @@ async def job_context(url: str = "", db: Session = Depends(get_db)):
     return await run_in_threadpool(context, db, url)
 
 
+def _autofill_fields(db: Session) -> dict:
+    """
+    The profile values worth typing into an application form, and nothing else.
+
+    Deliberately a narrow projection rather than the whole profile. These end up
+    in the page's own process — that is unavoidable, since typing them into a
+    form is the point — so what travels is only what a form actually asks for.
+    The narrative, the match scores, the application history and the LaTeX
+    templates have no business on an employer's page.
+    """
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    data = (profile.data if profile else {}) or {}
+    personal = data.get("personal") or {}
+
+    name = (personal.get("name") or "").strip()
+    first, _, last = name.partition(" ")
+
+    education = (data.get("education") or [])
+    latest = education[0] if education else {}
+
+    return {
+        "first_name": first,
+        "last_name": last.strip(),
+        "full_name": name,
+        "email": (personal.get("email") or "").strip(),
+        "phone": (personal.get("phone") or "").strip(),
+        "location": (personal.get("location") or "").strip(),
+        "linkedin": (personal.get("linkedin") or "").strip(),
+        "github": (personal.get("github") or "").strip(),
+        "website": (personal.get("website") or "").strip(),
+        "school": (latest.get("school") or "").strip(),
+        "degree": (latest.get("degree") or "").strip(),
+        "field_of_study": (latest.get("field") or "").strip(),
+    }
+
+
+@router.get("/autofill-fields")
+async def autofill_fields(db: Session = Depends(get_db)):
+    """
+    What to put in an application form.
+
+    Fetched on demand when the user presses Fill, not on page load, so profile
+    values reach a page only when they have asked for them to be typed there.
+    """
+    return await run_in_threadpool(_autofill_fields, db)
+
+
 def _prepare(db: Session, url: str, posting: dict) -> dict:
     from app.services.job_context import prepare
 
