@@ -171,3 +171,40 @@ class TestDegradation:
         response = client.get("/runs")
         assert response.status_code == 200
         assert "agent queue" in response.text
+
+
+class TestPoolVisibility:
+    """
+    Connections in use, where someone already looks.
+
+    Exhaustion is invisible until it is total, and then every page fails at
+    once with a message naming no request in particular — which is how a single
+    slow endpoint holding a connection across a minute of HTTP took down the
+    whole app and pointed nowhere near itself.
+    """
+
+    def test_the_panel_reports_it(self, client):
+        assert "Database pool" in client.get("/runs/system").text
+
+    def test_health_reports_it(self, client):
+        pool = client.get("/health").json()["pool"]
+        assert pool["size"] > 0
+        assert pool["checked_out"] >= 0
+
+    def test_the_pool_is_bigger_than_sqlalchemys_default(self):
+        # 5 + 10 goes quickly with an agent long-polling and HTMX fragments
+        # refreshing independently of the page around them.
+        from app.database import engine
+
+        assert engine.pool.size() > 5
+
+    def test_a_pool_failure_does_not_take_the_page_down(self, client, monkeypatch):
+        import app.routers.runs as runs
+
+        monkeypatch.setattr(
+            runs, "_system_context",
+            lambda db: {"agent": None, "mailbox": None, "corpus": None,
+                        "pool": None, "errors": ["pool: unavailable"]},
+        )
+        response = client.get("/runs")
+        assert response.status_code == 200

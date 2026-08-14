@@ -113,14 +113,25 @@ def research_interviews(app_id: uuid.UUID, request: Request, db: Session = Depen
     Runs inline rather than through Celery. It is a handful of HTTP calls, the
     user is waiting on the answer, and a queued job that fails silently is a
     worse experience than a slow button.
+
+    The database connection is deliberately let go before those calls. Fetching
+    three sources can take a minute — GeeksforGeeks alone reads an index and
+    then up to ten articles — and holding a pooled connection idle for that long
+    while waiting on someone else's web server is how a handful of clicks
+    exhausts the pool and takes down every page in the app.
     """
     app_obj = db.query(Application).filter(Application.id == app_id).first()
     if not app_obj:
         raise HTTPException(status_code=404, detail="Application not found")
 
     company = (app_obj.job.company if app_obj.job else "") or ""
+    # Read into a local first: after the commit below these objects are expired,
+    # and touching one would silently take a connection straight back out.
     outcome = None
     if company:
+        # Ends the read transaction and returns the connection to the pool. The
+        # session reacquires one by itself when ingestion needs it.
+        db.commit()
         try:
             from app.services.interview_corpus import ingest
             from app.services.interview_sources import fetch_all

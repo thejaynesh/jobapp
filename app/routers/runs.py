@@ -105,7 +105,9 @@ def _system_context(db: Session) -> dict:
     """
     from app.services import browser_tasks, interview_corpus, mailbox
 
-    context: dict = {"agent": None, "mailbox": None, "corpus": None, "errors": []}
+    context: dict = {
+        "agent": None, "mailbox": None, "corpus": None, "pool": None, "errors": [],
+    }
 
     try:
         context["agent"] = {
@@ -117,6 +119,13 @@ def _system_context(db: Session) -> dict:
     except Exception as exc:
         logger.warning("runs: agent status unavailable: %s", exc)
         context["errors"].append(f"agent queue: {exc}")
+
+    try:
+        from app.database import pool_status
+
+        context["pool"] = pool_status()
+    except Exception as exc:
+        logger.warning("runs: pool status unavailable: %s", exc)
 
     try:
         context["mailbox"] = mailbox.status(db)

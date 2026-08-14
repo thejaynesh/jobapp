@@ -6,6 +6,13 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     TEST_DATABASE_URL: str = ""
+    # Connection pool. Larger than SQLAlchemy's 5 + 10 default because an agent
+    # long-polls, HTMX fragments refresh independently, and several panels query
+    # per render — fifteen goes quickly with a browser talking to it too.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: int = 20
+    DB_POOL_RECYCLE: int = 1800
     REDIS_URL: str
     SECRET_KEY: str
 

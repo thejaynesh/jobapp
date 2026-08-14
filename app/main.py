@@ -331,12 +331,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> HTMLR
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
+    from app.database import pool_status
+
     try:
         db.execute(text("SELECT 1"))
         db_status = "ok"
     except Exception:
         db_status = "error"
-    return {"status": "ok", "db": db_status}
+    # The pool goes with it. Exhaustion is invisible until it is total, and then
+    # every page fails at once with a message that names no request in
+    # particular — so the count that would have said so lives where a monitor
+    # already looks.
+    return {"status": "ok", "db": db_status, "pool": pool_status()}
 
 
 @app.get("/")

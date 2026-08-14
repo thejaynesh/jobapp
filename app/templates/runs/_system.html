@@ -19,6 +19,17 @@
   </div>
   {% endif %}
 
+  {% if system.pool %}
+  {# Connections in use. Exhaustion takes every page down at once with a
+     message that names no request, so the number that would have said lives
+     where someone already looks. #}
+  <p class="text-[11px] mb-3
+     {% if system.pool.available <= 2 %}text-amber-700{% else %}text-gray-400{% endif %}">
+    Database pool: {{ system.pool.checked_out }} of {{ system.pool.size }} in use
+    {%- if system.pool.overflow > 0 %}, {{ system.pool.overflow }} overflow{% endif %}
+  </p>
+  {% endif %}
+
   <div class="grid gap-4 md:grid-cols-3">
 
     {# ---- Browser agent ------------------------------------------------ #}
