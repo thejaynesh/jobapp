@@ -64,6 +64,7 @@ TUNABLES: list[Tunable] = [
     Tunable(
         key="nvidia_nim_model", env="NVIDIA_NIM_MODEL", kind="choice",
         choices=[
+            "z-ai/glm-5.2",
             "deepseek-ai/deepseek-v4-flash",
             "meta/llama-3.3-70b-instruct",
             "meta/llama-3.1-70b-instruct",

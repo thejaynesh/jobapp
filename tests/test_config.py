@@ -34,10 +34,20 @@ def test_settings_defaults():
     assert s.DEBUG is False
 
 
-def test_the_default_matching_model_is_deepseek():
+def test_the_default_matching_model_is_glm():
     from app.config import Settings
 
-    assert Settings.model_fields["NVIDIA_NIM_MODEL"].default == "deepseek-ai/deepseek-v4-flash"
+    assert Settings.model_fields["NVIDIA_NIM_MODEL"].default == "z-ai/glm-5.2"
+
+
+def test_the_default_model_is_one_the_picker_offers():
+    # A default the Settings dropdown cannot represent would silently reset
+    # itself the first time anyone opened that page.
+    from app.config import Settings
+    from app.services.tunables import TUNABLES
+
+    picker = next(t for t in TUNABLES if t.key == "nvidia_nim_model")
+    assert Settings.model_fields["NVIDIA_NIM_MODEL"].default in picker.choices
 
 
 def test_the_matching_ceiling_leaves_room_for_thinking():

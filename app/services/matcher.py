@@ -428,7 +428,25 @@ def chat_completion(
         max_tokens=max_tokens if max_tokens is not None else _match_max_tokens(),
         timeout=90,
     )
-    return response.choices[0].message.content or ""
+    return _reply_text(response)
+
+
+def _reply_text(response) -> str:
+    """
+    The model's answer, wherever it put it.
+
+    Reasoning models on NIM return their thinking in `reasoning_content` and the
+    answer in `content`, which is the good case: the answer arrives clean. But
+    when the ceiling is reached mid-thought `content` comes back empty, and
+    returning "" throws away the only text there is — the scoring object is
+    often already inside the thinking, and the parser hunts for a balanced
+    object rather than assuming the reply is pure JSON.
+    """
+    message = response.choices[0].message
+    content = (getattr(message, "content", None) or "").strip()
+    if content:
+        return content
+    return (getattr(message, "reasoning_content", None) or "").strip()
 
 
 def _rpm_interval() -> float:

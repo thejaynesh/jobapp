@@ -49,7 +49,7 @@ class Settings(BaseSettings):
 
     NVIDIA_NIM_API_KEY: str
     NVIDIA_NIM_BASE_URL: str
-    NVIDIA_NIM_MODEL: str = "deepseek-ai/deepseek-v4-flash"
+    NVIDIA_NIM_MODEL: str = "z-ai/glm-5.2"
     NVIDIA_NIM_RPM: int = 40  # requests per minute allowed by the API
     # Output ceiling for a matching call. Generous because the default model
     # reasons before answering: the scoring JSON itself is a couple of hundred

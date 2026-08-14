@@ -1030,3 +1030,53 @@ class TestMatchingTokenCeiling:
         monkeypatch.setattr(matcher, "OpenAI", _FakeClient)
         matcher.chat_completion([], "k", "u", "m")
         assert captured["max_tokens"] == 2048
+
+
+class TestReasoningReplies:
+    """
+    Reading an answer a reasoning model split across two fields.
+
+    NIM returns thinking in `reasoning_content` and the answer in `content`.
+    The good case needs nothing — the answer arrives clean. The case worth
+    handling is a reply cut off mid-thought, where `content` is empty and the
+    scoring object is sitting in the thinking that did arrive.
+    """
+
+    @staticmethod
+    def _response(content=None, reasoning=None):
+        message = type("M", (), {"content": content, "reasoning_content": reasoning})()
+        return type("R", (), {"choices": [type("C", (), {"message": message})()]})()
+
+    def test_the_answer_is_preferred(self):
+        from app.services.matcher import _reply_text
+
+        reply = self._response(content='{"score": 80}', reasoning="thinking out loud")
+        assert _reply_text(reply) == '{"score": 80}'
+
+    def test_thinking_is_used_when_the_answer_never_arrived(self):
+        from app.services.matcher import _reply_text
+
+        reply = self._response(content="", reasoning='...so {"score": 80}')
+        assert "score" in _reply_text(reply)
+
+    def test_an_empty_reply_is_empty_rather_than_an_error(self):
+        from app.services.matcher import _reply_text
+
+        assert _reply_text(self._response()) == ""
+
+    def test_a_model_without_a_reasoning_field_is_unaffected(self):
+        from app.services.matcher import _reply_text
+
+        message = type("M", (), {"content": '{"score": 70}'})()
+        reply = type("R", (), {"choices": [type("C", (), {"message": message})()]})()
+        assert _reply_text(reply) == '{"score": 70}'
+
+    def test_the_parser_can_read_a_score_out_of_thinking(self):
+        # The two halves together: a truncated reply still yields a score.
+        from app.services.matcher import _extract_json_object, _reply_text
+
+        reply = self._response(
+            content="",
+            reasoning='Let me weigh this. The stack matches. {"score": 82, "reasoning": "good fit"}',
+        )
+        assert _extract_json_object(_reply_text(reply))["score"] == 82

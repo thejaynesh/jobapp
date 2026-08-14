@@ -24,6 +24,7 @@ ROLLUP_WINDOW = 20
 # that only fits the JSON they get truncated mid-object, which reads as the
 # model being bad at scoring rather than as a budget that was too small.
 NIM_MODELS = [
+    "z-ai/glm-5.2",
     "deepseek-ai/deepseek-v4-flash",
     "meta/llama-3.3-70b-instruct",
     "meta/llama-3.1-70b-instruct",
