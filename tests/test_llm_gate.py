@@ -301,6 +301,34 @@ class TestProviderCheck:
         assert results[0]["ok"] is True
         assert results[0]["gated"] is True
 
+    def test_a_probe_does_not_wait_a_working_calls_timeout(self):
+        # It is a reachability check. A provider that needs 90 seconds to say
+        # one word is a finding, not something to sit through.
+        from app.llm.providers import DEFAULT_TIMEOUT_SECONDS
+        from app.services import provider_check
+
+        with patch("app.services.provider_check.configured_providers",
+                   return_value={"fi": Provider(name="fi", api_key="k", model="m")}):
+            with patch("app.services.provider_check.call_provider",
+                       return_value="ready") as call:
+                with patch.object(provider_check.settings, "NVIDIA_NIM_API_KEY", ""):
+                    provider_check.check_providers()
+        assert call.call_args.kwargs["timeout"] < DEFAULT_TIMEOUT_SECONDS
+
+    def test_a_probe_does_not_queue_politely_behind_real_work(self):
+        # Whether a single-slot provider is busy right now is part of what the
+        # check is reporting, so it should not wait two minutes to find out.
+        from app.services import llm_gate, provider_check
+
+        with patch("app.services.provider_check.configured_providers",
+                   return_value={"fi": Provider(name="fi", api_key="k", model="m",
+                                                max_concurrency=1)}):
+            with patch("app.services.provider_check.call_provider",
+                       return_value="ready") as call:
+                with patch.object(provider_check.settings, "NVIDIA_NIM_API_KEY", ""):
+                    provider_check.check_providers()
+        assert call.call_args.kwargs["gate_wait"] < llm_gate.DEFAULT_WAIT_SECONDS
+
     def test_a_failure_names_the_reason(self):
         # "Nothing happened" is what this check exists to replace.
         from app.services import provider_check
@@ -337,22 +365,150 @@ class TestProviderCheck:
         assert [r["name"] for r in results] == ["nim"]
 
 
+class TestTheCheckRunsOffTheRequest:
+    """
+    The proxy gives an upstream 60 seconds. Real calls to real providers, one of
+    which may be queueing behind another caller, do not reliably fit in that —
+    and an answer that arrives as a 504 is not an answer.
+    """
+
+    @pytest.fixture
+    def profile(self, db):
+        from app.models.profile import Profile
+
+        record = Profile(data={})
+        db.add(record)
+        db.commit()
+        return record
+
+    def test_the_button_queues_instead_of_calling(self, client, profile):
+        with patch("app.services.provider_check.check_providers") as check:
+            with patch("app.tasks.providers.run_provider_check.delay") as delay:
+                response = client.post("/runs/providers/check")
+        assert response.status_code == 200
+        assert delay.called
+        check.assert_not_called(), "no provider call may happen in the request"
+
+    def test_the_click_is_visible_before_a_worker_picks_it_up(
+        self, client, db, profile
+    ):
+        # Otherwise "queued" and "never asked for" look identical and the
+        # button appears to do nothing at all.
+        from app.services import provider_check
+
+        with patch("app.tasks.providers.run_provider_check.delay"):
+            body = client.post("/runs/providers/check").text
+        assert provider_check.load_state(db)["status"] == "queued"
+        assert "Calling each one in turn" in body
+
+    def test_a_broker_that_is_down_is_reported_not_swallowed(
+        self, client, db, profile
+    ):
+        with patch("app.tasks.providers.run_provider_check.delay",
+                   side_effect=RuntimeError("redis down")):
+            response = client.post("/runs/providers/check")
+        assert response.status_code == 200
+        assert provider_check_status(db) == "failed"
+
+    def test_the_task_stores_what_it_found(self, db, profile, monkeypatch):
+        import app.tasks.providers as task_module
+        from app.services import provider_check
+        from app.tasks.providers import run_provider_check
+
+        monkeypatch.setattr(task_module, "SessionLocal", lambda: db)
+        monkeypatch.setattr(
+            "app.services.provider_check.check_providers",
+            lambda: [{"name": "freeinference", "model": "glm-5.1", "ok": True,
+                      "ms": 812, "detail": "ready", "gated": True}],
+        )
+        run_provider_check.apply()
+        record = provider_check.load_state(db)
+        assert record["status"] == "done"
+        assert record["results"][0]["name"] == "freeinference"
+
+    def test_a_failure_is_stored_rather_than_left_spinning(
+        self, db, profile, monkeypatch
+    ):
+        import app.tasks.providers as task_module
+        from app.services import provider_check
+        from app.tasks.providers import run_provider_check
+
+        monkeypatch.setattr(task_module, "SessionLocal", lambda: db)
+        monkeypatch.setattr(
+            "app.services.provider_check.check_providers",
+            lambda: (_ for _ in ()).throw(RuntimeError("openai package missing")),
+        )
+        run_provider_check.apply()
+        record = provider_check.load_state(db)
+        assert record["status"] == "failed"
+        assert "openai" in record["error"]
+
+    def test_a_check_whose_worker_died_is_called_stalled(self):
+        from datetime import datetime, timedelta, timezone
+
+        from app.services.provider_check import progress
+
+        long_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        state = progress({"status": "running", "started_at": long_ago, "results": []})
+        assert state["stalled"] is True
+        assert state["active"] is False, "polling a dead check forever helps nobody"
+
+
+def provider_check_status(db):
+    from app.services import provider_check
+
+    return (provider_check.load_state(db) or {}).get("status")
+
+
 class TestProviderPanel:
+    @pytest.fixture
+    def profile(self, db):
+        from app.models.profile import Profile
+
+        record = Profile(data={})
+        db.add(record)
+        db.commit()
+        return record
+
     def test_the_page_offers_the_check(self, client):
         assert "Test each provider" in client.get("/runs").text
 
-    def test_results_come_back_in_the_panel(self, client):
-        with patch("app.services.provider_check.check_providers", return_value=[
-            {"name": "freeinference", "model": "glm-5.1", "ok": True, "ms": 812,
-             "detail": "ready", "gated": True},
-        ]):
-            body = client.post("/runs/providers/check").text
+    def test_stored_results_are_shown(self, client, db, profile):
+        from app.services import provider_check
+
+        provider_check.store_state(db, {
+            "status": "done", "finished_at": provider_check._now(),
+            "results": [{"name": "freeinference", "model": "glm-5.1", "ok": True,
+                         "ms": 812, "detail": "ready", "gated": True}],
+        })
+        body = client.get("/runs/system").text
         assert "freeinference" in body
         assert "812" in body
 
-    def test_a_failing_check_does_not_take_the_page_down(self, client):
-        with patch("app.services.provider_check.check_providers",
-                   side_effect=RuntimeError("openai package missing")):
-            response = client.post("/runs/providers/check")
-        assert response.status_code == 200
-        assert "openai package missing" in response.text
+    def test_it_polls_while_a_check_is_in_flight(self, client, db, profile):
+        from app.services import provider_check
+
+        provider_check.mark_queued(db)
+        body = client.get("/runs/system").text
+        assert 'hx-trigger="load delay:3s"' in body, "the panel must come back on its own"
+        assert "Calling each one in turn" in body
+
+    def test_it_does_not_poll_once_there_is_an_answer(self, client, db, profile):
+        from app.services import provider_check
+
+        provider_check.store_state(db, {
+            "status": "done", "finished_at": provider_check._now(),
+            "results": [{"name": "nim", "model": "m", "ok": True, "ms": 10,
+                         "detail": "ready", "gated": False}],
+        })
+        body = client.get("/runs/system").text
+        assert "hx-trigger=\"load delay:3s\"" not in body
+
+    def test_a_stored_failure_is_readable(self, client, db, profile):
+        from app.services import provider_check
+
+        provider_check.store_state(db, {
+            "status": "failed", "results": [],
+            "error": "could not queue it: redis down",
+        })
+        assert "redis down" in client.get("/runs/system").text

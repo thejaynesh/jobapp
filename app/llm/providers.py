@@ -107,7 +107,13 @@ def configured_providers() -> dict[str, Provider]:
     return providers
 
 
-def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int) -> str:
+# A working call gets a generous ceiling; a reachability probe does not want to
+# wait that long to learn a provider is unreachable.
+DEFAULT_TIMEOUT_SECONDS = 90
+
+
+def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int,
+                    timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
     import anthropic
 
     client = anthropic.Anthropic(api_key=provider.api_key)
@@ -120,7 +126,7 @@ def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int) -
         "model": provider.model,
         "max_tokens": max_tokens,
         "messages": chat_messages,
-        "timeout": 90.0,
+        "timeout": float(timeout),
     }
     if system:
         kwargs["system"] = system
@@ -133,7 +139,8 @@ def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int) -
 
 
 def _call_openai_compatible(
-    provider: Provider, messages: list[dict], temperature: float, max_tokens: int
+    provider: Provider, messages: list[dict], temperature: float, max_tokens: int,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
     from openai import OpenAI
 
@@ -143,7 +150,7 @@ def _call_openai_compatible(
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
-        timeout=90,
+        timeout=timeout,
     )
     return response.choices[0].message.content or ""
 
@@ -153,18 +160,22 @@ def call_provider(
     messages: list[dict],
     temperature: float = 0.1,
     max_tokens: int = 512,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    gate_wait: float | None = None,
 ) -> str:
-    with _concurrency_gate(provider):
+    with _concurrency_gate(provider, gate_wait):
         if provider.name == "anthropic":
-            result = _call_anthropic(provider, messages, max_tokens)
+            result = _call_anthropic(provider, messages, max_tokens, timeout)
         else:
-            result = _call_openai_compatible(provider, messages, temperature, max_tokens)
+            result = _call_openai_compatible(
+                provider, messages, temperature, max_tokens, timeout
+            )
     _record_llm_use(provider)
     return result
 
 
 @contextlib.contextmanager
-def _concurrency_gate(provider: Provider):
+def _concurrency_gate(provider: Provider, wait: float | None = None):
     """
     Queue behind other callers when the endpoint only takes one at a time.
 
@@ -177,7 +188,7 @@ def _concurrency_gate(provider: Provider):
         return
     from app.services import llm_gate
 
-    with llm_gate.hold(provider.name):
+    with llm_gate.hold(provider.name, wait=wait):
         yield
 
 

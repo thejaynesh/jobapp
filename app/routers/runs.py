@@ -94,7 +94,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
     )
 
 
-def _system_context(db: Session, provider_check: list | None = None) -> dict:
+def _system_context(db: Session) -> dict:
     """
     The state of the subsystems that have no page of their own.
 
@@ -107,7 +107,7 @@ def _system_context(db: Session, provider_check: list | None = None) -> dict:
 
     context: dict = {
         "agent": None, "mailbox": None, "corpus": None, "pool": None,
-        "pipeline": None, "providers": provider_check, "errors": [],
+        "pipeline": None, "providers": None, "errors": [],
     }
 
     try:
@@ -117,6 +117,17 @@ def _system_context(db: Session, provider_check: list | None = None) -> dict:
     except Exception as exc:
         logger.warning("runs: pipeline status unavailable: %s", exc)
         context["errors"].append(f"pipeline: {exc}")
+
+    try:
+        from app.services import provider_check
+
+        record = provider_check.load_state(db)
+        context["providers"] = {
+            "record": record,
+            "progress": provider_check.progress(record),
+        }
+    except Exception as exc:
+        logger.warning("runs: provider check state unavailable: %s", exc)
 
     try:
         context["agent"] = {
@@ -193,23 +204,33 @@ def trigger_match(request: Request, db: Session = Depends(get_db)):
 @router.post("/providers/check", response_class=HTMLResponse)
 def check_llm_providers(request: Request, db: Session = Depends(get_db)):
     """
-    One real call to each configured LLM provider, and what came back.
+    Queue one real call to each configured LLM provider.
 
-    Failover is invisible either way: a provider with a wrong key or a renamed
-    model looks exactly like one that was never needed. This is the only place
-    that tells the difference before the day the chain is all there is.
+    Queued rather than run here: the calls take seconds each, more when a
+    single-slot provider is busy and this has to wait its turn, and the proxy
+    gives an upstream sixty seconds before returning a 504. The panel polls for
+    the result, which arrives when it arrives.
     """
-    from app.services.provider_check import check_providers
+    from app.services import provider_check
 
     try:
-        results = check_providers()
+        # Recorded before the task is published, so the panel has something to
+        # show between the click and a worker picking it up — otherwise the
+        # button looks like it did nothing.
+        provider_check.mark_queued(db)
+        from app.tasks.providers import run_provider_check
+        run_provider_check.delay()
     except Exception as exc:
-        logger.error("runs: provider check failed: %s", exc)
-        results = [{"name": "check", "model": "", "ok": False, "ms": 0,
-                    "detail": str(exc)[:200], "gated": False}]
+        logger.error("runs: could not queue the provider check: %s", exc)
+        try:
+            provider_check.store_state(db, {
+                "status": "failed", "results": [],
+                "error": f"could not queue it: {exc}"[:300],
+            })
+        except Exception:
+            pass
     return templates.TemplateResponse(
-        "runs/_system.html",
-        {"request": request, "system": _system_context(db, provider_check=results)},
+        "runs/_system.html", {"request": request, "system": _system_context(db)}
     )
 
 

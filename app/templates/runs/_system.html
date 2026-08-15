@@ -140,26 +140,51 @@
      provider with a stale key or a renamed model reads exactly like one that
      was never needed. One real call each is the only thing that tells them
      apart before the day the chain is all that's left. #}
-  <div class="border border-gray-100 rounded p-3 mb-4">
+  {# The check itself runs on a worker. It makes real calls to real providers,
+     and the proxy in front of the app gives an upstream sixty seconds — so
+     doing it inline returned the answer as a 504 rather than as an answer.
+     While it runs, this polls; the whole panel is what gets swapped. #}
+  <div class="border border-gray-100 rounded p-3 mb-4"
+       {% if system.providers and system.providers.progress.active %}
+       hx-get="/runs/system"
+       hx-target="#system-panel"
+       hx-swap="outerHTML"
+       hx-trigger="load delay:3s"
+       {% endif %}>
     <div class="flex flex-wrap items-center justify-between gap-2">
       <h3 class="text-sm font-semibold text-gray-700">AI providers</h3>
+      {% if system.providers and system.providers.progress.active %}
+      <span class="text-[11px] text-gray-500">
+        Calling each one in turn — {{ system.providers.progress.waiting }} so far.
+      </span>
+      {% else %}
       <button hx-post="/runs/providers/check"
               hx-target="#system-panel"
               hx-swap="outerHTML"
-              hx-indicator="#provider-check-spinner"
               class="text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
         Test each provider
       </button>
+      {% endif %}
     </div>
-    <p id="provider-check-spinner" class="htmx-indicator text-[11px] text-gray-400 mt-1">
-      Calling each one in turn — a provider that takes one request at a time
-      waits its turn, so this can take a few seconds.
-    </p>
 
-    {% if system.providers %}
-    <table class="w-full text-[11px] mt-2">
+    {% set record = system.providers.record if system.providers else None %}
+    {% if record and record.error %}
+    <p class="text-[11px] text-amber-700 mt-1">{{ record.error }}</p>
+    {% endif %}
+    {% if system.providers and system.providers.progress.stalled %}
+    <p class="text-[11px] text-amber-700 mt-1">
+      A check has been running for {{ system.providers.progress.waiting }} with no
+      result. The worker handling it is gone — start another one.
+    </p>
+    {% endif %}
+
+    {% if record and record.results %}
+    <p class="text-[10px] text-gray-400 mt-1">
+      Checked {{ system.providers.progress.age }} ago.
+    </p>
+    <table class="w-full text-[11px] mt-1">
       <tbody>
-        {% for result in system.providers %}
+        {% for result in record.results %}
         <tr class="border-t border-gray-100">
           <td class="py-0.5 text-gray-700 font-medium">
             {{ result.name }}
@@ -188,7 +213,7 @@
         {% endfor %}
       </tbody>
     </table>
-    {% else %}
+    {% elif not (system.providers and system.providers.progress.active) %}
     <p class="text-[11px] text-gray-400 mt-1">
       Not checked yet. Matching runs on NVIDIA NIM and falls through to the
       others only when it fails, so a broken one stays silent until then.
