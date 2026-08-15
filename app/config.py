@@ -238,6 +238,25 @@ class Settings(BaseSettings):
     DOCS_OUTPUT_DIR: str = "/storage"
     MIN_MATCH_SCORE: int = 70
     FETCH_INTERVAL_HOURS: int = 5
+
+    # ---- Matching cadence ------------------------------------------------
+    # Matching used to run only as a tail-call from a fetch cycle, so anything
+    # it did not get through — a worker restarted mid-pass, a backlog larger
+    # than one pass, a provider that was down — waited hours for the next
+    # fetch, which looks exactly like matching being broken. A sweep of its own
+    # means "still `new`" is always temporary.
+    MATCH_INTERVAL_MINUTES: int = 20
+    # Jobs per match task. A pass over hundreds of jobs is minutes of LLM calls
+    # holding one of two worker slots, during which nothing else — including
+    # the document generation it just queued — can run. Bounded batches that
+    # re-queue themselves keep the queue moving and make progress durable:
+    # a restart loses at most one batch.
+    MATCH_MAX_JOBS_PER_TASK: int = 25
+    # An application whose generation has been running longer than this had its
+    # worker killed — Celery lost the task, and nothing was ever going to
+    # retry it. The sweeper re-queues those.
+    GENERATION_STUCK_MINUTES: int = 20
+
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates

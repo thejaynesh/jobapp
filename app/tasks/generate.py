@@ -1,14 +1,38 @@
 import errno
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
+from app.config import settings
 from app.database import SessionLocal
 from app.models.application import Application
 
 logger = logging.getLogger(__name__)
+
+# Statuses that mean "no run is in flight and none has succeeded", so queueing
+# one is the right move. 'generating' is excluded on purpose — the sweeper
+# decides about those, using the clock.
+NEEDS_GENERATION = ("idle", "failed")
+
+
+def queue_generation(application_id) -> bool:
+    """
+    Ask a worker to write this application's documents.
+
+    Separate from `.delay()` at the call sites so that a broker that is down
+    is a logged failure rather than an exception thrown through whatever was
+    happening at the time — a matching pass, in particular, should not lose
+    its remaining jobs because Redis blinked between two of them.
+    """
+    try:
+        generate_docs.delay(str(application_id))
+        return True
+    except Exception as exc:
+        logger.error("could not queue generation for %s: %s", application_id, exc)
+        return False
 
 
 def _friendly_error(exc: BaseException) -> str:
@@ -37,6 +61,7 @@ def generate_docs(self, application_id: str, feedback: str | None = None) -> dic
 
         app.generation_status = "generating"
         app.generation_error = None
+        app.generation_started_at = datetime.now(timezone.utc)
         db.commit()
 
         from app.services.doc_generator import generate_documents
@@ -71,6 +96,81 @@ def generate_docs(self, application_id: str, feedback: str | None = None) -> dic
         logger.error("generate_docs failed for %s: %s", application_id, exc)
         _mark_failed(db, application_id, _friendly_error(exc))
         return {"status": "error", "error": str(exc)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.generate.sweep_generations", bind=False)
+def sweep_generations() -> dict:
+    """
+    Re-queue generations that nothing else is going to finish.
+
+    Two ways an application ends up waiting forever with no error recorded:
+
+    * its worker was killed mid-run — a deploy, an OOM — leaving the row at
+      'generating' with no task behind it. Late acks (see celery_app) fix this
+      going forward, but not for tasks already lost, and not when the same
+      worker is killed twice.
+    * it was never queued at all, because the pass that should have queued it
+      did not get that far.
+
+    Both are indistinguishable from "working on it" by looking at the app,
+    which is why this runs on a clock rather than waiting to be noticed.
+    """
+    from app.models.job import Job, JobStatus
+
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        minutes=max(1, settings.GENERATION_STUCK_MINUTES)
+    )
+    db = SessionLocal()
+    requeued_stale = 0
+    requeued_missed = 0
+    try:
+        stale = (
+            db.query(Application)
+            .filter(
+                Application.generation_status == "generating",
+                # A NULL start time means the row predates the column, and the
+                # migration stamped those, so anything NULL here started under
+                # code that no longer runs. Treat it as stale.
+                (Application.generation_started_at.is_(None))
+                | (Application.generation_started_at < cutoff),
+            )
+            .all()
+        )
+        for app in stale:
+            if queue_generation(app.id):
+                requeued_stale += 1
+
+        missed = (
+            db.query(Application)
+            .join(Job, Application.job_id == Job.id)
+            .filter(
+                Job.status.in_([JobStatus.matched, JobStatus.docs_generated]),
+                Application.generation_status.in_(NEEDS_GENERATION),
+            )
+            .all()
+        )
+        for app in missed:
+            # A 'failed' one has an error the user can read and a Rewrite
+            # button; re-queueing it on a timer would just burn LLM calls on
+            # the same failure. Only never-started ones are swept.
+            if app.generation_status != "idle":
+                continue
+            if any(doc.is_current for doc in app.documents):
+                continue
+            if queue_generation(app.id):
+                requeued_missed += 1
+
+        if requeued_stale or requeued_missed:
+            logger.info(
+                "sweep_generations — requeued %d stalled, %d never queued",
+                requeued_stale, requeued_missed,
+            )
+        return {"stalled": requeued_stale, "never_queued": requeued_missed}
+    except Exception as exc:
+        logger.error("sweep_generations failed: %s", exc)
+        return {"stalled": 0, "never_queued": 0, "error": str(exc)}
     finally:
         db.close()
 

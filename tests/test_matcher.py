@@ -661,7 +661,7 @@ class TestMatchAllNewJobs:
         job1 = MagicMock()
         job2 = MagicMock()
         mock_profile = self._make_mock_profile(profile_data)
-        db.query.return_value.filter.return_value.all.return_value = [job1, job2]
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [job1, job2]
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job", return_value="matched"):
             result = match_all_new_jobs(db)
@@ -671,7 +671,7 @@ class TestMatchAllNewJobs:
         from app.services.matcher import match_all_new_jobs
         db = MagicMock()
         mock_profile = self._make_mock_profile(profile_data)
-        db.query.return_value.filter.return_value.all.return_value = []
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job") as mock_mj:
             result = match_all_new_jobs(db)
@@ -683,7 +683,7 @@ class TestMatchAllNewJobs:
         db = MagicMock()
         job1 = MagicMock()
         mock_profile = self._make_mock_profile(profile_data)
-        db.query.return_value.filter.return_value.all.return_value = [job1]
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [job1]
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job", return_value="matched"):
             match_all_new_jobs(db)
@@ -693,7 +693,7 @@ class TestMatchAllNewJobs:
         from app.services.matcher import match_all_new_jobs
         db = MagicMock()
         mock_profile = self._make_mock_profile(profile_data)
-        db.query.return_value.filter.return_value.all.return_value = [MagicMock(), MagicMock()]
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [MagicMock(), MagicMock()]
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job", return_value="rate_limited"):
             with patch("app.services.matcher.time.sleep"):
@@ -710,7 +710,7 @@ class TestMatchAllNewJobs:
         job1, job2 = MagicMock(), MagicMock()
         job1.llm_score = 85
         job2.llm_score = 42
-        db.query.return_value.filter.return_value.all.return_value = [job1, job2]
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [job1, job2]
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job", return_value="matched"):
             with patch("app.services.matcher.time.sleep") as mock_sleep:
@@ -724,7 +724,7 @@ class TestMatchAllNewJobs:
         # Job that was keyword-filtered (llm_score stays None)
         job = MagicMock()
         job.llm_score = None
-        db.query.return_value.filter.return_value.all.return_value = [job]
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [job]
         db.query.return_value.first.return_value = mock_profile
         with patch("app.services.matcher.match_job", return_value="filtered_out"):
             with patch("app.services.matcher.time.sleep") as mock_sleep:
@@ -742,9 +742,13 @@ class TestMatchJobsTask:
         mock_db = MagicMock()
         with patch("app.tasks.match.match_all_new_jobs") as mock_man:
             with patch("app.tasks.match.SessionLocal", return_value=mock_db):
-                mock_man.return_value = {"processed": 3, "matched": 2, "filtered_out": 1, "errors": 0}
+                mock_man.return_value = {"processed": 3, "matched": 2, "filtered_out": 1,
+                                        "errors": 0, "remaining": 0}
                 result = match_jobs()
-        mock_man.assert_called_once_with(mock_db)
+        # Bounded, and told how to queue documents as it goes rather than after.
+        assert mock_man.call_args.args[0] is mock_db
+        assert mock_man.call_args.kwargs["limit"] > 0
+        assert callable(mock_man.call_args.kwargs["on_matched"])
         assert result["processed"] == 3
 
     def test_task_returns_summary(self):

@@ -51,6 +51,12 @@ class Application(Base):
     outreach_contacts: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
     generation_status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle", server_default="idle")
     generation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When the current run started. 'generating' with no clock on it cannot be
+    # told apart from 'generating since a worker died on Tuesday' — both look
+    # like work in progress forever. This is what the sweeper reads.
+    generation_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # idle | discovering | done | failed — mirrors generation_status so the
     # outreach panel can poll while contact discovery runs on a worker.
     outreach_status: Mapped[str] = mapped_column(String(20), nullable=False, default="idle", server_default="idle")

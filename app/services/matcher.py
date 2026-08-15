@@ -603,7 +603,27 @@ def match_job(
     return "filtered_out"
 
 
-def match_all_new_jobs(db) -> dict[str, int]:
+def count_unmatched(db) -> int:
+    """How many jobs are still waiting to be scored."""
+    return db.query(Job).filter(Job.status == JobStatus.new).count()
+
+
+def match_all_new_jobs(db, limit: int | None = None, on_matched=None) -> dict[str, int]:
+    """
+    Score jobs still sitting at `new`.
+
+    `limit` bounds one pass. Matching a large backlog in a single call means one
+    task holding a worker slot for the length of every LLM round trip put
+    together, and a worker restarted anywhere in that window loses the lot; a
+    bounded pass that the caller repeats makes progress durable.
+
+    `on_matched(job)` fires as each job crosses the threshold rather than after
+    the pass, so the documents for the first match are being written while the
+    hundredth is still being scored.
+
+    `remaining` in the result is how many are still `new` afterwards — the
+    caller's cue to come back for another pass.
+    """
     from app.services.tunables import value as tunable
 
     api_key = settings.NVIDIA_NIM_API_KEY
@@ -614,7 +634,10 @@ def match_all_new_jobs(db) -> dict[str, int]:
     profile_data = profile.data if profile else {}
     model = tunable(profile_data, "nvidia_nim_model")
 
-    new_jobs = db.query(Job).filter(Job.status == JobStatus.new).all()
+    query = db.query(Job).filter(Job.status == JobStatus.new).order_by(Job.fetched_at.desc())
+    if limit is not None:
+        query = query.limit(limit)
+    new_jobs = query.all()
 
     processed = 0
     matched = 0
@@ -631,6 +654,15 @@ def match_all_new_jobs(db) -> dict[str, int]:
             processed += 1
             if result == "matched":
                 matched += 1
+                if on_matched is not None:
+                    # A failure here is a queueing problem, not a matching one:
+                    # the score is already committed, and the sweeper picks up
+                    # anything that never got queued.
+                    try:
+                        on_matched(job)
+                    except Exception as exc:
+                        logger.error("match_all_new_jobs: on_matched failed for %s: %s",
+                                     job.id, exc)
             elif result == "rate_limited":
                 rate_limited += 1
             else:
@@ -643,9 +675,13 @@ def match_all_new_jobs(db) -> dict[str, int]:
             db.rollback()
             errors += 1
 
+    remaining = count_unmatched(db)
     logger.info(
-        "match_all_new_jobs done — processed=%d matched=%d filtered_out=%d rate_limited=%d errors=%d paid_llm_calls=%d",
-        processed, matched, filtered_out, rate_limited, errors, budget["paid_calls"],
+        "match_all_new_jobs done — processed=%d matched=%d filtered_out=%d "
+        "rate_limited=%d errors=%d paid_llm_calls=%d remaining=%d",
+        processed, matched, filtered_out, rate_limited, errors,
+        budget["paid_calls"], remaining,
     )
     return {"processed": processed, "matched": matched, "filtered_out": filtered_out,
-            "rate_limited": rate_limited, "errors": errors, "paid_llm_calls": budget["paid_calls"]}
+            "rate_limited": rate_limited, "errors": errors,
+            "paid_llm_calls": budget["paid_calls"], "remaining": remaining}

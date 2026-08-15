@@ -30,6 +30,111 @@
   </p>
   {% endif %}
 
+  {# ---- Pipeline ------------------------------------------------------- #}
+  {# Where work is between "fetched" and "documents written". Each stage
+     already reported itself — a log line, a status column, a Redis list —
+     which is another way of saying none of them reported anywhere anyone
+     looks, and "matching seems stuck" needed a container shell to answer. #}
+  <div class="border border-gray-100 rounded p-3 mb-4">
+    <div class="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+      <h3 class="text-sm font-semibold text-gray-700">Pipeline</h3>
+      {% if system.pipeline %}
+      <p class="text-[11px] text-gray-400">
+        Matching sweeps every {{ system.pipeline.match_interval_minutes }} minutes,
+        {{ system.pipeline.match_batch_size }} jobs at a time.
+      </p>
+      {% endif %}
+    </div>
+
+    {% if not system.pipeline %}
+      <p class="text-xs text-gray-400">Pipeline status unavailable.</p>
+    {% else %}
+      <div class="grid gap-4 sm:grid-cols-2">
+
+        <div>
+          <p class="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Jobs</p>
+          <dl class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+            {% for stage in system.pipeline.jobs %}
+            <dt class="text-gray-500">{{ stage.label }}</dt>
+            <dd class="tabular-nums text-right
+                {% if stage.key == 'new' and stage.count > 0 %}text-amber-700{% else %}text-gray-800{% endif %}">
+              {{ stage.count }}
+            </dd>
+            {% endfor %}
+          </dl>
+          {# A count alone can't tell "slow" from "dead". The age of the oldest
+             one waiting can. #}
+          {% if system.pipeline.waiting_to_score > 0 %}
+          <p class="text-[11px] mt-1
+             {% if system.pipeline.matching_now %}text-gray-500{% else %}text-amber-700{% endif %}">
+            {% if system.pipeline.matching_now %}
+              Scoring now.
+            {% else %}
+              Not scoring right now — next sweep within
+              {{ system.pipeline.match_interval_minutes }} minutes.
+            {% endif %}
+            {% if system.pipeline.oldest_unmatched_minutes is not none %}
+              Oldest has waited {{ system.pipeline.oldest_unmatched_minutes }} min.
+            {% endif %}
+          </p>
+          {% endif %}
+        </div>
+
+        <div>
+          <p class="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Documents</p>
+          <dl class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+            {% for stage in system.pipeline.generation %}
+            <dt class="text-gray-500">{{ stage.label }}</dt>
+            <dd class="tabular-nums text-right
+                {% if stage.key == 'failed' and stage.count > 0 %}text-amber-700{% else %}text-gray-800{% endif %}">
+              {{ stage.count }}
+            </dd>
+            {% endfor %}
+          </dl>
+          {% if system.pipeline.oldest_generating_minutes is not none %}
+          <p class="text-[11px] mt-1
+             {% if system.pipeline.generation_stalled %}text-amber-700{% else %}text-gray-500{% endif %}">
+            Longest run {{ system.pipeline.oldest_generating_minutes }} min
+            {%- if system.pipeline.generation_stalled %} — past the point where a
+            generation should have finished, so it will be re-queued{% endif %}.
+          </p>
+          {% endif %}
+        </div>
+      </div>
+
+      {# Why a generation failed, where the person who can act on it looks. #}
+      {% if system.pipeline.failures %}
+      <div class="mt-3 border-t border-gray-100 pt-2">
+        {% for failure in system.pipeline.failures %}
+        <p class="text-[11px] text-amber-700 truncate">
+          <span class="font-medium">{{ failure.company }}</span>
+          {% if failure.title %}· {{ failure.title }}{% endif %} — {{ failure.error }}
+        </p>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <div class="flex flex-wrap items-center gap-3 mt-3">
+        <button hx-post="/runs/match"
+                hx-target="#system-panel"
+                hx-swap="outerHTML"
+                class="text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
+          Score waiting jobs now
+        </button>
+        {# An empty queue with work outstanding is the telling case: nothing is
+           coming to do it, which is what a dropped task looks like. #}
+        <p class="text-[11px] text-gray-400">
+          {% if system.pipeline.queue.reachable %}
+            Queue: {{ system.pipeline.queue.waiting }} waiting,
+            {{ system.pipeline.queue.claimed }} being worked on
+          {% else %}
+            Queue unreachable — the worker cannot be receiving anything.
+          {% endif %}
+        </p>
+      </div>
+    {% endif %}
+  </div>
+
   <div class="grid gap-4 md:grid-cols-3">
 
     {# ---- Browser agent ------------------------------------------------ #}

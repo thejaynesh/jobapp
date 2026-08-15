@@ -22,6 +22,21 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    # Acknowledge a task when it finishes, not when it is received.
+    #
+    # With the default (ack on receipt) a worker killed mid-task — a deploy,
+    # an OOM, `docker compose up -d` — takes the task with it. Nothing errors
+    # and nothing retries; the work simply never happened. That is how a
+    # matching pass and the generations queued behind it can both stop dead
+    # with no failure recorded anywhere. Late acks put an interrupted task back
+    # on the queue instead.
+    #
+    # The trade is at-least-once delivery: a task can run twice if the worker
+    # dies after the work but before the ack. Every task here is safe to repeat
+    # — matching re-scores a job, generation rewrites documents — and nothing
+    # sends mail unattended, so a duplicate costs time, not a mistake.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
     # Fail fast when Redis is unreachable. The default connect timeout is long
     # enough that a web request queueing a task — the overlay's "write
     # documents" button, say — reads as a hang rather than as an error. Workers
@@ -35,6 +50,20 @@ celery_app.conf.beat_schedule = {
     "fetch-jobs-every-5-hours": {
         "task": "app.tasks.fetch.fetch_jobs",
         "schedule": celery_schedule(settings.FETCH_INTERVAL_HOURS * 3600),
+    },
+    # Matching used to happen only as a tail-call from a fetch, so a pass that
+    # did not finish left jobs sitting as `new` until the next fetch hours
+    # later. On its own schedule, unmatched jobs are a delay rather than a
+    # dead end. It no-ops in milliseconds when there is nothing new.
+    "match-new-jobs": {
+        "task": "app.tasks.match.match_jobs",
+        "schedule": celery_schedule(settings.MATCH_INTERVAL_MINUTES * 60),
+    },
+    # Re-queues generations whose worker died mid-run, and matched jobs whose
+    # generation was never queued at all.
+    "sweep-stuck-generations": {
+        "task": "app.tasks.generate.sweep_generations",
+        "schedule": celery_schedule(settings.GENERATION_STUCK_MINUTES * 60),
     },
     # Drafts follow-ups that have come due. Drafting only — sending is always a
     # deliberate click, so this never mails anyone on its own.

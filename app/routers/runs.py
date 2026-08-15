@@ -106,8 +106,17 @@ def _system_context(db: Session) -> dict:
     from app.services import browser_tasks, interview_corpus, mailbox
 
     context: dict = {
-        "agent": None, "mailbox": None, "corpus": None, "pool": None, "errors": [],
+        "agent": None, "mailbox": None, "corpus": None, "pool": None,
+        "pipeline": None, "errors": [],
     }
+
+    try:
+        from app.services import pipeline
+
+        context["pipeline"] = pipeline.status(db)
+    except Exception as exc:
+        logger.warning("runs: pipeline status unavailable: %s", exc)
+        context["errors"].append(f"pipeline: {exc}")
 
     try:
         context["agent"] = {
@@ -157,6 +166,25 @@ def queue_ping(request: Request, db: Session = Depends(get_db)):
         browser_tasks.enqueue(db, "ping", {"from": "runs page"})
     except Exception as exc:
         logger.error("runs: could not queue ping: %s", exc)
+    return templates.TemplateResponse(
+        "runs/_system.html", {"request": request, "system": _system_context(db)}
+    )
+
+
+@router.post("/match", response_class=HTMLResponse)
+def trigger_match(request: Request, db: Session = Depends(get_db)):
+    """
+    Run a matching batch now, without waiting for the schedule.
+
+    The task takes the same lock the scheduled pass does, so clicking this
+    while one is running is a no-op rather than a second pass double-spending
+    LLM calls on the same jobs.
+    """
+    try:
+        from app.tasks.match import match_jobs
+        match_jobs.delay()
+    except Exception as exc:
+        logger.error("runs: could not queue matching: %s", exc)
     return templates.TemplateResponse(
         "runs/_system.html", {"request": request, "system": _system_context(db)}
     )
