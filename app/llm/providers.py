@@ -1,26 +1,33 @@
 """
 Multi-provider LLM routing.
 
-Three providers are supported:
-  - "anthropic" — Claude via the official Anthropic SDK (quality generation)
-  - "gemini"    — Gemini via Google's OpenAI-compatible endpoint
-  - "nim"       — NVIDIA NIM (OpenAI-compatible), the existing default
+Four providers are supported:
+  - "freeinference" — OpenAI-compatible, free daily credit for researchers
+  - "anthropic"     — Claude via the official Anthropic SDK (quality generation)
+  - "gemini"        — Gemini via Google's OpenAI-compatible endpoint
+  - "nim"           — NVIDIA NIM (OpenAI-compatible), the existing default
 
 Document generation prefers quality-first (anthropic -> gemini -> primary),
 while high-volume job matching uses the extra providers only as failover.
 Providers without an API key configured are simply skipped.
+
+FreeInference goes ahead of the paid providers in both chains. It costs nothing
+until its daily credit runs out, and the chain already falls through on any
+failure — including that one — so trying free before paid cannot cost anything
+except the seconds spent finding out.
 """
 
+import contextlib
 import contextvars
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-GENERATION_PREFERENCE = ["anthropic", "gemini"]
-MATCHING_PREFERENCE = ["gemini", "anthropic"]
+GENERATION_PREFERENCE = ["freeinference", "anthropic", "gemini"]
+MATCHING_PREFERENCE = ["freeinference", "gemini", "anthropic"]
 
 # Records which provider/model served each successful LLM call, so callers
 # (e.g. document generation) can persist "who wrote this". Only active between
@@ -62,10 +69,28 @@ class Provider:
     api_key: str
     model: str
     base_url: str = ""  # empty for the Anthropic SDK
+    # Requests this endpoint will accept at once; 0 means it does not care.
+    # Above zero, calls queue through a Redis gate — this app runs two worker
+    # processes and overlaps matching with generation by design, so a
+    # single-slot provider would otherwise refuse every second caller.
+    max_concurrency: int = 0
+    # Whether a call here can appear on a bill. Only paid calls count against
+    # MAX_PAID_MATCH_CALLS_PER_CYCLE; a provider with a fixed free daily
+    # allowance cannot produce a surprise, so capping it just wastes credit.
+    paid: bool = True
 
 
 def configured_providers() -> dict[str, Provider]:
     providers: dict[str, Provider] = {}
+    if settings.FREEINFERENCE_API_KEY:
+        providers["freeinference"] = Provider(
+            name="freeinference",
+            api_key=settings.FREEINFERENCE_API_KEY,
+            model=settings.FREEINFERENCE_MODEL,
+            base_url=settings.FREEINFERENCE_BASE_URL,
+            max_concurrency=settings.FREEINFERENCE_MAX_CONCURRENCY,
+            paid=False,
+        )
     if settings.ANTHROPIC_API_KEY:
         providers["anthropic"] = Provider(
             name="anthropic",
@@ -129,12 +154,31 @@ def call_provider(
     temperature: float = 0.1,
     max_tokens: int = 512,
 ) -> str:
-    if provider.name == "anthropic":
-        result = _call_anthropic(provider, messages, max_tokens)
-    else:
-        result = _call_openai_compatible(provider, messages, temperature, max_tokens)
+    with _concurrency_gate(provider):
+        if provider.name == "anthropic":
+            result = _call_anthropic(provider, messages, max_tokens)
+        else:
+            result = _call_openai_compatible(provider, messages, temperature, max_tokens)
     _record_llm_use(provider)
     return result
+
+
+@contextlib.contextmanager
+def _concurrency_gate(provider: Provider):
+    """
+    Queue behind other callers when the endpoint only takes one at a time.
+
+    A gate that will not open in time raises, and the caller's failover chain
+    treats that like any other provider failure — which is the right reading:
+    a provider busy for two minutes is one that cannot serve this call.
+    """
+    if provider.max_concurrency != 1:
+        yield
+        return
+    from app.services import llm_gate
+
+    with llm_gate.hold(provider.name):
+        yield
 
 
 def matching_fallbacks() -> list[Provider]:
@@ -149,15 +193,22 @@ def matching_fallbacks() -> list[Provider]:
         if name not in providers:
             continue
         provider = providers[name]
-        if name == "anthropic":
-            provider = Provider(
-                name="anthropic",
-                api_key=provider.api_key,
-                model=getattr(settings, "ANTHROPIC_MATCH_MODEL", "claude-haiku-4-5")
-                or provider.model,
-            )
+        match_model = _MATCH_MODELS.get(name)
+        if match_model:
+            # dataclasses.replace, so a provider's concurrency limit and paid
+            # flag survive the model swap — losing max_concurrency here would
+            # silently ungate every matching call, which is most of them.
+            provider = replace(provider, model=match_model(settings) or provider.model)
         chain.append(provider)
     return chain
+
+
+# Matching is high-volume JSON scoring, so providers that offer a cheaper or
+# faster sibling model use it here instead of their generation model.
+_MATCH_MODELS = {
+    "anthropic": lambda s: getattr(s, "ANTHROPIC_MATCH_MODEL", "claude-haiku-4-5"),
+    "freeinference": lambda s: getattr(s, "FREEINFERENCE_MATCH_MODEL", ""),
+}
 
 
 def generation_chat(

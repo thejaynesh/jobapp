@@ -469,14 +469,22 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) 
     """
     cap = getattr(settings, "MAX_PAID_MATCH_CALLS_PER_CYCLE", 150)
     for provider in matching_fallbacks():
-        if budget is not None and cap and budget.get("paid_calls", 0) >= cap:
+        # The cap exists to stop a NIM outage turning into a surprise bill. A
+        # provider that cannot bill — a fixed free daily allowance — has nothing
+        # to be surprised by, and counting its calls would spend the budget
+        # protecting against a cost that does not exist.
+        billable = getattr(provider, "paid", True)
+        if billable and budget is not None and cap and budget.get("paid_calls", 0) >= cap:
+            # Skip this one rather than abandoning the chain: a free provider
+            # further down is still worth trying, and the loop falls out to
+            # None on its own if nothing serves the call.
             logger.warning(
                 "llm_score_job: paid-call budget (%d) exhausted this cycle; "
-                "leaving job %s for the next cycle", cap, getattr(job, "id", "?"),
+                "skipping %s for job %s", cap, provider.name, getattr(job, "id", "?"),
             )
-            return None
+            continue
         try:
-            if budget is not None:
+            if billable and budget is not None:
                 budget["paid_calls"] = budget.get("paid_calls", 0) + 1
             raw = call_provider(
                 provider, messages, temperature=0.1, max_tokens=_match_max_tokens()

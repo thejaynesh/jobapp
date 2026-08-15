@@ -65,9 +65,26 @@ class Settings(BaseSettings):
     # tokens actually produced are generated.
     NIM_MATCH_MAX_TOKENS: int = 1536
 
+    # ---- FreeInference --------------------------------------------------
+    # OpenAI-compatible, free daily credit for the research community. It goes
+    # ahead of the paid providers in both chains: it cannot bill, and the chain
+    # already falls through when a provider fails — including when the day's
+    # credit runs out — so trying it first costs nothing but the attempt.
+    FREEINFERENCE_API_KEY: str = ""
+    FREEINFERENCE_BASE_URL: str = "https://freeinference.org/v1"
+    FREEINFERENCE_MODEL: str = "glm-5.1"
+    # Matching is high-volume JSON scoring, so it uses the faster sibling.
+    FREEINFERENCE_MATCH_MODEL: str = "glm-5-turbo"
+    # The endpoint accepts ONE request at a time. This app does not run one at
+    # a time — two worker processes, matching overlapping generation by
+    # design — so calls queue through a Redis gate rather than being refused.
+    # Set 0 only if the limit is ever lifted; the gate costs a Redis round trip.
+    FREEINFERENCE_MAX_CONCURRENCY: int = 1
+
     # Optional additional LLM providers. When configured, document generation
-    # prefers quality-first (Anthropic -> Gemini -> NIM) and job matching uses
-    # them as failover (NIM -> Gemini -> Anthropic).
+    # prefers quality-first (FreeInference -> Anthropic -> Gemini -> NIM) and
+    # job matching uses them as failover (NIM -> FreeInference -> Gemini ->
+    # Anthropic).
     ANTHROPIC_API_KEY: str = ""
     # Generation model (resumes/cover letters — the user-facing writing).
     # claude-opus-4-8: best quality, ~$0.11/application; claude-sonnet-5: ~$0.04.

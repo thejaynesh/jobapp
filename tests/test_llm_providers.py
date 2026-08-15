@@ -16,14 +16,21 @@ _MESSAGES = [
 ]
 
 
-def _settings(anthropic_key="", gemini_key=""):
+def _settings(anthropic_key="", gemini_key="", freeinference_key=""):
     return patch.multiple(
         "app.llm.providers.settings",
         ANTHROPIC_API_KEY=anthropic_key,
         GEMINI_API_KEY=gemini_key,
+        # Pinned rather than inherited: a real key in the developer's own .env
+        # would otherwise change what every one of these tests is asserting.
+        FREEINFERENCE_API_KEY=freeinference_key,
         ANTHROPIC_MODEL="claude-opus-4-8",
         GEMINI_MODEL="gemini-2.5-flash",
         GEMINI_BASE_URL="https://gemini.example/v1/",
+        FREEINFERENCE_MODEL="glm-5.1",
+        FREEINFERENCE_MATCH_MODEL="glm-5-turbo",
+        FREEINFERENCE_BASE_URL="https://freeinference.example/v1",
+        FREEINFERENCE_MAX_CONCURRENCY=1,
         create=True,
     )
 

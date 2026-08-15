@@ -135,6 +135,67 @@
     {% endif %}
   </div>
 
+  {# ---- LLM providers -------------------------------------------------- #}
+  {# Failover is invisible when it works and invisible when it doesn't: a
+     provider with a stale key or a renamed model reads exactly like one that
+     was never needed. One real call each is the only thing that tells them
+     apart before the day the chain is all that's left. #}
+  <div class="border border-gray-100 rounded p-3 mb-4">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h3 class="text-sm font-semibold text-gray-700">AI providers</h3>
+      <button hx-post="/runs/providers/check"
+              hx-target="#system-panel"
+              hx-swap="outerHTML"
+              hx-indicator="#provider-check-spinner"
+              class="text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
+        Test each provider
+      </button>
+    </div>
+    <p id="provider-check-spinner" class="htmx-indicator text-[11px] text-gray-400 mt-1">
+      Calling each one in turn — a provider that takes one request at a time
+      waits its turn, so this can take a few seconds.
+    </p>
+
+    {% if system.providers %}
+    <table class="w-full text-[11px] mt-2">
+      <tbody>
+        {% for result in system.providers %}
+        <tr class="border-t border-gray-100">
+          <td class="py-0.5 text-gray-700 font-medium">
+            {{ result.name }}
+            {% if result.gated %}
+            <span class="text-gray-400" title="One request at a time; calls queue">· queued</span>
+            {% endif %}
+          </td>
+          <td class="py-0.5 text-gray-500 font-mono">{{ result.model }}</td>
+          <td class="py-0.5 text-right">
+            <span class="px-1 rounded
+              {% if result.ok %}bg-emerald-50 text-emerald-700
+              {% else %}bg-amber-50 text-amber-700{% endif %}">
+              {{ 'ok' if result.ok else 'failed' }}
+            </span>
+          </td>
+          <td class="py-0.5 text-gray-400 text-right tabular-nums">{{ result.ms }} ms</td>
+        </tr>
+        {% if not result.ok or result.detail %}
+        <tr>
+          <td colspan="4" class="pb-1 text-[10px]
+              {% if result.ok %}text-gray-400{% else %}text-amber-600{% endif %}">
+            {{ result.detail }}
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-[11px] text-gray-400 mt-1">
+      Not checked yet. Matching runs on NVIDIA NIM and falls through to the
+      others only when it fails, so a broken one stays silent until then.
+    </p>
+    {% endif %}
+  </div>
+
   <div class="grid gap-4 md:grid-cols-3">
 
     {# ---- Browser agent ------------------------------------------------ #}
