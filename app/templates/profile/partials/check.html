@@ -1,0 +1,135 @@
+{# What document generation actually gets from this profile.
+
+   An empty generated resume has three possible causes — nothing in the
+   profile, tailoring that returned nothing, or a render that dropped it — and
+   they produce an identical PDF. This rules the first one in or out on its
+   own: no LLM call, no network. Whatever shows here is the profile's doing. #}
+<div id="profile-check">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+    <h2 class="text-lg font-semibold">What generation sees</h2>
+    <p class="text-xs text-gray-400 max-w-lg">
+      Read straight from the saved profile through the same code that builds a
+      resume, with no AI involved. If the content is here and a generated
+      document is still blank, the profile is not the cause.
+    </p>
+  </div>
+
+  {% if not check %}
+  <p class="text-sm text-gray-500">Could not read the profile.</p>
+  {% else %}
+
+  {# ---- The verdict, first ---------------------------------------------- #}
+  {% if check.readiness.blockers %}
+  <div class="bg-amber-50 border border-amber-200 rounded p-3 mb-4">
+    <p class="text-sm font-medium text-amber-800 mb-1">
+      This profile would produce a nearly empty document.
+    </p>
+    <ul class="list-disc list-inside text-xs text-amber-700 space-y-0.5">
+      {% for blocker in check.readiness.blockers %}<li>{{ blocker }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% else %}
+  <div class="bg-emerald-50 border border-emerald-200 rounded p-3 mb-4">
+    <p class="text-sm text-emerald-800">
+      The profile has everything a resume needs. An empty generated document is
+      coming from somewhere after this point — the AI tailoring or the PDF build.
+    </p>
+  </div>
+  {% endif %}
+
+  {# ---- Section counts --------------------------------------------------- #}
+  <table class="w-full text-sm mb-4">
+    <tbody>
+      {% for section in check.readiness.sections %}
+      <tr class="border-t border-gray-100">
+        <td class="py-1.5 text-gray-700 w-44">{{ section.name }}</td>
+        <td class="py-1.5 tabular-nums w-12 text-right
+            {% if section.count == 0 %}text-amber-700 font-medium{% else %}text-gray-800{% endif %}">
+          {{ section.count }}
+        </td>
+        <td class="py-1.5 pl-4 text-gray-500 text-xs">{{ section.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {# ---- Per-entry bullet counts ------------------------------------------ #}
+  {# The distinction the totals hide: entries that exist but carry no bullets
+     render as headings with nothing under them, which looks like broken code
+     and reads in the database as a healthy profile. #}
+  {% if check.readiness.experience or check.readiness.projects %}
+  <div class="grid gap-4 sm:grid-cols-2 mb-4">
+    {% for group, rows in [("Experience", check.readiness.experience),
+                           ("Projects", check.readiness.projects)] %}
+    {% if rows %}
+    <div class="border border-gray-100 rounded p-3">
+      <p class="text-[11px] uppercase tracking-wide text-gray-400 mb-1">{{ group }}</p>
+      <table class="w-full text-xs">
+        <tbody>
+          {% for row in rows %}
+          <tr class="border-t border-gray-100">
+            <td class="py-0.5 text-gray-600 truncate">{{ row.label }}</td>
+            <td class="py-0.5 text-right tabular-nums
+                {% if row.bullets == 0 %}text-amber-700 font-medium{% else %}text-gray-700{% endif %}">
+              {{ row.bullets }} bullet{{ '' if row.bullets == 1 else 's' }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# ---- What survives the template --------------------------------------- #}
+  {# Content can be in the profile and still not reach the page: every section
+     of the resume template is conditional. This is the render, untailored. #}
+  <div class="border border-gray-100 rounded p-3 mb-4">
+    <p class="text-[11px] uppercase tracking-wide text-gray-400 mb-2">
+      Sections that reach the page, with no AI tailoring
+    </p>
+    {% if not check.rendered.ok %}
+    <p class="text-xs text-amber-700">
+      The resume template failed to render: {{ check.rendered.error }}
+    </p>
+    {% else %}
+    <div class="flex flex-wrap gap-1.5 mb-2">
+      {% for section in check.rendered.sections %}
+      <span class="text-[11px] px-1.5 py-0.5 rounded
+        {% if section.present %}bg-emerald-50 text-emerald-700
+        {% else %}bg-gray-100 text-gray-400 line-through{% endif %}">
+        {{ section.name }}
+      </span>
+      {% endfor %}
+    </div>
+    <p class="text-[11px] text-gray-400">
+      {{ check.rendered.characters }} characters of document body.
+      Cover letter template:
+      {% if check.rendered.cover_letter_ok %}renders fine.
+      {% else %}<span class="text-amber-700">{{ check.rendered.cover_letter_error }}</span>{% endif %}
+    </p>
+    {% endif %}
+  </div>
+
+  {# ---- Worth fixing, but not fatal --------------------------------------- #}
+  {% if check.readiness.warnings %}
+  <details class="text-xs">
+    <summary class="cursor-pointer text-gray-500 hover:text-gray-700">
+      {{ check.readiness.warnings | length }} thing{{ '' if check.readiness.warnings | length == 1 else 's' }}
+      worth fixing that would not blank the document
+    </summary>
+    <ul class="list-disc list-inside text-gray-500 space-y-0.5 mt-2">
+      {% for warning in check.readiness.warnings %}<li>{{ warning }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  <p class="text-[11px] text-gray-400 mt-4">
+    Everything here is edited from the tabs above — nothing on this page changes
+    anything. The raw stored JSON is at <a href="/profile/debug/raw"
+    class="text-blue-600 hover:underline">/profile/debug/raw</a>.
+  </p>
+  {% endif %}
+</div>

@@ -19,7 +19,7 @@ templates.env.globals["region_options"] = REGION_OPTIONS
 templates.env.globals["location_prefs"] = normalize_prefs
 
 TABS = ["personal", "experience", "projects", "skills", "education",
-        "templates", "narrative", "ai prompt"]
+        "templates", "narrative", "ai prompt", "check"]
 
 
 @router.get("", response_class=HTMLResponse)
@@ -31,7 +31,25 @@ def get_profile(request: Request, tab: str = "personal", db: Session = Depends(g
     context = {"request": request, "profile": profile.data, "active_tab": tab}
     if tab == "ai prompt":
         context["preview"] = _preview(db)
+    if tab == "check":
+        context["check"] = _check(profile.data)
     return templates.TemplateResponse("profile/index.html", context)
+
+
+def _check(profile_data: dict) -> dict | None:
+    """
+    What generation would get from this profile — no LLM, no network.
+
+    Wrapped like the prompt preview: a diagnostic that takes the page down when
+    the thing it diagnoses is broken is a diagnostic you cannot use.
+    """
+    from app.services.profile_check import report
+
+    try:
+        return report(profile_data)
+    except Exception as exc:
+        logger.warning("profile: readiness check unavailable: %s", exc)
+        return None
 
 
 def _preview(db: Session, job_id: str | None = None) -> dict | None:
