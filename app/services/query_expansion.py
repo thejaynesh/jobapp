@@ -85,8 +85,12 @@ def expand_search_queries(
             ),
         },
     ]
+    from app.services import llm_log
+
     try:
-        raw = chat_completion(messages=messages, api_key=api_key, base_url=base_url, model=model)
+        with llm_log.stage("query_expansion"):
+            raw = chat_completion(messages=messages, api_key=api_key,
+                                  base_url=base_url, model=model)
         extra = json.loads(_strip_json_fences(raw))
         extra = [str(q).strip() for q in extra if isinstance(q, (str, int)) and str(q).strip()]
     except Exception as exc:

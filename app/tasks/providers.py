@@ -17,6 +17,27 @@ from app.database import SessionLocal
 logger = logging.getLogger(__name__)
 
 
+@celery_app.task(name="app.tasks.providers.prune_llm_log", bind=False)
+def prune_llm_log() -> dict:
+    """
+    Keep the LLM log to its retention limit.
+
+    Prompts carry whole job descriptions, so this table grows faster than
+    anything else in the schema — and a diagnostic that fills the disk stops
+    being a diagnostic.
+    """
+    from app.services.llm_log import prune
+
+    db = SessionLocal()
+    try:
+        return {"removed": prune(db)}
+    except Exception as exc:
+        logger.error("prune_llm_log failed: %s", exc)
+        return {"removed": 0, "error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery_app.task(
     name="app.tasks.providers.run_provider_check",
     bind=False,

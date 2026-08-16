@@ -48,6 +48,8 @@ PROBE_GATE_WAIT_SECONDS = 5
 
 
 def _probe(provider: Provider) -> dict:
+    from app.services import llm_log
+
     started = time.monotonic()
     base = {
         "name": provider.name,
@@ -55,10 +57,11 @@ def _probe(provider: Provider) -> dict:
         "gated": provider.max_concurrency == 1,
     }
     try:
-        reply = call_provider(
-            provider, PROBE, temperature=0.0, max_tokens=PROBE_MAX_TOKENS,
-            timeout=PROBE_TIMEOUT_SECONDS, gate_wait=PROBE_GATE_WAIT_SECONDS,
-        )
+        with llm_log.stage("provider_check"):
+            reply = call_provider(
+                provider, PROBE, temperature=0.0, max_tokens=PROBE_MAX_TOKENS,
+                timeout=PROBE_TIMEOUT_SECONDS, gate_wait=PROBE_GATE_WAIT_SECONDS,
+            )
         text = (reply or "").strip()
         return {
             **base,

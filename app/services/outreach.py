@@ -443,16 +443,19 @@ def compose_message(
     spec = channel_spec(channel)
     messages = build_messages(profile_data, contact, job, channel, kind, tone, feedback, thread)
 
+    from app.services import llm_log
+
     start_llm_log()
     try:
-        raw = generation_chat(
-            messages=messages,
-            api_key=settings.NVIDIA_NIM_API_KEY,
-            base_url=settings.NVIDIA_NIM_BASE_URL,
-            model=settings.NVIDIA_NIM_MODEL,
-            temperature=0.7,
-            max_tokens=800,
-        )
+        with llm_log.stage(f"outreach_{kind}"[:40]):
+            raw = generation_chat(
+                messages=messages,
+                api_key=settings.NVIDIA_NIM_API_KEY,
+                base_url=settings.NVIDIA_NIM_BASE_URL,
+                model=settings.NVIDIA_NIM_MODEL,
+                temperature=0.7,
+                max_tokens=800,
+            )
     except Exception as exc:
         logger.error("compose_message: no provider produced a draft: %s", exc)
         collect_llm_log()

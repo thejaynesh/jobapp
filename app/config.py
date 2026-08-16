@@ -65,6 +65,17 @@ class Settings(BaseSettings):
     # tokens actually produced are generated.
     NIM_MATCH_MAX_TOKENS: int = 1536
 
+    # ---- LLM call log ---------------------------------------------------
+    # Every request and reply, stored together. The existing log lines say a
+    # call happened and how it ended — which the result already tells you. The
+    # pair is what answers "was the prompt wrong or was the answer wrong".
+    LLM_LOG_ENABLED: bool = True
+    # Per-field ceiling. Prompts carry whole job descriptions and profiles, so
+    # without one this table outgrows everything else in the schema.
+    LLM_LOG_MAX_CHARS: int = 20000
+    LLM_LOG_KEEP_ROWS: int = 2000
+    LLM_LOG_PRUNE_INTERVAL_HOURS: int = 6
+
     # ---- FreeInference --------------------------------------------------
     # OpenAI-compatible, free daily credit for the research community. It goes
     # ahead of the paid providers in both chains: it cannot bill, and the chain

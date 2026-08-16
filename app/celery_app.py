@@ -65,6 +65,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.generate.sweep_generations",
         "schedule": celery_schedule(settings.GENERATION_STUCK_MINUTES * 60),
     },
+    # Prompts carry whole job descriptions, so the LLM log outgrows everything
+    # else in the schema if nothing trims it.
+    "prune-llm-log": {
+        "task": "app.tasks.providers.prune_llm_log",
+        "schedule": celery_schedule(settings.LLM_LOG_PRUNE_INTERVAL_HOURS * 3600),
+    },
     # Drafts follow-ups that have come due. Drafting only — sending is always a
     # deliberate click, so this never mails anyone on its own.
     "draft-due-outreach-followups": {

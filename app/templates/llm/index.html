@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}AI calls — JobApp{% endblock %}
+{% block content %}
+
+<div class="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+  <h1 class="text-2xl font-bold">AI calls</h1>
+  <p class="text-xs text-gray-400 max-w-xl">
+    Every request to a model and everything that came back. When something comes
+    out wrong the question is whether the prompt asked for the wrong thing or the
+    model answered badly, and that is only answerable with both side by side.
+  </p>
+</div>
+
+{# The counts that are worth acting on. "Empty" is the important one: a call
+   that succeeded and returned nothing looks like success everywhere else in
+   the app, and is the exact shape of a blank generated document. #}
+<div class="flex flex-wrap gap-2 mb-4 text-xs">
+  <a href="/llm"
+     class="px-2 py-1 rounded border {{ 'border-blue-600 text-blue-700 bg-blue-50' if not active_status else 'border-gray-200 text-gray-600 hover:bg-gray-50' }}">
+    All {{ totals.all }}
+  </a>
+  <a href="/llm?status=failed{% if active_stage %}&stage={{ active_stage }}{% endif %}"
+     class="px-2 py-1 rounded border {{ 'border-amber-600 text-amber-700 bg-amber-50' if active_status == 'failed' else 'border-gray-200 text-gray-600 hover:bg-gray-50' }}">
+    Failed {{ totals.failed }}
+  </a>
+  <a href="/llm?status=empty{% if active_stage %}&stage={{ active_stage }}{% endif %}"
+     class="px-2 py-1 rounded border {{ 'border-amber-600 text-amber-700 bg-amber-50' if active_status == 'empty' else 'border-gray-200 text-gray-600 hover:bg-gray-50' }}">
+    Returned nothing {{ totals.empty }}
+  </a>
+</div>
+
+{% if stages %}
+<div class="flex flex-wrap gap-1.5 mb-4 text-[11px]">
+  <a href="/llm{% if active_status %}?status={{ active_status }}{% endif %}"
+     class="px-1.5 py-0.5 rounded {{ 'bg-gray-800 text-white' if not active_stage else 'bg-gray-100 text-gray-600 hover:bg-gray-200' }}">
+    every stage
+  </a>
+  {% for entry in stages %}
+  <a href="/llm?stage={{ entry.name }}{% if active_status %}&status={{ active_status }}{% endif %}"
+     class="px-1.5 py-0.5 rounded font-mono {{ 'bg-gray-800 text-white' if active_stage == entry.name else 'bg-gray-100 text-gray-600 hover:bg-gray-200' }}">
+    {{ entry.name }} <span class="opacity-60">{{ entry.count }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if not calls %}
+<div class="bg-white border border-gray-200 rounded-lg p-6 text-center">
+  <p class="text-sm text-gray-500">
+    {% if active_stage or active_status %}
+      Nothing matches that filter.
+      <a href="/llm" class="text-blue-600 hover:underline">Show everything</a>.
+    {% else %}
+      No calls recorded yet. Every match, resume, cover letter and outreach draft
+      lands here from the next one onward.
+    {% endif %}
+  </p>
+</div>
+{% else %}
+<div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-xs text-gray-500">
+      <tr>
+        <th class="text-left font-medium px-3 py-2">When</th>
+        <th class="text-left font-medium px-3 py-2">Stage</th>
+        <th class="text-left font-medium px-3 py-2">Model</th>
+        <th class="text-left font-medium px-3 py-2">Reply</th>
+        <th class="text-right font-medium px-3 py-2">Took</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for call in calls %}
+      <tr class="border-t border-gray-100 hover:bg-gray-50 cursor-pointer"
+          onclick="window.location='/llm/{{ call.id }}'">
+        <td class="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">
+          {{ call.created_at.strftime('%d %b %H:%M:%S') }}
+        </td>
+        <td class="px-3 py-2">
+          <span class="font-mono text-xs text-gray-700">{{ call.stage }}</span>
+        </td>
+        <td class="px-3 py-2 text-xs text-gray-500 font-mono truncate max-w-[14rem]">
+          {{ call.provider }}/{{ call.model }}
+        </td>
+        <td class="px-3 py-2 text-xs">
+          {% if not call.ok %}
+          <span class="text-amber-700">{{ (call.error or 'failed')[:80] }}</span>
+          {% elif not (call.response or '').strip() %}
+          {# Succeeded and said nothing. For a reasoning model that usually
+             means the token ceiling ran out mid-thought. #}
+          <span class="text-amber-700">
+            returned nothing{% if call.reasoning %} (but did reason){% endif %}
+          </span>
+          {% else %}
+          <span class="text-gray-600">{{ call.response[:80] }}</span>
+          {% endif %}
+        </td>
+        <td class="px-3 py-2 text-right text-xs text-gray-400 tabular-nums whitespace-nowrap">
+          {{ (call.duration_ms / 1000) | round(1) }}s
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if calls | length >= limit %}
+<div class="mt-3 text-center">
+  <a href="/llm?limit={{ limit + 40 }}{% if active_stage %}&stage={{ active_stage }}{% endif %}{% if active_status %}&status={{ active_status }}{% endif %}"
+     class="text-xs text-blue-600 hover:underline">Show more</a>
+</div>
+{% endif %}
+{% endif %}
+
+{% endblock %}

@@ -420,15 +420,30 @@ def chat_completion(
     temperature: float = 0.1,
     max_tokens: int | None = None,
 ) -> str:
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens if max_tokens is not None else _match_max_tokens(),
-        timeout=90,
-    )
-    return _reply_text(response)
+    from app.services import llm_log
+
+    ceiling = max_tokens if max_tokens is not None else _match_max_tokens()
+    with llm_log.call("nim", model, messages,
+                      temperature=temperature, max_tokens=ceiling) as entry:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=ceiling,
+            timeout=90,
+        )
+        message = response.choices[0].message
+        # Logged as the model actually returned them, not as _reply_text folds
+        # them together — an empty `content` beside a full `reasoning_content`
+        # is the signature of a token ceiling that was too low, and merging the
+        # two hides exactly that.
+        entry.finish(
+            getattr(message, "content", None) or "",
+            reasoning=getattr(message, "reasoning_content", None),
+            raw=response,
+        )
+        return _reply_text(response)
 
 
 def _reply_text(response) -> str:
@@ -504,6 +519,16 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) 
 
 
 def llm_score_job(
+    job, profile_data: dict, api_key: str, base_url: str, model: str,
+    budget: dict | None = None,
+) -> dict:
+    from app.services import llm_log
+
+    with llm_log.stage("match", job_id=getattr(job, "id", None)):
+        return _llm_score_job(job, profile_data, api_key, base_url, model, budget)
+
+
+def _llm_score_job(
     job, profile_data: dict, api_key: str, base_url: str, model: str,
     budget: dict | None = None,
 ) -> dict:

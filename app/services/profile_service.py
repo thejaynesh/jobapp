@@ -263,12 +263,15 @@ Example format:
 1. How do colleagues describe your problem-solving style?
 2. What kinds of problems energize you most?"""
 
-    response = chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-    )
+    from app.services import llm_log
+
+    with llm_log.stage("profile_questions"):
+        response = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
 
     questions = []
     for line in response.strip().splitlines():
@@ -301,14 +304,17 @@ It should sound natural and personal — not like a resume summary.
 
 Write only the summary paragraph. No intro, no labels."""
 
-    summary = chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        temperature=0.8,
-        max_tokens=300,
-    )
+    from app.services import llm_log
+
+    with llm_log.stage("profile_summary"):
+        summary = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=0.8,
+            max_tokens=300,
+        )
 
     updated = copy.deepcopy(profile.data)
     updated["narrative"]["summary"] = summary.strip()

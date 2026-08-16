@@ -85,14 +85,17 @@ def score_with_model(job, profile_data: dict, model: str) -> tuple[int | None, s
         chat_completion,
     )
 
+    from app.services import llm_log
+
     messages = _build_match_prompt(job, profile_data)
     try:
-        raw = chat_completion(
-            messages=messages,
-            api_key=settings.NVIDIA_NIM_API_KEY,
-            base_url=settings.NVIDIA_NIM_BASE_URL,
-            model=model,
-        )
+        with llm_log.stage("model_compare", job_id=job.id):
+            raw = chat_completion(
+                messages=messages,
+                api_key=settings.NVIDIA_NIM_API_KEY,
+                base_url=settings.NVIDIA_NIM_BASE_URL,
+                model=model,
+            )
     except Exception as exc:
         logger.warning("compare: %s call failed for %s: %s", model, job.id, exc)
         return None, "error"

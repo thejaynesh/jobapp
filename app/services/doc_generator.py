@@ -979,36 +979,51 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     profile_data = profile.data if profile else {}
     job = application.job
 
+    # Each phase is labelled for the LLM log. A generation is six calls with six
+    # different jobs, and "the resume came out empty" is a question about
+    # exactly one of them — without the label the log is six anonymous rows.
+    from app.services import llm_log
+
+    def phase(name: str):
+        return llm_log.stage(name, job_id=job.id, application_id=application.id)
+
     # One analysis pass over the JD grounds everything downstream: ATS keywords,
     # ranked requirements, and company specifics for the cover letter.
-    insights = extract_job_insights(
-        profile_data, job.title, job.company, job.description or "", api_key, base_url, model
-    )
+    with phase("job_insights"):
+        insights = extract_job_insights(
+            profile_data, job.title, job.company, job.description or "",
+            api_key, base_url, model,
+        )
 
     # Curate which experiences, projects, and skills to include so the resume
     # stays focused (ideally one page) and relevant to this specific job.
-    selection = tailor_resume_selection(
-        profile_data, job.title, job.description or "", api_key, base_url, model
-    )
+    with phase("resume_selection"):
+        selection = tailor_resume_selection(
+            profile_data, job.title, job.description or "", api_key, base_url, model
+        )
     selected_experience = selection["experience"]
     selected_projects = selection["projects"]
     selected_skills = selection["skills"]
 
     # Rewrite bullets only for the experiences we are actually keeping.
     bullet_profile = {**profile_data, "experience": selected_experience}
-    tailored_bullets = tailor_resume_bullets(
-        bullet_profile, job.title, job.description or "", api_key, base_url, model,
-        insights=insights, feedback=feedback,
-    )
-    tailored_summary = tailor_summary(
-        profile_data, job.title, job.company, insights, api_key, base_url, model,
-        feedback=feedback,
-    )
-    cover_body = generate_cover_letter_body(
-        profile_data, job.company, job.title, job.description or "", api_key, base_url, model,
-        insights=insights, feedback=feedback,
-        selected_experience=selected_experience, selected_projects=selected_projects,
-    )
+    with phase("resume_bullets"):
+        tailored_bullets = tailor_resume_bullets(
+            bullet_profile, job.title, job.description or "", api_key, base_url, model,
+            insights=insights, feedback=feedback,
+        )
+    with phase("resume_summary"):
+        tailored_summary = tailor_summary(
+            profile_data, job.title, job.company, insights, api_key, base_url, model,
+            feedback=feedback,
+        )
+    with phase("cover_letter"):
+        cover_body = generate_cover_letter_body(
+            profile_data, job.company, job.title, job.description or "",
+            api_key, base_url, model,
+            insights=insights, feedback=feedback,
+            selected_experience=selected_experience, selected_projects=selected_projects,
+        )
 
     # Resume
     resume_ctx = build_resume_context(
@@ -1048,10 +1063,12 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
                 "where the original work truthfully involved it."
             )
             retry_feedback = f"{feedback}\n{retry_note}" if feedback else retry_note
-            retried = tailor_resume_bullets(
-                bullet_profile, job.title, job.description or "", api_key, base_url, model,
-                insights=insights, feedback=retry_feedback,
-            )
+            with phase("resume_bullets_retry"):
+                retried = tailor_resume_bullets(
+                    bullet_profile, job.title, job.description or "",
+                    api_key, base_url, model,
+                    insights=insights, feedback=retry_feedback,
+                )
             if retried:
                 tailored_bullets = retried
                 resume_ctx = build_resume_context(

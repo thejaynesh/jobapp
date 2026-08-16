@@ -113,7 +113,8 @@ DEFAULT_TIMEOUT_SECONDS = 90
 
 
 def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int,
-                    timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
+                    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+                    entry=None) -> str:
     import anthropic
 
     client = anthropic.Anthropic(api_key=provider.api_key)
@@ -135,12 +136,19 @@ def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int,
 
     if response.stop_reason == "refusal":
         raise RuntimeError("Anthropic refused the request")
-    return "".join(b.text for b in response.content if b.type == "text")
+    text = "".join(b.text for b in response.content if b.type == "text")
+    if entry is not None:
+        usage = getattr(response, "usage", None)
+        entry.finish(text, finish_reason=getattr(response, "stop_reason", None))
+        if usage is not None:
+            entry.prompt_tokens = getattr(usage, "input_tokens", None)
+            entry.completion_tokens = getattr(usage, "output_tokens", None)
+    return text
 
 
 def _call_openai_compatible(
     provider: Provider, messages: list[dict], temperature: float, max_tokens: int,
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS, entry=None,
 ) -> str:
     from openai import OpenAI
 
@@ -152,7 +160,15 @@ def _call_openai_compatible(
         max_tokens=max_tokens,
         timeout=timeout,
     )
-    return response.choices[0].message.content or ""
+    message = response.choices[0].message
+    text = getattr(message, "content", None) or ""
+    if entry is not None:
+        # Reasoning models put their working in a separate field and leave
+        # `content` empty when the ceiling runs out mid-thought. Storing both
+        # separates "the model is bad at this" from "the budget was too small".
+        entry.finish(text, reasoning=getattr(message, "reasoning_content", None),
+                     raw=response)
+    return text
 
 
 def call_provider(
@@ -163,13 +179,17 @@ def call_provider(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     gate_wait: float | None = None,
 ) -> str:
+    from app.services import llm_log
+
     with _concurrency_gate(provider, gate_wait):
-        if provider.name == "anthropic":
-            result = _call_anthropic(provider, messages, max_tokens, timeout)
-        else:
-            result = _call_openai_compatible(
-                provider, messages, temperature, max_tokens, timeout
-            )
+        with llm_log.call(provider.name, provider.model, messages,
+                          temperature=temperature, max_tokens=max_tokens) as entry:
+            if provider.name == "anthropic":
+                result = _call_anthropic(provider, messages, max_tokens, timeout, entry)
+            else:
+                result = _call_openai_compatible(
+                    provider, messages, temperature, max_tokens, timeout, entry
+                )
     _record_llm_use(provider)
     return result
 
