@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -41,6 +42,9 @@ def trigger_generate_docs(
 
     app_obj.generation_status = "generating"
     app_obj.generation_error = None
+    # Queue-time stamp, same as the other trigger routes: a NULL clock reads as
+    # "stale" to the sweeper, which would queue a duplicate straight away.
+    app_obj.generation_started_at = datetime.now(timezone.utc)
     db.commit()
 
     generate_docs.delay(str(app_obj.id))

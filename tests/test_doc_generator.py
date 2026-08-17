@@ -286,14 +286,16 @@ class TestNextVersion:
         from app.services.doc_generator import _next_version
         from app.models.application import DocType
         db = MagicMock()
-        db.query.return_value.filter.return_value.count.return_value = 0
+        db.query.return_value.filter.return_value.scalar.return_value = 0
         assert _next_version(db, _APP_ID, DocType.resume) == 1
 
-    def test_increments_existing_count(self):
+    def test_increments_the_highest_existing_version(self):
+        # max()+1, not count()+1: a deleted row or a duplicate run must not
+        # produce a version (and filename) that already exists.
         from app.services.doc_generator import _next_version
         from app.models.application import DocType
         db = MagicMock()
-        db.query.return_value.filter.return_value.count.return_value = 3
+        db.query.return_value.filter.return_value.scalar.return_value = 3
         assert _next_version(db, _APP_ID, DocType.resume) == 4
 
 

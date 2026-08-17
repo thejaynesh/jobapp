@@ -76,6 +76,10 @@ def generate_docs(self, application_id: str, feedback: str | None = None) -> dic
 
     except SoftTimeLimitExceeded:
         logger.error("generate_docs timed out for %s", application_id)
+        # Discard whatever the interrupted generation had pending (a document
+        # row, is_current flips) — without this, _mark_failed's commit would
+        # write that partial state alongside the failure.
+        db.rollback()
         _mark_failed(db, application_id, "Generation timed out after 5 minutes")
         return {"status": "timeout"}
 
@@ -138,8 +142,14 @@ def sweep_generations() -> dict:
             )
             .all()
         )
+        now = datetime.now(timezone.utc)
         for app in stale:
             if queue_generation(app.id):
+                # Restart the clock at requeue time. Without this the row keeps
+                # its old start time, so while the queue is backed up every
+                # sweep re-queues the same application again — one stuck run
+                # becomes a pile of duplicate tasks.
+                app.generation_started_at = now
                 requeued_stale += 1
 
         missed = (
@@ -160,9 +170,16 @@ def sweep_generations() -> dict:
             if any(doc.is_current for doc in app.documents):
                 continue
             if queue_generation(app.id):
+                # Marked in-flight with a fresh clock for the same reason as the
+                # stale loop: an 'idle' row would be re-queued on every sweep
+                # until a worker picks the first copy up. If the queued task is
+                # lost, the stale sweep recovers it after the window.
+                app.generation_status = "generating"
+                app.generation_started_at = now
                 requeued_missed += 1
 
         if requeued_stale or requeued_missed:
+            db.commit()
             logger.info(
                 "sweep_generations — requeued %d stalled, %d never queued",
                 requeued_stale, requeued_missed,

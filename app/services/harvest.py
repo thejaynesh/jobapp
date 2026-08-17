@@ -234,45 +234,57 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         source_job_id = data.get("source_job_id")
         dedupe_hash = compute_dedupe_hash(company, title, location)
 
-        existing = find_existing_job(
-            db, HARVEST_SOURCE, url, source_job_id, dedupe_hash
-        )
-        if existing is not None:
-            # The harvested copy usually carries a fuller description than the
-            # guest API managed, which is the main reason this path exists.
-            if url in existing.source_urls or (
-                source_job_id
-                and existing.source_job_id == source_job_id
-                and existing.source == HARVEST_SOURCE
-            ):
-                if description and len(description) > len(existing.description or ""):
-                    existing.description = description
+        # Savepoint + flush per job. extract_jobs dedupes on id/url, but two
+        # postings with different ids can share a dedupe_hash — and without a
+        # flush the second one can't see the first's pending insert, so the
+        # unique constraint fired at commit and the WHOLE batch was lost.
+        # Flushing makes the duplicate visible to find_existing_job; the
+        # savepoint contains anything that still slips through.
+        try:
+            with db.begin_nested():
+                existing = find_existing_job(
+                    db, HARVEST_SOURCE, url, source_job_id, dedupe_hash
+                )
+                if existing is not None:
+                    # The harvested copy usually carries a fuller description than the
+                    # guest API managed, which is the main reason this path exists.
+                    if url in existing.source_urls or (
+                        source_job_id
+                        and existing.source_job_id == source_job_id
+                        and existing.source == HARVEST_SOURCE
+                    ):
+                        if description and len(description) > len(existing.description or ""):
+                            existing.description = description
+                            counts["merged"] += 1
+                        else:
+                            counts["skipped"] += 1
+                        continue
+                    merge_or_skip(db, existing, url, description, layer=3)
                     counts["merged"] += 1
-                else:
-                    counts["skipped"] += 1
-                continue
-            merge_or_skip(db, existing, url, description, layer=3)
-            counts["merged"] += 1
-            continue
+                    continue
 
-        db.add(
-            Job(
-                source=HARVEST_SOURCE,
-                source_job_id=source_job_id,
-                source_urls=[url],
-                title=title,
-                company=company,
-                location=location,
-                is_remote=bool(data.get("is_remote")),
-                url=url,
-                description=description,
-                experience_level="mid",
-                status=JobStatus.new,
-                fetched_at=now,
-                dedupe_hash=dedupe_hash,
-            )
-        )
-        counts["inserted"] += 1
+                db.add(
+                    Job(
+                        source=HARVEST_SOURCE,
+                        source_job_id=source_job_id,
+                        source_urls=[url],
+                        title=title,
+                        company=company,
+                        location=location,
+                        is_remote=bool(data.get("is_remote")),
+                        url=url,
+                        description=description,
+                        experience_level="mid",
+                        status=JobStatus.new,
+                        fetched_at=now,
+                        dedupe_hash=dedupe_hash,
+                    )
+                )
+                db.flush()
+                counts["inserted"] += 1
+        except Exception as exc:
+            logger.warning("harvest: could not store %r at %s: %s", title, company, exc)
+            counts["invalid"] += 1
 
     db.commit()
     if counts["inserted"] or counts["merged"]:

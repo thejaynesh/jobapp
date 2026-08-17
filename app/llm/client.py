@@ -25,4 +25,11 @@ def chat_completion(
         entry.finish(getattr(message, "content", None) or "",
                      reasoning=getattr(message, "reasoning_content", None),
                      raw=response)
-        return message.content
+        # Reasoning models can spend the whole token budget thinking and leave
+        # `content` empty (or None). The answer is often inside the reasoning,
+        # and returning None crashes callers that .strip() the reply — so fall
+        # back rather than handing back nothing. Same rule as matcher._reply_text.
+        content = (getattr(message, "content", None) or "").strip()
+        if content:
+            return content
+        return (getattr(message, "reasoning_content", None) or "").strip()

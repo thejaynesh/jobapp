@@ -14,6 +14,16 @@ logger = logging.getLogger(__name__)
 # Give the one-time board backfill a few shots at a flaky network, then stop.
 _MAX_BACKFILL_ATTEMPTS = 3
 
+# The profile-blob keys a fetch cycle owns. Only these are written back at the
+# end of a cycle; everything else on the blob belongs to other writers (agent
+# presence, mailbox state, settings) and must survive a cycle that overlaps
+# them. Cycles themselves are serialized by the fetch lock, so two cycles never
+# race each other on these.
+_FETCH_CYCLE_KEYS = (
+    "search_query_cache", "ats_slug_cache", "ats_slug_report",
+    "discovered_ats", "ats_sniff_cache", "last_fetch",
+)
+
 
 class _BrowserTierSkipped(Exception):
     """Internal signal: no Playwright source was requested this run."""
@@ -809,7 +819,18 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
         "boards": board_stats or None,
         "backfill": backfill_report,
     }
-    profile.data = updated_data
+    # Merge into a fresh read rather than writing `updated_data` wholesale. The
+    # copy above was taken minutes ago, and other writers touch this blob in
+    # the meantime — the agent poll stamps "agent" every 25 seconds, the
+    # mailbox poller records its state, and a settings save can land mid-cycle.
+    # Overwriting the whole blob silently reverted all of them; only the keys
+    # this cycle actually owns are carried over.
+    db.refresh(profile)
+    merged_data = copy.deepcopy(profile.data or {})
+    for key in _FETCH_CYCLE_KEYS:
+        if key in updated_data:
+            merged_data[key] = updated_data[key]
+    profile.data = merged_data
     counts["links"] = resolve_stats.as_dict() if resolve_stats else {}
     counts["boards"] = board_stats
 
@@ -843,66 +864,72 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
         entry[outcome] += 1
 
     for job_data in raw_jobs:
+        # Each job gets its own savepoint: a flush that fails (a constraint
+        # violation, an over-long value) used to leave the session in a failed
+        # state, so every job after it errored and the final commit lost the
+        # whole cycle's inserts. Rolling back to the savepoint discards only
+        # the bad row.
         try:
-            url = job_data.get("url", "")
-            source = job_data.get("source", "")
-            source_job_id = job_data.get("source_job_id")
-            company = job_data.get("company", "")
-            title = job_data.get("title", "")
-            location = job_data.get("location", "")
-            description = job_data.get("description", "")
-            apply_url = job_data.get("apply_url")
+            with db.begin_nested():
+                url = job_data.get("url", "")
+                source = job_data.get("source", "")
+                source_job_id = job_data.get("source_job_id")
+                company = job_data.get("company", "")
+                title = job_data.get("title", "")
+                location = job_data.get("location", "")
+                description = job_data.get("description", "")
+                apply_url = job_data.get("apply_url")
 
-            # Skip stale postings: they're usually filled or unresponsive, and
-            # they waste LLM matching calls and applications.
-            posted_at = _parse_posted_at(job_data.get("posted_at"))
-            if posted_at and max_age_days and (now - posted_at).days > max_age_days:
-                counts["stale"] += 1
-                _tally(source, "stale")
-                continue
-
-            dedupe_hash = compute_dedupe_hash(company, title, location)
-            existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
-
-            if existing is not None:
-                # A direct apply link is worth backfilling even on a job we're
-                # otherwise skipping — it's what the user actually clicks.
-                if apply_url and not existing.apply_url:
-                    existing.apply_url = apply_url
-                if url in existing.source_urls:
-                    counts["skipped"] += 1
-                    _tally(source, "skipped")
+                # Skip stale postings: they're usually filled or unresponsive, and
+                # they waste LLM matching calls and applications.
+                posted_at = _parse_posted_at(job_data.get("posted_at"))
+                if posted_at and max_age_days and (now - posted_at).days > max_age_days:
+                    counts["stale"] += 1
+                    _tally(source, "stale")
                     continue
-                if source_job_id and existing.source_job_id == source_job_id and existing.source == source:
-                    counts["skipped"] += 1
-                    _tally(source, "skipped")
-                    continue
-                merge_or_skip(db, existing, url, description, layer=3)
-                counts["merged"] += 1
-                _tally(source, "merged")
-                continue
 
-            new_job = Job(
-                source=source,
-                source_job_id=source_job_id,
-                source_urls=[url],
-                title=title,
-                company=company,
-                location=location,
-                is_remote=job_data.get("is_remote", False),
-                url=url,
-                apply_url=apply_url,
-                description=description,
-                experience_level=job_data.get("experience_level", "mid"),
-                status=JobStatus.new,
-                fetched_at=now,
-                posted_at=posted_at,
-                dedupe_hash=dedupe_hash,
-            )
-            db.add(new_job)
-            db.flush()
-            counts["inserted"] += 1
-            _tally(source, "inserted")
+                dedupe_hash = compute_dedupe_hash(company, title, location)
+                existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
+
+                if existing is not None:
+                    # A direct apply link is worth backfilling even on a job we're
+                    # otherwise skipping — it's what the user actually clicks.
+                    if apply_url and not existing.apply_url:
+                        existing.apply_url = apply_url
+                    if url in existing.source_urls:
+                        counts["skipped"] += 1
+                        _tally(source, "skipped")
+                        continue
+                    if source_job_id and existing.source_job_id == source_job_id and existing.source == source:
+                        counts["skipped"] += 1
+                        _tally(source, "skipped")
+                        continue
+                    merge_or_skip(db, existing, url, description, layer=3)
+                    counts["merged"] += 1
+                    _tally(source, "merged")
+                    continue
+
+                new_job = Job(
+                    source=source,
+                    source_job_id=source_job_id,
+                    source_urls=[url],
+                    title=title,
+                    company=company,
+                    location=location,
+                    is_remote=job_data.get("is_remote", False),
+                    url=url,
+                    apply_url=apply_url,
+                    description=description,
+                    experience_level=job_data.get("experience_level", "mid"),
+                    status=JobStatus.new,
+                    fetched_at=now,
+                    posted_at=posted_at,
+                    dedupe_hash=dedupe_hash,
+                )
+                db.add(new_job)
+                db.flush()
+                counts["inserted"] += 1
+                _tally(source, "inserted")
 
         except Exception as exc:
             logger.error("job_fetcher: error processing job: %s", exc)

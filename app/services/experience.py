@@ -110,11 +110,16 @@ def total_years(experience: list[dict]) -> float:
         (span for span in (entry_span(e) for e in experience or []) if span),
         key=lambda s: s[0],
     )
+    # Entries with an explicit `years` but no parseable dates can't be merged
+    # for overlap, but they are still real experience — dropping them the
+    # moment any OTHER entry had dates undercounted the total.
+    explicit = sum(
+        entry_years(e) or 0
+        for e in experience or []
+        if entry_span(e) is None and e.get("years") not in (None, "")
+    )
     if not spans:
-        # Fall back to explicit years, which don't carry dates to merge.
-        explicit = [entry_years(e) or 0 for e in experience or []
-                    if e.get("years") not in (None, "")]
-        return round(sum(explicit), 1)
+        return round(explicit, 1)
 
     merged: list[list[date]] = [list(spans[0])]
     for start, end in spans[1:]:
@@ -124,4 +129,4 @@ def total_years(experience: list[dict]) -> float:
             merged.append([start, end])
 
     days = sum((end - start).days for start, end in merged)
-    return round(days / DAYS_PER_YEAR, 1)
+    return round(days / DAYS_PER_YEAR + explicit, 1)

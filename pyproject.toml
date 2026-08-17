@@ -27,6 +27,13 @@ dev = [
     "pytest-cov==6.0.0",
 ]
 
+# Without this, `pip install -e .` fails outside Docker: setuptools' flat-layout
+# discovery sees app/, caddy/, alembic/ and extension/ as four top-level
+# packages and refuses to guess. (The Docker build only worked because it
+# copies pyproject.toml alone before installing.)
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

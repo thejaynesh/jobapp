@@ -658,15 +658,13 @@ function ensureAlarm() {
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureAlarm();
-syncHarvestScripts();
-syncOverlayScripts();
   syncHarvestScripts();
+  syncOverlayScripts();
 });
 chrome.runtime.onStartup.addListener(() => {
   ensureAlarm();
-syncHarvestScripts();
-syncOverlayScripts();
   syncHarvestScripts();
+  syncOverlayScripts();
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) pollOnce();
