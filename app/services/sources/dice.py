@@ -1,5 +1,5 @@
-import json
 import logging
+import re
 
 from app.services.sources.base import parse_experience_level
 from app.services.sources.playwright_base import (
@@ -13,6 +13,14 @@ from app.services.sources.playwright_base import (
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.dice.com"
+
+# https://www.dice.com/job-detail/<guid> — the id is the last path segment.
+_JOB_DETAIL_RE = re.compile(r"/job-detail/([^/?#]+)")
+
+
+def _job_id_from_url(url: str) -> str | None:
+    match = _JOB_DETAIL_RE.search(url or "")
+    return match.group(1) if match else None
 
 # The old extractor keyed entirely on <dhi-job-card>, an Angular custom element
 # Dice no longer renders — the page loads fine (real title, full body) but that
@@ -61,7 +69,13 @@ _EXTRACT_JS = """() => {
                     location: [addr.addressLocality, addr.addressRegion]
                         .filter(Boolean).join(', '),
                     url: abs(node.url || ''),
-                    description: (node.description || '').replace(/<[^>]+>/g, ' ').trim(),
+                    // Left as markup: the server cleans descriptions in one
+                    // place, and a regex here would strip the list structure
+                    // out before it ever got there.
+                    description: node.description || '',
+                    postedAt: node.datePosted || '',
+                    employmentType: Array.isArray(node.employmentType)
+                        ? node.employmentType[0] : (node.employmentType || ''),
                 });
             }
         }
@@ -88,8 +102,9 @@ _EXTRACT_JS = """() => {
                     location: String(node.jobLocation || node.location ||
                                      node.formattedLocation || '').trim(),
                     url: abs('/job-detail/' + id),
-                    description: String(node.summary || node.description || '')
-                        .replace(/<[^>]+>/g, ' ').trim(),
+                    description: String(node.summary || node.description || ''),
+                    postedAt: String(node.postedDate || node.datePosted ||
+                                     node.modifiedDate || ''),
                 });
             }
             for (const v of Object.values(node)) {
@@ -167,18 +182,41 @@ async def _scrape(query: str, location: str) -> list[dict]:
                 continue
             loc = (d.get("location") or "").strip()
             desc = (d.get("description") or "").strip()
+            url = d.get("url") or ""
             jobs.append({
                 "source": "dice",
-                "source_job_id": None,
+                # The id is right there in the URL Dice already gave us.
+                # Leaving it None threw away the strongest dedupe key the
+                # source has, so the same posting re-inserted itself under
+                # every cosmetic title change.
+                "source_job_id": _job_id_from_url(url),
                 "title": title,
                 "company": (d.get("company") or "").strip(),
                 "location": loc,
                 "is_remote": is_remote_location(loc, title),
-                "url": d.get("url") or "",
+                "url": url,
                 "description": desc,
                 "experience_level": parse_experience_level(title, desc),
+                # Dice publishes datePosted in its structured data; not reading
+                # it is why 97% of stored Dice jobs have no date, which in turn
+                # is why the staleness filter can never drop an old one.
+                "posted_at": (d.get("postedAt") or "").strip() or None,
             })
-        logger.info("Dice: %d jobs for %s / %s", len(jobs), query, location)
+        with_desc = sum(1 for j in jobs if j["description"])
+        logger.info(
+            "Dice: %d jobs for %s / %s (%d with a description, %d dated)",
+            len(jobs), query, location, with_desc,
+            sum(1 for j in jobs if j["posted_at"]),
+        )
+        if jobs and not with_desc:
+            # Not fatal any more: the search page has never carried
+            # descriptions, and enrichment fetches them from the job-detail
+            # URLs afterwards. Said out loud so the panel's "0 chars" reads as
+            # expected rather than as a broken adapter.
+            logger.info(
+                "Dice: search results carry no descriptions; enrichment will "
+                "fetch them from the job-detail pages"
+            )
         return jobs
 
 

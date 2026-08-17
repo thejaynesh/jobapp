@@ -729,6 +729,116 @@ class TestHimalayasAdapter:
             results = fetch(query="Engineer")
         assert results == []
 
+    def test_a_nested_company_object_yields_its_name(self):
+        """
+        Every stored Himalayas job had the literal string "name" as its
+        employer: the key got read where the value was meant. The company
+        arrives as a string on some records and an object on others, so both
+        shapes are read.
+        """
+        from app.services.sources.himalayas import fetch
+        raw = [{
+            "title": "Backend Engineer",
+            "company": {"name": "Doist", "logo": "https://x/y.png"},
+            "categories": ["Software Engineering"],
+            "guid": "https://himalayas.app/jobs/9",
+            "description": "Build APIs.",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert results[0]["company"] == "Doist"
+
+    def test_a_bare_key_name_is_never_stored_as_a_company(self):
+        from app.services.sources.himalayas import fetch
+        raw = [{
+            "title": "Backend Engineer",
+            "companyName": "name",
+            "categories": ["Software Engineering"],
+            "guid": "https://himalayas.app/jobs/10",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert results[0]["company"] == ""
+
+    def test_object_shaped_location_restrictions_do_not_leak_keys(self):
+        from app.services.sources.himalayas import fetch
+        raw = [{
+            "title": "Backend Engineer",
+            "companyName": "Doist",
+            "categories": ["Software Engineering"],
+            "guid": "https://himalayas.app/jobs/11",
+            "locationRestrictions": [{"name": "USA"}, {"name": "Canada"}],
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert results[0]["location"] == "USA, Canada"
+
+
+# ---------------------------------------------------------------------------
+# RemoteOK adapter
+# ---------------------------------------------------------------------------
+
+class TestRemoteOKAdapter:
+    def _mock_response(self, items: list) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = items
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_standard_dicts(self):
+        from app.services.sources.remoteok import fetch
+        raw = [{
+            "id": "77",
+            "position": "Backend Engineer",
+            "company": "Remote Co",
+            "location": "Worldwide",
+            "url": "https://remoteok.com/l/77",
+            "description": "<p>Python and Go.</p>",
+            "tags": ["python", "go"],
+            "date": "2026-08-01T00:00:00+00:00",
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert len(results) == 1
+        assert results[0]["company"] == "Remote Co"
+        # Cleaned on the way out of the adapter, like every other write path.
+        assert results[0]["description"] == "Python and Go."
+
+    def test_a_challenge_page_description_drops_the_listing(self):
+        """
+        RemoteOK sits behind a bot wall that sometimes answers with its
+        challenge page. Storing that is worse than storing nothing — it reads
+        as a real description to the filter, the matcher and the generator.
+        """
+        from app.services.sources.remoteok import fetch
+        raw = [{
+            "id": "78",
+            "position": "Backend Engineer",
+            "company": "Remote Co",
+            "url": "https://remoteok.com/l/78",
+            "description": "Verify you are human. Performance & security by Cloudflare",
+            "tags": ["python"],
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert results == []
+
+    def test_a_listing_with_no_description_is_still_kept(self):
+        # Nothing to enrich from is different from a wall; enrichment can go
+        # and fetch this one's real text later.
+        from app.services.sources.remoteok import fetch
+        raw = [{
+            "id": "79",
+            "position": "Backend Engineer",
+            "company": "Remote Co",
+            "url": "https://remoteok.com/l/79",
+            "description": "",
+            "tags": ["python"],
+        }]
+        with patch("httpx.get", return_value=self._mock_response(raw)):
+            results = fetch(query="Backend Engineer")
+        assert len(results) == 1
+
 
 # ---------------------------------------------------------------------------
 # Jobicy adapter
@@ -870,6 +980,48 @@ class TestHNHiringAdapter:
         )
         assert title == "Founding Systems Engineer"
         assert company == "CaseLight Systems Inc."
+
+    def test_a_location_is_never_stored_as_the_company(self):
+        """
+        The thread's template is `Company | Role | Location | ...`, so the
+        company is the earliest segment that is neither. Reading it as "the
+        first segment without a comma" instead is what filed
+        "New York, NY (In-Office)" as an employer.
+        """
+        from app.services.sources.hnhiring import _parse_header
+        company, title = _parse_header(
+            "Acme Corp | Senior Backend Engineer | New York, NY (In-Office) | Full-time"
+        )
+        assert company == "Acme Corp"
+        assert title == "Senior Backend Engineer"
+
+    def test_a_company_with_a_comma_beats_the_location_beside_it(self):
+        from app.services.sources.hnhiring import _parse_header
+        company, _ = _parse_header("ACME Corp, Inc | Senior Engineer | NYC")
+        assert company == "ACME Corp, Inc"
+
+    def test_a_company_named_after_a_region_is_not_mistaken_for_one(self):
+        # "UK Power Networks" is an employer. Rejecting it to avoid a location
+        # would trade a wrong answer for a missing job, which is worse.
+        from app.services.sources.hnhiring import _parse_header
+        company, _ = _parse_header("UK Power Networks | Systems Engineer | London")
+        assert company == "UK Power Networks"
+
+    def test_a_header_naming_no_company_is_dropped(self):
+        """
+        The company is half the dedupe key; an empty one collapses unrelated
+        posts into each other, so a post that names only a place and a role is
+        not stored at all.
+        """
+        from app.services.sources.hnhiring import fetch
+        children = [
+            {"id": 3, "created_at": "",
+             "text": "<p>New York, NY (In-Office) | Backend Engineer</p>"
+                     "<p>We use Python.</p>"},
+        ]
+        with patch("httpx.get", side_effect=[self._search_resp(), self._item_resp(children)]):
+            results = fetch(queries=["Backend Engineer"])
+        assert results == []
 
 
 # ---------------------------------------------------------------------------

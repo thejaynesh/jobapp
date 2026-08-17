@@ -8,6 +8,7 @@ from app.config import settings
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
 from app.services.deduplication import compute_dedupe_hash, find_existing_job, merge_or_skip
+from app.services.descriptions import clean as clean_description
 
 logger = logging.getLogger(__name__)
 
@@ -391,7 +392,7 @@ def _run_all_adapters(
         else:
             pw_stats["wellfound"] = {"count": 0, "errors": [], "enabled": False}
 
-        if only is None or "dice" in only:
+        if (only is None or "dice" in only) and getattr(cfg, "DICE_ENABLED", True):
             from app.services.sources.dice import fetch as dice_fetch
             pw_stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
             for role in roles:
@@ -877,7 +878,9 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
                 company = job_data.get("company", "")
                 title = job_data.get("title", "")
                 location = job_data.get("location", "")
-                description = job_data.get("description", "")
+                # Canonicalized here rather than in each adapter, so a new
+                # source cannot reintroduce HTML soup by forgetting to.
+                description = clean_description(job_data.get("description", ""))
                 apply_url = job_data.get("apply_url")
 
                 # Skip stale postings: they're usually filled or unresponsive, and
@@ -919,7 +922,12 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
                     is_remote=job_data.get("is_remote", False),
                     url=url,
                     apply_url=apply_url,
-                    description=description,
+                    # NULL, not "", when cleaning found nothing worth keeping:
+                    # "no description" is a state the pipeline acts on (the
+                    # filter names it, enrichment goes looking for one), and it
+                    # should read the same whether the source sent an empty
+                    # field or a Cloudflare page.
+                    description=description or None,
                     experience_level=job_data.get("experience_level", "mid"),
                     status=JobStatus.new,
                     fetched_at=now,

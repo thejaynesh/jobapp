@@ -36,6 +36,7 @@ from app.services.deduplication import (
     find_existing_job,
     merge_or_skip,
 )
+from app.services.descriptions import clean as clean_description
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
             continue
 
         location = (data.get("location") or "").strip()
-        description = data.get("description") or ""
+        description = clean_description(data.get("description") or "")
         source_job_id = data.get("source_job_id")
         dedupe_hash = compute_dedupe_hash(company, title, location)
 
@@ -276,7 +277,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                         location=location,
                         is_remote=bool(data.get("is_remote")),
                         url=url,
-                        description=description,
+                        description=description or None,
                         experience_level="mid",
                         status=JobStatus.new,
                         fetched_at=now,

@@ -130,6 +130,50 @@ class TestDiceExtraction:
         assert "job-detail" in _READY_SELECTOR
         assert "ld+json" in _READY_SELECTOR
 
+    @pytest.mark.asyncio
+    async def test_the_posting_date_is_carried_through(self):
+        """
+        97% of stored Dice jobs had no date, so the staleness filter could
+        never drop an old one. Dice publishes datePosted in its structured
+        data; the extractor simply wasn't reading it.
+        """
+        from app.services.sources.dice import fetch
+        row = {**self._ROW, "postedAt": "2026-08-01T00:00:00Z"}
+        page = _page(evaluate=[row])
+        with patch("playwright.async_api.async_playwright", return_value=_playwright(page)):
+            jobs = await fetch("Backend Engineer", "United States")
+        assert jobs[0]["posted_at"] == "2026-08-01T00:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_the_job_id_is_read_off_the_detail_url(self):
+        """
+        source_job_id was always None, throwing away the strongest dedupe key
+        the source has — so the same posting re-inserted itself under every
+        cosmetic title change.
+        """
+        from app.services.sources.dice import fetch
+        page = _page(evaluate=[self._ROW])
+        with patch("playwright.async_api.async_playwright", return_value=_playwright(page)):
+            jobs = await fetch("Backend Engineer", "United States")
+        assert jobs[0]["source_job_id"] == "abc-123"
+
+    @pytest.mark.asyncio
+    async def test_a_row_without_a_date_reports_none_not_empty_string(self):
+        from app.services.sources.dice import fetch
+        page = _page(evaluate=[self._ROW])
+        with patch("playwright.async_api.async_playwright", return_value=_playwright(page)):
+            jobs = await fetch("Backend Engineer", "United States")
+        assert jobs[0]["posted_at"] is None
+
+    def test_the_extractor_no_longer_strips_markup_itself(self):
+        """
+        Descriptions are cleaned in exactly one place. A regex here would take
+        the list structure off before the cleaner ever saw it.
+        """
+        from app.services.sources.dice import _EXTRACT_JS
+        assert "replace(/<[^>]+>/g" not in _EXTRACT_JS
+        assert "datePosted" in _EXTRACT_JS
+
 
 class TestWellfoundRolePages:
     """

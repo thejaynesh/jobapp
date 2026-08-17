@@ -251,10 +251,16 @@ class Settings(BaseSettings):
     WELLFOUND_ROLES: str = (
         "software-engineer,full-stack-engineer,backend-engineer,mobile-engineer"
     )
-    # Wellfound has served this server empty responses through a browser. Set
-    # false to stop paying for the attempt (including a Chromium launch) if it
-    # turns out to be blocked for good.
-    WELLFOUND_ENABLED: bool = True
+    # Wellfound has served this server empty responses through a browser, and
+    # every one of the 140 jobs it ever stored arrived with no description at
+    # all. Off until that changes: a Chromium launch per cycle is the most
+    # expensive thing in the fetch, and it has never bought a usable posting.
+    WELLFOUND_ENABLED: bool = False
+    # Dice's search results carry titles and links but no descriptions — those
+    # live on the job-detail pages, which enrichment fetches. Here so the whole
+    # browser tier can be switched off from the settings page if it stops
+    # earning its keep.
+    DICE_ENABLED: bool = True
     SLUG_HARVEST_URLS: str = (
         "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"

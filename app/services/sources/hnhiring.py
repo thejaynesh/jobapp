@@ -51,29 +51,62 @@ _NON_COMPANY = re.compile(
     re.IGNORECASE,
 )
 
+# Segments that name a place rather than an employer. The state-code pattern
+# ('New York, NY') is the one that matters most: it is how almost every US
+# location segment in the thread is written.
+#
+# The bare region names are anchored to the whole segment on purpose. Matched
+# loosely they reject real employers — "UK Power Networks" is a company, and
+# dropping it to avoid a location would trade one wrong answer for a missing
+# job, which is the worse of the two.
+_LOCATION_LIKE = re.compile(
+    r",\s*[A-Z]{2}\b"                                   # New York, NY
+    r"|\(\s*(in-?office|on-?site|onsite|hybrid|remote)"  # ... (In-Office)
+    r"|^\s*(usa|u\.s\.a?\.?|uk|eu|emea|apac|latam|worldwide|anywhere"
+    r"|global(ly)?|bay area|silicon valley|nyc|sf)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _parse_header(text: str) -> tuple[str, str]:
     """
-    Posts conventionally start with pipe-separated segments, but their order
-    varies ('Company | Role | Location', 'Location | Company | Role', ...).
-    Pick the title as the segment containing a role word, and the company as
-    the most company-looking remaining segment. Falls back to the first line
-    when unpiped.
+    Posts follow the thread's own template: `Company | Role | Location | ...`.
+
+    So the company is the *earliest* segment that isn't the role and isn't a
+    place — position is the signal, and reading it as anything else is what
+    stored "New York, NY (In-Office)" as an employer. The previous rule
+    preferred comma-free segments over leading ones, which inverts exactly on
+    the two common headers: a company written "Acme, Inc." loses to the
+    location beside it, and a header of just `Location | Role` has no
+    comma-free candidate at all and falls back to the location.
+
+    The role is still found by content rather than position, because plenty of
+    posters swap the first two segments.
     """
     first_line = text.split("\n", 1)[0].strip()
     parts = [p.strip() for p in first_line.split("|") if p.strip()]
-    if len(parts) >= 2:
-        title = (
-            next((p for p in parts if _CORE_ROLE.search(p)), None)
-            or next((p for p in parts if _ANY_ROLE.search(p)), None)
-            or next((p for p in parts[1:] if not _NON_COMPANY.search(p)), parts[1])
+    if len(parts) < 2:
+        return (parts[0][:120] if parts else "", first_line[:150])
+
+    title_idx = next(
+        (i for i, p in enumerate(parts) if _CORE_ROLE.search(p)),
+        next((i for i, p in enumerate(parts) if _ANY_ROLE.search(p)), None),
+    )
+    if title_idx is None:
+        title_idx = next(
+            (i for i, p in enumerate(parts[1:], start=1)
+             if not _NON_COMPANY.search(p)),
+            1,
         )
-        others = [p for p in parts if p != title and not _NON_COMPANY.search(p)]
-        # Segments with commas are usually locations ('Blaine, WA'), not companies.
-        company_candidates = [p for p in others if "," not in p] or others
-        company = company_candidates[0] if company_candidates else parts[0]
-        return company[:120], title[:150]
-    return parts[0][:120] if parts else "", first_line[:150]
+
+    company = next(
+        (p for i, p in enumerate(parts)
+         if i != title_idx
+         and not _NON_COMPANY.search(p)
+         and not _LOCATION_LIKE.search(p)),
+        "",  # a header of only a place and a role names no employer
+    )
+    return company[:120], parts[title_idx][:150]
 
 
 def fetch(queries: list[str]) -> list[dict]:
@@ -95,6 +128,7 @@ def fetch(queries: list[str]) -> list[dict]:
 
     q_words = {w for q in queries for w in q.lower().split()}
     jobs: list[dict] = []
+    skipped_no_company = 0
 
     for comment in story.get("children", []):
         raw = comment.get("text")
@@ -105,7 +139,12 @@ def fetch(queries: list[str]) -> list[dict]:
             continue
 
         company, title = _parse_header(text)
-        if not title:
+        # No employer means no job worth storing: the company is half of the
+        # dedupe key, and an empty one collapses unrelated posts into each
+        # other. Rarer than it sounds — it needs a header that names only a
+        # place and a role.
+        if not title or not company:
+            skipped_no_company += 1 if title else 0
             continue
         comment_id = str(comment.get("id", ""))
 
@@ -126,5 +165,8 @@ def fetch(queries: list[str]) -> list[dict]:
             "posted_at": comment.get("created_at"),
         })
 
-    logger.info("HN hiring: %d jobs from thread %s", len(jobs), story_id)
+    logger.info(
+        "HN hiring: %d jobs from thread %s (%d posts named no company)",
+        len(jobs), story_id, skipped_no_company,
+    )
     return jobs

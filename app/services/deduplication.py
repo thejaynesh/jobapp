@@ -156,7 +156,14 @@ def merge_or_skip(
     if new_url not in existing.source_urls:
         existing.source_urls = existing.source_urls + [new_url]
 
+    # Cleaned before the comparison, never after. Raw markup inflates a
+    # description's length by roughly a third, so an HTML cross-post would beat
+    # a longer plain-text description on the tape measure alone and replace
+    # good text with worse.
+    from app.services.descriptions import clean
+
+    cleaned = clean(new_description)
     old_length = len(existing.description or "")
-    if len(new_description) > old_length:
-        existing.description = new_description
+    if len(cleaned) > old_length:
+        existing.description = cleaned
         note_description_growth(existing, old_length)
