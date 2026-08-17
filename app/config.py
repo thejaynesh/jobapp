@@ -212,8 +212,17 @@ class Settings(BaseSettings):
     # rather than the employer. Following those once per new posting yields the
     # real apply URL and exposes the company's ATS board to discovery.
     RESOLVE_APPLY_LINKS: bool = True
-    LINK_RESOLVE_MAX_PER_CYCLE: int = 400
-    LINK_RESOLVE_WORKERS: int = 8
+    # Was 400, which left 79,705 aggregator links never resolved at all — a
+    # backlog that grows faster than the budget drains it never drains. The
+    # real limit is politeness per host, below; this only stops one cycle from
+    # running unboundedly long.
+    LINK_RESOLVE_MAX_PER_CYCLE: int = 5000
+    LINK_RESOLVE_WORKERS: int = 16
+    # Concurrent requests to any one host, and the minimum gap between them.
+    # A backlog that is 90% Adzuna paces itself while everything else runs flat
+    # out.
+    LINK_RESOLVE_PER_HOST: int = 4
+    LINK_RESOLVE_HOST_DELAY_MS: int = 250
     # Sniff company careers sites (careers.acme.com) for an embedded ATS board.
     ATS_SNIFF_CAREER_SITES: bool = True
     ATS_SNIFF_MAX_HOSTS_PER_CYCLE: int = 40

@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 # a false negative costs a job that never gets resolved.
 _INTERSTITIAL_SQL_HINTS = (
     "%adzuna%", "%jooble%", "%careerjet%", "%indeed.com%",
+    "%appcast.io%", "%recruitics.com%", "%click.jobvite.com%",
+    "%clickcast.jobs%", "%jobs2web.com%",
     "%/redirect?%", "%/out?url=%",
 )
 

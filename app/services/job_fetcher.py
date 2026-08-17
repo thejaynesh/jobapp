@@ -486,6 +486,8 @@ def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
         fresh,
         max_links=settings.LINK_RESOLVE_MAX_PER_CYCLE,
         workers=settings.LINK_RESOLVE_WORKERS,
+        per_host=settings.LINK_RESOLVE_PER_HOST,
+        host_delay=settings.LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
     )
 
 
