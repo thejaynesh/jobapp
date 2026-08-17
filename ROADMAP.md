@@ -425,12 +425,52 @@ already exists across `jobs`/`fetch_runs`); per-source
 
 ## Build order
 
-1.1 → 1.3 → 1.2+5.1 (together) → 1.4 → 1.5 → then Phase 2 rolling, Phase 3,
-Phase 4, with 5.2/5.3 and Phase 6 slotted between larger items.
+~~1.1 → 1.3 → 1.2+5.1 (together) → 1.4 → 1.5~~ (**Phase 1 done — see below**)
+→ then Phase 2 rolling, Phase 3, Phase 4, with 5.2/5.3 and Phase 6 slotted
+between larger items.
 
 Rationale: matching, documents, and coverage ROI all multiply off clean full
 descriptions, so data quality goes first; coverage second; intelligence third
 once it has real data to be intelligent about.
+
+## Phase 1: what shipped, and what to check once it has run
+
+Phase 1 is built and merged. Nothing here has been observed against the live
+database yet — the numbers below are what to look for on the first cycles.
+
+- **1.1** `services/descriptions.clean()` is the single door into
+  `Job.description`, called by the fetch cycle, the harvest ingest and the
+  cross-post merge. `python -m app.tasks.descriptions` backfills stored rows
+  (`--dry-run` first). Adapter fixes: himalayas company, hnhiring
+  company/location, remoteok challenge pages, dice dates + job ids;
+  `WELLFOUND_ENABLED` now defaults false, `DICE_ENABLED` added.
+- **1.3** Click trackers are followed through (up to 4 hops, including JS
+  bounces) and can never be stored as an apply URL.
+  `python -m app.tasks.links` repairs the ones already stored.
+  `LINK_RESOLVE_MAX_PER_CYCLE` 400 → 5000, with per-host politeness instead.
+- **1.2 + 5.1** `services/enrichment.py` + `tasks/enrich.py`, on a 30-minute
+  schedule and as a tail-call from each fetch. ATS API → JSON-LD → LLM →
+  browser, and the landing HTML from link resolution is reused rather than
+  re-downloaded. Panel on `/runs`, table `enrichment_runs`.
+- **1.4** Migration 0022 adds salary/employment type/required years/skills/
+  education/benefits/language. Read by one `job_details` call after the
+  keyword filter passes. Pills on the job card, facts on the app page, salary
+  floor filter on `/jobs`.
+- **1.5** LinkedIn applies the title gate *before* detail fetches; cap 200 →
+  2000, pages 5 → 15. Harvest reads salary bands out of Voyager payloads.
+
+**Check after a few cycles** (`scripts/db_report.sql`): section D
+`html_ish_total` → ~0 after the backfill; section 2 Adzuna `avg_len` climbing
+off 500 and LinkedIn `desc%` off 9.8; new section 2b for detail coverage and
+2c for enrichment runs; section 4 `no_description`/`few_skills` shrinking;
+section 11 `still_unresolved` trending down; section 12 nonzero **only once
+the extension's harvest toggle is ticked** — the `/runs` enrichment panel now
+says so explicitly when it is still off.
+
+**Deferred out of Phase 1 on purpose:** the matcher's description excerpt is
+still capped at 4,000 chars (that is 3.1, with its own token-budget
+consequences). The structured facts from 1.4 are passed as explicit lines
+above the excerpt, so they survive wherever it truncates.
 
 ## Done so far (Aug 2026)
 
