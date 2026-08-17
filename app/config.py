@@ -276,6 +276,28 @@ class Settings(BaseSettings):
         "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md"
     )
 
+    # ---- Enrichment ------------------------------------------------------
+    # Going back for the description the source didn't send. Adzuna truncates
+    # at 500 chars, LinkedIn ships 90% of its jobs without one, and ~25k jobs
+    # were auto-rejected for thin data rather than for being bad jobs.
+    ENRICH_ENABLED: bool = True
+    # Per pass, not per day. The backlog drains over days; a pass with no
+    # ceiling holds a worker slot for hours while the jobs it already rescued
+    # wait behind it to be scored.
+    ENRICH_MAX_PER_RUN: int = 200
+    ENRICH_INTERVAL_MINUTES: int = 30
+    # A pass at the end of each fetch cycle, so the jobs that just arrived are
+    # scored on their real descriptions rather than on the stub the aggregator
+    # sent. Smaller than a scheduled pass: the cycle is already long, and the
+    # backlog is the scheduled pass's job.
+    ENRICH_ON_FETCH: bool = True
+    ENRICH_MAX_PER_FETCH: int = 150
+    ENRICH_WORKERS: int = 8
+    # The only real budget: concurrent requests to one host, and the gap
+    # between them.
+    ENRICH_PER_HOST: int = 4
+    ENRICH_HOST_DELAY_MS: int = 400
+
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"
     DOCS_OUTPUT_DIR: str = "/storage"

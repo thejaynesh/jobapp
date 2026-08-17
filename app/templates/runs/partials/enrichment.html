@@ -1,0 +1,115 @@
+{# Enrichment: what going back for the real description actually got us. #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-8 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Enrichment</h2>
+    <p class="text-xs text-gray-400">
+      Going back to the employer's page for the description the source
+      truncated or never sent.
+    </p>
+  </div>
+
+  {% if enrichment_backlog and (enrichment_backlog.thin or enrichment_backlog.rescuable) %}
+  <p class="text-xs text-gray-500 mb-3">
+    <span class="font-medium text-gray-700">{{ "{:,}".format(enrichment_backlog.thin) }}</span>
+    jobs still have a thin or missing description
+    {%- if enrichment_backlog.rescuable %}, and
+    <span class="font-medium text-gray-700">{{ "{:,}".format(enrichment_backlog.rescuable) }}</span>
+    were filtered out for exactly that — those get another score once they have
+    a real one{% endif %}.
+  </p>
+  {% endif %}
+
+  {% if enrichment_totals %}
+  <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 mb-4">
+    <span>
+      Last {{ enrichment_totals.runs }} passes:
+      <span class="font-medium text-gray-700">{{ "{:,}".format(enrichment_totals.enriched) }}</span>
+      of {{ "{:,}".format(enrichment_totals.attempted) }} enriched
+    </span>
+    <span title="The number this whole feature exists for">
+      <span class="font-medium text-green-700">+{{ "{:,}".format(enrichment_totals.chars_gained) }}</span>
+      characters of description gained
+    </span>
+    <span>
+      <span class="font-medium text-gray-700">{{ enrichment_totals.requeued_for_matching }}</span>
+      jobs back in the matching queue
+    </span>
+    <span class="text-gray-400">
+      via ats {{ enrichment_totals.via.ats_api }} ·
+      json-ld {{ enrichment_totals.via.json_ld }} ·
+      llm {{ enrichment_totals.via.llm }} ·
+      held page {{ enrichment_totals.via.landing_html }}
+    </span>
+  </div>
+  {% endif %}
+
+  {% if not enrichment_runs %}
+  <p class="text-sm text-gray-400">
+    No enrichment passes recorded yet. The first one runs with the next fetch
+    cycle.
+  </p>
+  {% else %}
+  <div class="overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead class="text-gray-400 uppercase">
+        <tr>
+          <th class="text-left py-1">Started</th>
+          <th class="text-left py-1">Status</th>
+          <th class="text-right py-1">Took</th>
+          <th class="text-right py-1">Tried</th>
+          <th class="text-right py-1">Enriched</th>
+          <th class="text-right py-1" title="Characters of description gained">Chars</th>
+          <th class="text-right py-1" title="ATS API / JSON-LD / model / page we already held">Method</th>
+          <th class="text-right py-1" title="Rescued from a no-description filter">Re-matched</th>
+          <th class="text-right py-1" title="Handed to the browser extension">Browser</th>
+          <th class="text-left py-1 pl-4">Refused by</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        {% for run in enrichment_runs %}
+        <tr>
+          <td class="py-1 text-gray-600 whitespace-nowrap">
+            {{ run.started_at.strftime("%b %d %H:%M") }}
+          </td>
+          <td class="py-1">
+            {% if run.status == 'ok' %}<span class="text-green-700">ok</span>
+            {% elif run.status == 'partial' %}<span class="text-yellow-700">partial</span>
+            {% else %}<span class="text-red-600">failed</span>{% endif %}
+          </td>
+          <td class="py-1 text-right text-gray-400">
+            {% if run.duration_seconds %}{{ "%.0f"|format(run.duration_seconds) }}s{% else %}—{% endif %}
+          </td>
+          <td class="py-1 text-right text-gray-600">{{ run.attempted }}</td>
+          <td class="py-1 text-right {% if run.enriched %}text-green-700 font-medium{% else %}text-gray-400{% endif %}">
+            {{ run.enriched }}
+          </td>
+          <td class="py-1 text-right {% if run.chars_gained %}text-green-700{% else %}text-gray-400{% endif %}">
+            {% if run.chars_gained %}+{{ "{:,}".format(run.chars_gained) }}{% else %}—{% endif %}
+          </td>
+          <td class="py-1 text-right text-gray-500 whitespace-nowrap">
+            {{ run.via_ats_api }}/{{ run.via_json_ld }}/{{ run.via_llm }}/{{ run.via_landing_html }}
+          </td>
+          <td class="py-1 text-right {% if run.requeued_for_matching %}text-blue-700{% else %}text-gray-400{% endif %}">
+            {{ run.requeued_for_matching }}
+          </td>
+          <td class="py-1 text-right text-gray-500">
+            {% if run.queued_browser %}{{ run.queued_browser }}{% else %}—{% endif %}
+          </td>
+          <td class="py-1 pl-4 text-gray-500">
+            {% if run.error %}
+              <span class="text-red-500 truncate max-w-xs inline-block" title="{{ run.error }}">{{ run.error }}</span>
+            {% elif run.failures_by_host %}
+              {% for host, count in run.failures_by_host.items() %}{% if loop.index <= 3 %}
+                <span class="whitespace-nowrap">{{ host }} ({{ count }}){% if not loop.last %}, {% endif %}</span>
+              {% endif %}{% endfor %}
+            {% else %}
+              <span class="text-gray-300">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>

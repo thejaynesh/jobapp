@@ -11,7 +11,7 @@ celery_app = Celery(
         "app.tasks.fetch", "app.tasks.match", "app.tasks.generate",
         "app.tasks.backfill", "app.tasks.compare_models", "app.tasks.outreach",
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
-        "app.tasks.descriptions", "app.tasks.links",
+        "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
     ],
 )
 
@@ -59,6 +59,14 @@ celery_app.conf.beat_schedule = {
     "match-new-jobs": {
         "task": "app.tasks.match.match_jobs",
         "schedule": celery_schedule(settings.MATCH_INTERVAL_MINUTES * 60),
+    },
+    # Goes back for the descriptions the sources left out. On a schedule of its
+    # own as well as a tail-call from each fetch, because the backlog it drains
+    # is tens of thousands of jobs stored before enrichment existed — the
+    # tail-call only ever sees the jobs that just arrived.
+    "enrich-thin-descriptions": {
+        "task": "app.tasks.enrich.enrich_jobs",
+        "schedule": celery_schedule(settings.ENRICH_INTERVAL_MINUTES * 60),
     },
     # Re-queues generations whose worker died mid-run, and matched jobs whose
     # generation was never queued at all.

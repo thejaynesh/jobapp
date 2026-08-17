@@ -218,6 +218,56 @@ def _note(db, task: BrowserTask, summary: dict) -> None:
     db.commit()
 
 
+def _ingest_enrichment(db, task: BrowserTask, payload: dict, final_url: str,
+                       html: str) -> None:
+    """
+    Read the description out of a page the browser fetched for us.
+
+    LinkedIn and Dice answer this server with a challenge and a real browser
+    with the posting, so for those hosts this is the only path to a description
+    at all — 8,800 stored LinkedIn jobs have none. The extraction is the same
+    code the server-side pass runs; only the thing that made the request
+    differed.
+    """
+    from app.services.enrichment import apply_extraction, extract_from_html
+
+    job_id = payload.get("job_id")
+    job = db.query(Job).filter(Job.id == job_id).first() if job_id else None
+    if job is None:
+        _note(db, task, {"error": "the job this was fetched for is gone"})
+        return
+
+    if not html:
+        _note(db, task, {"enriched": False, "reason": "no page body came back",
+                         "landed_on": final_url[:120]})
+        return
+
+    found = extract_from_html(html, job_id=job.id)
+    outcome = apply_extraction(db, job, found)
+
+    # An apply URL is worth taking from this trip too, since the browser
+    # followed the whole chain to get here.
+    from app.services.link_resolver import is_aggregator
+
+    if final_url and final_url != payload.get("url") and not is_aggregator(final_url):
+        if not job.apply_url:
+            job.apply_url = final_url
+
+    db.commit()
+    _note(db, task, {
+        "enriched": outcome["improved"],
+        "chars_gained": outcome["chars_gained"],
+        "requeued_for_matching": outcome["requeued"],
+        "method": found.method or "none",
+        "via": (task.result or {}).get("via") or "fetch",
+    })
+    if outcome["improved"]:
+        logger.info(
+            "agent_work: enriched %s in-browser (+%d chars via %s)",
+            job.id, outcome["chars_gained"], found.method,
+        )
+
+
 def _ingest_resolve_link(db, task: BrowserTask) -> None:
     """
     Store the apply URL a browser found, and mine the page for ATS boards.
@@ -230,12 +280,20 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     from app.services.link_resolver import is_aggregator
     from app.models.profile import Profile
 
-    original = (task.payload or {}).get("url") or ""
+    payload = task.payload or {}
+    original = payload.get("url") or ""
     result = task.result or {}
     final_url = (result.get("final_url") or "").strip()
     html = result.get("html") or ""
 
     if not original or not final_url:
+        return
+
+    # Queued by enrichment rather than by link resolution: the page it brought
+    # back is the whole point, not the URL it landed on. Handled first because
+    # it names the exact job it was fetched for.
+    if payload.get("purpose") == "enrich":
+        _ingest_enrichment(db, task, payload, final_url, html)
         return
 
     updated = 0

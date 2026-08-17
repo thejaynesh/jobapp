@@ -88,10 +88,35 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "sources": TRIGGERABLE_SOURCES,
             "triggered": None,
             "system": _system_context(db),
+            **_enrichment_context(db),
             **{k: v for k, v in _compare_context(request, db).items()
                if k != "request"},
         },
     )
+
+
+def _enrichment_context(db: Session) -> dict:
+    """
+    What the enrichment passes have been getting, and how much is left.
+
+    The backlog count is what makes a run of 200 legible: without a
+    denominator, "enriched 140" reads the same whether there are 300 jobs left
+    or 30,000.
+    """
+    from app.services import enrichment_history
+
+    try:
+        return {
+            "enrichment_runs": enrichment_history.recent_runs(db, DEFAULT_RUNS_SHOWN),
+            "enrichment_totals": enrichment_history.totals(db, ROLLUP_WINDOW),
+            "enrichment_backlog": enrichment_history.backlog(db),
+        }
+    except Exception as exc:
+        logger.warning("runs: enrichment history unavailable: %s", exc)
+        return {
+            "enrichment_runs": [], "enrichment_totals": {},
+            "enrichment_backlog": {},
+        }
 
 
 def _system_context(db: Session) -> dict:

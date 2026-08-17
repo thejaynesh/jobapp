@@ -950,6 +950,26 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
         logger.error("job_fetcher: DB commit failed: %s", exc)
         db.rollback()
 
+    # Enrich what just arrived, before matching scores it. A job matched on
+    # Adzuna's 500-character stub is filtered for "too few skills" and never
+    # seen again, so the minutes between storing it and scoring it are the only
+    # chance to give the matcher the real posting.
+    #
+    # The landing HTML from link resolution goes in with it: those pages were
+    # downloaded moments ago and thrown away after slug mining, and the job
+    # description is sitting in them.
+    if settings.ENRICH_ENABLED and settings.ENRICH_ON_FETCH:
+        try:
+            from app.services.enrichment import run as enrich_run
+            counts["enrichment"] = enrich_run(
+                db,
+                limit=settings.ENRICH_MAX_PER_FETCH,
+                landing_html=(resolve_stats.landing_html if resolve_stats else None),
+            )
+        except Exception as exc:
+            logger.error("job_fetcher: enrichment pass failed: %s", exc)
+            db.rollback()
+
     counts["per_source"] = per_source
     _log_run_summary(counts, source_stats, per_source, resolve_stats, board_stats,
                      started_at)
