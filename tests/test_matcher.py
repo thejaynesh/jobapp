@@ -1084,3 +1084,75 @@ class TestReasoningReplies:
             reasoning='Let me weigh this. The stack matches. {"score": 82, "reasoning": "good fit"}',
         )
         assert _extract_json_object(_reply_text(reply))["score"] == 82
+
+
+# ---------------------------------------------------------------------------
+# Expanded-query title matching + user-blocked title words
+# ---------------------------------------------------------------------------
+
+class TestExpandedTitleMatching:
+    """
+    The LLM expands target roles into the titles recruiters actually post, and
+    the fetcher searches under all of them — so the title gate must accept
+    them too, or a job found BY an expanded query is rejected for not
+    matching it.
+    """
+
+    def test_an_expanded_query_rescues_a_title(self, mock_job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+
+        mock_job.title = "Java Developer"
+        profile_data["search_query_cache"] = {
+            "basis": "x", "queries": ["Java Developer"],
+        }
+        outcome = evaluate_keyword_filter(mock_job, profile_data)
+        assert outcome.reason != "title_mismatch"
+
+    def test_without_the_cache_the_same_title_still_fails(self, mock_job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+
+        mock_job.title = "Java Developer"
+        outcome = evaluate_keyword_filter(mock_job, profile_data)
+        assert not outcome.passed
+        assert outcome.reason == "title_mismatch"
+
+    def test_raw_roles_keep_working_without_a_cache(self, mock_job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+
+        outcome = evaluate_keyword_filter(mock_job, profile_data)
+        assert outcome.passed
+
+
+class TestBlockedTitleWords:
+    def test_a_blocked_word_filters_the_title(self, mock_job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+
+        mock_job.title = "Embedded Software Engineer"
+        profile_data["blocked_title_words"] = ["Embedded"]
+        outcome = evaluate_keyword_filter(mock_job, profile_data)
+        assert not outcome.passed
+        assert outcome.reason == "blocked_title"
+        assert "Embedded" in outcome.detail
+
+    def test_blocking_matches_whole_words_only(self, mock_job, profile_data):
+        # Blocking "ember" must not filter "Embedded".
+        from app.services.matcher import evaluate_keyword_filter
+
+        mock_job.title = "Embedded Software Engineer"
+        profile_data["blocked_title_words"] = ["ember"]
+        outcome = evaluate_keyword_filter(mock_job, profile_data)
+        assert outcome.reason != "blocked_title"
+
+    def test_blocking_is_case_insensitive(self, mock_job, profile_data):
+        from app.services.matcher import evaluate_keyword_filter
+
+        mock_job.title = "Backend Engineer (embedded team)"
+        profile_data["blocked_title_words"] = ["Embedded"]
+        outcome = evaluate_keyword_filter(mock_job, profile_data)
+        assert outcome.reason == "blocked_title"
+
+    def test_blocked_title_is_a_known_filter_reason(self):
+        from app.services.matcher import FILTER_REASON_LABELS
+
+        assert "blocked_title" in FILTER_REASON_LABELS
+        assert "duplicate" in FILTER_REASON_LABELS

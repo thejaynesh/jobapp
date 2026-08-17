@@ -232,3 +232,101 @@ class TestNormalizationV2:
         from app.services.deduplication import normalize_company
         # a company literally named "Co" must not normalize to empty
         assert normalize_company("Co") == "co"
+
+
+# ---------------------------------------------------------------------------
+# Cross-post duplicate application guard
+# ---------------------------------------------------------------------------
+
+class TestFindDuplicateApplicationJob:
+    """
+    The dedupe hash catches exact-normalized cross-posts at fetch time; this
+    catches the near-misses at application time, because each one that slips
+    through used to cost a full duplicate document generation.
+    """
+
+    def _with_application(self, db, **kwargs):
+        from app.models.application import Application
+
+        job = _make_job(db, **kwargs)
+        db.add(Application(job_id=job.id))
+        db.flush()
+        return job
+
+    def test_a_cosmetic_title_difference_is_caught(self, db):
+        from app.services.deduplication import find_duplicate_application_job
+
+        original = self._with_application(
+            db, company="Stripe", title="Backend Engineer",
+            url="https://ex.com/dup1", source_job_id="D1", dedupe_hash="d" * 32,
+        )
+        newcomer = _make_job(
+            db, company="Stripe, Inc.", title="Backend Engineer - Remote",
+            url="https://ex.com/dup2", source_job_id="D2", dedupe_hash="e" * 32,
+        )
+        found = find_duplicate_application_job(db, newcomer)
+        assert found is not None
+        assert found.id == original.id
+
+    def test_a_genuinely_different_role_is_not_a_duplicate(self, db):
+        from app.services.deduplication import find_duplicate_application_job
+
+        self._with_application(
+            db, company="Stripe", title="Backend Engineer",
+            url="https://ex.com/dup3", source_job_id="D3", dedupe_hash="f" * 32,
+        )
+        newcomer = _make_job(
+            db, company="Stripe", title="Data Scientist, Payments",
+            url="https://ex.com/dup4", source_job_id="D4", dedupe_hash="1" * 32,
+        )
+        assert find_duplicate_application_job(db, newcomer) is None
+
+    def test_same_title_at_another_company_is_not_a_duplicate(self, db):
+        from app.services.deduplication import find_duplicate_application_job
+
+        self._with_application(
+            db, company="Stripe", title="Backend Engineer",
+            url="https://ex.com/dup5", source_job_id="D5", dedupe_hash="2" * 32,
+        )
+        newcomer = _make_job(
+            db, company="Square", title="Backend Engineer",
+            url="https://ex.com/dup6", source_job_id="D6", dedupe_hash="3" * 32,
+        )
+        assert find_duplicate_application_job(db, newcomer) is None
+
+    def test_a_job_without_an_application_does_not_block_anything(self, db):
+        from app.services.deduplication import find_duplicate_application_job
+
+        _make_job(
+            db, company="Stripe", title="Backend Engineer",
+            url="https://ex.com/dup7", source_job_id="D7", dedupe_hash="4" * 32,
+        )
+        newcomer = _make_job(
+            db, company="Stripe", title="Backend Engineer - Remote",
+            url="https://ex.com/dup8", source_job_id="D8", dedupe_hash="5" * 32,
+        )
+        assert find_duplicate_application_job(db, newcomer) is None
+
+
+# ---------------------------------------------------------------------------
+# The "description got meaningfully fuller" stamp
+# ---------------------------------------------------------------------------
+
+class TestDescriptionGrowthStamp:
+    def test_a_much_fuller_description_stamps_the_job(self, db):
+        from app.services.deduplication import merge_or_skip
+
+        job = _make_job(db, url="https://ex.com/g1", source_job_id="G1",
+                        dedupe_hash="6" * 32)
+        merge_or_skip(db, job, "https://ex.com/g1b", "long description " * 50, layer=3)
+        assert job.description_updated_at is not None
+
+    def test_a_marginally_longer_description_does_not(self, db):
+        # A few extra characters isn't new grounding; stamping it would nag
+        # about rewriting documents for nothing.
+        from app.services.deduplication import merge_or_skip
+
+        job = _make_job(db, url="https://ex.com/g2", source_job_id="G2",
+                        dedupe_hash="7" * 32)
+        merge_or_skip(db, job, "https://ex.com/g2b", "A greater job.", layer=3)
+        assert job.description_updated_at is None

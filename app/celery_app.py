@@ -10,7 +10,7 @@ celery_app = Celery(
     include=[
         "app.tasks.fetch", "app.tasks.match", "app.tasks.generate",
         "app.tasks.backfill", "app.tasks.compare_models", "app.tasks.outreach",
-        "app.tasks.interview", "app.tasks.providers",
+        "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
     ],
 )
 
@@ -80,6 +80,12 @@ celery_app.conf.beat_schedule = {
     "poll-mailbox": {
         "task": "app.tasks.outreach.poll_mailbox",
         "schedule": celery_schedule(settings.IMAP_POLL_INTERVAL_MINUTES * 60),
+    },
+    # Postings close on the employer's side without telling anyone. Checking
+    # the jobs worth applying to keeps "ready to apply" meaning "still open".
+    "check-posting-liveness": {
+        "task": "app.tasks.liveness.check_postings",
+        "schedule": celery_schedule(settings.LIVENESS_INTERVAL_HOURS * 3600),
     },
 }
 

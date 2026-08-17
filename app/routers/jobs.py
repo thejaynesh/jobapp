@@ -1,7 +1,8 @@
+import re
 import uuid
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_
@@ -215,6 +216,81 @@ def open_job_application(job_id: uuid.UUID, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(app_obj)
     return RedirectResponse(url=f"/apps/{app_obj.id}", status_code=302)
+
+
+def _add_to_profile_list(db: Session, key: str, value: str) -> None:
+    """
+    Append one value to a list on the profile blob, if it isn't there already.
+
+    A fresh read right before the write keeps the window against concurrent
+    profile writers (the fetch cycle merges only its own keys) small.
+    """
+    import copy
+
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return
+    data = copy.deepcopy(profile.data or {})
+    existing = [str(v) for v in (data.get(key) or [])]
+    if value.lower() not in {v.lower() for v in existing}:
+        data[key] = existing + [value]
+        profile.data = data
+
+
+@router.post("/{job_id}/not-interested", response_class=HTMLResponse)
+def not_interested(
+    job_id: uuid.UUID,
+    request: Request,
+    scope: str = Form(...),
+    word: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """
+    Filter this job out, and — when asked — learn from it.
+
+    The scope is the user's explicit choice, never inferred: "job" hides only
+    this posting, "company" also excludes the employer from future matching,
+    and "title_word" blocks a word they picked off this title. Every option
+    used to be a correction the system threw away.
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if scope == "company":
+        company = (job.company or "").strip()
+        if not company:
+            raise HTTPException(status_code=422, detail="This job has no company to exclude")
+        _add_to_profile_list(db, "excluded_companies", company)
+        job.filter_reason = "excluded_company"
+        job.filter_detail = f"You excluded {company}; future postings from them are filtered too."
+    elif scope == "title_word":
+        chosen = (word or "").strip()
+        # Only a word actually present in this title: the button list is the
+        # interface, and a free-typed stray would silently block half the feed.
+        if not chosen or not re.search(
+            rf"\b{re.escape(chosen)}\b", job.title or "", re.IGNORECASE
+        ):
+            raise HTTPException(status_code=422, detail="Pick a word from this job's title")
+        _add_to_profile_list(db, "blocked_title_words", chosen)
+        job.filter_reason = "blocked_title"
+        job.filter_detail = (
+            f"You blocked {chosen!r}; titles containing it are filtered from now on."
+        )
+    elif scope == "job":
+        job.filter_reason = "manual"
+        job.filter_detail = "You filtered this out from the jobs list."
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown scope: {scope}")
+
+    job.status = JobStatus.filtered_out
+    db.commit()
+    return templates.TemplateResponse(
+        "jobs/partials/job_card.html",
+        {"request": request, "job": job},
+    )
 
 
 @router.post("/{job_id}/override", response_class=HTMLResponse)

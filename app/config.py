@@ -290,5 +290,17 @@ class Settings(BaseSettings):
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates
     JUNIOR_MAX_YEARS: float = 3.0  # candidate is "junior" below this many years of experience
 
+    # ---- Posting liveness -----------------------------------------------
+    # Re-check matched/docs-generated jobs against the employer's page and
+    # mark the ones that closed, so a dead posting wears a badge instead of
+    # silently wasting an application. Conservative by design: only a 404, an
+    # explicit "no longer accepting applications", or a known ATS bouncing to
+    # its board index counts — ambiguity never closes a job.
+    LIVENESS_ENABLED: bool = True
+    LIVENESS_INTERVAL_HOURS: int = 12
+    LIVENESS_MAX_PER_CYCLE: int = 200   # postings checked per sweep
+    LIVENESS_WORKERS: int = 8
+    LIVENESS_RECHECK_DAYS: int = 3      # how long a verdict stands before re-checking
+
 
 settings = Settings()

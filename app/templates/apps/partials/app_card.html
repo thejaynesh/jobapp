@@ -4,7 +4,18 @@
       <a href="/apps/{{ app.id }}" class="text-blue-600 font-medium hover:underline block break-words leading-snug">
         {{ app.job.title }}
       </a>
-      <p class="text-sm text-gray-500 mt-0.5 break-words">{{ app.job.company }}</p>
+      <p class="text-sm text-gray-500 mt-0.5 break-words">{{ app.job.company }}
+        {% if app.job.closed_at %}
+        <span title="{{ app.job.closed_note or 'A check found this posting gone' }}"
+          class="ml-1 bg-red-100 text-red-700 text-xs px-1.5 py-0.5 rounded cursor-help">Closed</span>
+        {% endif %}
+        {% set current_docs = app.documents | selectattr('is_current') | list %}
+        {% if app.job.description_updated_at and current_docs
+              and app.job.description_updated_at > (current_docs | map(attribute='created_at') | max) %}
+        <span title="The job description became fuller after these documents were generated — consider a rewrite"
+          class="ml-1 bg-amber-50 text-amber-700 text-xs px-1.5 py-0.5 rounded cursor-help">Docs stale</span>
+        {% endif %}
+      </p>
     </div>
     <span class="text-xs text-gray-400 shrink-0 mt-0.5">
       {% if app.documents %}{{ app.documents | length }} doc(s){% endif %}
