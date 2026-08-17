@@ -42,7 +42,8 @@ TRIGGERABLE_SOURCES = [
     "adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby",
     "smartrecruiters", "workable", "recruitee", "workday", "icims",
     "bamboohr", "teamtailor", "jobvite", "personio", "jooble",
-    "careerjet", "findwork", "indeed", "remotive", "arbeitnow", "remoteok",
+    "careerjet", "findwork", "usajobs", "hiringcafe", "ycombinator",
+    "indeed", "remotive", "arbeitnow", "remoteok",
     "weworkremotely", "themuse", "himalayas", "jobicy", "hnhiring",
     "wellfound", "dice", "handshake",
 ]

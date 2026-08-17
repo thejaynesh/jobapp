@@ -146,8 +146,30 @@ def jobs_from_listing(
             "description": description,
             "experience_level": parse_experience_level(title, description),
             "posted_at": posting["posted_at"],
+            # Passed through rather than dropped: the block already stated it,
+            # and re-deriving it from prose later costs a model call.
+            "salary_min": posting["salary_min"],
+            "salary_max": posting["salary_max"],
+            "salary_currency": posting["salary_currency"],
+            "employment_type": _employment_type(posting["employment_type"]),
         })
     return jobs
+
+
+# schema.org spells these FULL_TIME / PART_TIME / CONTRACTOR / INTERN; the
+# `jobs` column uses the vocabulary job_details normalises to.
+_EMPLOYMENT_TYPES = {
+    "full_time": "full_time", "fulltime": "full_time", "full-time": "full_time",
+    "part_time": "part_time", "parttime": "part_time", "part-time": "part_time",
+    "contractor": "contract", "contract": "contract", "temporary": "contract",
+    "intern": "internship", "internship": "internship",
+}
+
+
+def _employment_type(raw) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    return _EMPLOYMENT_TYPES.get(raw.strip().lower().replace(" ", "_"))
 
 
 def _listing_job_id(url: str) -> str | None:

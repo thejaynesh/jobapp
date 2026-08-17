@@ -162,6 +162,73 @@ def recent_runs(db: Session, limit: int = 20) -> list[FetchRun]:
     )
 
 
+def failing_streaks(db: Session, lookback: int = 40) -> dict[str, int]:
+    """
+    How many most-recent runs each source has failed in a row.
+
+    Runs where the source was disabled or skipped do not count and do not
+    interrupt the streak — otherwise resting a source would immediately reset
+    its own streak and it would be retried every cycle, which is the thing
+    resting exists to stop.
+    """
+    recent = recent_runs(db, lookback)
+    if not recent:
+        return {}
+
+    rows = (
+        db.query(FetchSourceRun.run_id, FetchSourceRun.source, FetchSourceRun.status)
+        .filter(FetchSourceRun.run_id.in_([r.id for r in recent]))
+        .all()
+    )
+    by_run: dict = {}
+    for run_id, source, status in rows:
+        by_run.setdefault(run_id, {})[source] = status
+
+    streaks: dict[str, int] = {}
+    done: set[str] = set()
+    for run in recent:  # newest first
+        for source, status in (by_run.get(run.id) or {}).items():
+            if source in done or status in ("disabled", "skipped"):
+                continue
+            if status == "failed":
+                streaks[source] = streaks.get(source, 0) + 1
+            else:
+                done.add(source)
+    return streaks
+
+
+def resting_sources(
+    db: Session, threshold: int = 10, retry_every: int = 10,
+) -> dict[str, int]:
+    """
+    Sources to skip this cycle because they have been failing for a long time.
+
+    An expired API key answers identically forever — JSearch has 403'd on every
+    run for twenty runs — and calling it each cycle buys nothing but an error
+    line that trains everyone to ignore error lines. Resting is not removal
+    though: every `retry_every` runs one probe goes out, so a key the user
+    refreshes is picked up on its own without anybody remembering to re-enable
+    anything.
+
+    Returns {source: streak length} for the sources being rested right now.
+    """
+    if threshold <= 0:
+        return {}
+    streaks = {
+        source: streak
+        for source, streak in failing_streaks(db).items()
+        if streak >= threshold
+    }
+    if not streaks:
+        return {}
+
+    total_runs = db.query(func.count(FetchRun.id)).scalar() or 0
+    if retry_every > 0 and total_runs % retry_every == 0:
+        logger.info("fetch_history: re-probing rested sources %s", sorted(streaks))
+        return {}
+    return streaks
+
+
 def source_totals(db: Session, runs: int = 20) -> list[dict]:
     """
     Per-source rollup over the last `runs` cycles, worst contributors last.

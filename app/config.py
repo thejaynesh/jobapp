@@ -207,6 +207,25 @@ class Settings(BaseSettings):
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     CAREERJET_AFFID: str = ""
+    # USAJOBS identifies callers by the email they registered with as well as
+    # by the key, and 401s a request carrying only one of the two.
+    USAJOBS_API_KEY: str = ""
+    USAJOBS_USER_AGENT: str = ""   # the registered email address
+    USAJOBS_MAX_PAGES: int = 2
+    # hiring.cafe indexes ATS boards directly rather than other job boards, so
+    # its postings carry full descriptions and link at the employer.
+    HIRINGCAFE_ENABLED: bool = True
+    # Y Combinator's public role pages (a fixed taxonomy, not search queries).
+    YC_ENABLED: bool = True
+    YC_ROLES: str = ""             # blank uses sources.ycombinator.DEFAULT_ROLES
+
+    # A source that has failed every run for this many cycles is skipped rather
+    # than called again — an expired key answers identically forever, and the
+    # error line it produces only trains everyone to ignore error lines. One
+    # probe still goes out every `RETRY` runs, so a refreshed key resumes on
+    # its own without anybody re-enabling anything.
+    SOURCE_REST_AFTER_FAILURES: int = 10
+    SOURCE_REST_RETRY_EVERY: int = 10
     ATS_AUTO_DISCOVERY: bool = True  # learn company ATS boards from fetched job links
     ATS_SEED_COMPANIES: bool = True  # include the verified seed list of known tech companies
     ATS_SLUG_VALIDATION: bool = True  # validate/auto-fix configured slugs against the ATS APIs

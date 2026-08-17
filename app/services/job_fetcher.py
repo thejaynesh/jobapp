@@ -25,6 +25,28 @@ _FETCH_CYCLE_KEYS = (
     "discovered_ats", "ats_sniff_cache", "last_fetch",
 )
 
+# Structured fields an adapter may already have been handed, and which would
+# otherwise be thrown away and re-derived from prose by an LLM call later.
+# USAJOBS states pay on every posting; so does any board publishing JobPosting
+# structured data. Only filled when the adapter supplies them — a source that
+# says nothing leaves the column null, which is what null means here.
+_ADAPTER_DETAIL_FIELDS = (
+    "salary_min", "salary_max", "salary_currency", "employment_type",
+)
+
+
+def _adapter_details(job_data: dict) -> dict:
+    details = {
+        field: job_data.get(field)
+        for field in _ADAPTER_DETAIL_FIELDS
+        if job_data.get(field) is not None
+    }
+    # A currency without an amount says nothing, and would read as a stated
+    # salary to the "does this job state pay?" count.
+    if details.get("salary_min") is None and details.get("salary_max") is None:
+        details.pop("salary_currency", None)
+    return details
+
 
 class _BrowserTierSkipped(Exception):
     """Internal signal: no Playwright source was requested this run."""
@@ -87,7 +109,7 @@ def _run_combos(
 def _run_all_adapters(
     roles: list[str], locations: list[str], cfg,
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
-    only: set[str] | None = None,
+    only: set[str] | None = None, resting: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
@@ -117,10 +139,45 @@ def _run_all_adapters(
     # results and looks like the change did nothing.
     _reset_source_caches()
 
+    resting = resting or {}
+
+    def _disable(source: str, reason: str = "") -> None:
+        """
+        Record a source as not run this cycle.
+
+        Never overwrites a reason already recorded. Every source's branch ends
+        in an `else` that marks it disabled, and those used to clobber the more
+        specific explanation `_skip` had just written — so a rested source
+        reported as plainly "disabled" and the reason it was rested went
+        nowhere.
+        """
+        existing = stats.get(source)
+        if existing is not None and not existing.get("enabled", True):
+            return
+        stats[source] = {
+            "count": 0, "enabled": False, "errors": [reason] if reason else [],
+        }
+
     def _skip(source: str) -> bool:
-        """True when `only` excludes this source; records it as disabled."""
+        """True when this source is not being called; records why."""
         if only is not None and source not in only:
-            stats[source] = {"count": 0, "errors": [], "enabled": False}
+            _disable(source)
+            return True
+        # A source that has failed every run for weeks answers identically
+        # again today. Skipped rather than removed: a probe goes out
+        # periodically, so a refreshed key is picked up on its own.
+        #
+        # Only on a full cycle. Reaching here with `only` set means this source
+        # was asked for by name on the runs page, which is exactly how somebody
+        # checks whether the key they just fixed works — resting is an
+        # automatic economy, not a lock.
+        if only is None and source in resting:
+            _disable(
+                source,
+                f"resting after failing {resting[source]} runs in a row; "
+                f"re-probed periodically, or fix its credentials to resume "
+                f"immediately",
+            )
             return True
         return False
 
@@ -141,7 +198,7 @@ def _run_all_adapters(
                 except Exception as exc:
                     _record(stats, "adzuna", [], f"{role}/{country}: {exc}")
     else:
-        stats["adzuna"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("adzuna")
 
     if cfg.JSEARCH_API_KEY and not _skip("jsearch"):
         from app.services.sources.jsearch import fetch as jsearch_fetch
@@ -153,7 +210,7 @@ def _run_all_adapters(
             _skip,
         )
     else:
-        stats["jsearch"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("jsearch")
 
     greenhouse_slugs = ats_slugs.get("greenhouse") or []
     if greenhouse_slugs and not _skip("greenhouse"):
@@ -167,7 +224,7 @@ def _run_all_adapters(
         stats.setdefault("greenhouse", {"count": 0, "errors": [], "enabled": True})
         stats["greenhouse"]["enabled"] = True
     else:
-        stats["greenhouse"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("greenhouse")
 
     lever_slugs = ats_slugs.get("lever") or []
     if lever_slugs and not _skip("lever"):
@@ -181,7 +238,7 @@ def _run_all_adapters(
         stats.setdefault("lever", {"count": 0, "errors": [], "enabled": True})
         stats["lever"]["enabled"] = True
     else:
-        stats["lever"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("lever")
 
     ashby_slugs = ats_slugs.get("ashby") or []
     if ashby_slugs and not _skip("ashby"):
@@ -195,7 +252,7 @@ def _run_all_adapters(
         stats.setdefault("ashby", {"count": 0, "errors": [], "enabled": True})
         stats["ashby"]["enabled"] = True
     else:
-        stats["ashby"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("ashby")
 
     # --- Additional slug-based ATS boards (no keys; slugs configured or auto-discovered) ---
     for ats_name, fetch_path in (
@@ -220,7 +277,7 @@ def _run_all_adapters(
             except Exception as exc:
                 _record(stats, ats_name, [], str(exc))
         else:
-            stats[ats_name] = {"count": 0, "errors": [], "enabled": False}
+            _disable(ats_name)
 
     # --- Workday-hosted career sites (tenant:host:site triples) ---
     workday_tenants = ats_slugs.get("workday") or []
@@ -234,7 +291,7 @@ def _run_all_adapters(
         except Exception as exc:
             _record(stats, "workday", [], str(exc))
     else:
-        stats["workday"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("workday")
 
     # --- Jooble: keyed aggregator (free key) ---
     if cfg.JOOBLE_API_KEY and not _skip("jooble"):
@@ -249,7 +306,7 @@ def _run_all_adapters(
                 except Exception as exc:
                     _record(stats, "jooble", [], f"{role}/{loc}: {exc}")
     else:
-        stats["jooble"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("jooble")
 
     # --- Careerjet: keyed aggregator (free affiliate id) ---
     if cfg.CAREERJET_AFFID and not _skip("careerjet"):
@@ -264,7 +321,59 @@ def _run_all_adapters(
                 except Exception as exc:
                     _record(stats, "careerjet", [], f"{role}/{loc}: {exc}")
     else:
-        stats["careerjet"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("careerjet")
+
+    # --- USAJOBS: the federal government's official API (free key) ---
+    # The only source that states pay on every posting, because federal salary
+    # ranges are public by law — so those land in the salary columns directly.
+    if cfg.USAJOBS_API_KEY and cfg.USAJOBS_USER_AGENT and not _skip("usajobs"):
+        from app.services.sources.usajobs import fetch as usajobs_fetch
+        stats.setdefault("usajobs", {"count": 0, "errors": [], "enabled": True})
+        _run_combos(
+            stats, all_jobs, "usajobs",
+            lambda role, loc: usajobs_fetch(
+                api_key=cfg.USAJOBS_API_KEY, user_agent=cfg.USAJOBS_USER_AGENT,
+                query=role, location=loc,
+                max_pages=getattr(cfg, "USAJOBS_MAX_PAGES", 2),
+            ),
+            [(r, l) for r in roles for l in locations],
+            _skip,
+        )
+    else:
+        # Half-configured is the failure worth naming: the API 401s a request
+        # carrying only one of the two, which reads as a bad key.
+        _disable(
+            "usajobs",
+            "" if not (cfg.USAJOBS_API_KEY or cfg.USAJOBS_USER_AGENT) else
+            "USAJOBS needs BOTH USAJOBS_API_KEY and USAJOBS_USER_AGENT (the "
+            "email you registered with); it answers 401 to a request carrying "
+            "only one",
+        )
+
+    # --- hiring.cafe: aggregates ATS boards, so descriptions come with it ---
+    if getattr(cfg, "HIRINGCAFE_ENABLED", True) and not _skip("hiringcafe"):
+        from app.services.sources.hiringcafe import fetch as hiringcafe_fetch
+        _run_combos(
+            stats, all_jobs, "hiringcafe",
+            lambda role, loc: hiringcafe_fetch(query=role, location=loc),
+            [(r, l) for r in roles for l in locations],
+            _skip,
+        )
+    else:
+        _disable("hiringcafe")
+
+    # --- Y Combinator: fixed role pages, fetched once for the whole cycle ---
+    if getattr(cfg, "YC_ENABLED", True) and not _skip("ycombinator"):
+        from app.services.sources.ycombinator import fetch as yc_fetch
+        stats.setdefault("ycombinator", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = yc_fetch()
+            _record(stats, "ycombinator", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "ycombinator", [], str(exc))
+    else:
+        _disable("ycombinator")
 
     # --- Findwork: keyed developer-jobs API (free key) ---
     if cfg.FINDWORK_API_KEY and not _skip("findwork"):
@@ -278,7 +387,7 @@ def _run_all_adapters(
             except Exception as exc:
                 _record(stats, "findwork", [], f"{role}: {exc}")
     else:
-        stats["findwork"] = {"count": 0, "errors": [], "enabled": False}
+        _disable("findwork")
 
     # --- LinkedIn: httpx guest API (no browser needed) ---
     # One call for the whole cycle: the same posting appears under many
@@ -311,11 +420,8 @@ def _run_all_adapters(
             _skip,
         )
     else:
-        stats["indeed"] = {
-            "count": 0, "enabled": False,
-            "errors": ["Indeed retired its public RSS feed (404 for every "
-                       "query); set INDEED_RSS_ENABLED=true to retry it"],
-        }
+        _disable("indeed", "Indeed retired its public RSS feed (404 for every "
+                       "query); set INDEED_RSS_ENABLED=true to retry it")
 
     # --- Remotive: free public API for remote tech jobs ---
     from app.services.sources.remotive import fetch as remotive_fetch
@@ -437,7 +543,7 @@ def _run_all_adapters(
         stats.update(pw_stats)
     except _BrowserTierSkipped:
         for src in sorted(pw_sources):
-            stats[src] = {"count": 0, "errors": [], "enabled": False}
+            _disable(src)
     except Exception as exc:
         logger.error("Playwright scrapers fatal error: %s", exc)
         for src in ("wellfound", "dice", "handshake"):
@@ -457,6 +563,32 @@ def _run_all_adapters(
             logger.warning("    └─ %s", err)
 
     return all_jobs, stats
+
+
+def _resting_sources(db: Session) -> dict:
+    """
+    Sources to skip this cycle for having failed every run for weeks.
+
+    Never fails the cycle: not knowing which sources are resting costs a few
+    wasted requests, and a history query that errors must not cost the fetch.
+    """
+    try:
+        from app.services.fetch_history import resting_sources
+
+        resting = resting_sources(
+            db,
+            threshold=settings.SOURCE_REST_AFTER_FAILURES,
+            retry_every=settings.SOURCE_REST_RETRY_EVERY,
+        )
+        if resting:
+            logger.info(
+                "job_fetcher: resting %s (failing every run for a long time)",
+                ", ".join(f"{s} ×{n}" for s, n in sorted(resting.items())),
+            )
+        return resting
+    except Exception as exc:
+        logger.warning("job_fetcher: could not read failing-source history: %s", exc)
+        return {}
 
 
 def _known_urls(db: Session) -> set[str]:
@@ -752,7 +884,8 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
         cfg = effective_settings(profile.data)
         with SourceLogCapture() as capture:
             raw_jobs, source_stats = _run_all_adapters(
-                queries, locations, cfg, ats_slugs, loc_prefs, only
+                queries, locations, cfg, ats_slugs, loc_prefs, only,
+                resting=_resting_sources(db),
             )
         merge_into_stats(source_stats, capture.messages)
     except Exception as exc:
@@ -906,6 +1039,12 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
                     # otherwise skipping — it's what the user actually clicks.
                     if apply_url and not existing.apply_url:
                         existing.apply_url = apply_url
+                    # Same for stated pay: one source's listing carries it and
+                    # another's doesn't, and the one that does should win over
+                    # whichever happened to be fetched first.
+                    for field, value in _adapter_details(job_data).items():
+                        if getattr(existing, field, None) is None:
+                            setattr(existing, field, value)
                     if url in existing.source_urls:
                         counts["skipped"] += 1
                         _tally(source, "skipped")
@@ -940,6 +1079,7 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
                     fetched_at=now,
                     posted_at=posted_at,
                     dedupe_hash=dedupe_hash,
+                    **_adapter_details(job_data),
                 )
                 db.add(new_job)
                 db.flush()

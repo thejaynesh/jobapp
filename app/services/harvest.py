@@ -226,7 +226,7 @@ def _looks_like_job(node: dict) -> bool:
     return bool(_job_id(node) or _first(node, _URL_KEYS))
 
 
-def _normalize(node: dict) -> dict | None:
+def _normalize(node: dict, source: str = HARVEST_SOURCE) -> dict | None:
     title = _first(node, _TITLE_KEYS)
     company = _first(node, _COMPANY_KEYS)
     if not title or not company:
@@ -234,15 +234,16 @@ def _normalize(node: dict) -> dict | None:
 
     job_id = _job_id(node)
     url = _first(node, _URL_KEYS)
-    if not url and job_id:
+    if not url and job_id and source == HARVEST_SOURCE:
         # Reconstructing beats dropping the job: this URL shape has been stable
-        # for years and is what the site itself links to.
+        # for years and is what the site itself links to. Only for LinkedIn —
+        # no other source's ids belong in a linkedin.com URL.
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
     if not url:
         return None
 
     return {
-        "source": HARVEST_SOURCE,
+        "source": source,
         "source_job_id": job_id or None,
         "url": url,
         "title": title,
@@ -254,12 +255,17 @@ def _normalize(node: dict) -> dict | None:
     }
 
 
-def extract_jobs(payload) -> list[dict]:
+def extract_jobs(payload, source: str = HARVEST_SOURCE) -> list[dict]:
     """
-    Every job-shaped object in an intercepted API response.
+    Every job-shaped object anywhere in a JSON payload.
 
     Deduplicated within the payload: the same posting commonly appears in both
     a card list and a detail blob in one response.
+
+    `source` exists because this shape-based read is useful well beyond the
+    browser harvest it was written for — any aggregator with an undocumented
+    JSON endpoint can be read this way, and a redesign that moves the nesting
+    around keeps working.
     """
     if not isinstance(payload, (dict, list)):
         return []
@@ -268,7 +274,7 @@ def extract_jobs(payload) -> list[dict]:
     for node in _walk(payload):
         if not _looks_like_job(node):
             continue
-        job = _normalize(node)
+        job = _normalize(node, source=source)
         if not job:
             continue
         key = job["source_job_id"] or job["url"]
