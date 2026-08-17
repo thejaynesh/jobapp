@@ -90,6 +90,62 @@ class Job(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # What the posting states, read out of the description once instead of
+    # re-derived from prose on every scoring call. All nullable, and null means
+    # "the posting doesn't say" — never a guess. A guessed salary is worse than
+    # a missing one, because the salary filter would then drop jobs on a number
+    # nobody ever wrote down.
+    salary_min: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+    salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salary_currency: Mapped[str | None] = mapped_column(String, nullable=True)
+    # full_time | part_time | contract | internship
+    employment_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    required_years: Mapped[float | None] = mapped_column(Float, nullable=True)
+    required_skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
+    nice_to_have_skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
+    education_required: Mapped[str | None] = mapped_column(String, nullable=True)
+    benefits_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ISO code of the posting's own language. German Arbeitnow listings waste a
+    # matcher call apiece; knowing which they are is what lets them be skipped.
+    language: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    details_extracted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    @property
+    def salary_label(self) -> str | None:
+        """
+        The stated pay as one readable string, or None if it wasn't stated.
+
+        A property rather than a template expression because three places show
+        it and every one of them would otherwise reimplement "one bound, both
+        bounds, or nothing" slightly differently.
+        """
+        low, high = self.salary_min, self.salary_max
+        if low is None and high is None:
+            return None
+        symbol = {"USD": "$", "EUR": "€", "GBP": "£"}.get(
+            (self.salary_currency or "USD").upper(), ""
+        )
+        suffix = "" if symbol else f" {self.salary_currency}" if self.salary_currency else ""
+
+        def _short(amount: float) -> str:
+            # Hourly and annual figures land in the same column; only the big
+            # ones read better abbreviated.
+            if amount >= 1000:
+                return f"{symbol}{amount / 1000:g}k"
+            return f"{symbol}{amount:g}"
+
+        if low is not None and high is not None and low != high:
+            return f"{_short(low)}–{_short(high)}{suffix}"
+        return f"{_short(low if low is not None else high)}{suffix}"
+
+    @property
+    def employment_type_label(self) -> str | None:
+        if not self.employment_type:
+            return None
+        return self.employment_type.replace("_", "-").title()
+
     @property
     def title_block_candidates(self) -> list[str]:
         """

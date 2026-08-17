@@ -30,6 +30,39 @@
     </div>
   </div>
 
+  {# What the posting itself states, read into columns once rather than left
+     buried in the description. Each pill is absent when the posting didn't
+     say — an empty "Salary: —" would be noise on most cards. #}
+  {% set salary = job.salary_label %}
+  {% if salary or job.employment_type or job.required_years is not none
+        or job.education_required or (job.language and job.language != 'en') %}
+  <div class="flex flex-wrap gap-1.5 mt-2">
+    {% if salary %}
+    <span class="bg-emerald-50 text-emerald-700 text-xs px-2 py-0.5 rounded font-medium"
+          title="Pay stated in the posting">{{ salary }}</span>
+    {% endif %}
+    {% if job.employment_type %}
+    <span class="bg-slate-100 text-slate-600 text-xs px-2 py-0.5 rounded">
+      {{ job.employment_type_label }}
+    </span>
+    {% endif %}
+    {% if job.required_years is not none %}
+    <span class="bg-amber-50 text-amber-700 text-xs px-2 py-0.5 rounded"
+          title="Years of experience the posting asks for">
+      asks {{ "%g"|format(job.required_years) }} yr{% if job.required_years != 1 %}s{% endif %}
+    </span>
+    {% endif %}
+    {% if job.education_required %}
+    <span class="bg-slate-100 text-slate-600 text-xs px-2 py-0.5 rounded"
+          title="Minimum education stated in the posting">{{ job.education_required }}</span>
+    {% endif %}
+    {% if job.language and job.language != 'en' %}
+    <span class="bg-slate-100 text-slate-500 text-xs px-2 py-0.5 rounded"
+          title="The posting is not written in English">{{ job.language | upper }}</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% if job.status.value == 'filtered_out' and job.filter_detail %}
   <div class="mt-2 bg-gray-50 border-l-2 border-gray-300 pl-3 py-1.5">
     <p class="text-xs font-medium text-gray-500">Filtered out</p>

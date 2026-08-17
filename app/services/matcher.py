@@ -270,6 +270,56 @@ def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
     return outcome.passed, outcome.score
 
 
+def _stated_facts(job) -> str:
+    """
+    The posting's own numbers, as explicit lines above the description.
+
+    Extracted once into columns (see `services.job_details`), so the scoring
+    call reads "Required experience: 3 years" instead of hunting for it in the
+    same prose it is being asked to judge. Silent when nothing was stated —
+    an empty "Salary:" line invites the model to fill the gap itself.
+    """
+    # Every read is both optional and type-checked. This runs against real
+    # rows, against the sample job the settings page previews the prompt with,
+    # and against rows written before these columns existed — and a line that
+    # cannot be rendered must cost the line, not the whole scoring call.
+    def _number(field) -> float | None:
+        value = getattr(job, field, None)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(
+            value, bool) else None
+
+    def _string(field) -> str | None:
+        value = getattr(job, field, None)
+        return value.strip() or None if isinstance(value, str) else None
+
+    def _strings(field) -> list[str]:
+        value = getattr(job, field, None)
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+    lines = []
+    years = _number("required_years")
+    if years is not None:
+        lines.append(f"Required experience (stated in the posting): {years:g} years")
+    label = getattr(job, "salary_label", None)
+    if isinstance(label, str) and label:
+        lines.append(f"Stated salary: {label}")
+    employment = _string("employment_type")
+    if employment:
+        lines.append(f"Employment type: {employment.replace('_', ' ')}")
+    required = _strings("required_skills")
+    if required:
+        lines.append(f"Required skills: {', '.join(required)}")
+    nice = _strings("nice_to_have_skills")
+    if nice:
+        lines.append(f"Nice to have: {', '.join(nice)}")
+    education = _string("education_required")
+    if education:
+        lines.append(f"Education required: {education}")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
 def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
     personal = profile_data.get("personal") or {}
     name = personal.get("name") or profile_data.get("name") or "Candidate"
@@ -366,7 +416,12 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         f"Company: {job.company}\n"
         f"Location: {job.location or 'Unknown'} (remote: {job.is_remote})\n"
         f"Experience level: {job.experience_level or 'unknown'}\n"
-        f"Description:\n{(job.description or '')[:4000]}"
+        + _stated_facts(job)
+        # Still excerpted. Raising this ceiling is its own change with its own
+        # token-budget consequences (roadmap 3.1); the stated facts above are
+        # what the excerpt was most likely to cut off, and they now arrive
+        # whole regardless of where the description gets truncated.
+        + f"Description:\n{(job.description or '')[:4000]}"
     )
 
     return [
@@ -641,6 +696,19 @@ def match_job(
         return "filtered_out"
 
     job.keyword_score = round(outcome.score, 4)
+
+    # Read the posting's stated facts before scoring it, so the prompt below
+    # gets "asks for 3 years, pays $140-170k" as data instead of leaving the
+    # model to find both in the prose it is also being asked to judge. Placed
+    # after the filter on purpose: a title-reject never costs this call.
+    from app.services import job_details
+
+    if job_details.needs_extraction(job):
+        try:
+            job_details.extract_and_apply(job)
+        except Exception as exc:
+            # Details are an improvement to scoring, not a precondition for it.
+            logger.warning("match_job: detail extraction failed for %s: %s", job.id, exc)
 
     try:
         llm_result = llm_score_job(job, profile_data, api_key, base_url, model, budget=budget)

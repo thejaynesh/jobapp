@@ -78,6 +78,22 @@
       <option value="90" {% if min_score_filter == "90" %}selected{% endif %}>Score ≥ 90</option>
     </select>
 
+    {# Matches against the TOP of a stated band, so "$120k–$180k" clears a
+       $150k floor. Only postings that state pay can match at all, which is a
+       minority — hence the count beside it, so an empty list reads as "few
+       postings state pay" rather than as a broken filter. #}
+    <select name="min_salary" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            title="{{ priced_count }} jobs state any pay at all">
+      <option value="" {% if not min_salary_filter %}selected{% endif %}>
+        Any salary{% if priced_count %} ({{ "{:,}".format(priced_count) }} priced){% endif %}
+      </option>
+      <option value="80000" {% if min_salary_filter == "80000" %}selected{% endif %}>Pays ≥ $80k</option>
+      <option value="100000" {% if min_salary_filter == "100000" %}selected{% endif %}>Pays ≥ $100k</option>
+      <option value="120000" {% if min_salary_filter == "120000" %}selected{% endif %}>Pays ≥ $120k</option>
+      <option value="150000" {% if min_salary_filter == "150000" %}selected{% endif %}>Pays ≥ $150k</option>
+      <option value="180000" {% if min_salary_filter == "180000" %}selected{% endif %}>Pays ≥ $180k</option>
+    </select>
+
     <label class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none">
       <input type="checkbox" name="remote" value="1" {% if remote_filter == "1" %}checked{% endif %}
         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
@@ -94,7 +110,7 @@
 
     <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
-    {% if status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter %}
+    {% if status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter %}
     <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
     {% endif %}
   </div>
@@ -134,7 +150,7 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&dated=" ~ dated_filter ~ "&sort=" ~ sort %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&min_salary=" ~ min_salary_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&dated=" ~ dated_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"

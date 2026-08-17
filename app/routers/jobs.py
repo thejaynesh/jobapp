@@ -92,6 +92,31 @@ def _undated_count(db: Session) -> int:
         .scalar()
     ) or 0
 
+
+def _priced_count(db: Session) -> int:
+    """
+    How many visible jobs state any pay at all.
+
+    Shown beside the salary filter because most postings don't, and a filter
+    that silently hides 90% of the list reads as a broken filter unless the
+    page says up front how many jobs it can possibly match.
+    """
+    try:
+        return int(
+            db.query(func.count(Job.id))
+            .filter(
+                Job.status.in_(_FILTERABLE_STATUSES),
+                func.coalesce(Job.salary_max, Job.salary_min).isnot(None),
+            )
+            .scalar()
+            or 0
+        )
+    except (TypeError, ValueError):
+        # A count the page cannot render is worse than no count: this label is
+        # a hint beside a filter, not the page's reason for existing.
+        return 0
+
+
 _SORT_OPTIONS = {
     "score_desc": Job.llm_score.desc().nullslast(),
     "score_asc": Job.llm_score.asc().nullsfirst(),
@@ -111,6 +136,7 @@ def get_jobs(
     location: str = "",
     remote: str = "",
     min_score: str = "",
+    min_salary: str = "",
     exp_level: str = "",
     filter_reason: str = "",
     dated: str = "",
@@ -156,6 +182,19 @@ def get_jobs(
             query = query.filter(Job.llm_score >= int(min_score))
         except ValueError:
             pass
+    if min_salary:
+        try:
+            floor = float(min_salary)
+        except ValueError:
+            floor = None
+        if floor is not None:
+            # Against the top of the band, not the bottom: "$120k–$180k" clears
+            # a $150k floor, and filtering on salary_min would hide it. Jobs
+            # that state no salary are excluded rather than assumed to pay
+            # nothing — but that is most of them, so the UI says so.
+            query = query.filter(
+                func.coalesce(Job.salary_max, Job.salary_min) >= floor
+            )
     if filter_reason:
         query = query.filter(Job.filter_reason == filter_reason)
     # A job with no posting date skips the fetcher's age check entirely, so
@@ -185,6 +224,8 @@ def get_jobs(
             "location_filter": location,
             "remote_filter": remote,
             "min_score_filter": min_score,
+            "min_salary_filter": min_salary,
+            "priced_count": _priced_count(db),
             "exp_level_filter": exp_level,
             "dated_filter": dated,
             "undated_count": _undated_count(db),

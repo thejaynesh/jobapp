@@ -247,7 +247,52 @@
       </div>
       {% endif %}
 
+      {# What the posting states about itself, read out of the description
+         once. Shown before the provenance fields because it is what you are
+         deciding on; each line is absent when the posting didn't say, which
+         is itself worth knowing. #}
       <dl class="text-xs text-gray-500 space-y-1.5 border-t border-gray-100 pt-3">
+        {% if app.job.salary_label %}
+        <div class="flex justify-between">
+          <dt class="font-medium">Stated salary</dt>
+          <dd class="text-emerald-700 font-medium">{{ app.job.salary_label }}</dd>
+        </div>
+        {% endif %}
+        {% if app.job.employment_type %}
+        <div class="flex justify-between"><dt class="font-medium">Employment type</dt><dd>{{ app.job.employment_type_label }}</dd></div>
+        {% endif %}
+        {% if app.job.required_years is not none %}
+        <div class="flex justify-between">
+          <dt class="font-medium">Asks for</dt>
+          <dd>{{ "%g"|format(app.job.required_years) }} year{% if app.job.required_years != 1 %}s{% endif %}</dd>
+        </div>
+        {% endif %}
+        {% if app.job.education_required %}
+        <div class="flex justify-between"><dt class="font-medium">Education</dt><dd class="text-right">{{ app.job.education_required }}</dd></div>
+        {% endif %}
+        {% if app.job.benefits_note %}
+        <div><dt class="font-medium mb-0.5">Benefits noted</dt><dd class="text-gray-600">{{ app.job.benefits_note }}</dd></div>
+        {% endif %}
+        {% if app.job.required_skills %}
+        <div>
+          <dt class="font-medium mb-1">Required by the posting</dt>
+          <dd class="flex flex-wrap gap-1">
+            {% for skill in app.job.required_skills %}
+              <span class="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{{ skill }}</span>
+            {% endfor %}
+          </dd>
+        </div>
+        {% endif %}
+        {% if app.job.nice_to_have_skills %}
+        <div>
+          <dt class="font-medium mb-1">Nice to have</dt>
+          <dd class="flex flex-wrap gap-1">
+            {% for skill in app.job.nice_to_have_skills %}
+              <span class="bg-gray-50 text-gray-500 px-1.5 py-0.5 rounded">{{ skill }}</span>
+            {% endfor %}
+          </dd>
+        </div>
+        {% endif %}
         {% if app.job.source %}
         <div class="flex justify-between"><dt class="font-medium">Source</dt><dd>{{ app.job.source | title }}</dd></div>
         {% endif %}

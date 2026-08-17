@@ -29,6 +29,33 @@ GROUP BY source
 ORDER BY jobs DESC;
 
 \echo ''
+\echo '=== 2b. Structured detail coverage (extracted per job, after the filter) ==='
+\echo '--- read%=details extracted, pay%=states a salary, yrs%=states required years'
+SELECT source,
+       count(*) AS jobs,
+       round(100.0 * count(details_extracted_at) / count(*), 1) AS "read%",
+       round(100.0 * count(coalesce(salary_max, salary_min)) / count(*), 1) AS "pay%",
+       round(100.0 * count(required_years) / count(*), 1) AS "yrs%",
+       round(100.0 * count(employment_type) / count(*), 1) AS "type%",
+       round(100.0 * count(*) FILTER (WHERE coalesce(array_length(required_skills, 1), 0) > 0)
+             / count(*), 1) AS "skills%",
+       count(*) FILTER (WHERE language IS NOT NULL AND language <> 'en') AS non_english
+FROM jobs
+GROUP BY source
+ORDER BY jobs DESC;
+
+\echo ''
+\echo '=== 2c. Enrichment passes (newest first) ==='
+\echo '--- via columns are ats_api/json_ld/llm/held-page; chars is what was gained'
+SELECT started_at, status, attempted, enriched, failed,
+       via_ats_api AS ats, via_json_ld AS ld, via_llm AS llm,
+       via_landing_html AS held, queued_browser AS browser,
+       chars_gained AS chars, requeued_for_matching AS rematch
+FROM enrichment_runs
+ORDER BY started_at DESC
+LIMIT 20;
+
+\echo ''
 \echo '=== 3. Per-source funnel: what each source turned into ==='
 SELECT source,
        count(*) AS total,
