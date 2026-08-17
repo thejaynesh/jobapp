@@ -148,6 +148,32 @@ def backlog(db: Session) -> dict:
         return {"thin": 0, "rescuable": 0}
 
 
+def linkedin_state(db: Session) -> dict:
+    """
+    How LinkedIn is doing, and whether the harvest is switched on.
+
+    The harvest is built and, so far, produces zero — the extension toggle
+    that feeds it has never been ticked. A subsystem that works perfectly and
+    is never enabled looks identical, from the server, to one that is broken;
+    saying "0 harvested, 8,800 without a description" makes the difference
+    visible on the page where somebody might act on it.
+    """
+    from app.models.job import Job
+
+    try:
+        harvested = db.query(func.count(Job.id)).filter(
+            Job.source == "linkedin_harvest"
+        ).scalar() or 0
+        missing = db.query(func.count(Job.id)).filter(
+            Job.source == "linkedin",
+            func.coalesce(func.length(Job.description), 0) == 0,
+        ).scalar() or 0
+        return {"harvested": int(harvested), "without_description": int(missing)}
+    except Exception as exc:
+        logger.warning("enrichment_history: LinkedIn state unavailable: %s", exc)
+        return {}
+
+
 def totals(db: Session, runs: int = 20) -> dict:
     """Rollup across the last `runs` passes."""
     recent = recent_runs(db, runs)

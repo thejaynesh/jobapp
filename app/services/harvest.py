@@ -58,6 +58,16 @@ _DESCRIPTION_KEYS = ("description", "jobDescription", "descriptionText")
 _URL_KEYS = ("jobPostingUrl", "applyUrl", "companyApplyUrl", "url", "link")
 _ID_KEYS = ("jobPostingId", "entityUrn", "trackingUrn", "referenceId", "id")
 _REMOTE_KEYS = ("workplaceType", "workRemoteAllowed", "workplaceTypes")
+# Voyager sends pay the guest API never does, in a nested object whose exact
+# path moves around. Read shape-first like everything else here: find the
+# object that has a min or a max and a currency, wherever it is sitting.
+_SALARY_KEYS = (
+    "salaryInsights", "compensation", "baseSalary", "payRange", "salary",
+    "compensationBreakdown",
+)
+_SALARY_MIN_KEYS = ("minSalary", "min", "minValue", "minAmount", "from")
+_SALARY_MAX_KEYS = ("maxSalary", "max", "maxValue", "maxAmount", "to")
+_CURRENCY_KEYS = ("currencyCode", "currency", "currencyIso")
 
 # LinkedIn ids arrive as bare numbers or wrapped in an urn.
 _URN_ID_RE = re.compile(r"(\d{6,})")
@@ -110,6 +120,66 @@ def _job_id(node: dict) -> str:
         if raw.isdigit():
             return raw
     return ""
+
+
+def _number(value) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    if isinstance(value, dict):
+        # Voyager wraps money as {"amount": "150000", "currencyCode": "USD"}.
+        for key in ("amount", "value"):
+            if key in value:
+                return _number(value[key])
+        return None
+    try:
+        parsed = float(str(value).replace(",", "").replace("$", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _salary(node: dict) -> dict:
+    """
+    Pay, from wherever in this node's subtree it happens to live.
+
+    The guest API never sends this at all, which is most of why harvesting is
+    worth turning on: the browser sees the band and the server cannot. Searched
+    by shape rather than by path for the same reason as everything else here —
+    a redesign that moves the nesting keeps working.
+    """
+    for key in _SALARY_KEYS:
+        block = node.get(key)
+        if block is None:
+            continue
+        for candidate in _walk(block):
+            low = _first_number(candidate, _SALARY_MIN_KEYS)
+            high = _first_number(candidate, _SALARY_MAX_KEYS)
+            if low is None and high is None:
+                continue
+            if low is None:
+                low = high  # a lone figure is the floor, not a ceiling
+            if high is not None and low is not None and high < low:
+                low, high = high, low
+            currency = _first(candidate, _CURRENCY_KEYS) or _first(node, _CURRENCY_KEYS)
+            return {
+                "salary_min": low,
+                "salary_max": high,
+                "salary_currency": (currency or "").upper()[:8] or None,
+            }
+    return {}
+
+
+def _first_number(node: dict, keys: tuple) -> float | None:
+    if not isinstance(node, dict):
+        return None
+    for key in keys:
+        if key in node:
+            found = _number(node[key])
+            if found is not None:
+                return found
+    return None
 
 
 def _is_remote(node: dict) -> bool:
@@ -180,6 +250,7 @@ def _normalize(node: dict) -> dict | None:
         "location": _first(node, _LOCATION_KEYS),
         "description": _first(node, _DESCRIPTION_KEYS),
         "is_remote": _is_remote(node),
+        **_salary(node),
     }
 
 
@@ -207,6 +278,24 @@ def extract_jobs(payload) -> list[dict]:
         if not existing or len(job["description"]) > len(existing["description"]):
             found[key] = job
     return list(found.values())
+
+
+def _apply_salary(job, data: dict) -> None:
+    """
+    Record a pay band the browser saw, without overwriting one we already have.
+
+    Never clobbers: the detail extractor reads pay out of the description with
+    a model that was told never to guess, and a harvested card is a summary of
+    the same posting. First stated figure wins, and a card that says nothing
+    leaves the column alone rather than blanking it.
+    """
+    if data.get("salary_min") is None and data.get("salary_max") is None:
+        return
+    if job.salary_min is not None or job.salary_max is not None:
+        return
+    job.salary_min = data.get("salary_min")
+    job.salary_max = data.get("salary_max")
+    job.salary_currency = data.get("salary_currency")
 
 
 def save_harvested_jobs(db, jobs: list[dict]) -> dict:
@@ -247,6 +336,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     db, HARVEST_SOURCE, url, source_job_id, dedupe_hash
                 )
                 if existing is not None:
+                    _apply_salary(existing, data)
                     # The harvested copy usually carries a fuller description than the
                     # guest API managed, which is the main reason this path exists.
                     if url in existing.source_urls or (
@@ -267,23 +357,23 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     counts["merged"] += 1
                     continue
 
-                db.add(
-                    Job(
-                        source=HARVEST_SOURCE,
-                        source_job_id=source_job_id,
-                        source_urls=[url],
-                        title=title,
-                        company=company,
-                        location=location,
-                        is_remote=bool(data.get("is_remote")),
-                        url=url,
-                        description=description or None,
-                        experience_level="mid",
-                        status=JobStatus.new,
-                        fetched_at=now,
-                        dedupe_hash=dedupe_hash,
-                    )
+                job = Job(
+                    source=HARVEST_SOURCE,
+                    source_job_id=source_job_id,
+                    source_urls=[url],
+                    title=title,
+                    company=company,
+                    location=location,
+                    is_remote=bool(data.get("is_remote")),
+                    url=url,
+                    description=description or None,
+                    experience_level="mid",
+                    status=JobStatus.new,
+                    fetched_at=now,
+                    dedupe_hash=dedupe_hash,
                 )
+                _apply_salary(job, data)
+                db.add(job)
                 db.flush()
                 counts["inserted"] += 1
         except Exception as exc:

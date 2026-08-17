@@ -11,7 +11,10 @@ query/location combinations and only needs fetching once.
 
 Descriptions matter disproportionately here: the downstream skill filter rejects
 any job with an empty description, so the detail-fetch budget is effectively the
-source's real yield ceiling.
+source's real yield ceiling. That budget used to be spent in card order, which
+meant most of it went to jobs the title gate would reject moments later — 8,800
+stored LinkedIn jobs have no description as a result. The same gate now runs
+*before* the detail fetches, and every job that survives it gets one.
 """
 
 import logging
@@ -43,12 +46,18 @@ _HEADERS = {
 
 # The guest endpoint pages in blocks of 10.
 _PAGE_SIZE = 10
-_DEFAULT_MAX_PAGES = 5
+_DEFAULT_MAX_PAGES = 15
 _DEFAULT_RECENCY_HOURS = 168  # 7 days — the fetch cycle runs every few hours
-_DEFAULT_MAX_DETAILS = 200    # cycle-wide budget, not per search
+# A politeness ceiling rather than a budget. The old 200 was a ration, and it
+# was spent before the title gate ran — mostly on jobs that then died at it.
+_DEFAULT_MAX_DETAILS = 2000
 _DEFAULT_DETAIL_WORKERS = 4
 
 _SEARCH_PAUSE_SECONDS = 0.4
+# Between detail fetches, per worker. With four workers this is roughly ten
+# requests a second — enough to clear a few hundred survivors in a cycle
+# without looking like anything but a browser.
+_DETAIL_PAUSE_SECONDS = 0.4
 # LinkedIn throttles guest traffic aggressively; back off rather than burn the
 # rest of the cycle on 429s.
 _MAX_CONSECUTIVE_THROTTLES = 3
@@ -252,9 +261,12 @@ def _extract_description(html: str) -> str:
     match = _MARKUP_RE.search(html) or _DESC_TEXT_RE.search(html)
     if not match:
         return ""
-    # Keep paragraph/bullet boundaries as newlines so the text stays readable.
-    text = re.sub(r"<(?:br|/p|/li|/ul)[^>]*>", "\n", match.group(1))
-    return re.sub(r"\n{3,}", "\n\n", _strip(text))
+    # Handed over as markup. Descriptions are cleaned in exactly one place
+    # (services.descriptions), and doing a rougher version of that job here
+    # only loses the list structure before the real cleaner ever sees it.
+    from app.services.descriptions import clean
+
+    return clean(match.group(1))
 
 
 # --- public API ------------------------------------------------------------
@@ -342,24 +354,63 @@ def fetch_all(
             break
 
     jobs = list(by_id.values()) + without_id
-    _enrich_descriptions(jobs, headers, max_details, detail_workers)
+    wanted = _title_passing(jobs, queries)
+    _enrich_descriptions(wanted, headers, max_details, detail_workers)
 
     with_desc = sum(1 for j in jobs if j["description"])
     undated = sum(1 for j in jobs if not j.get("posted_at"))
     logger.info(
-        "LinkedIn: %d unique jobs from %d searches (%d with descriptions, "
-        "%d with no posting date)",
-        len(jobs), searches, with_desc, undated,
+        "LinkedIn: %d unique jobs from %d searches — %d passed the title gate, "
+        "%d have descriptions, %d have no posting date",
+        len(jobs), searches, len(wanted), with_desc, undated,
     )
     return jobs
 
 
+def _title_passing(jobs: list[dict], queries: list[str]) -> list[dict]:
+    """
+    The jobs a description is actually worth fetching for.
+
+    `queries` is already the expanded role set the fetch cycle searched under,
+    which is exactly what the matcher's title gate compares against — so a job
+    that fails here is one that would be filtered as `title_mismatch` minutes
+    later. Spending a request on its description first is the specific waste
+    that left 8,800 LinkedIn jobs with none.
+
+    Falls open: if the gate cannot be consulted, everything is a candidate.
+    Fetching too many descriptions is a slow cycle; fetching too few is a
+    source that produces nothing usable.
+    """
+    candidates = [job for job in jobs if job["source_job_id"]]
+    if not queries:
+        return candidates
+    try:
+        from app.services.matcher import _title_matches_roles
+    except Exception as exc:  # pragma: no cover — an import cycle would be a bug
+        logger.warning("LinkedIn: title gate unavailable (%s); fetching all", exc)
+        return candidates
+
+    passing = [
+        job for job in candidates
+        if _title_matches_roles(job["title"], queries)
+    ]
+    # Every one of them failing means the gate disagrees with the very queries
+    # that found them, which is a configuration problem rather than a verdict.
+    return passing or candidates
+
+
 def _enrich_descriptions(jobs: list[dict], headers: dict, max_details: int,
                          workers: int) -> None:
-    """Fetch JDs in parallel for the first `max_details` postings, in place."""
-    targets = [j for j in jobs if j["source_job_id"]][:max_details]
+    """Fetch JDs in parallel for up to `max_details` postings, in place."""
+    targets = jobs[:max_details]
     if not targets:
         return
+    if len(jobs) > max_details:
+        logger.warning(
+            "LinkedIn: %d jobs passed the title gate but only %d descriptions "
+            "will be fetched this cycle; the rest are enriched later",
+            len(jobs), max_details,
+        )
 
     def _one(job: dict) -> None:
         try:
@@ -367,6 +418,8 @@ def _enrich_descriptions(jobs: list[dict], headers: dict, max_details: int,
         except _Throttled as exc:
             logger.warning("LinkedIn description throttled: %s", exc)
             raise
+        finally:
+            time.sleep(_DETAIL_PAUSE_SECONDS)
         job["description"] = description
         # The card's own date wins when it has one — it's exact, whereas the
         # posting page may only offer "3 weeks ago".

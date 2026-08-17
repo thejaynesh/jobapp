@@ -212,3 +212,99 @@ class TestSave:
 
     def test_saving_nothing_is_not_an_error(self, db):
         assert harvest.save_harvested_jobs(db, [])["inserted"] == 0
+
+
+class TestHarvestedSalary:
+    """
+    Pay the guest API never sends and the browser sees anyway — most of why
+    turning the harvest toggle on is worth doing.
+    """
+
+    def test_a_nested_pay_band_is_read(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"elements": [{
+            "title": "Backend Engineer",
+            "companyName": "Acme",
+            "jobPostingId": 4012345678,
+            "salaryInsights": {
+                "compensationBreakdown": [
+                    {"minSalary": 150000, "maxSalary": 190000, "currencyCode": "USD"}
+                ]
+            },
+        }]}
+        job = extract_jobs(payload)[0]
+        assert job["salary_min"] == 150000
+        assert job["salary_max"] == 190000
+        assert job["salary_currency"] == "USD"
+
+    def test_money_wrapped_as_an_amount_object_is_read(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"elements": [{
+            "title": "Backend Engineer",
+            "companyName": "Acme",
+            "jobPostingId": 4012345679,
+            "compensation": {
+                "min": {"amount": "120000", "currencyCode": "USD"},
+                "max": {"amount": "160000", "currencyCode": "USD"},
+            },
+        }]}
+        job = extract_jobs(payload)[0]
+        assert job["salary_min"] == 120000
+        assert job["salary_max"] == 160000
+
+    def test_a_card_with_no_pay_reports_none(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"elements": [{
+            "title": "Backend Engineer", "companyName": "Acme",
+            "jobPostingId": 4012345680,
+        }]}
+        assert "salary_min" not in extract_jobs(payload)[0]
+
+    def test_a_harvested_band_reaches_the_stored_job(self, db):
+        from app.models.job import Job
+        from app.services.harvest import save_harvested_jobs
+
+        save_harvested_jobs(db, [{
+            "title": "Backend Engineer", "company": "Acme",
+            "url": "https://www.linkedin.com/jobs/view/900/",
+            "source_job_id": "900",
+            "salary_min": 150000.0, "salary_max": 190000.0,
+            "salary_currency": "USD",
+        }])
+
+        job = db.query(Job).filter(Job.source_job_id == "900").one()
+        assert job.salary_label == "$150k–$190k"
+
+    def test_a_salary_already_read_from_the_description_is_not_overwritten(self, db):
+        """
+        The detail extractor read the posting itself with a model told never to
+        guess. A harvested card is a summary of the same job — first stated
+        figure wins, and a card that says nothing leaves the column alone.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        from app.models.job import Job, JobStatus
+        from app.services.harvest import save_harvested_jobs
+
+        url = "https://www.linkedin.com/jobs/view/901/"
+        db.add(Job(
+            source="linkedin_harvest", source_job_id="901", source_urls=[url],
+            title="Backend Engineer", company="Acme", location="", url=url,
+            status=JobStatus.new, fetched_at=datetime.now(timezone.utc),
+            dedupe_hash=uuid.uuid4().hex,
+            salary_min=140000.0, salary_max=180000.0, salary_currency="USD",
+        ))
+        db.commit()
+
+        save_harvested_jobs(db, [{
+            "title": "Backend Engineer", "company": "Acme", "url": url,
+            "source_job_id": "901",
+            "salary_min": 10.0, "salary_max": 20.0, "salary_currency": "USD",
+        }])
+
+        job = db.query(Job).filter(Job.source_job_id == "901").one()
+        assert job.salary_min == 140000.0

@@ -3,6 +3,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
+from app.services.sources import linkedin as linkedin_module
+
 
 # ---------------------------------------------------------------------------
 # Adzuna adapter
@@ -422,6 +424,101 @@ class TestLinkedInScraper:
                                          max_pages=5)
         assert results == []
         assert len(calls) == linkedin._MAX_CONSECUTIVE_THROTTLES
+
+    def test_the_title_gate_runs_before_the_detail_fetches(self):
+        """
+        The regression that left 8,800 LinkedIn jobs with no description: the
+        detail budget was spent in card order, so most of it went to jobs the
+        title gate rejected moments later. The gate runs first now.
+        """
+        from app.services.sources.linkedin import fetch_all
+        search = (
+            _li_card("4000002001", title="Dental Hygienist")
+            + _li_card("4000002002", title="Backend Engineer")
+            + _li_card("4000002003", title="Marketing Manager")
+        )
+        detail_calls = []
+
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                detail_calls.append(url)
+                return self._resp(self._POSTING_HTML)
+            return self._resp(search)
+
+        with patch("httpx.get", side_effect=_get), \
+             patch.object(linkedin_module.time, "sleep"):
+            results = fetch_all("", ["Backend Engineer"], ["NYC"], max_pages=1)
+
+        # One request, for the one job worth having a description.
+        assert len(detail_calls) == 1
+        assert "4000002002" in detail_calls[0]
+        described = [j for j in results if j["description"]]
+        assert [j["title"] for j in described] == ["Backend Engineer"]
+        # The rejects are still stored — the matcher explains why it dropped
+        # them, which is more useful than their silent absence.
+        assert len(results) == 3
+
+    def test_every_surviving_job_gets_a_description(self):
+        from app.services.sources.linkedin import fetch_all
+        search = "".join(
+            _li_card(f"4000003{i:03d}", title="Backend Engineer") for i in range(6)
+        )
+        detail_calls = []
+
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                detail_calls.append(url)
+                return self._resp(self._POSTING_HTML)
+            return self._resp(search)
+
+        with patch("httpx.get", side_effect=_get), \
+             patch.object(linkedin_module.time, "sleep"):
+            results = fetch_all("", ["Backend Engineer"], ["NYC"], max_pages=1)
+
+        assert len(detail_calls) == 6
+        assert all(job["description"] for job in results)
+
+    def test_a_gate_that_rejects_everything_is_treated_as_misconfiguration(self):
+        """
+        If nothing passes, the gate disagrees with the very queries that found
+        these jobs — that is a configuration problem, not a verdict, and
+        fetching nothing would make the source produce nothing usable.
+        """
+        from app.services.sources.linkedin import fetch_all
+        search = _li_card("4000004001", title="Backend Engineer")
+        detail_calls = []
+
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                detail_calls.append(url)
+                return self._resp(self._POSTING_HTML)
+            return self._resp(search)
+
+        with patch("httpx.get", side_effect=_get), \
+             patch.object(linkedin_module.time, "sleep"):
+            fetch_all("", ["Underwater Basket Weaving"], ["NYC"], max_pages=1)
+
+        assert len(detail_calls) == 1
+
+    def test_the_description_keeps_its_list_structure(self):
+        # Cleaned by services.descriptions rather than by a rougher strip here,
+        # so bullets survive into the text the matcher reads.
+        from app.services.sources.linkedin import fetch_all
+        posting = (
+            '<div class="show-more-less-html__markup">'
+            "<p>Build APIs.</p><ul><li>Python</li><li>Docker</li></ul></div>"
+        )
+
+        def _get(url, **kwargs):
+            if "jobPosting" in url:
+                return self._resp(posting)
+            return self._resp(self._SEARCH_HTML)
+
+        with patch("httpx.get", side_effect=_get), \
+             patch.object(linkedin_module.time, "sleep"):
+            results = fetch_all("", ["Software Engineer"], ["NYC"], max_pages=1)
+
+        assert results[0]["description"] == "Build APIs.\n\n- Python\n- Docker"
 
     def test_a_200_with_unrecognisable_markup_is_reported_not_silent(self, caplog):
         """

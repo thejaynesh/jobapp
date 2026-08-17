@@ -19,6 +19,27 @@
   </p>
   {% endif %}
 
+  {% if linkedin_state and linkedin_state.without_description %}
+  {# The harvest is built and switched off, which from here looks exactly like
+     a harvest that is broken. Say which it is, next to the number it would
+     fix. #}
+  <p class="text-xs mb-3 {% if linkedin_state.harvested %}text-gray-500{% else %}text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1.5{% endif %}">
+    LinkedIn:
+    <span class="font-medium">{{ "{:,}".format(linkedin_state.without_description) }}</span>
+    jobs have no description.
+    {% if linkedin_state.harvested %}
+      The browser harvest has contributed
+      <span class="font-medium">{{ "{:,}".format(linkedin_state.harvested) }}</span>
+      postings so far; the rest are queued for the extension to fetch.
+    {% else %}
+      The browser harvest has never produced anything — LinkedIn answers this
+      server with a challenge, so the descriptions can only come from your own
+      browser. Tick <em>Harvest jobs from LinkedIn</em> in the extension
+      options and they arrive as you browse, at no extra requests.
+    {% endif %}
+  </p>
+  {% endif %}
+
   {% if enrichment_totals %}
   <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 mb-4">
     <span>

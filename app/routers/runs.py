@@ -110,12 +110,13 @@ def _enrichment_context(db: Session) -> dict:
             "enrichment_runs": enrichment_history.recent_runs(db, DEFAULT_RUNS_SHOWN),
             "enrichment_totals": enrichment_history.totals(db, ROLLUP_WINDOW),
             "enrichment_backlog": enrichment_history.backlog(db),
+            "linkedin_state": enrichment_history.linkedin_state(db),
         }
     except Exception as exc:
         logger.warning("runs: enrichment history unavailable: %s", exc)
         return {
             "enrichment_runs": [], "enrichment_totals": {},
-            "enrichment_backlog": {},
+            "enrichment_backlog": {}, "linkedin_state": {},
         }
 
 

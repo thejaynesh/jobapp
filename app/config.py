@@ -240,9 +240,13 @@ class Settings(BaseSettings):
     # LinkedIn guest API. The endpoint pages in blocks of 10, and jobs without a
     # description are dropped by the skill filter, so these two caps set the
     # source's real yield.
-    LINKEDIN_MAX_PAGES: int = 5
+    LINKEDIN_MAX_PAGES: int = 15
     LINKEDIN_RECENCY_HOURS: int = 168  # 0 disables the freshness filter
-    LINKEDIN_MAX_DETAIL_FETCHES: int = 200  # per cycle, not per search
+    # A politeness ceiling, not a ration. The old 200 was spent before the
+    # title gate ran, mostly on jobs that died at it moments later — which is
+    # why 8,800 stored LinkedIn jobs have no description. The gate runs first
+    # now, and everything that survives it gets one.
+    LINKEDIN_MAX_DETAIL_FETCHES: int = 2000
     LINKEDIN_DETAIL_WORKERS: int = 4
 
     # Adzuna pages 50 results at a time; a 1-day window threw most of them away.

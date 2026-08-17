@@ -589,3 +589,42 @@ class TestEnrichmentPanel:
     def test_the_panel_survives_having_no_history(self, client, db):
         body = client.get("/runs").text
         assert "No enrichment passes recorded yet" in body
+
+
+class TestLinkedInNudge:
+    """
+    The harvest is built and has never been switched on, which from the server
+    looks exactly like a harvest that is broken. The panel says which.
+    """
+
+    def _linkedin_job(self, db, description=None):
+        job = _job(source="linkedin", description=description,
+                   url=f"https://www.linkedin.com/jobs/view/{uuid.uuid4().hex[:8]}/",
+                   source_urls=[f"https://x/{uuid.uuid4()}"])
+        db.add(job)
+        return job
+
+    def test_a_silent_harvest_is_named_as_switched_off(self, client, db):
+        self._linkedin_job(db)
+        db.commit()
+
+        body = client.get("/runs").text
+        assert "has never produced anything" in body
+        assert "Harvest jobs from LinkedIn" in body
+
+    def test_a_working_harvest_reports_its_yield_instead(self, client, db):
+        self._linkedin_job(db)
+        harvested = _job(source="linkedin_harvest", description=LONG,
+                         url="https://www.linkedin.com/jobs/view/777/",
+                         source_urls=["https://www.linkedin.com/jobs/view/777/"])
+        db.add(harvested)
+        db.commit()
+
+        body = client.get("/runs").text
+        assert "has never produced anything" not in body
+        assert "postings so far" in body
+
+    def test_nothing_is_said_when_every_linkedin_job_has_a_description(self, client, db):
+        self._linkedin_job(db, description=LONG)
+        db.commit()
+        assert "jobs have no description" not in client.get("/runs").text
