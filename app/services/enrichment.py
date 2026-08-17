@@ -284,6 +284,81 @@ def _is_job_posting(node: dict) -> bool:
     return any(str(t).lower() == "jobposting" for t in types if t)
 
 
+def _ld_blocks(html: str):
+    """Every parsed ld+json payload on the page."""
+    for block in _LD_BLOCK.finditer(html or ""):
+        raw = block.group(1).strip()
+        if not raw:
+            continue
+        try:
+            yield json.loads(raw)
+        except Exception:
+            # Some sites emit JS-with-comments in an ld+json tag. One repair
+            # attempt, then move on.
+            try:
+                yield json.loads(re.sub(r"//[^\n]*", "", raw))
+            except Exception:
+                continue
+
+
+def _ld_text(value) -> str:
+    """A display string out of a value that may be an object or a list."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("name", "title", "legalName"):
+            if key in value:
+                return _ld_text(value[key])
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            found = _ld_text(item)
+            if found:
+                return found
+    return ""
+
+
+def json_ld_postings(html: str) -> list[dict]:
+    """
+    Every `JobPosting` on a listing page, shaped like a source adapter's output.
+
+    Board software that publishes structured data for Google's job results
+    publishes it whether or not it also offers an API — which makes this the
+    most durable way to read an ATS whose JSON endpoint is undocumented or
+    moves around. Descriptions are often absent from a *listing* page's blocks;
+    that is fine, because enrichment fetches them from the posting URL
+    afterwards.
+    """
+    found: dict[str, dict] = {}
+    for data in _ld_blocks(html):
+        for node in _walk_ld(data):
+            if not isinstance(node, dict) or not _is_job_posting(node):
+                continue
+            title = _ld_text(node.get("title"))
+            url = _ld_text(node.get("url")) or _ld_text(node.get("sameAs"))
+            if not title or not url:
+                continue
+            details = _details_from_ld(node)
+            posting = {
+                "title": title,
+                "company": _ld_text(node.get("hiringOrganization")),
+                "location": details.get("location", ""),
+                "url": url,
+                "description": clean(node.get("description") or ""),
+                "posted_at": node.get("datePosted"),
+                "employment_type": details.get("employment_type"),
+                "salary_min": details.get("salary_min"),
+                "salary_max": details.get("salary_max"),
+                "salary_currency": details.get("salary_currency"),
+            }
+            # Keep the richest copy: a page often carries the same posting in a
+            # summary block and again in a fuller one.
+            existing = found.get(url)
+            if not existing or len(posting["description"]) > len(existing["description"]):
+                found[url] = posting
+    return list(found.values())
+
+
 def json_ld_extraction(html: str) -> Extraction:
     """
     The `JobPosting` block any page that wants Google's job results publishes.
@@ -295,20 +370,7 @@ def json_ld_extraction(html: str) -> Extraction:
     if not html:
         return Extraction()
 
-    for block in _LD_BLOCK.finditer(html):
-        raw = block.group(1).strip()
-        if not raw:
-            continue
-        try:
-            data = json.loads(raw)
-        except Exception:
-            # Some sites emit JS-with-comments in an ld+json tag. One repair
-            # attempt, then move on.
-            try:
-                data = json.loads(re.sub(r"//[^\n]*", "", raw))
-            except Exception:
-                continue
-
+    for data in _ld_blocks(html):
         for node in _walk_ld(data):
             if not isinstance(node, dict) or not _is_job_posting(node):
                 continue

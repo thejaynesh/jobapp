@@ -40,7 +40,8 @@ NIM_MODELS = [
 # Every source the fetcher knows about, for the manual-trigger picker.
 TRIGGERABLE_SOURCES = [
     "adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby",
-    "smartrecruiters", "workable", "recruitee", "workday", "jooble",
+    "smartrecruiters", "workable", "recruitee", "workday", "icims",
+    "bamboohr", "teamtailor", "jobvite", "personio", "jooble",
     "careerjet", "findwork", "indeed", "remotive", "arbeitnow", "remoteok",
     "weworkremotely", "themuse", "himalayas", "jobicy", "hnhiring",
     "wellfound", "dice", "handshake",

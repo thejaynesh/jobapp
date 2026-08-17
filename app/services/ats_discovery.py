@@ -22,6 +22,10 @@ MAX_SLUGS_PER_ATS = 100
 DISCOVERY_CAPS = {
     "workday": 15,          # searches × per-job detail calls per tenant
     "smartrecruiters": 30,  # per-posting detail calls per company
+    "bamboohr": 30,
+    "icims": 25,
+    "teamtailor": 50,
+    "jobvite": 50,
 }
 
 
@@ -55,6 +59,30 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
     ],
     "recruitee": [
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.recruitee\.com", re.I),
+    ],
+    "icims": [
+        # Both host shapes in the wild, normalized to the bare company slug.
+        # The second pattern refuses the `careers-` prefix explicitly: without
+        # that it also matches `careers-globex.icims.com` and registers
+        # "careers-globex" as a second, duplicate board for the same company.
+        re.compile(r"https?://careers-([A-Za-z0-9-]{2,})\.icims\.com", re.I),
+        re.compile(r"https?://(?!careers-)([A-Za-z0-9-]{2,})\.icims\.com", re.I),
+    ],
+    "bamboohr": [
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.bamboohr\.com", re.I),
+    ],
+    "teamtailor": [
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.teamtailor\.com", re.I),
+    ],
+    "jobvite": [
+        # jobs.jobvite.com/<slug> only. click.jobvite.com is the click tracker
+        # (see link_resolver._TRACKER_DOMAINS), and reading a slug out of one
+        # would register the tracker itself as a company board.
+        re.compile(r"jobs\.jobvite\.com/(?:careers/)?([A-Za-z0-9_-]{2,})", re.I),
+    ],
+    "personio": [
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio\.(?:de|com)", re.I),
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio-int\.com", re.I),
     ],
 }
 
@@ -204,6 +232,11 @@ ATS_CONFIG_FIELDS = {
     "workable": "WORKABLE_COMPANY_SLUGS",
     "recruitee": "RECRUITEE_COMPANY_SLUGS",
     "workday": "WORKDAY_TENANTS",
+    "icims": "ICIMS_COMPANY_SLUGS",
+    "bamboohr": "BAMBOOHR_COMPANY_SLUGS",
+    "teamtailor": "TEAMTAILOR_COMPANY_SLUGS",
+    "jobvite": "JOBVITE_COMPANY_SLUGS",
+    "personio": "PERSONIO_COMPANY_SLUGS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -214,6 +247,11 @@ MAX_TOTAL_SLUGS_PER_ATS = 300
 TOTAL_SLUG_CAPS = {
     "workday": 30,          # searches × per-job detail calls per tenant
     "smartrecruiters": 80,  # per-posting detail calls per company
+    "bamboohr": 80,         # per-posting detail calls per company
+    # Two host shapes tried per slug, and a full HTML page parsed each time.
+    "icims": 60,
+    "teamtailor": 120,
+    "jobvite": 120,
 }
 
 

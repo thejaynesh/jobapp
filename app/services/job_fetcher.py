@@ -202,6 +202,11 @@ def _run_all_adapters(
         ("smartrecruiters", "app.services.sources.smartrecruiters"),
         ("workable", "app.services.sources.workable"),
         ("recruitee", "app.services.sources.recruitee"),
+        ("icims", "app.services.sources.icims"),
+        ("bamboohr", "app.services.sources.bamboohr"),
+        ("teamtailor", "app.services.sources.teamtailor"),
+        ("jobvite", "app.services.sources.jobvite"),
+        ("personio", "app.services.sources.personio"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):

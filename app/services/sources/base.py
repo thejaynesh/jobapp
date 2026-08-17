@@ -75,6 +75,87 @@ def board_workers() -> int:
     return getattr(settings, "ATS_BOARD_FETCH_WORKERS", DEFAULT_BOARD_WORKERS)
 
 
+# Browser-ish headers. Several ATS careers pages answer a bare httpx request
+# with a redirect to a consent page and a full one with the listing.
+LISTING_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def jobs_from_listing(
+    url: str,
+    source: str,
+    slug: str,
+    company: str = "",
+    timeout: int = 15,
+) -> list[dict]:
+    """
+    Read a careers listing page through the structured data it publishes.
+
+    Every ATS that wants its customers' jobs in Google's job results emits
+    `JobPosting` blocks, whether or not it also documents a JSON API. Reading
+    those is more durable than reading an undocumented endpoint: the endpoint
+    moves and the structured data cannot, because the customer's search
+    ranking depends on it.
+
+    Listing pages routinely omit the description from those blocks. That used
+    to make this approach useless; it doesn't now, because enrichment fetches
+    the full posting from the URL each block carries.
+    """
+    import httpx
+
+    from app.services.enrichment import json_ld_postings
+
+    resp = httpx.get(url, headers=LISTING_HEADERS, timeout=timeout,
+                     follow_redirects=True)
+    resp.raise_for_status()
+
+    postings = json_ld_postings(resp.text)
+    if not postings:
+        # Distinguish "this board has no openings" from "we cannot read this
+        # board any more" — they look identical from the job count alone, and
+        # the second one is the failure that goes unnoticed for months.
+        board_logger = logging.getLogger(f"{__package__}.{source}")
+        if len(resp.text) > 2000:
+            board_logger.warning(
+                "%s/%s: %d bytes returned but no JobPosting structured data "
+                "found (the board's markup may have changed)",
+                source, slug, len(resp.text),
+            )
+        return []
+
+    jobs = []
+    for posting in postings:
+        title = posting["title"]
+        description = posting["description"]
+        location = posting["location"]
+        jobs.append({
+            "source": source,
+            "source_job_id": _listing_job_id(posting["url"]),
+            "title": title,
+            "company": company or posting["company"] or slug,
+            "location": location,
+            "is_remote": "remote" in f"{location} {title}".lower(),
+            "url": posting["url"],
+            "description": description,
+            "experience_level": parse_experience_level(title, description),
+            "posted_at": posting["posted_at"],
+        })
+    return jobs
+
+
+def _listing_job_id(url: str) -> str | None:
+    """The longest number in a posting URL — every ATS puts its id in there."""
+    numbers = re.findall(r"\d{3,}", url or "")
+    return max(numbers, key=len) if numbers else None
+
+
 def parse_experience_level(title: str, description: str) -> str:
     """
     Infer seniority from job title and description text.

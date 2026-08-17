@@ -195,6 +195,14 @@ class Settings(BaseSettings):
     SMARTRECRUITERS_COMPANY_SLUGS: str = ""
     WORKABLE_COMPANY_SLUGS: str = ""
     RECRUITEE_COMPANY_SLUGS: str = ""
+    # Each ATS we speak makes every company hosted on it reachable, and the
+    # discovery flywheel starts finding boards for it automatically in job
+    # links and career pages. Empty is fine: discovery fills them in.
+    ICIMS_COMPANY_SLUGS: str = ""
+    BAMBOOHR_COMPANY_SLUGS: str = ""
+    TEAMTAILOR_COMPANY_SLUGS: str = ""
+    JOBVITE_COMPANY_SLUGS: str = ""
+    PERSONIO_COMPANY_SLUGS: str = ""
     WORKDAY_TENANTS: str = ""  # comma-separated tenant:host:site, e.g. nvidia:wd5:NVIDIAExternalCareerSite
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""

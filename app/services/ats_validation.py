@@ -76,6 +76,48 @@ def _probe_workday(spec: str) -> bool:
     return r.status_code == 200
 
 
+def _probe_bamboohr(slug: str) -> bool:
+    r = httpx.get(f"https://{slug}.bamboohr.com/careers/list", timeout=_TIMEOUT,
+                  follow_redirects=True)
+    return r.status_code == 200
+
+
+def _probe_personio(slug: str) -> bool:
+    r = httpx.get(f"https://{slug}.jobs.personio.de/xml", timeout=_TIMEOUT,
+                  follow_redirects=True)
+    return r.status_code == 200 and r.content.lstrip()[:1] == b"<"
+
+
+def _probe_listing(url: str) -> bool:
+    """
+    A board we read through structured data is valid when it publishes some.
+
+    A 200 alone is not enough: iCIMS, Teamtailor and Jobvite all serve a
+    friendly "company not found" page with a 200, and treating that as a live
+    board would put a nonexistent company in the registry to be polled forever.
+    """
+    from app.services.sources.base import LISTING_HEADERS
+
+    r = httpx.get(url, headers=LISTING_HEADERS, timeout=_TIMEOUT,
+                  follow_redirects=True)
+    return r.status_code == 200 and "jobposting" in r.text.lower()
+
+
+def _probe_icims(slug: str) -> bool:
+    return any(
+        _probe_listing(f"https://{host}/jobs/search?ss=1")
+        for host in (f"{slug}.icims.com", f"careers-{slug}.icims.com")
+    )
+
+
+def _probe_teamtailor(slug: str) -> bool:
+    return _probe_listing(f"https://{slug}.teamtailor.com/jobs")
+
+
+def _probe_jobvite(slug: str) -> bool:
+    return _probe_listing(f"https://jobs.jobvite.com/{slug}/search")
+
+
 PROBES = {
     "greenhouse": _probe_greenhouse,
     "lever": _probe_lever,
@@ -84,6 +126,11 @@ PROBES = {
     "workable": _probe_workable,
     "recruitee": _probe_recruitee,
     "workday": _probe_workday,
+    "icims": _probe_icims,
+    "bamboohr": _probe_bamboohr,
+    "teamtailor": _probe_teamtailor,
+    "jobvite": _probe_jobvite,
+    "personio": _probe_personio,
 }
 
 
