@@ -253,8 +253,11 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                         and existing.source_job_id == source_job_id
                         and existing.source == HARVEST_SOURCE
                     ):
-                        if description and len(description) > len(existing.description or ""):
+                        old_length = len(existing.description or "")
+                        if description and len(description) > old_length:
                             existing.description = description
+                            from app.services.deduplication import note_description_growth
+                            note_description_growth(existing, old_length)
                             counts["merged"] += 1
                         else:
                             counts["skipped"] += 1

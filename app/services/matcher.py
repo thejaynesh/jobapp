@@ -125,12 +125,47 @@ FILTER_REASON_LABELS = {
     "seniority": "Too senior for your experience",
     "location": "Outside your locations",
     "excluded_company": "Excluded company",
+    "blocked_title": "Title contains a word you blocked",
     "few_skills": "Too few skills in description",
     "no_description": "No job description available",
     "low_score": "AI score below your minimum",
     "restricted": "Restricted to US citizens",
+    "duplicate": "Same posting already has an application",
     "manual": "You filtered it manually",
 }
+
+
+def _title_match_roles(profile_data: dict) -> list[str]:
+    """
+    Every phrasing a matching title may arrive under.
+
+    The LLM already expands the target roles into the titles recruiters
+    actually post ("Software Engineer" → "Java Developer", "Backend
+    Developer") and the fetcher searches under all of them — but the title
+    gate only knew the raw roles, so a job found BY an expanded query could
+    then be rejected for not matching it. The expansion is cached on the
+    profile by the fetch cycle, so reading it here costs nothing.
+    """
+    roles = list(profile_data.get("target_roles") or [])
+    expanded = (profile_data.get("search_query_cache") or {}).get("queries") or []
+    seen = {r.lower().strip() for r in roles}
+    for query in expanded:
+        text = str(query).strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            roles.append(text)
+    return roles
+
+
+def _blocked_title_word(title: str, profile_data: dict) -> str | None:
+    """The first user-blocked word this title contains, or None."""
+    blocked = profile_data.get("blocked_title_words") or []
+    title_lower = (title or "").lower()
+    for word in blocked:
+        text = str(word).strip().lower()
+        if text and re.search(rf"\b{re.escape(text)}\b", title_lower):
+            return str(word).strip()
+    return None
 
 
 def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome:
@@ -146,12 +181,20 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
     the advisory half of it anyway pass theirs in rather than paying for a
     second pass over the description.
     """
-    target_roles = profile_data.get("target_roles", [])
+    target_roles = _title_match_roles(profile_data)
     if not _title_matches_roles(job.title, target_roles):
-        roles = ", ".join(target_roles[:5]) or "none set"
+        roles = ", ".join((profile_data.get("target_roles") or [])[:5]) or "none set"
         return FilterOutcome(
             False, 0.0, "title_mismatch",
-            f"Title {job.title!r} shares no keyword with your target roles ({roles}).",
+            f"Title {job.title!r} shares no keyword with your target roles ({roles}) "
+            "or their expanded variants.",
+        )
+
+    blocked_word = _blocked_title_word(job.title, profile_data)
+    if blocked_word:
+        return FilterOutcome(
+            False, 0.0, "blocked_title",
+            f"Title contains {blocked_word!r}, which you blocked from the jobs list.",
         )
 
     if _blocked_by_seniority(job.title, profile_data):
@@ -620,13 +663,29 @@ def match_job(
     job.matched_by = llm_result.get("scored_by")
 
     if score >= min_score:
+        if not job.applications:
+            # A cross-post of a job that already has an application must not
+            # buy a second full document generation. The dedupe hash catches
+            # exact matches at fetch time; this catches the near-misses
+            # ("Backend Engineer" vs "Backend Engineer - Remote").
+            from app.services.deduplication import find_duplicate_application_job
+
+            duplicate = find_duplicate_application_job(db, job)
+            if duplicate is not None:
+                job.status = JobStatus.filtered_out
+                job.filter_reason = "duplicate"
+                job.filter_detail = (
+                    f"Scored {score}/100, but {duplicate.title!r} at "
+                    f"{duplicate.company} already has an application — this "
+                    "looks like the same posting cross-posted."
+                )
+                return "filtered_out"
+            db.add(Application(job_id=job.id))
         job.status = JobStatus.matched
         # Clear any reason from a previous cycle so a re-matched job isn't
         # still carrying an explanation for why it used to be rejected.
         job.filter_reason = None
         job.filter_detail = None
-        if not job.applications:
-            db.add(Application(job_id=job.id))
         return "matched"
 
     job.status = JobStatus.filtered_out
