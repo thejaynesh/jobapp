@@ -49,15 +49,13 @@ _INTERSTITIAL_PATTERNS = [
     )
 ]
 
-# Hosts that are still an aggregator after redirects — landing on one of these
-# means we did not reach the employer, so don't advertise it as an apply URL.
-_AGGREGATOR_HOSTS = frozenset({
-    "adzuna.com", "www.adzuna.com", "jooble.org", "www.jooble.org",
-    "careerjet.com", "www.careerjet.com", "indeed.com", "www.indeed.com",
-    "glassdoor.com", "www.glassdoor.com", "ziprecruiter.com",
-    "www.ziprecruiter.com", "linkedin.com", "www.linkedin.com",
-    "simplyhired.com", "www.simplyhired.com", "talent.com", "www.talent.com",
-    "neuvoo.com", "jobs2careers.com", "monster.com", "www.monster.com",
+# Domains that are still an aggregator after redirects — landing on one of
+# these means we did not reach the employer, so don't advertise it as an apply
+# URL. Matched by suffix, so uk.indeed.com and m.linkedin.com count too.
+_AGGREGATOR_DOMAINS = frozenset({
+    "adzuna.com", "jooble.org", "careerjet.com", "indeed.com",
+    "glassdoor.com", "ziprecruiter.com", "linkedin.com", "simplyhired.com",
+    "talent.com", "neuvoo.com", "jobs2careers.com", "monster.com",
 })
 
 # Fallbacks for landing pages that redirect with markup instead of a 3xx.
@@ -113,7 +111,10 @@ def is_interstitial(url: str) -> bool:
 def is_aggregator(url: str) -> bool:
     """True when the URL's host is a job board rather than an employer/ATS site."""
     host = (urlparse(url).hostname or "").lower()
-    return host in _AGGREGATOR_HOSTS
+    return any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in _AGGREGATOR_DOMAINS
+    )
 
 
 def _absolutize(candidate: str, base: str) -> str:

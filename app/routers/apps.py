@@ -1,6 +1,7 @@
 import os
 import uuid
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
@@ -218,6 +219,10 @@ def regenerate_docs(
         raise HTTPException(status_code=404, detail="Application not found")
     app_obj.generation_status = "generating"
     app_obj.generation_error = None
+    # Stamped at queue time, not only at task start: with no clock on the row
+    # the sweeper reads NULL as "stale" and queues a duplicate while this one
+    # is still waiting for a worker.
+    app_obj.generation_started_at = datetime.now(timezone.utc)
     db.commit()
     generate_docs.delay(str(app_obj.id), feedback=feedback or None)
     return HTMLResponse('<span class="text-blue-600">Queued &mdash; generating&hellip;</span>')

@@ -934,16 +934,21 @@ def tailor_resume_bullets(
 # ---------------------------------------------------------------------------
 
 def _next_version(db, application_id: uuid.UUID, doc_type) -> int:
+    from sqlalchemy import func
+
     from app.models.application import ApplicationDocument
-    count = (
-        db.query(ApplicationDocument)
+
+    # max()+1 rather than count()+1: a deleted row or a duplicate run would
+    # make the count collide with a version (and filename) that already exists.
+    current = (
+        db.query(func.coalesce(func.max(ApplicationDocument.version), 0))
         .filter(
             ApplicationDocument.application_id == application_id,
             ApplicationDocument.doc_type == doc_type,
         )
-        .count()
+        .scalar()
     )
-    return count + 1
+    return int(current or 0) + 1
 
 
 def _set_only_current(db, application_id: uuid.UUID, doc_type, new_doc) -> None:

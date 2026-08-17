@@ -499,11 +499,14 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) 
             )
             continue
         try:
-            if billable and budget is not None:
-                budget["paid_calls"] = budget.get("paid_calls", 0) + 1
             raw = call_provider(
                 provider, messages, temperature=0.1, max_tokens=_match_max_tokens()
             )
+            # Counted after the call returns: a provider that refused or timed
+            # out billed nothing, and charging failures to the budget could
+            # burn the whole cap on one broken provider without a single score.
+            if billable and budget is not None:
+                budget["paid_calls"] = budget.get("paid_calls", 0) + 1
             logger.info(
                 "llm_score_job: scored job %s via fallback provider %s (%s)",
                 getattr(job, "id", "?"), provider.name, provider.model,

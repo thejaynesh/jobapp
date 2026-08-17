@@ -14,6 +14,7 @@ conflict with a fetch, so sharing one key would have each block the other.
 """
 
 import logging
+import uuid
 
 from app.config import settings
 
@@ -25,13 +26,27 @@ COMPARE_LOCK_KEY = "jobapp:compare:running"
 # doesn't block the next scheduled run for long.
 DEFAULT_TTL_SECONDS = 3600
 
+# Only the holder's own token may release the lock (same script as llm_gate).
+# A plain DELETE would let a cycle that outlived its TTL delete the *next*
+# cycle's lock, quietly allowing a third to overlap it.
+_RELEASE = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+# The token this process stored for each key it holds. acquire/release pairs
+# always run within one worker process, so process-local is the right scope.
+_held_tokens: dict[str, str] = {}
+
 
 def _client():
     import redis
     return redis.Redis.from_url(settings.REDIS_URL, socket_timeout=5)
 
 
-def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str = "1",
+def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str | None = None,
             key: str = LOCK_KEY) -> bool:
     """
     Claim the lock. False means a fetch is already running.
@@ -39,16 +54,26 @@ def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str = "1",
     If Redis is unreachable we allow the fetch: refusing to work because the
     lock service is down would be worse than the overlap it prevents.
     """
+    token = token or uuid.uuid4().hex
     try:
-        return bool(_client().set(key, token, nx=True, ex=ttl))
+        acquired = bool(_client().set(key, token, nx=True, ex=ttl))
     except Exception as exc:
         logger.warning("fetch_lock: cannot reach Redis (%s); proceeding unlocked", exc)
         return True
+    if acquired:
+        _held_tokens[key] = token
+    return acquired
 
 
 def release(key: str = LOCK_KEY) -> None:
+    token = _held_tokens.pop(key, None)
     try:
-        _client().delete(key)
+        if token is None:
+            # Acquired while Redis was unreachable (or never acquired here):
+            # there is no token to compare, and deleting blind could release
+            # somebody else's lock — the TTL clears it instead.
+            return
+        _client().eval(_RELEASE, 1, key, token)
     except Exception as exc:
         logger.warning("fetch_lock: could not release lock: %s", exc)
 

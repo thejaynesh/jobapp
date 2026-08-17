@@ -367,6 +367,17 @@ def poll(db, limit: int | None = None) -> dict:
         if typ != "OK":
             raise MailboxError("The mail server refused the search.")
         uids = [u for u in (data[0] or b"").split() if u]
+        if last_uid:
+            # IMAP quirk: `UID n:*` always returns at least the mailbox's last
+            # message, even when its UID is below n — so every quiet poll
+            # re-fetched and re-scanned the newest mail. Keep only genuinely
+            # new UIDs.
+            def _above(uid) -> bool:
+                try:
+                    return int(uid) > last_uid
+                except ValueError:
+                    return True
+            uids = [u for u in uids if _above(u)]
         if len(uids) > budget:
             uids = uids[-budget:]
 

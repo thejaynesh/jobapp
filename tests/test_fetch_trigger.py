@@ -32,13 +32,29 @@ class TestFetchLock:
         with patch("app.services.fetch_lock._client", side_effect=RuntimeError("down")):
             assert fetch_lock.acquire() is True
 
-    def test_release_deletes_the_key(self):
+    def test_release_deletes_only_its_own_key(self):
+        # Compare-and-delete, not a blind DELETE: a cycle that outlived its TTL
+        # must not delete the lock its successor is now holding.
+        client = _redis()
+        with patch("app.services.fetch_lock._client", return_value=client):
+            assert fetch_lock.acquire() is True
+            fetch_lock.release()
+        client.delete.assert_not_called()
+        script, numkeys, key, token = client.eval.call_args.args
+        assert numkeys == 1
+        assert key == fetch_lock.LOCK_KEY
+        assert token == client.set.call_args.args[1]
+
+    def test_release_without_holding_touches_nothing(self):
+        fetch_lock._held_tokens.clear()
         client = _redis()
         with patch("app.services.fetch_lock._client", return_value=client):
             fetch_lock.release()
-        client.delete.assert_called_once_with(fetch_lock.LOCK_KEY)
+        client.delete.assert_not_called()
+        client.eval.assert_not_called()
 
     def test_release_survives_a_broken_redis(self):
+        fetch_lock._held_tokens[fetch_lock.LOCK_KEY] = "tok"
         with patch("app.services.fetch_lock._client", side_effect=RuntimeError("down")):
             fetch_lock.release()  # must not raise
 

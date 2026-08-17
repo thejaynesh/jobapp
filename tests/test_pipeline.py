@@ -326,9 +326,26 @@ class TestSweepGenerations:
             generation_started_at=NOW - timedelta(hours=3),
         )
         db.commit()
+        app_id = str(app.id)
         result, queued = self._run(db, monkeypatch)
-        assert str(app.id) in queued
+        assert app_id in queued
         assert result["stalled"] == 1
+
+    def test_a_requeued_generation_is_not_requeued_again_while_it_waits(
+        self, db, monkeypatch
+    ):
+        # The sweep restarts the clock at requeue time. Without that, a backed-up
+        # queue meant every sweep re-queued the same application again, piling
+        # duplicate tasks behind one stuck run.
+        make_application(
+            db, suffix="restamp", generation_status="generating",
+            generation_started_at=NOW - timedelta(hours=3),
+        )
+        db.commit()
+        _, first = self._run(db, monkeypatch)
+        _, second = self._run(db, monkeypatch)
+        assert len(first) == 1
+        assert second == []
 
     def test_one_that_started_a_moment_ago_is_left_alone(self, db, monkeypatch):
         make_application(
@@ -344,9 +361,15 @@ class TestSweepGenerations:
     ):
         app = make_application(db, suffix="missed", generation_status="idle")
         db.commit()
+        app_pk = app.id
         result, queued = self._run(db, monkeypatch)
-        assert str(app.id) in queued
+        assert str(app_pk) in queued
         assert result["never_queued"] == 1
+        # Marked in-flight at queue time so the next sweep doesn't queue a
+        # duplicate while this one waits for a worker.
+        stored = db.query(Application).filter(Application.id == app_pk).one()
+        assert stored.generation_status == "generating"
+        assert stored.generation_started_at is not None
 
     def test_a_failure_is_not_retried_on_a_timer(self, db, monkeypatch):
         # It has an error the user can read and a Rewrite button. Re-queueing it
