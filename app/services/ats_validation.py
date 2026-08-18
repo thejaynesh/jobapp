@@ -145,6 +145,81 @@ def is_valid_slug(ats: str, slug: str) -> bool:
         return True  # network trouble ≠ bad slug; let the adapter try
 
 
+# The board APIs that name their own company, and where the name lives. Used
+# to catch a slug that resolves to a real board belonging to somebody else —
+# `greenhouse/appcast` is a live board, just not the company it was filed under.
+_NAME_ENDPOINTS = {
+    "greenhouse": ("https://boards-api.greenhouse.io/v1/boards/{slug}", ("name",)),
+    "workable": ("https://apply.workable.com/api/v1/widget/accounts/{slug}", ("name",)),
+    "recruitee": ("https://{slug}.recruitee.com/api/offers/",
+                  ("offers", 0, "company_name")),
+    "bamboohr": ("https://{slug}.bamboohr.com/careers/list", ("companyName",)),
+}
+
+
+def _dig(data, path):
+    for key in path:
+        if isinstance(key, int):
+            if not isinstance(data, list) or len(data) <= key:
+                return None
+            data = data[key]
+        elif isinstance(data, dict):
+            data = data.get(key)
+        else:
+            return None
+        if data is None:
+            return None
+    return data if isinstance(data, str) else None
+
+
+def board_company_name(ats: str, slug: str) -> str | None:
+    """The company name the board's own API reports, when it reports one."""
+    endpoint = _NAME_ENDPOINTS.get(ats)
+    if not endpoint:
+        return None
+    url, path = endpoint
+    try:
+        resp = httpx.get(url.format(slug=slug), timeout=_TIMEOUT,
+                         follow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        return _dig(resp.json(), path)
+    except Exception:
+        return None
+
+
+class BoardProbe:
+    """What one validation probe found."""
+
+    __slots__ = ("exists", "company", "error")
+
+    def __init__(self, exists: bool, company: str | None = None,
+                 error: str | None = None):
+        self.exists = exists
+        self.company = company
+        self.error = error
+
+
+def probe_board(ats: str, slug: str) -> BoardProbe:
+    """
+    Ask an ATS whether a slug is a real board, and whose.
+
+    A network failure reports `exists=True` on purpose: not being able to reach
+    the ATS is not evidence that the company is fictional, and marking a real
+    board dead because of one timeout is the more expensive mistake.
+    """
+    probe = PROBES.get(ats)
+    if probe is None:
+        return BoardProbe(True)
+    try:
+        exists = bool(probe(slug))
+    except Exception as exc:
+        return BoardProbe(True, error=f"probe failed: {exc}")
+    if not exists:
+        return BoardProbe(False, error=f"{ats} has no board for this slug")
+    return BoardProbe(True, company=board_company_name(ats, slug))
+
+
 def candidate_slugs(name: str) -> list[str]:
     """Plausible slug variants for a company name, most likely first."""
     base = name.strip().lower()

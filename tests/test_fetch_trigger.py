@@ -204,3 +204,53 @@ class TestSourceFiltering:
             )
         assert gh.called
         lever.assert_not_called()
+
+
+class TestGroupTriggers:
+    """
+    The three slices the schedule runs, startable by hand. Each has its own
+    lock, so starting one does not block the others.
+    """
+
+    def _run(self, db, group="api"):
+        from datetime import datetime, timezone
+        from app.models.fetch_run import FetchRun
+
+        db.add(FetchRun(started_at=datetime.now(timezone.utc), status="ok",
+                        group=group, fetched=10, inserted=3))
+        db.commit()
+
+    def test_the_page_offers_a_button_per_group(self, client, db):
+        body = client.get("/runs").text
+        for group in ("api", "boards", "browser"):
+            assert f'name="group" value="{group}"' in body, group
+
+    def test_a_run_is_labelled_with_its_group(self, client, db):
+        self._run(db, group="boards")
+        body = client.get("/runs").text
+        assert "Group" in body
+        assert "boards" in body
+
+    def test_triggering_a_group_queues_it(self, client, db):
+        from unittest.mock import patch
+
+        with patch("app.tasks.fetch.fetch_jobs.delay") as delay, \
+             patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}):
+            response = client.post("/runs/trigger", data={"group": "api"})
+
+        assert response.status_code == 200
+        assert delay.call_args.kwargs["group"] == "api"
+        # A whole group is what the schedule runs, not a narrow adapter test,
+        # so it keeps its tail-call to matching.
+        assert delay.call_args.kwargs["match_after"] is True
+
+    def test_an_unknown_group_is_ignored_rather_than_fetching_nothing(self, client, db):
+        from unittest.mock import patch
+
+        with patch("app.tasks.fetch.fetch_jobs.delay") as delay, \
+             patch("app.services.fetch_lock.state",
+                   return_value={"running": False, "seconds_left": None}):
+            client.post("/runs/trigger", data={"group": "nonsense"})
+
+        assert delay.call_args.kwargs["group"] is None

@@ -88,6 +88,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "top_boards": boards,
             "fetch_state": state(),
             "sources": TRIGGERABLE_SOURCES,
+            "source_groups": _source_group_labels(),
             "triggered": None,
             "system": _system_context(db),
             **_enrichment_context(db),
@@ -95,6 +96,21 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
                if k != "request"},
         },
     )
+
+
+def _source_group_labels() -> list[tuple[str, str, int]]:
+    """The fetch groups, for the trigger buttons: (key, label, source count)."""
+    from app.services.job_fetcher import SOURCE_GROUPS
+
+    labels = {
+        "api": "API sources & feeds",
+        "boards": "Company ATS boards",
+        "browser": "Browser tier",
+    }
+    return [
+        (key, labels.get(key, key), len(sources))
+        for key, sources in SOURCE_GROUPS.items()
+    ]
 
 
 def _enrichment_context(db: Session) -> dict:
@@ -370,17 +386,21 @@ def fetch_status(request: Request):
 
 
 @router.post("/trigger", response_class=HTMLResponse)
-def trigger_fetch(request: Request, sources: list[str] = Form(default=[])):
+def trigger_fetch(request: Request, sources: list[str] = Form(default=[]),
+                  group: str = Form(default="")):
     """
     Queue a fetch cycle now.
 
-    Restricting it to a few sources is the point: a full cycle takes minutes
-    (hundreds of company boards, LinkedIn pagination, a browser tier), which
-    makes verifying one adapter change unreasonably slow.
+    Restricting it is the point: a full cycle takes minutes (hundreds of
+    company boards, LinkedIn pagination, a browser tier), which makes verifying
+    one adapter change unreasonably slow. Two ways to narrow it — a few named
+    sources, or one of the groups the schedule itself runs.
     """
     from app.services.fetch_lock import state
+    from app.services.job_fetcher import ALL_GROUPS
 
     wanted = [s for s in sources if s in TRIGGERABLE_SOURCES]
+    group = group if group in ALL_GROUPS else ""
     current = state()
     if current.get("running"):
         return templates.TemplateResponse(
@@ -392,8 +412,13 @@ def trigger_fetch(request: Request, sources: list[str] = Form(default=[])):
 
     try:
         from app.tasks.fetch import fetch_jobs
-        # Matching costs LLM calls; skip it for a narrow source test.
-        fetch_jobs.delay(only=wanted or None, match_after=not wanted)
+        # Matching costs LLM calls; skip it for a narrow source test. A whole
+        # group is not a narrow test — it is what the schedule runs — so that
+        # keeps its tail-call.
+        fetch_jobs.delay(
+            only=wanted or None, match_after=not wanted,
+            group=group or None,
+        )
     except Exception as exc:
         logger.error("runs: could not queue fetch: %s", exc)
         return templates.TemplateResponse(
@@ -403,7 +428,9 @@ def trigger_fetch(request: Request, sources: list[str] = Form(default=[])):
                            "message": f"Could not queue the fetch: {exc}"}},
         )
 
-    scope = ", ".join(wanted) if wanted else "all sources"
+    scope = ", ".join(wanted) if wanted else (
+        f"the {group} group" if group else "all sources"
+    )
     return templates.TemplateResponse(
         "runs/partials/status.html",
         {"request": request, "fetch_state": {"running": True, "seconds_left": None},

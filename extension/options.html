@@ -88,6 +88,27 @@
   </div>
 
   <div class="row">
+    <input type="checkbox" id="harvestIndeed">
+    <label for="harvestIndeed">Harvest jobs from Indeed</label>
+  </div>
+  <div class="row">
+    <input type="checkbox" id="harvestGlassdoor">
+    <label for="harvestGlassdoor">Harvest jobs from Glassdoor</label>
+  </div>
+  <div class="row">
+    <input type="checkbox" id="harvestWorkday">
+    <label for="harvestWorkday">Harvest jobs from Workday career sites</label>
+  </div>
+  <div class="hint">
+    The same thing, on the other sites that refuse the server outright. Each is
+    a separate permission asked for when you tick it, and given back when you
+    untick it — "read every job board you visit" is a different thing to agree
+    to than "read LinkedIn", so they are not bundled. Indeed and Glassdoor both
+    answer a datacenter IP with a challenge; Workday career sites are per
+    employer, so browsing one is the only way its postings are seen at all.
+  </div>
+
+  <div class="row">
     <input type="checkbox" id="overlay">
     <label for="overlay">Show the overlay on job pages</label>
   </div>

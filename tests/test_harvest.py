@@ -308,3 +308,123 @@ class TestHarvestedSalary:
 
         job = db.query(Job).filter(Job.source_job_id == "901").one()
         assert job.salary_min == 140000.0
+
+
+class TestHarvestBeyondLinkedIn:
+    """
+    The extractor was always host-agnostic — it finds anything shaped like a
+    job in any JSON. Only the interceptor's registration limited it to
+    LinkedIn. Now that it can be registered per site, each host needs its own
+    source name, or Indeed's yield disappears into LinkedIn's number and
+    neither can be judged.
+    """
+
+    def test_each_host_gets_its_own_source_name(self):
+        from app.services.harvest import source_for_url
+
+        assert source_for_url("https://www.linkedin.com/jobs/view/1/") == "linkedin_harvest"
+        assert source_for_url("https://www.indeed.com/viewjob?jk=1") == "indeed_harvest"
+        assert source_for_url("https://uk.indeed.com/viewjob?jk=1") == "indeed_harvest"
+        assert source_for_url("https://www.glassdoor.com/job-listing/1") == "glassdoor_harvest"
+        assert source_for_url("https://acme.wd5.myworkdayjobs.com/x") == "workday_harvest"
+
+    def test_an_unknown_host_falls_back_rather_than_inventing_a_source(self):
+        # A wrong-but-known bucket is easier to notice than a new source name
+        # appearing silently.
+        from app.services.harvest import source_for_url
+
+        assert source_for_url("https://example.com/jobs") == "linkedin_harvest"
+        assert source_for_url("") == "linkedin_harvest"
+
+    def test_an_indeed_payload_is_read_with_indeed_field_names(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"metaData": {"mosaicProviderJobCardsModel": {"results": [{
+            "jobkey": "abc123def456",
+            "displayTitle": "Backend Engineer",
+            "truncatedCompany": "Acme",
+            "formattedLocation": "Austin, TX",
+            "snippet": "Build APIs with Python.",
+            "jobUrl": "https://www.indeed.com/viewjob?jk=abc123def456",
+        }]}}}
+        jobs = extract_jobs(payload, source="indeed_harvest")
+
+        assert len(jobs) == 1
+        assert jobs[0]["source"] == "indeed_harvest"
+        assert jobs[0]["title"] == "Backend Engineer"
+        assert jobs[0]["company"] == "Acme"
+        assert jobs[0]["url"] == "https://www.indeed.com/viewjob?jk=abc123def456"
+
+    def test_a_glassdoor_payload_is_read_with_glassdoor_field_names(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"jobListings": [{
+            "jobListingId": 1009988776,
+            "jobTitleText": "Staff Engineer",
+            "employerName": "Globex",
+            "locationName": "Remote",
+            "jobUrl": "https://www.glassdoor.com/job-listing/1009988776",
+        }]}}
+        jobs = extract_jobs(payload, source="glassdoor_harvest")
+
+        assert len(jobs) == 1
+        assert jobs[0]["source"] == "glassdoor_harvest"
+        assert jobs[0]["company"] == "Globex"
+
+    def test_harvested_jobs_are_stored_under_their_own_source(self, db):
+        from app.models.job import Job
+        from app.services.harvest import save_harvested_jobs
+
+        save_harvested_jobs(db, [{
+            "source": "indeed_harvest",
+            "title": "Backend Engineer", "company": "Acme",
+            "url": "https://www.indeed.com/viewjob?jk=zz1",
+            "source_job_id": "zz1",
+            "description": "Build things.",
+        }])
+
+        job = db.query(Job).filter(Job.source_job_id == "zz1").one()
+        assert job.source == "indeed_harvest"
+
+    def test_the_endpoint_files_a_payload_under_the_page_it_came_from(self, db):
+        from app.models.job import Job
+        from app.routers.agent import _harvest
+
+        payload = {"results": [{
+            "jobkey": "a1b2c3d4e5f6a7b8", "displayTitle": "Backend Engineer",
+            "truncatedCompany": "Acme",
+            "jobUrl": "https://www.indeed.com/viewjob?jk=a1b2c3d4e5f6a7b8",
+        }]}
+        counts = _harvest(db, payload, "https://www.indeed.com/jobs?q=backend")
+
+        assert counts["source"] == "indeed_harvest"
+        assert db.query(Job).filter(
+            Job.source_job_id == "a1b2c3d4e5f6a7b8").one().source == \
+            "indeed_harvest"
+
+    def test_an_alphanumeric_posting_id_is_read(self):
+        """
+        Reading only numbers left every harvested Indeed job with no id, which
+        drops it to URL-only dedupe — so the same posting re-inserts itself
+        whenever the URL picks up a different tracking parameter.
+        """
+        from app.services.harvest import extract_jobs
+
+        jobs = extract_jobs({"results": [{
+            "jobkey": "a1b2c3d4e5f6a7b8",
+            "displayTitle": "Backend Engineer",
+            "truncatedCompany": "Acme",
+            "jobUrl": "https://www.indeed.com/viewjob?jk=a1b2c3d4e5f6a7b8",
+        }]}, source="indeed_harvest")
+        assert jobs[0]["source_job_id"] == "a1b2c3d4e5f6a7b8"
+
+    def test_an_ordinary_word_under_an_id_key_is_not_an_id(self):
+        from app.services.harvest import extract_jobs
+
+        jobs = extract_jobs({"results": [{
+            "id": "featured",
+            "displayTitle": "Backend Engineer",
+            "truncatedCompany": "Acme",
+            "jobUrl": "https://www.indeed.com/viewjob?jk=1",
+        }]}, source="indeed_harvest")
+        assert jobs[0]["source_job_id"] is None

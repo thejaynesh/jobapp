@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     ATS_MAX_SLUGS_PER_ATS: int = 300  # per-cycle slug budget per ATS (tighter caps still apply)
     ATS_BOARD_FETCH_WORKERS: int = 8  # concurrent per-company board fetches
     ATS_BOARD_MAX_EMPTY_CYCLES: int = 8  # retire a discovered board after this many silent cycles
+    # Discovery reads a slug out of a link and files it as a company, which is
+    # a guess. Probing before polling is what stops `greenhouse/linkedin` and
+    # `greenhouse/appcast` from spending the budget real companies compete for.
+    ATS_BOARD_VALIDATION: bool = True
+    ATS_BOARD_VALIDATE_PER_CYCLE: int = 150
 
     # Aggregators (Adzuna, Jooble, Careerjet) link to their own redirect page
     # rather than the employer. Following those once per new posting yields the
@@ -301,10 +306,19 @@ class Settings(BaseSettings):
     # browser tier can be switched off from the settings page if it stops
     # earning its keep.
     DICE_ENABLED: bool = True
+    # Community job lists, mined for the ATS slugs in their apply links. Each
+    # one is a few thousand company boards for the cost of a single request,
+    # which makes it by far the cheapest discovery we have — the three original
+    # lists alone yielded 212 boards on one cycle.
+    # Every URL here was checked to return 200 before being added; four
+    # plausible-looking ones did not and are deliberately absent, because a
+    # dead list costs a request and a warning line every single cycle forever.
     SLUG_HARVEST_URLS: str = (
         "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"
-        "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md"
+        "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md,"
+        "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/README.md,"
+        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md"
     )
 
     # ---- Enrichment ------------------------------------------------------
@@ -333,7 +347,20 @@ class Settings(BaseSettings):
     STORAGE_PATH: str = "/storage"
     DOCS_OUTPUT_DIR: str = "/storage"
     MIN_MATCH_SCORE: int = 70
+    # Kept for the combined cycle and for anything still reading it; the
+    # scheduled work is the three group intervals below.
     FETCH_INTERVAL_HOURS: int = 5
+
+    # ---- Fetch groups ----------------------------------------------------
+    # One 47-minute task fetched everything, so an API source that could
+    # refresh hourly ran on the schedule of a Chromium launch. Each slice now
+    # has its own cadence, its own lock and its own history row.
+    FETCH_API_INTERVAL_HOURS: int = 2
+    FETCH_BOARDS_INTERVAL_HOURS: int = 5
+    FETCH_BROWSER_INTERVAL_HOURS: int = 12
+    # The browser tier is the one worth being able to switch off wholesale: it
+    # is the most expensive thing in the pipeline and the least productive.
+    BROWSER_TIER_ENABLED: bool = True
 
     # ---- Matching cadence ------------------------------------------------
     # Matching used to run only as a tail-call from a fetch cycle, so anything

@@ -151,14 +151,18 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
-def _harvest(db: Session, payload) -> dict:
-    from app.services.harvest import extract_jobs, save_harvested_jobs
+def _harvest(db: Session, payload, source_url: str = "") -> dict:
+    from app.services.harvest import extract_jobs, save_harvested_jobs, source_for_url
 
-    jobs = extract_jobs(payload)
+    # The page it came off decides the source name. The extractor is
+    # shape-based and host-agnostic, so without this every site's yield would
+    # be filed under LinkedIn and none of them could be judged separately.
+    source = source_for_url(source_url)
+    jobs = extract_jobs(payload, source=source)
     if not jobs:
         return {"found": 0, "inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
     counts = save_harvested_jobs(db, jobs)
-    return {"found": len(jobs), **counts}
+    return {"found": len(jobs), "source": source, **counts}
 
 
 @router.post("/harvest")
@@ -181,7 +185,9 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
     if payload is None:
         return JSONResponse({"detail": "No payload."}, status_code=400)
     try:
-        counts = await run_in_threadpool(_harvest, db, payload)
+        counts = await run_in_threadpool(
+            _harvest, db, payload, body.get("source_url") or ""
+        )
     except Exception as exc:
         # Never charge a parsing bug of ours to the browser that volunteered
         # the data; it has no way to act on the failure and nothing to retry.

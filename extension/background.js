@@ -503,57 +503,120 @@ async function pollOnce() {
  * declared in the manifest, so installing the extension does not ask for
  * LinkedIn access on behalf of a feature that is off.
  */
-const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
-const HARVEST_SCRIPTS = [
+/**
+ * The sites harvesting can read, each behind its own toggle and its own host
+ * permission.
+ *
+ * One entry per site rather than one wildcard on purpose. The server-side
+ * extractor was always host-agnostic — it finds anything shaped like a job in
+ * any JSON — and only this registration ever limited it to LinkedIn. Widening
+ * it is a matter of adding a row here, but it must stay a row per site:
+ * "read every job board you visit" is a different thing to consent to than
+ * "read LinkedIn", and it should be asked for separately and revocable
+ * separately.
+ *
+ * `storageKey` keeps LinkedIn on the original `harvest` key so an existing
+ * install keeps working without a migration.
+ */
+const HARVEST_SITES = [
   {
-    id: "jobapp-interceptor",
+    id: "linkedin",
+    label: "LinkedIn",
+    storageKey: "harvest",
     matches: ["https://www.linkedin.com/*"],
-    js: ["interceptor.js"],
-    runAt: "document_start",
-    // MAIN shares the page's globals, which is the only way to patch the
-    // `fetch` the page itself calls. It also means no chrome.* here.
-    world: "MAIN",
   },
   {
-    id: "jobapp-relay",
-    matches: ["https://www.linkedin.com/*"],
-    js: ["relay.js"],
-    runAt: "document_start",
+    id: "indeed",
+    label: "Indeed",
+    storageKey: "harvestIndeed",
+    matches: ["https://*.indeed.com/*"],
+  },
+  {
+    id: "glassdoor",
+    label: "Glassdoor",
+    storageKey: "harvestGlassdoor",
+    matches: ["https://*.glassdoor.com/*"],
+  },
+  {
+    id: "workday",
+    label: "Workday",
+    storageKey: "harvestWorkday",
+    matches: ["https://*.myworkdayjobs.com/*"],
   },
 ];
 
-async function harvestRegistered() {
+/** Kept for the options page and for anything still reading one site. */
+const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
+
+function harvestScriptsFor(site) {
+  return [
+    {
+      id: `jobapp-interceptor-${site.id}`,
+      matches: site.matches,
+      js: ["interceptor.js"],
+      runAt: "document_start",
+      // MAIN shares the page's globals, which is the only way to patch the
+      // `fetch` the page itself calls. It also means no chrome.* here.
+      world: "MAIN",
+    },
+    {
+      id: `jobapp-relay-${site.id}`,
+      matches: site.matches,
+      js: ["relay.js"],
+      runAt: "document_start",
+    },
+  ];
+}
+
+async function registeredIds(ids) {
   try {
-    const existing = await chrome.scripting.getRegisteredContentScripts({
-      ids: HARVEST_SCRIPTS.map((s) => s.id),
-    });
-    return existing.length === HARVEST_SCRIPTS.length;
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids });
+    return new Set(existing.map((s) => s.id));
   } catch (_) {
-    return false;
+    return new Set();
   }
 }
 
 async function syncHarvestScripts() {
-  const wanted =
-    (await chrome.storage.local.get({ harvest: false })).harvest &&
-    (await chrome.permissions.contains(HARVEST_HOSTS));
-  const registered = await harvestRegistered();
+  const keys = Object.fromEntries(
+    HARVEST_SITES.map((site) => [site.storageKey, false]),
+  );
+  const stored = await chrome.storage.local.get(keys);
 
-  try {
-    if (wanted && !registered) {
-      // Unregister first: a half-registered pair from an interrupted run would
-      // otherwise make register() throw on the duplicate id.
-      await chrome.scripting
-        .unregisterContentScripts({ ids: HARVEST_SCRIPTS.map((s) => s.id) })
-        .catch(() => {});
-      await chrome.scripting.registerContentScripts(HARVEST_SCRIPTS);
-    } else if (!wanted && registered) {
-      await chrome.scripting.unregisterContentScripts({
-        ids: HARVEST_SCRIPTS.map((s) => s.id),
+  const allIds = HARVEST_SITES.flatMap((site) =>
+    harvestScriptsFor(site).map((s) => s.id),
+  );
+  // The pre-multi-site ids, so an upgrade does not leave a stale pair
+  // registered against LinkedIn forever.
+  const legacyIds = ["jobapp-interceptor", "jobapp-relay"];
+  await chrome.scripting
+    .unregisterContentScripts({ ids: legacyIds })
+    .catch(() => {});
+
+  const already = await registeredIds(allIds);
+
+  for (const site of HARVEST_SITES) {
+    const scripts = harvestScriptsFor(site);
+    const ids = scripts.map((s) => s.id);
+    const wanted =
+      Boolean(stored[site.storageKey]) &&
+      (await chrome.permissions.contains({ origins: site.matches }));
+    const registered = ids.every((id) => already.has(id));
+
+    try {
+      if (wanted && !registered) {
+        // Unregister first: a half-registered pair from an interrupted run
+        // would otherwise make register() throw on the duplicate id.
+        await chrome.scripting.unregisterContentScripts({ ids }).catch(() => {});
+        await chrome.scripting.registerContentScripts(scripts);
+      } else if (!wanted && registered) {
+        await chrome.scripting.unregisterContentScripts({ ids });
+      }
+    } catch (error) {
+      await setStatus({
+        lastError: `harvest scripts (${site.id}): ${error.message}`,
       });
     }
-  } catch (error) {
-    await setStatus({ lastError: `harvest scripts: ${error.message}` });
   }
 }
 

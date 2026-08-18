@@ -162,10 +162,14 @@ SELECT count(*) FILTER (WHERE url ~* 'adzuna|jooble|careerjet|indeed\.com') AS a
 FROM jobs;
 
 \echo ''
-\echo '=== 12. LinkedIn harvest yield (extension) ==='
-SELECT count(*) AS harvested_jobs,
+\echo '=== 12. Browser harvest yield, per site (extension) ==='
+\echo '--- zero rows means no harvest toggle has ever been ticked'
+SELECT source AS harvested_from, count(*) AS jobs,
+       count(*) FILTER (WHERE coalesce(length(description), 0) > 0) AS with_desc,
+       count(coalesce(salary_max, salary_min)) AS with_pay,
        min(fetched_at)::date AS first, max(fetched_at)::date AS last
-FROM jobs WHERE source = 'linkedin_harvest';
+FROM jobs WHERE source LIKE '%\_harvest'
+GROUP BY source ORDER BY jobs DESC;
 
 \echo ''
 \echo '=== 13. Browser agent tasks ==='

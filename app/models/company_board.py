@@ -41,6 +41,15 @@ class CompanyBoard(Base):
     last_job_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_job_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # When this board was last probed to confirm it exists, and what the probe
+    # found if it didn't. A board discovered from a link is a guess until
+    # something asks its ATS whether the slug is real — `greenhouse/linkedin`
+    # and `greenhouse/appcast` were both polled for months on that guess.
+    validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    inactive_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_fetched_at: Mapped[datetime | None] = mapped_column(

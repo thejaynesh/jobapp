@@ -151,8 +151,11 @@
   <h2 class="text-lg font-semibold text-gray-800 mb-1">Company ATS boards</h2>
   <p class="text-xs text-gray-400 mb-4">
     Boards learned from job links, resolved apply URLs and sniffed careers pages.
-    Each cycle polls the highest-yielding ones directly; boards that stay silent
-    are retired automatically.
+    A discovered slug is a guess until its ATS confirms it, so new ones are
+    probed before they are ever polled — that is what keeps a slug scraped off
+    an aggregator's own page from spending the budget real companies compete
+    for. Each cycle then polls the highest-yielding ones; boards that stay
+    silent are retired automatically.
   </p>
   <div class="overflow-x-auto">
     <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
@@ -160,6 +163,8 @@
         <tr>
           <th class="text-left px-4 py-2">ATS</th>
           <th class="text-right px-4 py-2">Active</th>
+          <th class="text-right px-4 py-2" title="Discovered, waiting for a probe to confirm the slug is real">Unproven</th>
+          <th class="text-right px-4 py-2" title="Probed, and the ATS has no such board">Not a board</th>
           <th class="text-right px-4 py-2">Not working</th>
           <th class="text-right px-4 py-2">Known</th>
           <th class="text-right px-4 py-2">Jobs sourced</th>
@@ -170,6 +175,12 @@
         <tr>
           <td class="px-4 py-2 font-medium text-gray-700">{{ ats }}</td>
           <td class="px-4 py-2 text-right text-gray-600">{{ info.active }}</td>
+          <td class="px-4 py-2 text-right {% if info.pending %}text-amber-600{% else %}text-gray-300{% endif %}">
+            {{ info.pending }}
+          </td>
+          <td class="px-4 py-2 text-right {% if info.rejected %}text-gray-500{% else %}text-gray-300{% endif %}">
+            {{ info.rejected }}
+          </td>
           <td class="px-4 py-2 text-right {% if info.retired %}text-red-500{% else %}text-gray-300{% endif %}">
             {{ info.retired }}
           </td>

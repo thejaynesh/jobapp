@@ -39,6 +39,7 @@ def record_run(
     board_stats: dict | None = None,
     backfill: dict | None = None,
     error: str | None = None,
+    group: str = "all",
     retention: int = DEFAULT_RETENTION,
 ) -> FetchRun:
     """
@@ -71,6 +72,7 @@ def record_run(
         finished_at=finished_at,
         duration_seconds=round((finished_at - started_at).total_seconds(), 1),
         status=status,
+        group=group or "all",
         fetched=counts.get("fetched", 0),
         inserted=counts.get("inserted", 0),
         merged=counts.get("merged", 0),

@@ -48,6 +48,47 @@ def _adapter_details(job_data: dict) -> dict:
     return details
 
 
+# The pipeline in three slices, so each can run on the schedule it deserves.
+#
+# One task used to fetch everything, and it took 47 minutes: Adzuna — an API
+# call that could refresh hourly — waited behind a Chromium launch that only
+# needs to happen twice a day, and every posting arrived hours later than it
+# could have. Splitting them costs a little duplicated setup per run and buys
+# API postings within the hour.
+SOURCE_GROUPS: dict[str, frozenset[str]] = {
+    # Cheap keyed/public APIs and feeds. Minutes, not tens of minutes.
+    "api": frozenset({
+        "adzuna", "jsearch", "jooble", "careerjet", "findwork", "usajobs",
+        "hiringcafe", "ycombinator", "linkedin", "indeed", "remotive",
+        "arbeitnow", "remoteok", "weworkremotely", "themuse", "himalayas",
+        "jobicy", "hnhiring",
+    }),
+    # The company board registry: hundreds of slugs, one request each.
+    "boards": frozenset({
+        "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
+        "recruitee", "workday", "icims", "bamboohr", "teamtailor", "jobvite",
+        "personio",
+    }),
+    # Playwright. The expensive tier, and the one worth running least often.
+    "browser": frozenset({"wellfound", "dice", "handshake"}),
+}
+
+ALL_GROUPS = tuple(SOURCE_GROUPS)
+
+
+def group_sources(group: str | None) -> set[str] | None:
+    """The sources one group covers; None for a run of everything."""
+    if not group or group == "all":
+        return None
+    try:
+        return set(SOURCE_GROUPS[group])
+    except KeyError:
+        raise ValueError(
+            f"Unknown fetch group {group!r}. Known groups: "
+            f"{', '.join(ALL_GROUPS)}"
+        ) from None
+
+
 class _BrowserTierSkipped(Exception):
     """Internal signal: no Playwright source was requested this run."""
 
@@ -710,6 +751,12 @@ def _update_board_registry(
     for ats, attempted in (ats_slugs or {}).items():
         if not attempted:
             continue
+        # Only for ATSes this run actually polled. A run that did not touch
+        # Greenhouse has no evidence about any Greenhouse board, and counting
+        # its silence would tick every one of them toward retirement — eight
+        # API-only cycles would have retired the entire board registry.
+        if not (source_stats.get(ats) or {}).get("enabled", False):
+            continue
         per_slug: dict[str, int] = {}
         for job in raw_jobs:
             if job.get("source") == ats and job.get("ats_slug"):
@@ -772,13 +819,24 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
     return new_boards
 
 
-def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
+def fetch_and_save_jobs(
+    db: Session, only: set[str] | None = None, group: str | None = None,
+) -> dict:
     """
-    Run one fetch cycle. `only` restricts it to the named sources, which is what
-    makes testing a single adapter take seconds instead of minutes.
+    Run one fetch cycle.
+
+    `only` restricts it to the named sources, which is what makes testing a
+    single adapter take seconds instead of minutes. `group` does the same from
+    the other end — "api", "boards" or "browser" — and is how the scheduled
+    cycles run: each slice on the cadence it deserves rather than all of them
+    behind the slowest one. Passing both is fine; `only` wins, because it is
+    the more specific request.
     """
     started_at = datetime.now(timezone.utc)
-    counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0, "sources": {}}
+    if only is None:
+        only = group_sources(group)
+    counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0,
+              "sources": {}, "group": group or "all"}
 
     profile = db.query(Profile).first()
     if not profile:
@@ -863,6 +921,21 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
             # Before picking this cycle's slugs, so anything the backfill
             # recovers from the back catalogue is fetched straight away.
             backfill_report = _maybe_backfill_boards(db, profile)
+            # And before that selection too: a board nobody has confirmed
+            # exists is not polled, so the per-ATS budget goes to companies
+            # rather than to slugs scraped off an aggregator's own page.
+            if settings.ATS_BOARD_VALIDATION:
+                try:
+                    with db.begin_nested():
+                        boards.validate_pending(
+                            db,
+                            limit=settings.ATS_BOARD_VALIDATE_PER_CYCLE,
+                            workers=settings.ATS_BOARD_FETCH_WORKERS,
+                        )
+                    db.commit()
+                except Exception as exc:
+                    logger.error("job_fetcher: board validation failed: %s", exc)
+                    db.rollback()
             registry_boards = boards.registry_slugs(db, slug_caps())
         except Exception as exc:
             logger.error("job_fetcher: board registry unavailable: %s", exc)
@@ -1133,6 +1206,7 @@ def fetch_and_save_jobs(db: Session, only: set[str] | None = None) -> dict:
             resolve_stats=resolve_stats.as_dict() if resolve_stats else None,
             board_stats=board_stats,
             backfill=backfill_report,
+            group=group or "all",
         )
         db.commit()
     except Exception as exc:

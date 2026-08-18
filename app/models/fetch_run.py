@@ -32,6 +32,14 @@ class FetchRun(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     # ok | partial | failed
     status: Mapped[str] = mapped_column(String, nullable=False, default="ok")
+    # Which slice of the pipeline this run was: all | api | boards | browser.
+    # One task used to fetch everything, so a cheap API source that could
+    # refresh hourly waited on a browser tier that only needs to run twice a
+    # day. Each group now runs on its own schedule, and this is what makes a
+    # run's numbers comparable to the right other runs.
+    group: Mapped[str] = mapped_column(
+        "group", String, nullable=False, default="all", index=True
+    )
 
     fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

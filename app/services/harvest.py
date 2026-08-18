@@ -44,20 +44,79 @@ logger = logging.getLogger(__name__)
 # visible next to the API sources rather than blended into them.
 HARVEST_SOURCE = "linkedin_harvest"
 
+# The extractor is shape-based and therefore host-agnostic; only the
+# interceptor's registration decided it saw LinkedIn and nothing else. Now that
+# it can be registered per site, each host gets its own source name — otherwise
+# Indeed's yield disappears into LinkedIn's number and neither can be judged.
+HARVEST_SOURCES = {
+    "linkedin.com": HARVEST_SOURCE,
+    "indeed.com": "indeed_harvest",
+    "glassdoor.com": "glassdoor_harvest",
+    "myworkdayjobs.com": "workday_harvest",
+}
+
+
+def source_for_url(url: str | None) -> str:
+    """
+    Which harvest source a payload belongs to, from the page it came off.
+
+    Falls back to the LinkedIn name rather than inventing a source: an
+    unrecognised host means the interceptor was registered somewhere this
+    doesn't know about yet, and a wrong-but-known bucket is easier to notice
+    and correct than a new one appearing silently.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(url or "").hostname or "").lower()
+    for domain, source in HARVEST_SOURCES.items():
+        if host == domain or host.endswith(f".{domain}"):
+            return source
+    return HARVEST_SOURCE
+
 # Field aliases, most specific first. Several are checked because one payload
 # calls it `companyName` and another nests it under `companyDetails`.
-_TITLE_KEYS = ("title", "jobTitle", "jobPostingTitle", "name")
+#
+# Names from LinkedIn's Voyager come first because that payload is the one this
+# was written against, then Indeed's mosaic payload, Glassdoor's GraphQL one,
+# and Workday's CXS. They are simply appended: the reader tries them in order
+# and takes the first that is present, so adding a host costs a few strings
+# rather than a parser.
+_TITLE_KEYS = (
+    "title", "jobTitle", "jobPostingTitle", "name",
+    "displayTitle", "normTitle", "jobTitleText",  # Indeed
+    "jobTitleText", "listingTitle",               # Glassdoor
+)
 _COMPANY_KEYS = (
     "companyName", "company", "companyUrn", "primarySubtitle", "subtitle",
+    "employerName", "truncatedCompany",           # Indeed / Glassdoor
+    "hiringOrganization", "employer",
 )
 _LOCATION_KEYS = (
     "formattedLocation", "locationName", "location", "secondarySubtitle",
     "secondaryDescription",
+    "formattedLocationFull", "jobLocationCity", "locationsText",  # Indeed
+    "locationName", "locationString",                             # Glassdoor
+    "locationsText", "primaryLocation",                           # Workday
 )
-_DESCRIPTION_KEYS = ("description", "jobDescription", "descriptionText")
-_URL_KEYS = ("jobPostingUrl", "applyUrl", "companyApplyUrl", "url", "link")
-_ID_KEYS = ("jobPostingId", "entityUrn", "trackingUrn", "referenceId", "id")
-_REMOTE_KEYS = ("workplaceType", "workRemoteAllowed", "workplaceTypes")
+_DESCRIPTION_KEYS = (
+    "description", "jobDescription", "descriptionText",
+    "snippet", "jobDescriptionText",              # Indeed
+    "descriptionFragments", "jobDescriptionHtml",  # Glassdoor
+)
+_URL_KEYS = (
+    "jobPostingUrl", "applyUrl", "companyApplyUrl", "url", "link",
+    "jobUrl", "viewJobLink", "externalPath",      # Indeed / Workday
+)
+_ID_KEYS = (
+    "jobPostingId", "entityUrn", "trackingUrn", "referenceId", "id",
+    "jobkey", "jobKey",                           # Indeed
+    "listingId", "jobListingId",                  # Glassdoor
+    "bulletFields",                               # Workday requisition ids
+)
+_REMOTE_KEYS = (
+    "workplaceType", "workRemoteAllowed", "workplaceTypes",
+    "remoteWorkModelType", "isRemote", "remoteType",
+)
 # Voyager sends pay the guest API never does, in a nested object whose exact
 # path moves around. Read shape-first like everything else here: find the
 # object that has a min or a max and a currency, wherever it is sitting.
@@ -109,6 +168,14 @@ def _first(node: dict, keys: tuple) -> str:
     return ""
 
 
+# An opaque posting id that is not a number. LinkedIn's are numeric urns;
+# Indeed's `jobkey` is a 16-character alphanumeric string, and reading only
+# numbers left every harvested Indeed job with no id — which drops it to
+# URL-only dedupe, so the same posting re-inserts itself whenever the URL
+# picks up a different tracking parameter.
+_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,}$")
+
+
 def _job_id(node: dict) -> str:
     for key in _ID_KEYS:
         raw = _text(node.get(key))
@@ -118,6 +185,10 @@ def _job_id(node: dict) -> str:
         if match:
             return match.group(1)
         if raw.isdigit():
+            return raw
+        # Requiring a digit keeps this from matching an ordinary word that
+        # happens to be sitting under a key named "id".
+        if _OPAQUE_ID_RE.match(raw) and any(c.isdigit() for c in raw):
             return raw
     return ""
 
@@ -338,8 +409,9 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         # savepoint contains anything that still slips through.
         try:
             with db.begin_nested():
+                source = data.get("source") or HARVEST_SOURCE
                 existing = find_existing_job(
-                    db, HARVEST_SOURCE, url, source_job_id, dedupe_hash
+                    db, source, url, source_job_id, dedupe_hash
                 )
                 if existing is not None:
                     _apply_salary(existing, data)
@@ -348,7 +420,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     if url in existing.source_urls or (
                         source_job_id
                         and existing.source_job_id == source_job_id
-                        and existing.source == HARVEST_SOURCE
+                        and existing.source == source
                     ):
                         old_length = len(existing.description or "")
                         if description and len(description) > old_length:
@@ -364,7 +436,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     continue
 
                 job = Job(
-                    source=HARVEST_SOURCE,
+                    source=source,
                     source_job_id=source_job_id,
                     source_urls=[url],
                     title=title,

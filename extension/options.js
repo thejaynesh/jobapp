@@ -15,6 +15,9 @@ const els = {
   enabled: document.getElementById("enabled"),
   resolveLinks: document.getElementById("resolveLinks"),
   harvest: document.getElementById("harvest"),
+  harvestIndeed: document.getElementById("harvestIndeed"),
+  harvestGlassdoor: document.getElementById("harvestGlassdoor"),
+  harvestWorkday: document.getElementById("harvestWorkday"),
   useTabs: document.getElementById("useTabs"),
   overlay: document.getElementById("overlay"),
   save: document.getElementById("save"),
@@ -38,6 +41,29 @@ const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
 
 /** Harvest needs one site, not the web. Asked for separately for that reason. */
 const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
+
+/**
+ * Every site harvesting can read, one row each.
+ *
+ * A row per site rather than one wildcard: "read every job board you visit" is
+ * a different thing to consent to than "read LinkedIn", so each is asked for
+ * separately, shown separately, and given back separately. LinkedIn keeps the
+ * original `harvest` storage key so existing installs need no migration.
+ */
+const HARVEST_SITES = [
+  { key: "harvest", el: "harvest", origins: ["https://www.linkedin.com/*"] },
+  { key: "harvestIndeed", el: "harvestIndeed", origins: ["https://*.indeed.com/*"] },
+  {
+    key: "harvestGlassdoor",
+    el: "harvestGlassdoor",
+    origins: ["https://*.glassdoor.com/*"],
+  },
+  {
+    key: "harvestWorkday",
+    el: "harvestWorkday",
+    origins: ["https://*.myworkdayjobs.com/*"],
+  },
+];
 
 /** Where the overlay draws. Named boards rather than a wildcard. */
 const OVERLAY_HOSTS = {
@@ -73,16 +99,24 @@ function originPattern(url) {
 
 async function load() {
   const stored = await chrome.storage.local.get({
-    serverUrl: "", token: "", enabled: false, harvest: false, overlay: false,
+    serverUrl: "", token: "", enabled: false, overlay: false,
     useTabs: true, agentId: "", status: {},
+    ...Object.fromEntries(HARVEST_SITES.map((site) => [site.key, false])),
   });
   els.serverUrl.value = stored.serverUrl;
   els.token.value = stored.token;
   els.enabled.checked = stored.enabled;
   els.agent.textContent = stored.agentId || "—";
   els.resolveLinks.checked = await chrome.permissions.contains(BROAD_HOSTS);
-  els.harvest.checked =
-    stored.harvest && (await chrome.permissions.contains(HARVEST_HOSTS));
+  // A ticked box with the permission revoked out from under it is a lie, so
+  // each one is shown as the AND of the two.
+  for (const site of HARVEST_SITES) {
+    const box = els[site.el];
+    if (!box) continue;
+    box.checked =
+      Boolean(stored[site.key]) &&
+      (await chrome.permissions.contains({ origins: site.origins }));
+  }
   els.overlay.checked =
     stored.overlay && (await chrome.permissions.contains(OVERLAY_HOSTS));
   els.useTabs.checked = stored.useTabs;
@@ -142,17 +176,20 @@ async function save() {
     await chrome.permissions.remove(BROAD_HOSTS);
   }
 
-  // Harvest, same shape: the permission follows the checkbox both ways, and
-  // the content scripts follow the permission.
-  const hasHarvest = await chrome.permissions.contains(HARVEST_HOSTS);
-  if (els.harvest.checked && !hasHarvest) {
-    if (!(await chrome.permissions.request(HARVEST_HOSTS))) {
-      els.harvest.checked = false;
+  // Harvest, same shape, once per site: the permission follows the checkbox
+  // both ways, and the content scripts follow the permission.
+  for (const site of HARVEST_SITES) {
+    const box = els[site.el];
+    if (!box) continue;
+    const hosts = { origins: site.origins };
+    const held = await chrome.permissions.contains(hosts);
+    if (box.checked && !held) {
+      if (!(await chrome.permissions.request(hosts))) box.checked = false;
+    } else if (!box.checked && held && !els.resolveLinks.checked) {
+      // Broad access already covers these hosts, so only give one back when
+      // it is not being kept alive by the other toggle anyway.
+      await chrome.permissions.remove(hosts);
     }
-  } else if (!els.harvest.checked && hasHarvest && !els.resolveLinks.checked) {
-    // Broad access already covers linkedin.com, so only give this one back
-    // when it is not being kept alive by the other toggle anyway.
-    await chrome.permissions.remove(HARVEST_HOSTS);
   }
   const hasOverlay = await chrome.permissions.contains(OVERLAY_HOSTS);
   if (els.overlay.checked && !hasOverlay) {
@@ -164,7 +201,12 @@ async function save() {
   }
 
   await chrome.storage.local.set({
-    harvest: els.harvest.checked,
+    ...Object.fromEntries(
+      HARVEST_SITES.filter((site) => els[site.el]).map((site) => [
+        site.key,
+        els[site.el].checked,
+      ]),
+    ),
     overlay: els.overlay.checked,
     useTabs: els.useTabs.checked,
   });

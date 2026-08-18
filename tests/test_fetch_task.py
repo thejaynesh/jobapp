@@ -42,8 +42,16 @@ def _std_job(*, title="SWE", company="ACME", location="NYC",
 # Orchestrator tests
 # ---------------------------------------------------------------------------
 
-def _patch_adapters(jobs=None, side_effect=None):
-    """Patch the adapter runner (returns (jobs, stats)) and skip LLM query expansion."""
+def _patch_adapters(jobs=None, side_effect=None, stats=None):
+    """
+    Patch the adapter runner (returns (jobs, stats)) and skip LLM query expansion.
+
+    `stats` defaults to marking every source of the supplied jobs as having
+    run. The real runner always records an entry per source, and board yield is
+    only counted for ATSes a run actually polled — so an empty stats dict here
+    would mean "this run touched nothing", which is not what these tests are
+    describing.
+    """
     from contextlib import ExitStack
     stack = ExitStack()
     stack.enter_context(patch(
@@ -54,8 +62,14 @@ def _patch_adapters(jobs=None, side_effect=None):
         stack.enter_context(patch(
             "app.services.job_fetcher._run_all_adapters", side_effect=side_effect))
     else:
+        jobs = jobs or []
+        if stats is None:
+            stats = {
+                job.get("source", ""): {"count": 0, "errors": [], "enabled": True}
+                for job in jobs if job.get("source")
+            }
         stack.enter_context(patch(
-            "app.services.job_fetcher._run_all_adapters", return_value=(jobs or [], {})))
+            "app.services.job_fetcher._run_all_adapters", return_value=(jobs, stats)))
     return stack
 
 
@@ -197,19 +211,38 @@ class TestFetchJobsTask:
         assert result == {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0}
 
     def test_beat_schedule_configured(self):
+        """
+        The schedule runs the three groups, not one task for everything —
+        that is the whole point of the split, and scheduling the combined task
+        as well would fetch everything twice.
+        """
         from app.celery_app import celery_app
         schedule = celery_app.conf.beat_schedule
-        assert "fetch-jobs-every-5-hours" in schedule
-        entry = schedule["fetch-jobs-every-5-hours"]
-        assert entry["task"] == "app.tasks.fetch.fetch_jobs"
+        for key, task in (
+            ("fetch-api-sources", "app.tasks.fetch.fetch_api_sources"),
+            ("fetch-ats-boards", "app.tasks.fetch.fetch_ats_boards"),
+            ("fetch-browser-tier", "app.tasks.fetch.fetch_browser_tier"),
+        ):
+            assert key in schedule, key
+            assert schedule[key]["task"] == task
 
     def test_beat_schedule_interval_matches_config(self):
         from app.celery_app import celery_app
         from app.config import settings
         schedule = celery_app.conf.beat_schedule
-        entry = schedule["fetch-jobs-every-5-hours"]
-        expected_seconds = settings.FETCH_INTERVAL_HOURS * 3600
-        assert entry["schedule"].seconds == expected_seconds
+        for key, hours in (
+            ("fetch-api-sources", settings.FETCH_API_INTERVAL_HOURS),
+            ("fetch-ats-boards", settings.FETCH_BOARDS_INTERVAL_HOURS),
+            ("fetch-browser-tier", settings.FETCH_BROWSER_INTERVAL_HOURS),
+        ):
+            assert schedule[key]["schedule"].seconds == hours * 3600, key
+
+    def test_the_cheap_tier_refreshes_more_often_than_the_expensive_one(self):
+        # If they were equal the split would have bought nothing.
+        from app.config import settings
+
+        assert (settings.FETCH_API_INTERVAL_HOURS
+                < settings.FETCH_BROWSER_INTERVAL_HOURS)
 
 
 class TestStaleJobFilter:
@@ -758,3 +791,125 @@ class TestSlugHarvestWiring:
             with _patch_adapters([_std_job()]):
                 result = fetch_and_save_jobs(db)
         assert result["inserted"] == 1
+
+
+class TestFetchGroups:
+    """
+    One 47-minute task fetched everything, so Adzuna — an API call that could
+    refresh hourly — ran on the schedule of a Chromium launch, and every
+    posting arrived hours later than it could have.
+    """
+
+    def test_every_source_belongs_to_exactly_one_group(self):
+        from app.routers.runs import TRIGGERABLE_SOURCES
+        from app.services.job_fetcher import SOURCE_GROUPS
+
+        seen = [s for group in SOURCE_GROUPS.values() for s in group]
+        assert len(seen) == len(set(seen)), "a source is in two groups"
+        # Every source the UI can trigger has a home, or the scheduled groups
+        # would silently stop fetching it.
+        assert set(TRIGGERABLE_SOURCES) == set(seen)
+
+    def test_a_group_resolves_to_its_sources(self):
+        from app.services.job_fetcher import SOURCE_GROUPS, group_sources
+
+        assert group_sources("api") == set(SOURCE_GROUPS["api"])
+        assert group_sources(None) is None
+        assert group_sources("all") is None
+
+    def test_an_unknown_group_is_refused_rather_than_silently_fetching_nothing(self):
+        import pytest
+        from app.services.job_fetcher import group_sources
+
+        with pytest.raises(ValueError, match="Unknown fetch group"):
+            group_sources("browsers")
+
+    def test_a_group_run_only_calls_its_own_sources(self, db):
+        from unittest.mock import patch
+        from app.config import settings
+        from app.services.job_fetcher import _run_all_adapters, group_sources
+
+        _, stats = _run_all_adapters(
+            ["SWE"], ["NYC"], settings, ats_slugs={},
+            only=group_sources("browser"),
+        )
+        assert stats["adzuna"]["enabled"] is False
+        assert stats["greenhouse"]["enabled"] is False
+
+    def test_the_run_records_which_group_it_was(self, db):
+        from unittest.mock import patch
+        from app.models.fetch_run import FetchRun
+        from app.models.profile import Profile
+        from app.services.job_fetcher import fetch_and_save_jobs
+
+        db.add(Profile(data={"target_roles": ["Backend Engineer"], "skills": {}}))
+        db.commit()
+
+        with patch("app.services.job_fetcher._run_all_adapters",
+                   return_value=([], {})):
+            result = fetch_and_save_jobs(db, group="api")
+
+        assert result["group"] == "api"
+        run = db.query(FetchRun).order_by(FetchRun.started_at.desc()).first()
+        assert run.group == "api"
+
+    def test_a_run_that_skipped_an_ats_does_not_count_it_as_empty(self, db):
+        """
+        The bug the split would have made routine: a run that never touched
+        Greenhouse has no evidence about any Greenhouse board, and counting its
+        silence would tick every one of them toward retirement — eight
+        API-only cycles would have retired the whole registry.
+        """
+        from app.services.company_boards import record_boards
+        from app.models.company_board import CompanyBoard
+        from app.services.job_fetcher import _update_board_registry
+
+        record_boards(db, {"greenhouse": ["acme"]}, origin="configured")
+        db.flush()
+        board = db.query(CompanyBoard).filter(CompanyBoard.slug == "acme").one()
+
+        _update_board_registry(
+            db, raw_jobs=[], ats_slugs={"greenhouse": ["acme"]},
+            # An API-group run: greenhouse was not polled.
+            source_stats={"greenhouse": {"count": 0, "errors": [], "enabled": False}},
+            resolve_stats=None, updated_data={},
+        )
+        db.flush()
+        db.refresh(board)
+        assert board.consecutive_empty == 0
+
+    def test_a_run_that_did_poll_an_ats_still_counts_its_silence(self, db):
+        from app.services.company_boards import record_boards
+        from app.models.company_board import CompanyBoard
+        from app.services.job_fetcher import _update_board_registry
+
+        record_boards(db, {"greenhouse": ["quiet"]}, origin="configured")
+        db.flush()
+        board = db.query(CompanyBoard).filter(CompanyBoard.slug == "quiet").one()
+
+        _update_board_registry(
+            db, raw_jobs=[], ats_slugs={"greenhouse": ["quiet"]},
+            source_stats={"greenhouse": {"count": 0, "errors": [], "enabled": True}},
+            resolve_stats=None, updated_data={},
+        )
+        db.flush()
+        db.refresh(board)
+        assert board.consecutive_empty == 1
+
+    def test_each_group_has_its_own_lock(self):
+        # A single key would have the hourly API run blocked by the
+        # twice-daily browser tier, which is most of what the split was for.
+        from app.tasks.fetch import GROUP_LOCK_KEYS
+
+        assert len(set(GROUP_LOCK_KEYS.values())) == len(GROUP_LOCK_KEYS)
+
+    def test_the_schedule_runs_the_groups_not_the_monolith(self):
+        from app.celery_app import celery_app
+
+        scheduled = {e["task"] for e in celery_app.conf.beat_schedule.values()}
+        assert "app.tasks.fetch.fetch_api_sources" in scheduled
+        assert "app.tasks.fetch.fetch_ats_boards" in scheduled
+        assert "app.tasks.fetch.fetch_browser_tier" in scheduled
+        # The combined task stays for the manual trigger, but nothing schedules
+        # it — that would run everything twice.
+        assert "app.tasks.fetch.fetch_jobs" not in scheduled

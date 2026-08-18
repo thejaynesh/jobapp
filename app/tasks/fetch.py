@@ -1,46 +1,114 @@
+"""
+Fetching, in three slices rather than one.
+
+The whole pipeline used to be a single 47-minute task, which meant a source
+that could refresh hourly ran on the schedule of the slowest thing beside it:
+Adzuna waited behind a Chromium launch, and every posting arrived hours later
+than it could have. Each group now has its own task, its own lock and its own
+cadence, and each writes its own `fetch_runs` row so a run's numbers are
+comparable to the right other runs.
+
+The combined entry point stays, because the manual trigger on `/runs` wants
+"everything" and "just this adapter" more often than it wants a group.
+"""
+
 import logging
 
 from app.celery_app import celery_app
+from app.config import settings
 from app.database import SessionLocal
-from app.services.fetch_lock import acquire, release
-from app.services.job_fetcher import fetch_and_save_jobs
+from app.services.fetch_lock import LOCK_KEY, acquire, release
+from app.services.job_fetcher import ALL_GROUPS, fetch_and_save_jobs
 
 logger = logging.getLogger(__name__)
 
 _EMPTY = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0}
 
+# A lock per group, plus the shared one.
+#
+# Groups do not conflict with each other — they touch disjoint sources — so a
+# single key would have the hourly API run blocked by the twice-daily browser
+# tier, which is most of what this split was for. They all take the combined
+# key as well, so a manual "fetch everything" and a scheduled group still
+# cannot overlap.
+GROUP_LOCK_KEYS = {group: f"jobapp:fetch:{group}" for group in ALL_GROUPS}
 
-@celery_app.task(name="app.tasks.fetch.fetch_jobs", bind=True, max_retries=0)
-def fetch_jobs(self, only: list[str] | None = None, match_after: bool = True) -> dict:
-    """
-    One fetch cycle.
 
-    `only` restricts the run to the named sources — the scheduled cycle passes
-    nothing and fetches everything, while a manual test run can ask for one
-    adapter and finish in seconds.
+def _run(group: str | None, only: list[str] | None, match_after: bool) -> dict:
+    """One cycle, under whichever locks this run needs."""
+    keys = [LOCK_KEY] if group in (None, "all") else [GROUP_LOCK_KEYS[group], LOCK_KEY]
 
-    Held under a lock so a manual trigger can't overlap the scheduled cycle:
-    two at once would double every outbound request and make the per-source
-    numbers meaningless.
-    """
-    if not acquire():
-        logger.warning("fetch_jobs: another fetch is already running; skipping")
-        return {**_EMPTY, "skipped_reason": "already running"}
+    held: list[str] = []
+    for key in keys:
+        if not acquire(key=key):
+            for taken in held:
+                release(key=taken)
+            logger.warning(
+                "fetch_jobs(%s): another fetch holds %s; skipping",
+                group or "all", key,
+            )
+            return {**_EMPTY, "skipped_reason": "already running"}
+        held.append(key)
 
     db = SessionLocal()
     try:
-        result = fetch_and_save_jobs(db, only=set(only) if only else None)
+        result = fetch_and_save_jobs(
+            db, only=set(only) if only else None, group=group
+        )
         logger.info(
-            "fetch_jobs complete — fetched=%d inserted=%d merged=%d skipped=%d",
-            result["fetched"], result["inserted"], result["merged"], result["skipped"],
+            "fetch_jobs(%s) complete — fetched=%d inserted=%d merged=%d skipped=%d",
+            group or "all", result["fetched"], result["inserted"],
+            result["merged"], result["skipped"],
         )
         if match_after:
             from app.tasks.match import match_jobs
             match_jobs.delay()
         return result
     except Exception as exc:
-        logger.error("fetch_jobs task raised unexpectedly: %s", exc)
+        logger.error("fetch_jobs(%s) raised unexpectedly: %s", group or "all", exc)
         return dict(_EMPTY)
     finally:
         db.close()
-        release()
+        for key in reversed(held):
+            release(key=key)
+
+
+@celery_app.task(name="app.tasks.fetch.fetch_jobs", bind=True, max_retries=0)
+def fetch_jobs(self, only: list[str] | None = None, match_after: bool = True,
+               group: str | None = None) -> dict:
+    """
+    One fetch cycle across every source, or a named subset.
+
+    `only` restricts the run to the named sources — the scheduled groups pass
+    nothing and the manual trigger passes what was ticked, which is what makes
+    verifying one adapter take seconds instead of minutes.
+
+    Held under a lock so a manual trigger can't overlap a scheduled cycle: two
+    at once would double every outbound request and make the per-source numbers
+    meaningless.
+    """
+    return _run(group, only, match_after)
+
+
+# ---------------------------------------------------------------------------
+# The scheduled groups
+# ---------------------------------------------------------------------------
+
+@celery_app.task(name="app.tasks.fetch.fetch_api_sources", bind=False, max_retries=0)
+def fetch_api_sources() -> dict:
+    """The cheap tier: keyed APIs and public feeds. Minutes, so run it often."""
+    return _run("api", None, True)
+
+
+@celery_app.task(name="app.tasks.fetch.fetch_ats_boards", bind=False, max_retries=0)
+def fetch_ats_boards() -> dict:
+    """The company board registry: hundreds of slugs, one request each."""
+    return _run("boards", None, True)
+
+
+@celery_app.task(name="app.tasks.fetch.fetch_browser_tier", bind=False, max_retries=0)
+def fetch_browser_tier() -> dict:
+    """Playwright. The most expensive thing here, and the least urgent."""
+    if not settings.BROWSER_TIER_ENABLED:
+        return {**_EMPTY, "skipped_reason": "disabled"}
+    return _run("browser", None, True)

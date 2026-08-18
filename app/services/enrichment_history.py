@@ -160,9 +160,11 @@ def linkedin_state(db: Session) -> dict:
     """
     from app.models.job import Job
 
+    from app.services.harvest import HARVEST_SOURCES
+
     try:
         harvested = db.query(func.count(Job.id)).filter(
-            Job.source == "linkedin_harvest"
+            Job.source.in_(sorted(set(HARVEST_SOURCES.values())))
         ).scalar() or 0
         missing = db.query(func.count(Job.id)).filter(
             Job.source == "linkedin",

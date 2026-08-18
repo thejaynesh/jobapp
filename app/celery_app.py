@@ -48,9 +48,21 @@ celery_app.conf.update(
 )
 
 celery_app.conf.beat_schedule = {
-    "fetch-jobs-every-5-hours": {
-        "task": "app.tasks.fetch.fetch_jobs",
-        "schedule": celery_schedule(settings.FETCH_INTERVAL_HOURS * 3600),
+    # Fetching in three slices rather than one. The combined task still exists
+    # for the manual trigger, but nothing schedules it: one 47-minute cycle
+    # meant Adzuna refreshed on the schedule of a Chromium launch, and every
+    # posting arrived hours later than it could have.
+    "fetch-api-sources": {
+        "task": "app.tasks.fetch.fetch_api_sources",
+        "schedule": celery_schedule(settings.FETCH_API_INTERVAL_HOURS * 3600),
+    },
+    "fetch-ats-boards": {
+        "task": "app.tasks.fetch.fetch_ats_boards",
+        "schedule": celery_schedule(settings.FETCH_BOARDS_INTERVAL_HOURS * 3600),
+    },
+    "fetch-browser-tier": {
+        "task": "app.tasks.fetch.fetch_browser_tier",
+        "schedule": celery_schedule(settings.FETCH_BROWSER_INTERVAL_HOURS * 3600),
     },
     # Matching used to happen only as a tail-call from a fetch, so a pass that
     # did not finish left jobs sitting as `new` until the next fetch hours

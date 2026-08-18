@@ -136,7 +136,7 @@ SELECT title, company, location,
        coalesce(length(description), 0) AS desc_len,
        left(regexp_replace(coalesce(description, ''), '\s+', ' ', 'g'), 300) AS desc_sample
 FROM jobs
-WHERE source = 'linkedin_harvest'
+WHERE source LIKE '%\_harvest'
 ORDER BY fetched_at DESC
 LIMIT 5;
 \x off

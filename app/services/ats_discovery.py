@@ -96,11 +96,32 @@ _WORKDAY_RE = re.compile(
 # All ATS kinds we can fetch directly (patterned single-slug ones plus workday).
 ALL_ATS = frozenset(ATS_PATTERNS) | {"workday"}
 
-# Path segments and subdomains that match the patterns but aren't company slugs.
-_SLUG_BLOCKLIST = frozenset({
+# Things that match the URL patterns but are not a company board.
+#
+# Two kinds, and the second is the one that cost us. Structural path segments
+# ("embed", "api") were always here. The job boards and trackers were not, so
+# `greenhouse/linkedin`, `greenhouse/appcast` and `greenhouse/stepstone` all
+# got registered as companies and polled every cycle for months — a slug
+# scraped off an aggregator's own page, which was never a company to begin
+# with.
+SLUG_BLOCKLIST = frozenset({
+    # Structural
     "embed", "api", "static", "assets", "www", "app", "jobs", "j", "widget",
     "careers", "share", "hire", "docs", "help", "blog", "wday", "job", "login",
+    "search", "apply", "posting", "postings", "board", "boards", "company",
+    "companies", "index", "home", "about", "contact", "support", "status",
+    "cdn", "media", "images", "img", "signup", "signin", "auth", "account",
+    # Aggregators, job boards and click trackers — never employers
+    "linkedin", "indeed", "glassdoor", "ziprecruiter", "simplyhired", "monster",
+    "appcast", "recruitics", "stepstone", "justjoin", "justjoinit", "adzuna",
+    "jooble", "careerjet", "talent", "neuvoo", "dice", "wellfound", "angellist",
+    "remoteok", "weworkremotely", "themuse", "himalayas", "jobicy", "arbeitnow",
+    "remotive", "hiringcafe", "workatastartup", "ycombinator", "levels",
+    "builtin", "otta", "welcometothejungle", "totaljobs", "reed", "seek",
 })
+
+# Kept under the old private name so nothing that imported it breaks.
+_SLUG_BLOCKLIST = SLUG_BLOCKLIST
 
 
 def _extract_slugs(text: str) -> dict[str, set[str]]:

@@ -56,6 +56,19 @@ def _auth_disabled_by_default(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
 
 
+@pytest.fixture(autouse=True)
+def _board_validation_off_by_default(monkeypatch):
+    """
+    Board validation probes real ATS APIs, one request per unproven board.
+
+    That is right in production and wrong in a test: a fetch cycle records
+    hundreds of boards from the community slug lists, and validating them would
+    put hundreds of live requests inside a unit test. `tests/test_company_boards
+    .py` exercises the validation logic directly with the probe stubbed.
+    """
+    monkeypatch.setattr(settings, "ATS_BOARD_VALIDATION", False)
+
+
 @pytest.fixture
 def client(db):
     from app.main import app
