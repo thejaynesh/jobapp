@@ -87,6 +87,13 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.generate.sweep_generations",
         "schedule": celery_schedule(settings.GENERATION_STUCK_MINUTES * 60),
     },
+    # Rewrites documents that were written before enrichment brought the real
+    # posting in. Only for applications the user has not acted on — sent is
+    # sent, and the file on disk is the record of what the employer received.
+    "refresh-stale-documents": {
+        "task": "app.tasks.generate.refresh_stale_docs",
+        "schedule": celery_schedule(settings.DOC_REFRESH_INTERVAL_HOURS * 3600),
+    },
     # Prompts carry whole job descriptions, so the LLM log outgrows everything
     # else in the schema if nothing trims it.
     "prune-llm-log": {

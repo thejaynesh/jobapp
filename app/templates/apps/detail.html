@@ -22,14 +22,20 @@
     </p>
     {# The description got meaningfully fuller after these documents were
        written — a merge, a harvest, or an enrichment brought the real JD in.
-       Rewriting is the user's call (the Rewrite button below), never automatic. #}
-    {% set current_docs = app.documents | selectattr('is_current') | list %}
-    {% if app.job.description_updated_at and current_docs
-          and app.job.description_updated_at > (current_docs | map(attribute='created_at') | max) %}
+       The same property the scheduled refresh selects on, so this can't
+       promise a rewrite that never comes. #}
+    {% if app.documents_are_stale %}
     <p class="mt-2 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded px-3 py-2">
       The job description became fuller after these documents were generated
       ({{ app.job.description_updated_at.strftime('%b %d') }}) — they were written
-      from thinner text. Consider the Rewrite button below.
+      from thinner text.
+      {% if app.status.value == 'not_applied' %}
+      A rewrite is queued automatically on the next sweep; the Rewrite button
+      below does it now.
+      {% else %}
+      These are the documents you applied with, so they are left alone —
+      the Rewrite button below replaces them if you want that.
+      {% endif %}
     </p>
     {% endif %}
   </div>

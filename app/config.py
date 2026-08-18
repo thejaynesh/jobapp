@@ -409,6 +409,18 @@ class Settings(BaseSettings):
     # retry it. The sweeper re-queues those.
     GENERATION_STUCK_MINUTES: int = 20
 
+    # Documents written before enrichment brought the real posting in were
+    # tailored to a teaser. This rewrites them on a clock instead of waiting
+    # for the user to notice the badge — but only for applications they have
+    # not acted on; see `services.doc_refresh`.
+    DOC_REFRESH_ENABLED: bool = True
+    DOC_REFRESH_INTERVAL_HOURS: int = 6
+    # Bounded per pass. The first run after enrichment has been going for a
+    # while can find hundreds, and queueing all of them means the documents for
+    # the job the user is looking at right now wait behind refreshes for jobs
+    # they are not.
+    DOC_REFRESH_MAX_PER_RUN: int = 25
+
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates

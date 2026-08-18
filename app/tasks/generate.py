@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 NEEDS_GENERATION = ("idle", "failed")
 
 
-def queue_generation(application_id) -> bool:
+def queue_generation(application_id, feedback: str | None = None) -> bool:
     """
     Ask a worker to write this application's documents.
 
@@ -26,9 +26,13 @@ def queue_generation(application_id) -> bool:
     is a logged failure rather than an exception thrown through whatever was
     happening at the time — a matching pass, in particular, should not lose
     its remaining jobs because Redis blinked between two of them.
+
+    `feedback` is the user's instruction for this rewrite. The automatic
+    refresh passes the last one they gave, so a run it did not ask for cannot
+    quietly undo a run it did.
     """
     try:
-        generate_docs.delay(str(application_id))
+        generate_docs.delay(str(application_id), feedback=feedback)
         return True
     except Exception as exc:
         logger.error("could not queue generation for %s: %s", application_id, exc)
@@ -188,6 +192,30 @@ def sweep_generations() -> dict:
     except Exception as exc:
         logger.error("sweep_generations failed: %s", exc)
         return {"stalled": 0, "never_queued": 0, "error": str(exc)}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.generate.refresh_stale_docs", bind=False)
+def refresh_stale_docs() -> dict:
+    """
+    Rewrite documents that were written from a thinner posting.
+
+    Enrichment goes back for the description the source left out, and it is
+    routinely the difference between an aggregator's teaser and the real
+    posting. The badge for this already existed and put the work on the user:
+    notice it, click Rewrite, once per application. See `services.doc_refresh`
+    for what it refuses to touch and why.
+    """
+    from app.services import doc_refresh
+
+    db = SessionLocal()
+    try:
+        return doc_refresh.refresh_stale_documents(db)
+    except Exception as exc:
+        db.rollback()
+        logger.error("refresh_stale_docs failed: %s", exc)
+        return {"eligible": 0, "queued": 0, "error": str(exc)}
     finally:
         db.close()
 

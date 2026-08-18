@@ -82,6 +82,27 @@ class Application(Base):
         order_by="OutreachMessage.created_at",
     )
 
+    @property
+    def documents_are_stale(self) -> bool:
+        """
+        Whether the live documents were written before the posting filled out.
+
+        Enrichment routinely replaces a 500-character teaser with the real
+        posting, and anything generated before that arrived was tailored to
+        requirements nobody had read yet.
+
+        One definition, two readers: the badge on the application page renders
+        from this, and `services.doc_refresh` selects on it. A badge that says
+        "stale" over documents the refresh will not touch is worse than no
+        badge at all.
+        """
+        grew_at = getattr(self.job, "description_updated_at", None) if self.job else None
+        if grew_at is None:
+            return False
+        written = [doc.created_at for doc in (self.documents or [])
+                   if doc.is_current and doc.created_at is not None]
+        return bool(written) and max(written) < grew_at
+
 
 class ApplicationDocument(Base):
     __tablename__ = "application_documents"
