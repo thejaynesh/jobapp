@@ -1030,6 +1030,55 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
             selected_experience=selected_experience, selected_projects=selected_projects,
         )
 
+    # Read the whole draft back as the recruiter would, and act on what that
+    # finds. Placed here on purpose: before the ATS keyword pass below, so that
+    # pass still gets the last word on coverage — keyword presence is
+    # mechanical and this is judgement, and the mechanical check should not be
+    # invalidated by a rewrite it never saw.
+    from app.services import self_review
+
+    if self_review.enabled():
+        with phase("doc_critique"):
+            notes = self_review.critique(
+                job.title, job.company, job.description or "",
+                tailored_bullets, tailored_summary, cover_body,
+                api_key, base_url, model, insights=insights,
+            )
+
+        resume_notes = notes.get("resume") or []
+        if resume_notes and tailored_bullets:
+            with phase("doc_revise_bullets"):
+                revised = tailor_resume_bullets(
+                    bullet_profile, job.title, job.description or "",
+                    api_key, base_url, model, insights=insights,
+                    feedback=self_review.as_feedback(resume_notes, feedback),
+                )
+            # A revision that came back empty is a failed call, not an opinion
+            # that the bullets should be blank.
+            if revised:
+                tailored_bullets = revised
+        if resume_notes and tailored_summary:
+            with phase("doc_revise_summary"):
+                tailored_summary = tailor_summary(
+                    profile_data, job.title, job.company, insights,
+                    api_key, base_url, model,
+                    feedback=self_review.as_feedback(resume_notes, feedback),
+                ) or tailored_summary
+
+        cover_notes = notes.get("cover_letter") or []
+        if cover_notes and cover_body:
+            with phase("doc_revise_cover"):
+                revised_cover = generate_cover_letter_body(
+                    profile_data, job.company, job.title, job.description or "",
+                    api_key, base_url, model,
+                    insights=insights,
+                    feedback=self_review.as_feedback(cover_notes, feedback),
+                    selected_experience=selected_experience,
+                    selected_projects=selected_projects,
+                )
+            if revised_cover:
+                cover_body = revised_cover
+
     # Resume
     resume_ctx = build_resume_context(
         profile_data,

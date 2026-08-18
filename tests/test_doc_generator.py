@@ -480,6 +480,13 @@ class TestGenerateDocuments:
                 return_value=(Path("/fake/path.pdf"), 1))),
             "compile": stack.enter_context(patch(
                 "app.services.doc_generator.compile_pdf", return_value=Path("/fake/path.pdf"))),
+            # Off unless a test is about it: a live critique call would put a
+            # network round trip inside every generation test, and the revision
+            # pass would rewrite the very kwargs these tests assert on.
+            # `TestSelfReviewInsideAGeneration` below drives it deliberately.
+            "critique": stack.enter_context(patch(
+                "app.services.self_review.critique",
+                return_value={"resume": [], "cover_letter": []})),
         }
         return stack, mocks
 
@@ -531,6 +538,121 @@ class TestGenerateDocuments:
         with stack:
             generate_documents(db, app)
         db.commit.assert_called_once()
+
+
+class TestSelfReviewInsideAGeneration:
+    """
+    The draft gets read back before it is compiled.
+
+    Generation is the one step whose output a human reads and the only one that
+    never had a second look. The care is in the negative cases: a reviewer with
+    nothing to say must cost nothing beyond the one call it took to find out.
+    """
+
+    def _run(self, critique, feedback=None, monkeypatch=None):
+        from app.services.doc_generator import generate_documents
+
+        db = _mock_db_for_generate()
+        app = _make_app()
+        stack, mocks = TestGenerateDocuments()._patches()
+        with stack:
+            mocks["critique"].return_value = critique
+            generate_documents(db, app, feedback=feedback)
+        return mocks
+
+    def test_a_clean_draft_is_left_alone(self):
+        mocks = self._run({"resume": [], "cover_letter": []})
+        # One drafting call each and no more: the reviewer said nothing, so
+        # there is nothing to act on.
+        assert mocks["bullets"].call_count == 1
+        assert mocks["summary"].call_count == 1
+        assert mocks["cover"].call_count == 1
+
+    def test_resume_points_revise_the_resume_only(self):
+        mocks = self._run({
+            "resume": ["The payments bullet names a duty, not an outcome."],
+            "cover_letter": [],
+        })
+        assert mocks["summary"].call_count == 2
+        assert mocks["cover"].call_count == 1
+
+    def test_resume_points_revise_the_bullets(self):
+        from app.services.doc_generator import generate_documents
+
+        db = _mock_db_for_generate()
+        app = _make_app()
+        stack, mocks = TestGenerateDocuments()._patches()
+        drafted = [{"company": "Acme", "title": "SWE", "bullets": ["Did a thing."]}]
+        revised = [{"company": "Acme", "title": "SWE", "bullets": ["Cut latency 20%."]}]
+        with stack, patch(
+            "app.services.doc_generator.build_resume_context",
+            return_value={"profile": {}, "experience": [], "projects": [],
+                          "skills": {}, "skills_ordered": [], "education": [],
+                          "narrative_summary": ""},
+        ) as build_ctx:
+            mocks["critique"].return_value = {
+                "resume": ["The Acme bullet names a duty, not an outcome."],
+                "cover_letter": [],
+            }
+            mocks["bullets"].side_effect = [drafted, revised]
+            generate_documents(db, app)
+
+        assert mocks["bullets"].call_count == 2
+        _, kwargs = mocks["bullets"].call_args
+        assert "names a duty" in kwargs["feedback"]
+        # The revised set is what reaches the resume, not the draft it replaced.
+        assert build_ctx.call_args_list[0][0][1] == revised
+
+    def test_cover_letter_points_revise_the_cover_letter_only(self):
+        mocks = self._run({
+            "resume": [],
+            "cover_letter": ["The opening is a statement of interest."],
+        })
+        assert mocks["cover"].call_count == 2
+        assert mocks["summary"].call_count == 1
+
+    def test_the_revision_carries_the_critique(self):
+        mocks = self._run({
+            "resume": [],
+            "cover_letter": ["Lead with the Kafka pipeline work."],
+        })
+        _, kwargs = mocks["cover"].call_args
+        assert "Lead with the Kafka pipeline work." in kwargs["feedback"]
+
+    def test_the_users_own_feedback_survives_a_revision(self):
+        # A critique must not displace the instruction the user actually gave.
+        mocks = self._run(
+            {"resume": [], "cover_letter": ["Tighten the close."]},
+            feedback="Mention the visa status.",
+        )
+        _, kwargs = mocks["cover"].call_args
+        assert "Tighten the close." in kwargs["feedback"]
+        assert "Mention the visa status." in kwargs["feedback"]
+
+    def test_it_costs_nothing_when_switched_off(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "SELF_REVIEW_ENABLED", False)
+        mocks = self._run({"resume": ["something"], "cover_letter": ["something"]})
+        mocks["critique"].assert_not_called()
+        assert mocks["cover"].call_count == 1
+
+    def test_an_empty_revision_keeps_the_draft(self):
+        # An empty reply is a failed call, not an opinion that the cover letter
+        # should be blank.
+        from app.services.doc_generator import generate_documents
+
+        db = _mock_db_for_generate()
+        app = _make_app()
+        stack, mocks = TestGenerateDocuments()._patches()
+        with stack:
+            mocks["critique"].return_value = {
+                "resume": [], "cover_letter": ["Tighten the close."]}
+            mocks["cover"].side_effect = ["First draft body.", ""]
+            generate_documents(db, app)
+
+        cl_ctx = mocks["render"].call_args_list[-1][0][1]
+        assert "First draft body." in json.dumps(cl_ctx, default=str)
 
 
 # ---------------------------------------------------------------------------

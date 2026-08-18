@@ -421,6 +421,11 @@ class Settings(BaseSettings):
     # they are not.
     DOC_REFRESH_MAX_PER_RUN: int = 25
 
+    # Read the draft back as the recruiter would before compiling it. Document
+    # generation is the one step whose output a human actually reads and the
+    # only one that never got a second look. See `services.self_review`.
+    SELF_REVIEW_ENABLED: bool = True
+
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates
