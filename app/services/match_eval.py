@@ -7,8 +7,14 @@ it cannot catch a regression: a change that improves ten jobs and quietly
 breaks forty looks exactly like a change that improves ten jobs.
 
 So: a fixed set of jobs with a known verdict, scored through the current prompt
-and model, reported as agreement. Run it before a change and after, and the
-difference is the evidence.
+and the provider that actually scores your jobs, reported as agreement. Run it
+before a change and after, and the difference is the evidence.
+
+**Which provider.** Whatever `MATCH_PRIMARY` selects, because a number measured
+against a provider the pipeline is not using is not evidence about the
+pipeline — it is a fact about a road not taken, and it would read as the real
+thing. Passing `--model` overrides that with a named NIM model, which is the
+older "compare two NIM models" question.
 
 **Where the labels come from.** Not from an afternoon of hand-labelling — from
 decisions the user has already made. Applying to a job says it was a good fit;
@@ -232,27 +238,89 @@ class EvalRow:
         return self.status == "ok" and self.verdict == self.predicted
 
 
+def _score_via_provider(provider, job, profile_data: dict) -> tuple[int | None, str]:
+    """
+    Score one job through a configured provider, in `score_with_model`'s shape.
+
+    Routed through `call_provider` rather than the NIM helper for the same
+    reason matching is: that is the path carrying the concurrency gate, and a
+    harness that hammered a one-at-a-time endpoint would be measuring its own
+    timeouts.
+    """
+    from app.llm.providers import call_provider
+    from app.services import llm_log
+    from app.services.matcher import (
+        ResponseParseError,
+        _build_match_prompt,
+        _match_max_tokens,
+        _parse_llm_response,
+    )
+
+    messages = _build_match_prompt(job, profile_data)
+    try:
+        with llm_log.stage("match_eval", job_id=getattr(job, "id", None)):
+            raw = call_provider(
+                provider, messages, temperature=0.1, max_tokens=_match_max_tokens(),
+            )
+    except Exception as exc:
+        logger.warning("match_eval: %s call failed: %s", provider.name, exc)
+        return None, "error"
+
+    try:
+        return _parse_llm_response(raw)["score"], "ok"
+    except ResponseParseError as exc:
+        logger.warning("match_eval: %s gave an unreadable reply: %s", provider.name, exc)
+        return None, "unreadable"
+
+
+def _scorer(profile_data: dict, model: str | None):
+    """
+    How to score, and what to call it in the report.
+
+    With no model named this uses whatever actually scores jobs today — the
+    provider `MATCH_PRIMARY` selects — because that is the entire point of the
+    harness. An agreement figure measured against a provider the pipeline is
+    not using is not evidence about the pipeline; it is a number about a road
+    not taken, and it would read as the real thing.
+
+    Naming a model keeps the older behaviour, which is a NIM model comparison:
+    `--model meta/llama-3.3-70b-instruct` asks what that specific NIM model
+    would do, whatever the primary happens to be.
+    """
+    from app.config import settings
+    from app.llm.providers import primary_matching_provider, provider_label
+    from app.services.model_compare import score_with_model
+
+    if model is None:
+        primary = primary_matching_provider()
+        if primary is not None:
+            return provider_label(primary), (
+                lambda job: _score_via_provider(primary, job, profile_data)
+            )
+
+    named = model or settings.NVIDIA_NIM_MODEL
+    return f"nim/{named}", (lambda job: score_with_model(job, profile_data, named))
+
+
 def run(labels: list[LabelledJob], profile_data: dict,
         model: str | None = None, threshold: int | None = None) -> dict:
     """
-    Score every labelled job through the current prompt and model.
+    Score every labelled job through the current prompt and provider.
 
     Reports the two error directions separately, because they cost different
     things: a false reject is a job the user never sees, and a false accept is
     a document generation and a few minutes of their attention.
     """
-    from app.config import settings
-    from app.services.model_compare import score_with_model
     from app.services.tunables import value as tunable
 
-    model = model or settings.NVIDIA_NIM_MODEL
+    label_for_model, score_one = _scorer(profile_data, model)
     if threshold is None:
         threshold = tunable(profile_data, "min_match_score")
 
     rows: list[EvalRow] = []
     for label in labels:
         job = label.as_job()
-        score, status = score_with_model(job, profile_data, model)
+        score, status = score_one(job)
         predicted = (
             GOOD if (status == "ok" and score is not None and score >= threshold)
             else BAD if status == "ok" else ""
@@ -269,7 +337,7 @@ def run(labels: list[LabelledJob], profile_data: dict,
     false_accepts = [r for r in scored if r.verdict == BAD and r.predicted == GOOD]
 
     return {
-        "model": model,
+        "model": label_for_model,
         "threshold": threshold,
         "labels": len(rows),
         "scored": len(scored),

@@ -5,9 +5,17 @@ Build the fixture once from decisions you have already made:
 
     docker compose -f docker-compose.prod.yml exec web python -m app.tasks.match_eval --build
 
-then run it before and after any prompt or model change:
+then run it before and after any prompt or provider change:
 
     docker compose -f docker-compose.prod.yml exec web python -m app.tasks.match_eval
+
+With no --model it scores through whatever actually scores your jobs — the
+provider MATCH_PRIMARY selects. That is the number worth comparing before and
+after, because an agreement figure measured against a provider the pipeline is
+not using is not evidence about the pipeline.
+
+--model asks a specific NVIDIA NIM model instead, whatever the primary is:
+
     docker compose -f docker-compose.prod.yml exec web python -m app.tasks.match_eval --model meta/llama-3.3-70b-instruct
 
 The fixture is a plain JSON file. Edit it, add jobs by hand, delete the ones
@@ -57,7 +65,8 @@ def main() -> None:
     parser.add_argument("--per-side", type=int, default=25,
                         help="when building: labels per class (default: 25)")
     parser.add_argument("--model", default=None,
-                        help="score with this model instead of the configured one")
+                        help="score with this NVIDIA NIM model instead of the "
+                             "provider MATCH_PRIMARY selects")
     parser.add_argument("--path", default=str(match_eval.DEFAULT_PATH),
                         help=f"label file (default: {match_eval.DEFAULT_PATH})")
     args = parser.parse_args()

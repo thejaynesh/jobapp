@@ -168,3 +168,80 @@ class TestPacing:
         # we are not calling is throttling the pass for nothing.
         monkeypatch.setattr(settings, "MATCH_PRIMARY", "freeinference")
         assert matcher.match_pace_seconds() == 0.0
+
+
+class TestTheQualityHarnessFollowsIt:
+    """
+    `match_eval` measures whether the matcher still agrees with you. It has to
+    measure the provider that actually scores your jobs — an agreement figure
+    against one the pipeline is not using is a fact about a road not taken, and
+    it reads exactly like the real thing.
+    """
+
+    LABELS = [
+        {"verdict": "good", "title": "Backend Engineer", "company": "Acme",
+         "description": "Python and Go." * 40},
+    ]
+
+    def _labels(self):
+        from app.services import match_eval
+
+        return [match_eval.LabelledJob(verdict="good", fields=self.LABELS[0])]
+
+    def test_it_uses_the_primary_provider_by_default(self, free, monkeypatch):
+        from app.services import match_eval
+
+        monkeypatch.setattr(settings, "MATCH_PRIMARY", "freeinference")
+
+        with patch("app.llm.providers.call_provider", return_value=REPLY) as call, \
+             patch("app.services.model_compare.score_with_model") as nim:
+            result = match_eval.run(self._labels(), {}, threshold=60)
+
+        assert result["model"] == "freeinference/glm-5-turbo"
+        assert result["agreement"] == 100.0
+        call.assert_called_once()
+        nim.assert_not_called()
+
+    def test_it_uses_nim_when_nim_is_primary(self, free, monkeypatch):
+        from app.services import match_eval
+
+        monkeypatch.setattr(settings, "MATCH_PRIMARY", "nim")
+        monkeypatch.setattr(settings, "NVIDIA_NIM_MODEL", "z-ai/glm-5.2")
+
+        with patch("app.services.model_compare.score_with_model",
+                   return_value=(82, "ok")) as nim:
+            result = match_eval.run(self._labels(), {}, threshold=60)
+
+        assert result["model"] == "nim/z-ai/glm-5.2"
+        nim.assert_called_once()
+
+    def test_naming_a_model_still_asks_that_nim_model(self, free, monkeypatch):
+        # The older question — "what would this other NIM model do?" — survives
+        # the change, whatever the primary happens to be.
+        from app.services import match_eval
+
+        monkeypatch.setattr(settings, "MATCH_PRIMARY", "freeinference")
+
+        with patch("app.services.model_compare.score_with_model",
+                   return_value=(82, "ok")) as nim, \
+             patch("app.llm.providers.call_provider") as gated:
+            result = match_eval.run(
+                self._labels(), {}, model="meta/llama-3.3-70b-instruct", threshold=60,
+            )
+
+        assert result["model"] == "nim/meta/llama-3.3-70b-instruct"
+        nim.assert_called_once()
+        gated.assert_not_called()
+
+    def test_the_report_names_the_provider_it_measured(self, free, monkeypatch):
+        # Otherwise two runs are two numbers with no way to tell what changed.
+        from app.services import match_eval
+
+        monkeypatch.setattr(settings, "MATCH_PRIMARY", "freeinference")
+
+        with patch("app.llm.providers.call_provider", return_value=REPLY):
+            report = match_eval.format_report(
+                match_eval.run(self._labels(), {}, threshold=60)
+            )
+
+        assert "freeinference/glm-5-turbo" in report
