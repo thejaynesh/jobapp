@@ -16,6 +16,11 @@ templates = Jinja2Templates(directory="app/templates")
 # Enough to see a trend without turning the page into a wall.
 DEFAULT_RUNS_SHOWN = 15
 ROLLUP_WINDOW = 20
+# Days of agent events to summarise. A week, because the question this answers
+# is "has the extension been working lately" — a day is too short to tell a
+# quiet weekend from a broken install, and a month buries a break that started
+# on Tuesday.
+AGENT_WINDOW_DAYS = 7
 
 # NIM models worth comparing for job matching, current default first.
 #
@@ -91,6 +96,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "source_groups": _source_group_labels(),
             "triggered": None,
             "system": _system_context(db),
+            **_agent_context(db),
             **_enrichment_context(db),
             **{k: v for k, v in _compare_context(request, db).items()
                if k != "request"},
@@ -136,6 +142,30 @@ def _enrichment_context(db: Session) -> dict:
             "enrichment_runs": [], "enrichment_totals": {},
             "enrichment_backlog": {}, "linkedin_state": {},
         }
+
+
+def _agent_context(db: Session) -> dict:
+    """
+    What the browser extension has been doing.
+
+    Separate from `_system_context`, which answers "is the queue moving" from
+    the task table. This answers "is the extension working", which is a
+    different question and one nothing could answer before: the tasks only
+    record work the server asked for, and most of what the extension does —
+    harvests, autofills, overlay lookups — was never asked for by anyone.
+    """
+    from app.services import agent_events, browser_tasks
+
+    try:
+        return {
+            "agent_events": agent_events.summary(db, days=AGENT_WINDOW_DAYS),
+            "agent_list": browser_tasks.known_agents(db),
+            "agent_window": AGENT_WINDOW_DAYS,
+        }
+    except Exception as exc:
+        logger.warning("runs: agent events unavailable: %s", exc)
+        return {"agent_events": None, "agent_list": [],
+                "agent_window": AGENT_WINDOW_DAYS}
 
 
 def _system_context(db: Session) -> dict:

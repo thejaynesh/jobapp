@@ -287,6 +287,14 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     html = result.get("html") or ""
 
     if not original or not final_url:
+        # Used to return in silence, which put the task on the panel as "done"
+        # with nothing beside it — the exact reading this whole subsystem keeps
+        # producing, where a task that yielded nothing is indistinguishable
+        # from one that never ran.
+        _note(db, task, {
+            "error": "no URL came back"
+            if original else "the task had no URL to resolve",
+        })
         return
 
     # Queued by enrichment rather than by link resolution: the page it brought

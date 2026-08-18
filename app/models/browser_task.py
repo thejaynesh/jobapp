@@ -74,6 +74,10 @@ class BrowserTask(Base):
         # The reaper scans both deadlines.
         Index("ix_browser_tasks_lease_expires_at", "lease_expires_at"),
         Index("ix_browser_tasks_expires_at", "expires_at"),
+        # Finished tasks, oldest first — what the pruner reads. Nothing pruned
+        # this table until there was somewhere else to keep the history, so
+        # this index had no reason to exist before now.
+        Index("ix_browser_tasks_completed_at", "completed_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

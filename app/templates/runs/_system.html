@@ -312,6 +312,17 @@
                 {% elif note.posts_seen is defined %}{{ note.posts_seen }} posts,
                   {{ note.kept }} kept, {{ note.stored }} new{% if note.duplicate %},
                   {{ note.duplicate }} already had{% endif %}
+                {# In-browser enrichment, which is most of what the browser tier
+                   does. This branch did not exist, so the commonest task kind
+                   rendered a blank line — "the panel can't see it", which is
+                   exactly the failure the note was added to prevent. It comes
+                   before `landed_on` because a failed enrichment carries both. #}
+                {% elif note.enriched is defined %}
+                  {% if note.enriched %}+{{ "{:,}".format(note.chars_gained or 0) }} chars
+                    via {{ note.method or "unknown" }}{% if note.requeued_for_matching %},
+                    back in the matching queue{% endif %}
+                  {% else %}no description gained{% if note.reason %} — {{ note.reason }}{% endif %}
+                  {% endif %}
                 {% elif note.landed_on %}→ {{ note.landed_on }}
                   {% if note.jobs_updated %}({{ note.jobs_updated }} job{{ '' if note.jobs_updated == 1 else 's' }}){% endif %}
                 {% endif %}

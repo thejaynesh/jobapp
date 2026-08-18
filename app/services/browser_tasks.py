@@ -214,7 +214,41 @@ def complete(db, task_id, result: dict | None = None, *, agent_id: str = "") -> 
     from app.services.agent_work import ingest
 
     ingest(db, task)
+    _note_event(db, task, "task_done", ok=True)
     return task
+
+
+def _note_event(db, task: BrowserTask, kind: str, *, ok: bool) -> None:
+    """
+    File a finished task in the event log as well as on the task row.
+
+    The row is the detail and is pruned in a fortnight; the event is the count
+    and outlives it. "Which task kinds actually succeed on which hosts" is a
+    question about months, and it was previously answerable only for as long as
+    nobody deleted anything — which, since nothing ever pruned this table, was
+    both the reason it worked and the reason the table grew without bound.
+    """
+    from app.services import agent_events
+
+    payload = task.payload or {}
+    agent_events.record(
+        db, kind,
+        url=payload.get("url") or "",
+        agent_id=task.agent_id or "",
+        ok=ok,
+        summary={
+            "task_kind": task.kind,
+            "attempts": task.attempts,
+            **({"error": (task.error or "")[:300]} if not ok else {}),
+            **({"ingest": (task.result or {}).get("ingest")}
+               if isinstance((task.result or {}).get("ingest"), dict) else {}),
+        },
+    )
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("browser_tasks: could not record a %s event: %s", kind, exc)
 
 
 def fail(
@@ -237,13 +271,19 @@ def fail(
     task.agent_id = None
     task.lease_expires_at = None
 
-    if permanent or task.attempts >= task.max_attempts:
+    retired = permanent or task.attempts >= task.max_attempts
+    if retired:
         task.status = "failed"
         task.completed_at = _now()
     else:
         task.status = "queued"
     db.commit()
     db.refresh(task)
+    # Only when it is actually giving up. A requeued attempt is the retry
+    # working, and counting each one as a failure would make every transient
+    # hiccup look like a broken host.
+    if retired:
+        _note_event(db, task, "task_failed", ok=False)
     return task
 
 
@@ -289,12 +329,29 @@ def record_agent_seen(db, agent_id: str, kinds: list[str] | None) -> None:
     profile = db.query(Profile).first()
     if profile is None:
         return
-    data = dict(profile.data or {})
-    data["agent"] = {
-        "agent_id": agent_id or "anonymous",
+    name = agent_id or "anonymous"
+    seen = {
+        "agent_id": name,
         "kinds": sorted(kinds or []),
         "at": _now().isoformat(),
     }
+    data = dict(profile.data or {})
+    # A map, not a slot. There is routinely more than one browser — a laptop
+    # and a desktop — and a single slot meant they overwrote each other, so
+    # "nothing has polled since Tuesday" got reported about whichever happened
+    # to be second. `agent` stays alongside it as the most recent, because the
+    # status panel and `last_agent` read it.
+    agents = dict(data.get("agents") or {})
+    agents[name[:120]] = seen
+    if len(agents) > 12:
+        # A cap, because an agent_id that is regenerated per browser session
+        # would otherwise grow this blob forever.
+        agents = dict(
+            sorted(agents.items(), key=lambda item: item[1].get("at") or "",
+                   reverse=True)[:12]
+        )
+    data["agents"] = agents
+    data["agent"] = seen
     profile.data = data
     db.commit()
 
@@ -333,6 +390,61 @@ def last_agent(db) -> dict | None:
         "kinds": [],
         "polled": False,
     }
+
+
+def prune(db, days: int | None = None) -> int:
+    """
+    Drop finished tasks older than the retention window.
+
+    This table has never been pruned, and it takes a row for every link
+    resolution and every in-browser enrichment — which is most of what the
+    browser tier does. It grew without bound because a finished task was the
+    only record that the work happened at all; now that `agent_events` keeps
+    the countable history, the row itself is just the payload and the page it
+    came back with, and those are the large parts.
+
+    Returns how many were removed.
+    """
+    days = days if days is not None else int(
+        getattr(settings, "BROWSER_TASK_KEEP_DAYS", 14)
+    )
+    if days <= 0:
+        return 0
+    cutoff = _now() - timedelta(days=days)
+    removed = (
+        db.query(BrowserTask)
+        .filter(
+            # Terminal only. A queued task is not old, it is late, and deleting
+            # it would silently drop work nobody has done yet.
+            BrowserTask.status.in_(("done", "failed", "expired")),
+            BrowserTask.completed_at.isnot(None),
+            BrowserTask.completed_at < cutoff,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    if removed:
+        logger.info("browser_tasks: pruned %d finished task(s) older than %d days",
+                    removed, days)
+    return removed
+
+
+def known_agents(db) -> list[dict]:
+    """
+    Every browser that has polled, newest first.
+
+    `last_agent` answers "is anything connected"; this answers "which of them",
+    which is the question that matters once there is more than one — an agent
+    that stopped a week ago is invisible behind one that polled a second ago.
+    """
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    stored = ((profile.data if profile else {}) or {}).get("agents") or {}
+    if not isinstance(stored, dict):
+        return []
+    rows = [entry for entry in stored.values() if isinstance(entry, dict)]
+    return sorted(rows, key=lambda entry: entry.get("at") or "", reverse=True)
 
 
 def queue_stats(db) -> dict:

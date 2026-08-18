@@ -28,6 +28,7 @@ const els = {
   error: document.getElementById("s-error"),
   kinds: document.getElementById("s-kinds"),
   harvestStatus: document.getElementById("s-harvest"),
+  events: document.querySelector("#events tbody"),
 };
 
 /**
@@ -100,7 +101,7 @@ function originPattern(url) {
 async function load() {
   const stored = await chrome.storage.local.get({
     serverUrl: "", token: "", enabled: false, overlay: false,
-    useTabs: true, agentId: "", status: {},
+    useTabs: true, agentId: "", status: {}, events: [],
     ...Object.fromEntries(HARVEST_SITES.map((site) => [site.key, false])),
   });
   els.serverUrl.value = stored.serverUrl;
@@ -133,6 +134,52 @@ async function load() {
     ? new Date(stored.status.lastPoll).toLocaleString()
     : "never";
   els.error.textContent = stored.status.lastError || "none";
+  renderEvents(stored.events || []);
+}
+
+
+/**
+ * The last few things this browser did.
+ *
+ * Built with DOM calls rather than innerHTML because every value in here —
+ * hostnames, error messages — came off a page we do not control.
+ */
+function renderEvents(events) {
+  if (!els.events) return;
+  els.events.replaceChildren();
+  if (!events.length) {
+    const row = els.events.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 4;
+    cell.textContent =
+      "Nothing yet. Open the panel on a job page, or tick a harvest box above.";
+    cell.className = "host";
+    return;
+  }
+  for (const event of events) {
+    const row = els.events.insertRow();
+    if (event.ok === false) row.className = "failed";
+
+    const when = row.insertCell();
+    when.className = "when";
+    when.textContent = new Date(event.at).toLocaleString(undefined, {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+
+    const kind = row.insertCell();
+    kind.className = "kind";
+    kind.textContent = (event.kind || "").replace(/_/g, " ");
+
+    const host = row.insertCell();
+    host.className = "host";
+    host.textContent = event.host || "";
+
+    const summary = row.insertCell();
+    summary.className = "host";
+    summary.textContent = Object.entries(event.summary || {})
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" ");
+  }
 }
 
 async function save() {

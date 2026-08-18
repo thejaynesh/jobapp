@@ -698,11 +698,78 @@ async function overlayApi(path, body) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Event reporting
+// ---------------------------------------------------------------------------
+
+/**
+ * Tell the server what happened, and remember it here either way.
+ *
+ * Two destinations because they answer different questions. The server's copy
+ * is the one that survives a reinstall and can be counted over weeks. The local
+ * ring buffer is what the options page shows, and it is the only thing that
+ * works when the server is the thing that is broken — which is exactly when
+ * somebody opens the options page.
+ *
+ * Nothing here throws. Reporting that an autofill happened must never be able
+ * to break the autofill.
+ */
+const EVENT_BUFFER_SIZE = 50;
+
+async function reportEvent(kind, { url, ok = true, summary } = {}) {
+  const entry = {
+    kind,
+    // The host, never the page. The server stores it that way for the same
+    // reason: this is a diagnostic, not a browsing history.
+    host: hostOf(url),
+    ok,
+    summary: summary || {},
+    at: new Date().toISOString(),
+  };
+
+  try {
+    const stored = (await chrome.storage.local.get("events")).events || [];
+    await chrome.storage.local.set({
+      events: [entry, ...stored].slice(0, EVENT_BUFFER_SIZE),
+    });
+  } catch (_) {
+    /* storage full or unavailable; the server copy is still worth trying */
+  }
+
+  try {
+    const config = await getConfig();
+    if (!config.serverUrl || !config.token) return;
+    await api("/api/agent/report", {
+      agent_id: await agentId(),
+      events: [entry],
+    });
+  } catch (_) {
+    // Offline is the normal state for half the day. The local buffer already
+    // has it, and losing one diagnostic event is not worth a retry queue.
+  }
+}
+
+function hostOf(url) {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function forwardHarvest(payload, sourceUrl) {
   const config = await getConfig();
   if (!config.serverUrl || !config.token) return;
   try {
-    const counts = await api("/api/agent/harvest", { payload, source_url: sourceUrl });
+    const counts = await api("/api/agent/harvest", {
+      payload,
+      source_url: sourceUrl,
+      // So the server files the event under the browser it came from. Several
+      // can be running, and "harvest stopped working" is usually only true of
+      // one of them.
+      agent_id: await agentId(),
+    });
     if (counts && counts.found) {
       await setStatus({
         lastHarvest: new Date().toISOString(),
@@ -753,6 +820,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab) return false;
     overlayApi(message.path, message.body).then(sendResponse);
     return true;
+  }
+  if (message?.type === "overlay-event") {
+    // From the panel, which knows what it did — whether a fill matched
+    // anything, whether the resume went in. The service worker cannot see any
+    // of that, and neither could the server.
+    if (!sender.tab) return false;
+    reportEvent(message.kind, {
+      url: sender.tab.url,
+      ok: message.ok !== false,
+      summary: message.summary,
+    });
+    return false;
   }
   if (message?.type === "poll-now") {
     pollOnce().then(() => sendResponse({ ok: true }));

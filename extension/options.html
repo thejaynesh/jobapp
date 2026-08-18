@@ -33,6 +33,13 @@
     #status dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; }
     #status dt { color: #666; }
     #status dd { margin: 0; font-variant-numeric: tabular-nums; }
+    #events-panel { margin-top: 16px; font-size: 12px; }
+    #events-panel summary { cursor: pointer; color: #666; }
+    #events { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    #events td { padding: 2px 6px 2px 0; vertical-align: top; border-top: 1px solid #eee; }
+    #events td.when { color: #999; white-space: nowrap; }
+    #events td.host { color: #999; word-break: break-all; }
+    #events tr.failed td.kind { color: #b91c1c; }
   </style>
 </head>
 <body>
@@ -135,6 +142,18 @@
       <dt>Last harvest</dt><dd id="s-harvest">never</dd>
     </dl>
   </div>
+
+  <!-- The last 50 things the extension did, kept here as well as on the
+       server. Two copies because this one works when the server is the thing
+       that is broken — which is exactly when somebody opens this page. -->
+  <details id="events-panel">
+    <summary>Recent activity</summary>
+    <p class="hint">
+      What this browser has done. Also sent to your server, where it is counted
+      over weeks on the <em>Browser agent</em> panel of the Runs page.
+    </p>
+    <table id="events"><tbody></tbody></table>
+  </details>
 
   <script src="options.js"></script>
 </body>

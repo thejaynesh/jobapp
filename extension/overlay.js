@@ -139,6 +139,22 @@
     });
   }
 
+  /**
+   * Tell the service worker what just happened here.
+   *
+   * Fire and forget. The panel is the only thing that knows whether a fill
+   * matched anything or whether the resume went in — the worker cannot see the
+   * page, and the server only ever sees the calls the panel chose to make, so
+   * a fill that recognised nothing was previously invisible from both ends.
+   */
+  function note(kind, summary, ok = true) {
+    try {
+      chrome.runtime.sendMessage({ type: "overlay-event", kind, ok, summary });
+    } catch (_) {
+      /* the worker is asleep or the extension reloaded; not worth a retry */
+    }
+  }
+
   async function open() {
     const box = panel("JobApp");
     line(box, "Checking…");
@@ -146,6 +162,8 @@
     const reply = await ask(
       `/api/agent/job-context?url=${encodeURIComponent(location.href)}`,
     );
+    note("overlay_open", { known: Boolean((reply.data || {}).known) },
+         !reply.error);
     if (reply.error) {
       const box2 = panel("JobApp");
       line(box2, reply.error, "muted");
@@ -291,6 +309,7 @@
   async function attachResume(box, button) {
     const field = resumeInput();
     if (!field) {
+      note("attach_resume", { reason: "no unambiguous file input" }, false);
       line(
         box,
         "There is more than one upload on this page and none of them says " +
@@ -309,6 +328,7 @@
 
     const data = reply.data || {};
     if (reply.error || !data.ok) {
+      note("attach_resume", { reason: reply.error || data.detail }, false);
       line(box, reply.error || data.detail || "Could not fetch the resume.");
       return;
     }
@@ -326,9 +346,11 @@
     } catch (error) {
       // Some forms make the input readonly or intercept assignment. Saying so
       // beats a button that reports success over an empty slot.
+      note("attach_resume", { reason: `refused: ${error.message}` }, false);
       line(box, `This form would not accept the file (${error.message}).`);
       return;
     }
+    note("attach_resume", { size: data.size });
     line(box, `Attached ${data.filename}. Check it appears on the form.`);
   }
 
@@ -361,9 +383,11 @@
       if (reply.error || !data.ok) {
         button.disabled = false;
         button.textContent = "Mark applied";
+        note("mark_applied", { reason: reply.error || data.detail }, false);
         line(box, reply.error || data.detail || "That did not work.");
         return;
       }
+      note("mark_applied", { changed: Boolean(data.changed) });
       button.remove();
       line(box, data.changed ? "Marked applied." : data.detail || "Already marked.");
     });
@@ -396,9 +420,11 @@
       if (reply.error || !data.ok) {
         button.textContent = label;
         button.disabled = false;
+        note("prepare", { reason: reply.error || data.detail }, false);
         line(box, reply.error || data.detail || "That did not work.");
         return;
       }
+      note("prepare", { generating: Boolean(data.generating) });
       button.remove();
       line(
         box,
@@ -642,6 +668,14 @@
 
     button.disabled = false;
     button.textContent = "Fill this form";
+    // The number that says whether autofill is working on this site. A fill
+    // that recognised two fields out of fifteen looks identical to a good one
+    // from the server's side, because both make exactly one call.
+    note(
+      "autofill",
+      { filled: filled.length, skipped: skipped.length, fields: filled },
+      filled.length > 0,
+    );
     line(
       box,
       filled.length

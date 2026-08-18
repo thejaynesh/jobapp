@@ -38,6 +38,32 @@ def prune_llm_log() -> dict:
         db.close()
 
 
+@celery_app.task(name="app.tasks.providers.prune_agent_history", bind=False)
+def prune_agent_history() -> dict:
+    """
+    Keep the browser agent's two histories to their limits.
+
+    Two tables with opposite shapes, which is why they are pruned differently.
+    `agent_events` rows are a kind, a host and a few counts, so tens of
+    thousands cost nothing and the questions they answer are about weeks —
+    capped by row count. `browser_tasks` rows carry the page the browser
+    brought back, which is the large part, and nothing has ever pruned them —
+    capped by age.
+    """
+    from app.services.agent_events import prune as prune_events
+    from app.services.browser_tasks import prune as prune_tasks
+
+    db = SessionLocal()
+    try:
+        return {"events": prune_events(db), "tasks": prune_tasks(db)}
+    except Exception as exc:
+        db.rollback()
+        logger.error("prune_agent_history failed: %s", exc)
+        return {"events": 0, "tasks": 0, "error": str(exc)}
+    finally:
+        db.close()
+
+
 @celery_app.task(
     name="app.tasks.providers.run_provider_check",
     bind=False,

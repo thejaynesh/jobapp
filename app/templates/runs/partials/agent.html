@@ -1,0 +1,131 @@
+{# The browser agent: is the extension actually working?
+
+   Distinct from the queue panel above, which answers "is the task queue
+   moving". Most of what the extension does was never asked for by this server
+   — harvests, autofills, overlay lookups happen because someone opened a page
+   — so the task table could never answer this. #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-8 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Browser agent</h2>
+    <p class="text-xs text-gray-400">
+      What the extension has done in the last {{ agent_window }} days.
+    </p>
+  </div>
+
+  {% if not agent_events %}
+  <p class="text-xs text-gray-400">Event history unavailable.</p>
+  {% elif not agent_events.total %}
+  <p class="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
+    Nothing reported in {{ agent_window }} days. Either the extension is not
+    installed and polling, or it is an older build than this server — events
+    started being reported in the version that added <em>Attach resume</em>.
+    Reload it from <code>chrome://extensions</code> and open the panel on any
+    job page.
+  </p>
+  {% else %}
+
+  {# The claim the extension exists to make, as a number: jobs that a server
+     cannot reach arrived anyway because a person looked at them. #}
+  {% set harvest = agent_events.harvest %}
+  {% if harvest and harvest.posts %}
+  <p class="text-xs text-gray-500 mb-3">
+    Browsing contributed
+    <span class="font-medium text-gray-700">{{ "{:,}".format(harvest.inserted) }}</span>
+    new job{{ '' if harvest.inserted == 1 else 's' }}
+    from {{ "{:,}".format(harvest.found) }} seen across
+    {{ "{:,}".format(harvest.posts) }} intercepted response{{ '' if harvest.posts == 1 else 's' }}.
+    {% if not harvest.inserted %}
+    Everything it saw was already stored, which is the normal steady state once
+    a source is well covered.
+    {% endif %}
+  </p>
+  {% endif %}
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div>
+      <p class="text-xs font-medium text-gray-600 mb-1">What happened</p>
+      <table class="w-full text-xs">
+        <tbody>
+          {% for row in agent_events.by_kind %}
+          <tr class="border-t border-gray-100">
+            <td class="py-1 text-gray-600">{{ row.kind | replace("_", " ") }}</td>
+            <td class="py-1 text-right text-gray-700 font-medium">
+              {{ "{:,}".format(row.count) }}
+            </td>
+            <td class="py-1 text-right w-24">
+              {% if row.failed %}
+              <span class="text-red-600">{{ row.failed }} failed</span>
+              {% else %}
+              <span class="text-gray-300">—</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div>
+      {# The most useful view here. A host that fails every time needs a
+         different approach; without this it just looks like flakiness. #}
+      <p class="text-xs font-medium text-gray-600 mb-1">Failing hosts</p>
+      {% if agent_events.failing_hosts %}
+      <table class="w-full text-xs">
+        <tbody>
+          {% for row in agent_events.failing_hosts %}
+          <tr class="border-t border-gray-100">
+            <td class="py-1 text-gray-600 break-all">{{ row.host }}</td>
+            <td class="py-1 text-right text-red-600 w-16">{{ row.count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="text-xs text-gray-400">Nothing has failed.</p>
+      {% endif %}
+
+      {# A map rather than a slot: a laptop and a desktop used to overwrite each
+         other, so "nothing has polled since Tuesday" got reported about
+         whichever happened to be second. #}
+      {% if agent_list %}
+      <p class="text-xs font-medium text-gray-600 mt-3 mb-1">Browsers seen</p>
+      <table class="w-full text-xs">
+        <tbody>
+          {% for entry in agent_list %}
+          <tr class="border-t border-gray-100">
+            <td class="py-1 text-gray-600 break-all">{{ entry.agent_id }}</td>
+            <td class="py-1 text-right text-gray-400 w-32">{{ entry.at[:16] | replace("T", " ") }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if agent_events.recent %}
+  <details class="mt-3">
+    <summary class="text-xs text-gray-400 hover:text-gray-600 cursor-pointer list-none">
+      Last {{ agent_events.recent | length }} events &#9662;
+    </summary>
+    <table class="w-full text-[11px] mt-2">
+      <tbody>
+        {% for event in agent_events.recent %}
+        <tr class="border-t border-gray-100">
+          <td class="py-0.5 text-gray-400 w-24">{{ event.created_at.strftime("%b %d %H:%M") }}</td>
+          <td class="py-0.5 {% if event.ok %}text-gray-600{% else %}text-red-600{% endif %}">
+            {{ event.kind | replace("_", " ") }}
+          </td>
+          <td class="py-0.5 text-gray-400 break-all">{{ event.host or "" }}</td>
+          <td class="py-0.5 text-gray-400 break-all">
+            {% for key, value in (event.summary or {}).items() %}{{ key }}={{ value }}{{ " " }}{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+
+  {% endif %}
+</div>

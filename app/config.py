@@ -426,6 +426,17 @@ class Settings(BaseSettings):
     # only one that never got a second look. See `services.self_review`.
     SELF_REVIEW_ENABLED: bool = True
 
+    # What the browser extension did. Rows are small — a kind, a host and a few
+    # counts — so this keeps far more than the LLM log, which carries whole
+    # prompts. The questions it answers ("is the extension even running", "which
+    # hosts is it failing on") are questions about weeks.
+    AGENT_EVENT_KEEP_ROWS: int = 20000
+    AGENT_EVENT_PRUNE_INTERVAL_HOURS: int = 12
+    # Finished browser tasks carry the page they brought back, which is the
+    # large part. The countable history now lives in `agent_events`, so the task
+    # row only needs to outlive anyone's interest in the detail.
+    BROWSER_TASK_KEEP_DAYS: int = 14
+
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates

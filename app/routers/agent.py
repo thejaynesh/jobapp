@@ -152,7 +152,8 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
-def _harvest(db: Session, payload, source_url: str = "") -> dict:
+def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "") -> dict:
+    from app.services import agent_events
     from app.services.harvest import extract_jobs, save_harvested_jobs, source_for_url
 
     # The page it came off decides the source name. The extractor is
@@ -161,9 +162,19 @@ def _harvest(db: Session, payload, source_url: str = "") -> dict:
     source = source_for_url(source_url)
     jobs = extract_jobs(payload, source=source)
     if not jobs:
-        return {"found": 0, "inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
-    counts = save_harvested_jobs(db, jobs)
-    return {"found": len(jobs), "source": source, **counts}
+        counts = {"found": 0, "inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
+    else:
+        counts = {"found": len(jobs), "source": source, **save_harvested_jobs(db, jobs)}
+
+    # A harvest that found nothing is the single most common outcome and used
+    # to leave no trace at all, so "the interceptor is forwarding rubbish" and
+    # "the extension is not running" looked identical.
+    agent_events.record(
+        db, "harvest", url=source_url, agent_id=agent_id,
+        ok=True, summary={"source": source, **counts},
+    )
+    db.commit()
+    return counts
 
 
 @router.post("/harvest")
@@ -187,7 +198,8 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"detail": "No payload."}, status_code=400)
     try:
         counts = await run_in_threadpool(
-            _harvest, db, payload, body.get("source_url") or ""
+            _harvest, db, payload, body.get("source_url") or "",
+            str(body.get("agent_id") or "")[:120],
         )
     except Exception as exc:
         # Never charge a parsing bug of ours to the browser that volunteered
@@ -200,6 +212,38 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
             counts["found"], (body.get("source_url") or "an intercepted response")[:200],
         )
     return counts
+
+
+@router.post("/report")
+async def report_events(request: Request, db: Session = Depends(get_db)):
+    """
+    Events the extension saw, which the server otherwise never learns about.
+
+    Body: {"agent_id": "...", "events": [{"kind", "url"|"host", "ok",
+    "summary"}, ...]}
+
+    Autofill outcomes, overlay lookups, resume attachments — all of them happen
+    entirely in the browser and end there. That is why "the extension is not
+    working" has never been answerable: the only things this server saw were
+    the calls the extension chose to make, and a fill that recognised nothing
+    makes no calls at all.
+
+    Forgiving on purpose. The client buffers these while the server is
+    unreachable and posts the backlog on reconnect, so a malformed entry costs
+    that entry rather than the batch, and an unknown kind is filed rather than
+    rejected — an extension newer than the server still leaves a trace.
+    """
+    from app.services import agent_events
+
+    body = await _json_body(request)
+    events = body.get("events")
+    if events is None and body.get("kind"):
+        # A single event posted bare. Cheap to accept and one less shape for
+        # the client to get wrong.
+        events = [body]
+    return await run_in_threadpool(
+        agent_events.record_batch, db, events, str(body.get("agent_id") or "")[:120]
+    )
 
 
 @router.get("/job-context")

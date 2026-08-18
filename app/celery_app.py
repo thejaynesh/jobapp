@@ -100,6 +100,13 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.providers.prune_llm_log",
         "schedule": celery_schedule(settings.LLM_LOG_PRUNE_INTERVAL_HOURS * 3600),
     },
+    # The browser agent's two histories: the event log by row count, and
+    # finished browser tasks by age. Nothing pruned the latter at all until
+    # there was somewhere else to keep the countable part.
+    "prune-agent-history": {
+        "task": "app.tasks.providers.prune_agent_history",
+        "schedule": celery_schedule(settings.AGENT_EVENT_PRUNE_INTERVAL_HOURS * 3600),
+    },
     # Drafts follow-ups that have come due. Drafting only — sending is always a
     # deliberate click, so this never mails anyone on its own.
     "draft-due-outreach-followups": {
