@@ -425,9 +425,9 @@ already exists across `jobs`/`fetch_runs`); per-source
 
 ## Build order
 
-~~1.1 → 1.3 → 1.2+5.1 (together) → 1.4 → 1.5~~ (**Phase 1 done — see below**)
-→ then Phase 2 rolling, Phase 3, Phase 4, with 5.2/5.3 and Phase 6 slotted
-between larger items.
+~~1.1 → 1.3 → 1.2+5.1 (together) → 1.4 → 1.5~~ (**Phase 1 done**)
+→ ~~Phase 2~~ (**done**) → then Phase 3, Phase 4, with 5.2/5.3 and Phase 6
+slotted between larger items.
 
 Rationale: matching, documents, and coverage ROI all multiply off clean full
 descriptions, so data quality goes first; coverage second; intelligence third
@@ -471,6 +471,46 @@ says so explicitly when it is still off.
 still capped at 4,000 chars (that is 3.1, with its own token-budget
 consequences). The structured facts from 1.4 are passed as explicit lines
 above the excerpt, so they survive wherever it truncates.
+
+## Phase 2: what shipped
+
+Also built and merged, and also unobserved against the live database.
+
+- **2.1** Five ATSes: iCIMS, BambooHR, Teamtailor, Jobvite, Personio. BambooHR
+  and Personio read real endpoints (a JSON list, an XML feed); the other three
+  read the `JobPosting` structured data their listing pages publish, which is
+  more durable than an undocumented endpoint and only became viable once
+  enrichment existed to fetch the descriptions those pages omit. Registered in
+  config, the discovery patterns, the slug caps, a validation probe each, the
+  fetch cycle and the trigger picker.
+- **2.2** USAJOBS (needs `USAJOBS_API_KEY` **and** `USAJOBS_USER_AGENT` — the
+  registered email; it 401s with only one), hiring.cafe, and YC's role pages.
+  Adapters can now hand structured pay straight to the fetcher instead of
+  having it re-derived from prose. A source that has failed every run for ten
+  cycles is *rested* rather than deleted — skipped, with the reason on `/runs`,
+  and re-probed every tenth run, so refreshing the JSearch key resumes it by
+  itself. Naming a source on the runs page bypasses resting.
+- **2.3** A slug blocklist at extraction and at registration, and a probe
+  before a discovered board is ever polled. `summary()` separates unproven /
+  rejected / retired. Four more slug-harvest lists (four others 404 and were
+  dropped).
+- **2.4** `fetch_api_sources` / `fetch_ats_boards` / `fetch_browser_tier`, each
+  with its own lock, cadence and `fetch_runs.group`. The combined task is now
+  manual-trigger only.
+- **2.5** Harvest toggles for Indeed, Glassdoor and Workday career sites, each
+  a separate permission and its own source name.
+
+**Check after a few cycles:** section 2 for the new ATS sources appearing at
+all; section 10 for `pending`/`rejected` boards resolving (a large `pending`
+that never shrinks means validation is not running); section 9b for a source
+showing as `disabled` with a "resting" reason; section 12 per-site harvest
+yield, still zero until the toggles are ticked. `/runs` now labels each row
+with its group — if only one group's rows appear, beat is not running the
+others.
+
+**Not done, and deliberately:** JSearch, careerjet and findwork keep their
+adapters. Resting makes a dead key cost nothing, so deleting them would only
+remove the option of fixing a key later — that call is yours, not the code's.
 
 ## Done so far (Aug 2026)
 
