@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from app.models.job import Job, JobStatus
 from app.services.deduplication import (
     compute_dedupe_hash,
+    was_archived,
     find_existing_job,
     merge_or_skip,
 )
@@ -433,6 +434,14 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                         continue
                     merge_or_skip(db, existing, url, description, layer=3)
                     counts["merged"] += 1
+                    continue
+
+                # Already seen, judged and retired. Same reasoning as the
+                # fetcher's check: an archived posting is one we have an answer
+                # about, and re-inserting it buys a scoring call to reach that
+                # same answer again.
+                if was_archived(db, source, url, source_job_id, dedupe_hash):
+                    counts["skipped"] += 1
                     continue
 
                 job = Job(

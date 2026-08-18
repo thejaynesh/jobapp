@@ -68,13 +68,34 @@ def overview(db) -> dict:
     counts = {status.value: int(status_rows.get(status, 0)) for status in JobStatus}
     total = sum(counts.values())
 
-    reasons = (
+    live_reasons = (
         db.query(Job.filter_reason, func.count(Job.id))
         .filter(Job.status == JobStatus.filtered_out)
         .group_by(Job.filter_reason)
-        .order_by(func.count(Job.id).desc())
         .all()
     )
+    # Archived rejections are counted too. This panel exists to say where the
+    # volume goes, and the day archiving first runs it would otherwise appear
+    # that a hundred thousand jobs were never filtered at all — a breakdown
+    # that silently stops counting most of its subject is worse than one that
+    # is merely incomplete.
+    from app.services.archive import reasons as archived_reasons
+
+    try:
+        archived = archived_reasons(db)
+    except Exception as exc:
+        logger.warning("funnel: archived reasons unavailable: %s", exc)
+        archived = {}
+    archived_total = sum(archived.values())
+
+    tally: dict[str | None, int] = {}
+    for reason, count in live_reasons:
+        tally[reason] = tally.get(reason, 0) + int(count)
+    for reason, count in archived.items():
+        key = None if reason == "unknown" else reason
+        tally[key] = tally.get(key, 0) + int(count)
+    reasons = sorted(tally.items(), key=lambda item: -item[1])
+    filtered_total = counts["filtered_out"] + archived_total
 
     app_rows = dict(
         db.query(Application.status, func.count(Application.id))
@@ -90,22 +111,32 @@ def overview(db) -> dict:
     )
 
     return {
-        "total": total,
+        # Archived jobs are still jobs this pipeline fetched and judged. A
+        # total that shrank every night as the archiver ran would describe the
+        # size of one table rather than the work the system has done.
+        "total": total + archived_total,
+        "live": total,
+        "archived": archived_total,
         "by_status": counts,
         "filter_reasons": [
             {
                 "reason": reason or "unknown",
                 "label": FILTER_REASON_LABELS.get(reason, "Not recorded"),
                 "count": int(count),
-                "share": round(100.0 * count / counts["filtered_out"], 1)
-                if counts["filtered_out"] else 0.0,
+                "share": round(100.0 * count / filtered_total, 1)
+                if filtered_total else 0.0,
             }
             for reason, count in reasons
         ],
         "applications": applications,
         "sent": sent,
-        # The one ratio that describes the whole machine.
-        "sent_per_thousand": round(1000.0 * sent / total, 2) if total else 0.0,
+        # The one ratio that describes the whole machine — over every job ever
+        # fetched, archived ones included, or it would drift upwards every
+        # night as the archiver ran without anything actually improving.
+        "sent_per_thousand": (
+            round(1000.0 * sent / (total + archived_total), 2)
+            if (total + archived_total) else 0.0
+        ),
     }
 
 

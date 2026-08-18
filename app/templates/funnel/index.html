@@ -36,6 +36,15 @@
     Another {{ "{:,}".format(overview.applications.not_applied) }} have documents
     written and were never sent.
     {% endif %}
+    {% if overview.archived %}
+    {# Counted in every number above. They are still jobs this pipeline fetched
+       and judged; a total that shrank each night as the archiver ran would
+       describe the size of a table rather than the work done. #}
+    <span class="text-gray-400">
+      Includes {{ "{:,}".format(overview.archived) }} archived — rejections old
+      enough to have stopped carrying their descriptions.
+    </span>
+    {% endif %}
   </p>
 </div>
 

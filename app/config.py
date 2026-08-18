@@ -449,6 +449,17 @@ class Settings(BaseSettings):
     # detection lag for a system nobody watches full time.
     BACKUP_KEEP: int = 14
 
+    # Settled rejections stop carrying their descriptions after this long. They
+    # are moved rather than deleted: deduplication reads three columns off the
+    # tombstone, and losing them means re-fetching and re-scoring the same
+    # posting forever. See `services.archive`.
+    ARCHIVE_ENABLED: bool = True
+    ARCHIVE_AFTER_DAYS: int = 60
+    # Bounded per pass: the first run has a six-figure backlog, and one
+    # transaction that size holds a worker and a lock for the duration.
+    ARCHIVE_MAX_PER_RUN: int = 5000
+    ARCHIVE_INTERVAL_HOURS: int = 24
+
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates

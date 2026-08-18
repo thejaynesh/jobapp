@@ -638,6 +638,52 @@ pure request spend. The score distribution is the other: if a model's bands are
 one tall column, it has found a safe answer rather than a judgement, and
 `match_eval` (3.4) is how you confirm that before changing anything.
 
+## Phase 6: what shipped
+
+- **Backups.** A gzipped `pg_dump` into `/storage/backups` every night, **on
+  the VPS and nowhere else** — that was the decision, and the gap is real:
+  this survives a bad migration or a dropped table, not the loss of the
+  machine. Written to a temp name, verified by decompressing it in full and
+  checking `pg_dump`'s completion marker, renamed into place, and only then
+  rotated. `docs/BACKUPS.md` has the restore procedure; the System panel on
+  `/runs` goes red when the newest is more than twice the interval old.
+  Needs a rebuild — `postgresql-client-16` was added to the Dockerfile.
+- **Language filter.** Non-English postings are skipped before the scoring
+  call, using the 1.4 `language` field. Two gates: one in the keyword filter
+  for jobs whose language is already known, one straight after detail
+  extraction (which is where it is first learned). Fails open on unknown.
+  Toggle on the settings page; `MATCH_LANGUAGES` accepts more than English.
+- **Archiving.** Migration 0028 adds `archived_jobs`. Settled rejections older
+  than `ARCHIVE_AFTER_DAYS` (60) are **moved, not deleted**, keeping exactly
+  the columns deduplication reads. Never touches a job with an application, a
+  job the user rejected by hand, or anything not `filtered_out`.
+
+**The dedupe point, since it was the condition on this one.** Deleting a job
+defeats all three dedupe layers silently: the posting comes back as new on the
+next fetch, costs a scoring call, reaches the same verdict, and repeats
+forever. So `archived_jobs` keeps `source_urls`, `source` + `source_job_id`
+and `dedupe_hash` (unique, as on `jobs`), and both insert paths — the fetcher
+and the harvest — call `deduplication.was_archived` before creating a row. It
+returns a bool rather than a row, because the description is exactly what
+archiving discarded and there is nothing to merge into.
+
+**The carve-out worth knowing about:** jobs filtered as `manual`,
+`blocked_title` or `excluded_company` are never archived. Those are the labels
+`match_eval` (3.4) builds its fixture from, and it needs their descriptions —
+archiving them would quietly destroy the only ground truth this system has
+about its own scoring. A test asserts the two lists stay in step.
+
+`/funnel` counts archived rows in its totals and its filter-reason breakdown,
+so the day this first runs it does not appear that a hundred thousand jobs were
+never filtered at all.
+
+**Do the first archive pass by hand**, watching one batch:
+
+```
+python -m app.tasks.archive --dry-run
+python -m app.tasks.archive
+```
+
 ## Done so far (Aug 2026)
 
 - Code-review pass: 13 bug fixes (session-poisoning batch losses, profile

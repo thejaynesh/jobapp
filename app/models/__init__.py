@@ -1,5 +1,6 @@
 from app.models.job import Job, JobStatus
 from app.models.job_score import JobScore
+from app.models.archived_job import ArchivedJob
 from app.models.profile import Profile
 from app.models.application import Application, ApplicationDocument, ApplicationStatus, DocType
 from app.models.company_board import CompanyBoard

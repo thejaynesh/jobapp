@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
-from app.services.deduplication import compute_dedupe_hash, find_existing_job, merge_or_skip
+from app.services.deduplication import (
+    compute_dedupe_hash, find_existing_job, merge_or_skip, was_archived,
+)
 from app.services.descriptions import clean as clean_description
 
 logger = logging.getLogger(__name__)
@@ -1129,6 +1131,17 @@ def fetch_and_save_jobs(
                     merge_or_skip(db, existing, url, description, layer=3)
                     counts["merged"] += 1
                     _tally(source, "merged")
+                    continue
+
+                # Seen, judged and retired months ago. Without this check
+                # archiving would be worse than useless: every archived posting
+                # still on its board comes back as new on the next fetch, costs
+                # a scoring call, reaches the same verdict, and is archived
+                # again sixty days later. There is nothing to merge into — the
+                # description is what archiving discarded — so it is a skip.
+                if was_archived(db, source, url, source_job_id, dedupe_hash):
+                    counts["skipped"] += 1
+                    _tally(source, "skipped")
                     continue
 
                 new_job = Job(

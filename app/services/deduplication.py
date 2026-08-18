@@ -94,6 +94,46 @@ def find_existing_job(
     return db.query(Job).filter(Job.dedupe_hash == dedupe_hash).first()
 
 
+def was_archived(
+    db: Session,
+    source: str,
+    url: str,
+    source_job_id: str | None,
+    dedupe_hash: str,
+) -> bool:
+    """
+    Whether this posting was already seen, judged, and retired.
+
+    The same three layers as `find_existing_job`, against the tombstones left
+    by `services.archive`. Without this check, archiving would be silently
+    expensive rather than cheap: every archived posting still on its board gets
+    re-inserted as brand new on the next fetch, costs a scoring call, reaches
+    the same verdict it reached in June, and is archived again sixty days
+    later. Forever.
+
+    Returns a bool rather than a row on purpose. There is nothing to merge into
+    — the description is exactly what archiving threw away — so the only honest
+    answer to "have we seen this?" here is yes, and the caller skips it.
+    """
+    from app.models.archived_job import ArchivedJob
+
+    query = db.query(ArchivedJob.id).filter(ArchivedJob.source_urls.any(url))
+    if query.first():
+        return True
+
+    if source_job_id:
+        query = db.query(ArchivedJob.id).filter(
+            ArchivedJob.source == source,
+            ArchivedJob.source_job_id == source_job_id,
+        )
+        if query.first():
+            return True
+
+    return db.query(ArchivedJob.id).filter(
+        ArchivedJob.dedupe_hash == dedupe_hash
+    ).first() is not None
+
+
 def find_duplicate_application_job(db: Session, job) -> Job | None:
     """
     A different job, same employer, near-identical title, that already has an

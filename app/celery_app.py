@@ -12,7 +12,7 @@ celery_app = Celery(
         "app.tasks.backfill", "app.tasks.compare_models", "app.tasks.outreach",
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
-        "app.tasks.match_eval", "app.tasks.backup",
+        "app.tasks.match_eval", "app.tasks.backup", "app.tasks.archive",
     ],
 )
 
@@ -119,6 +119,14 @@ celery_app.conf.beat_schedule = {
     "take-backup": {
         "task": "app.tasks.backup.take_backup",
         "schedule": celery_schedule(settings.BACKUP_INTERVAL_HOURS * 3600),
+    },
+    # Settled rejections stop carrying their descriptions after 60 days. They
+    # are moved rather than deleted: deduplication reads three columns off the
+    # tombstone, and without them the same posting is re-fetched and re-scored
+    # forever.
+    "archive-old-jobs": {
+        "task": "app.tasks.archive.archive_old_jobs",
+        "schedule": celery_schedule(settings.ARCHIVE_INTERVAL_HOURS * 3600),
     },
     "poll-mailbox": {
         "task": "app.tasks.outreach.poll_mailbox",
