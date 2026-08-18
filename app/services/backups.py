@@ -46,9 +46,19 @@ logger = logging.getLogger(__name__)
 STATE_KEY = "backup"
 FILE_PREFIX = "jobapp-"
 FILE_SUFFIX = ".sql.gz"
-# What `pg_dump` writes as its last line. Its presence is the difference
+# What `pg_dump` writes when it has finished. Its presence is the difference
 # between a complete dump and a file that stopped when the disk filled.
+#
+# Searched for near the end rather than required to *be* the end: pg_dump 16.10
+# and newer wrap the output in `\restrict`/`\unrestrict` to block psql
+# meta-command injection (CVE-2025-8714), so the marker sits a few lines above
+# the last one. A check written as "ends with the marker" would call every
+# modern dump broken.
 COMPLETION_MARKER = "PostgreSQL database dump complete"
+# How much of the tail to search for it. Generous: the trailing `\unrestrict`
+# line is under a hundred bytes, and this leaves room for whatever a future
+# release decides to append.
+_TAIL_BYTES = 2048
 
 
 def _now() -> str:
@@ -148,7 +158,7 @@ def verify(path: Path) -> int:
     with gzip.open(path, "rb") as handle:
         while chunk := handle.read(1 << 20):
             size += len(chunk)
-            tail = (tail + chunk)[-2048:]
+            tail = (tail + chunk)[-_TAIL_BYTES:]
     text = tail.decode("utf-8", "replace")
     if COMPLETION_MARKER not in text:
         last = next(

@@ -24,8 +24,8 @@ A beat task, `app.tasks.backup.take_backup`, every `BACKUP_INTERVAL_HOURS`
 (default 24). Each run:
 
 1. dumps to a **temporary name** in the backup directory,
-2. **verifies** it by decompressing the whole file and checking it ends with
-   `pg_dump`'s completion marker,
+2. **verifies** it by decompressing the whole file and finding `pg_dump`'s
+   completion marker near the end,
 3. renames it into place only then,
 4. and **only then** rotates old files.
 
@@ -85,6 +85,38 @@ like it worked — the same failure as an unverified backup, one step later.
 
 Run it from `web` rather than `postgres`: the backup files are on the storage
 volume, which only the app containers mount.
+
+## Checking a dump by hand
+
+The completion marker is **not** the last line. `pg_dump` 16.10 and newer wrap
+their output in `\restrict` / `\unrestrict` to block psql meta-command
+injection (CVE-2025-8714), so a healthy dump ends like this:
+
+```
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict ywfxlKs1aa082Kj49Kxyr8e6LeCHJdBJyIOEhG1PhEmHqf32Z2AIjfWOjq1ztD1
+```
+
+So `tail -3` shows the `\unrestrict` line and looks alarming. Grep for the
+marker instead:
+
+```bash
+zcat backup.sql.gz | tail -8                            # eyeball it
+zcat backup.sql.gz | grep -c "database dump complete"    # expect 1
+```
+
+Or just use the built-in verifier, which does exactly this:
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python -m app.tasks.backup --verify
+```
+
+One consequence for restores: those are psql meta-commands, so the dump must be
+restored with a `psql` at least as new as the `pg_dump` that wrote it. Both come
+from `postgresql-client-16` in this image, so that holds here.
 
 ## Why `postgresql-client-16` is in the Dockerfile
 

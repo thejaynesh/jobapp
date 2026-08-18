@@ -24,6 +24,14 @@ COMPLETE = (
     "--\n-- PostgreSQL database dump complete\n--\n\n"
 )
 
+# What pg_dump 16.10 and newer actually emit. The August 2025 security releases
+# wrap the dump in \restrict/\unrestrict to block psql meta-command injection
+# (CVE-2025-8714), which means the completion marker is no longer the last line
+# of the file — it is four lines up.
+COMPLETE_MODERN = COMPLETE + (
+    "\\unrestrict ywfxlKs1aa082Kj49Kxyr8e6LeCHJdBJyIOEhG1PhEmHqf32Z2AIjfWOjq1ztD1\n\n"
+)
+
 
 @pytest.fixture
 def folder(tmp_path, monkeypatch):
@@ -45,6 +53,14 @@ class TestVerification:
     def test_a_complete_dump_passes(self, folder):
         path = _write(folder, "jobapp-20260101T000000Z.sql.gz")
         assert backups.verify(path) == len(COMPLETE)
+
+    def test_the_marker_need_not_be_the_last_line(self, folder):
+        # pg_dump 16.10+ appends `\unrestrict <token>` after the completion
+        # marker. A verifier written as "does the file end with the marker"
+        # would call every modern dump broken — and the failure would arrive
+        # as a backup job that has cried wolf every night for a month.
+        path = _write(folder, "jobapp-modern.sql.gz", COMPLETE_MODERN)
+        assert backups.verify(path) == len(COMPLETE_MODERN)
 
     def test_a_dump_without_the_completion_marker_fails(self, folder):
         # What a pg_dump that died mid-table looks like: valid gzip, valid SQL,
