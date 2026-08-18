@@ -698,6 +698,25 @@ def _rpm_interval() -> float:
     return 60.0 / max(rpm, 1)
 
 
+def match_pace_seconds() -> float:
+    """
+    How long to pause between jobs in a matching pass.
+
+    The pause exists to stay under NVIDIA NIM's requests-per-minute limit. When
+    something else is scoring — see `providers.primary_matching_provider` — that
+    number describes a provider we are not calling, and sleeping to respect it
+    would be throttling the pass against a limit that does not apply.
+
+    Zero is safe rather than reckless: the providers that replace NIM here are
+    gated on concurrency instead (FreeInference takes one request at a time),
+    so the pacing moves from a fixed sleep to a queue that opens as soon as the
+    endpoint is free.
+    """
+    from app.llm.providers import primary_matching_provider
+
+    return 0.0 if primary_matching_provider() is not None else _rpm_interval()
+
+
 def _retry_delays() -> list[int]:
     """Wait durations on 429: one short pause then a full minute window reset."""
     interval = _rpm_interval()
@@ -764,6 +783,39 @@ def _llm_score_job(
     budget: dict | None = None,
 ) -> dict:
     messages = _build_match_prompt(job, profile_data)
+
+    # Something other than NIM is going first. Routed through `call_provider`
+    # rather than `chat_completion` because that is the path carrying the
+    # concurrency gate, and FreeInference accepts one request at a time — a
+    # matching pass that bypassed the gate would collide with every document
+    # generation running beside it.
+    from app.llm.providers import primary_matching_provider
+
+    primary = primary_matching_provider()
+    if primary is not None:
+        try:
+            # Already inside `llm_score_job`'s "match" stage, so the call is
+            # labelled in the LLM log without wrapping it again.
+            raw = call_provider(
+                primary, messages, temperature=0.1,
+                max_tokens=_match_max_tokens(),
+            )
+            result = _parse_llm_response(raw)
+            result["scored_by"] = provider_label(primary)
+            return result
+        except Exception as exc:
+            # Down the chain, which now has NIM at the end of it. No retry loop
+            # here: the 429 dance below is sized to NIM's stated RPM and means
+            # nothing to a provider that queues on concurrency instead.
+            logger.warning(
+                "llm_score_job: primary provider %s failed for job %s: %s",
+                primary.name, getattr(job, "id", "?"), exc,
+            )
+            result = _score_via_fallbacks(messages, job, budget)
+            if result is not None:
+                return result
+            raise LLMUnavailableError(str(exc)) from exc
+
     delays = _retry_delays()
     last_exc: Exception | None = None
     for attempt, delay in enumerate([0] + delays):
@@ -1066,7 +1118,7 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None) -> dict[st
 
     api_key = settings.NVIDIA_NIM_API_KEY
     base_url = settings.NVIDIA_NIM_BASE_URL
-    pace_interval = _rpm_interval()
+    pace_interval = match_pace_seconds()
 
     profile = db.query(Profile).first()
     profile_data = profile.data if profile else {}

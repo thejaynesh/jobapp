@@ -222,25 +222,83 @@ def _concurrency_gate(provider: Provider, wait: float | None = None):
         yield
 
 
+def nim_provider() -> Provider:
+    """
+    NVIDIA NIM as a `Provider`, for when it is not the one going first.
+
+    `paid=False` because it never counted against the paid-call budget when it
+    was the primary, and moving it down the chain should not quietly start
+    charging it against a cap meant for providers that bill.
+    """
+    return Provider(
+        name="nim",
+        api_key=settings.NVIDIA_NIM_API_KEY,
+        model=settings.NVIDIA_NIM_MODEL,
+        base_url=settings.NVIDIA_NIM_BASE_URL,
+        paid=False,
+    )
+
+
+def primary_matching_provider() -> Provider | None:
+    """
+    The provider matching should try first, or None to use NIM directly.
+
+    None is the historical behaviour and stays the default: NIM is called
+    through `matcher.chat_completion`, which carries its own retry-on-429 loop
+    sized to `NVIDIA_NIM_RPM`. Naming any other configured provider here routes
+    the first attempt through `call_provider` instead — which matters for more
+    than tidiness, because that is the path with the concurrency gate on it.
+    FreeInference accepts one request at a time, and matching that bypassed the
+    gate would collide with document generation on the same endpoint.
+
+    An unconfigured name falls back to NIM rather than failing: a typo in a
+    setting should cost a log line, not every score in the queue.
+    """
+    name = str(getattr(settings, "MATCH_PRIMARY", "") or "nim").strip().lower()
+    if name in ("nim", "nvidia", "primary", ""):
+        return None
+
+    providers = configured_providers()
+    provider = providers.get(name)
+    if provider is None:
+        logger.warning(
+            "MATCH_PRIMARY=%r is not a configured provider (have: %s) — "
+            "matching will use NVIDIA NIM.", name, ", ".join(sorted(providers)) or "none",
+        )
+        return None
+    return _with_match_model(name, provider)
+
+
+def _with_match_model(name: str, provider: Provider) -> Provider:
+    match_model = _MATCH_MODELS.get(name)
+    if not match_model:
+        return provider
+    # dataclasses.replace, so a provider's concurrency limit and paid flag
+    # survive the model swap — losing max_concurrency here would silently
+    # ungate every matching call, which is most of them.
+    return replace(provider, model=match_model(settings) or provider.model)
+
+
 def matching_fallbacks() -> list[Provider]:
     """
     Providers to try (in order) when the primary matching provider fails.
     Matching is high-volume JSON scoring, so the Anthropic entry uses the cheap
     match model (Haiku by default) rather than the generation model.
+
+    Whichever provider went first is left out — retrying the endpoint that just
+    failed, immediately, is a call spent to watch it fail again. NIM joins the
+    end of the chain when it is not the one going first, so switching the
+    primary moves it down rather than removing it.
     """
+    primary = primary_matching_provider()
     providers = configured_providers()
     chain = []
     for name in MATCHING_PREFERENCE:
-        if name not in providers:
+        if name not in providers or (primary is not None and name == primary.name):
             continue
-        provider = providers[name]
-        match_model = _MATCH_MODELS.get(name)
-        if match_model:
-            # dataclasses.replace, so a provider's concurrency limit and paid
-            # flag survive the model swap — losing max_concurrency here would
-            # silently ungate every matching call, which is most of them.
-            provider = replace(provider, model=match_model(settings) or provider.model)
-        chain.append(provider)
+        chain.append(_with_match_model(name, providers[name]))
+    if primary is not None and settings.NVIDIA_NIM_API_KEY:
+        chain.append(nim_provider())
     return chain
 
 

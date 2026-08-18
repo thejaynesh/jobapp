@@ -123,6 +123,17 @@ class Settings(BaseSettings):
     # and the cap is hit, remaining jobs simply stay `new` and retry next cycle.
     MAX_PAID_MATCH_CALLS_PER_CYCLE: int = 150
 
+    # Which provider scores jobs first. "nim" is the historical behaviour and
+    # the safe default; naming another configured provider ("freeinference",
+    # "gemini", "anthropic") moves NIM to the end of the failover chain rather
+    # than removing it.
+    #
+    # Worth knowing before switching to freeinference: it is the same free daily
+    # credit document generation prefers, and matching is by far the higher
+    # volume of the two. Spending the day's allowance on scoring means
+    # generation falls through to whatever is next in its own chain.
+    MATCH_PRIMARY: str = "nim"
+
     # ---- Second-opinion scoring ------------------------------------------
     # A fast model scores everything, and most of its answers are not close
     # calls: a 20 is a 20 and a 95 is a 95 whoever reads them. The band in the
