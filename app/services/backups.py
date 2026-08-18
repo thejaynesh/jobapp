@@ -136,9 +136,18 @@ def _dump(target: Path) -> None:
             process.stderr.close()
         code = process.wait()
     if code != 0:
-        raise RuntimeError(
-            f"pg_dump exited {code}: {stderr.strip()[:400] or 'no message'}"
-        )
+        message = stderr.strip()[:400] or "no message"
+        # The one predictable failure, and the one whose message reads as
+        # gibberish if you have not met it: pg_dump can dump a server older
+        # than itself but flatly refuses a newer one. Say what to do about it
+        # rather than leaving the raw complaint on a status panel.
+        if "server version" in message.lower():
+            message += (
+                " — this image's pg_dump is older than the database server. "
+                "Rebuild the image so the client matches, or upgrade it; "
+                "pg_dump will not dump a server newer than itself."
+            )
+        raise RuntimeError(f"pg_dump exited {code}: {message}")
 
 
 def verify(path: Path) -> int:

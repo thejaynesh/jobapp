@@ -1,31 +1,27 @@
 FROM python:3.12-slim
 
-# Install system deps: pdflatex + playwright deps
+# Install system deps: pdflatex, playwright deps, and the postgres client.
+#
+# `postgresql-client` is unversioned on purpose. It provides pg_dump and psql
+# for the nightly backup and for restoring from one, and the only rule that
+# matters is directional: pg_dump can dump a server OLDER than itself but
+# refuses one that is newer. Debian's default client tracks the base image and
+# has always been at least as new as the server this deploys against, so
+# naming a version here would only create a way for the two to drift — an
+# earlier revision of this file pinned 16 from the PGDG repo under a hardcoded
+# `bookworm`, which broke the moment python:3.12-slim moved to trixie.
 RUN apt-get update && apt-get install -y \
     texlive-latex-base \
     texlive-fonts-recommended \
     texlive-latex-extra \
     curl \
-    ca-certificates \
-    gnupg \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# pg_dump and psql, for the nightly backup and for restoring from one.
-#
-# From PGDG rather than Debian, and pinned to 16 to match the server image.
-# pg_dump refuses to dump a server newer than itself, and bookworm ships 15 —
-# so the distro package would produce a backup task that fails every night with
-# a version-mismatch error, which is a worse outcome than no backup task at all
-# because it looks like one.
-RUN install -d /usr/share/postgresql-common/pgdg \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-        -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
-        > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-client-16 \
-    && rm -rf /var/lib/apt/lists/*
+# Fail the build here rather than at 3am on the first backup. A missing pg_dump
+# is a broken image, and finding that out from a backup job that has silently
+# never run is the failure this whole feature exists to prevent.
+RUN pg_dump --version && psql --version
 
 WORKDIR /app
 

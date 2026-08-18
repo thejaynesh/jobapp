@@ -118,9 +118,19 @@ One consequence for restores: those are psql meta-commands, so the dump must be
 restored with a `psql` at least as new as the `pg_dump` that wrote it. Both come
 from `postgresql-client-16` in this image, so that holds here.
 
-## Why `postgresql-client-16` is in the Dockerfile
+## Why `postgresql-client` is in the Dockerfile
 
-`pg_dump` refuses to dump a server newer than itself, and Debian bookworm ships
-15 against a 16 server. The distro package would give you a backup task that
-fails every night with a version-mismatch error — which is worse than no task,
-because it looks like one.
+`pg_dump` and `psql` are not in `python:3.12-slim`, so the backup task cannot
+run without them. The package is deliberately **unversioned**.
+
+The only rule that matters is directional: `pg_dump` can dump a server *older*
+than itself, but refuses one that is newer. Debian's default client tracks the
+base image and has been ahead of the server this deploys against — trixie ships
+17, the server is 16 — so pinning a version here would only create a way for
+the two to drift. An earlier revision of this file pinned 16 from the PGDG
+repo under a hardcoded `bookworm`, and broke the moment `python:3.12-slim`
+moved to trixie.
+
+The build runs `pg_dump --version` as its own step, so a missing client fails
+the build rather than the first backup. If the client ever *is* older than the
+server, the backup status on `/runs` says so and tells you to rebuild.
