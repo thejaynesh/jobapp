@@ -5,6 +5,11 @@
 }
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator { display: inline; }
+/* The same rule for an indicator named by hx-indicator rather than nested
+   inside the element that triggered the request: htmx puts `htmx-request` on
+   the indicator itself there, so the descendant selector above never matches
+   and the spinner silently never appears. */
+.htmx-request.htmx-indicator { display: inline; }
 .success-flash {
     animation: fadeout 2s forwards;
     animation-delay: 1s;

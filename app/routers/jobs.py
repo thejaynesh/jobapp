@@ -8,6 +8,7 @@ from app.templating import build as build_templates
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models.job import Job, JobStatus
 from app.services.locations import REGIONS, REGION_OPTIONS, resolve_region_key
@@ -335,6 +336,76 @@ def not_interested(
 
     job.status = JobStatus.filtered_out
     db.commit()
+    return templates.TemplateResponse(
+        "jobs/partials/job_card.html",
+        {"request": request, "job": job},
+    )
+
+
+@router.post("/{job_id}/rematch", response_class=HTMLResponse)
+def rematch_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    """
+    Score this job again, now, and show the result.
+
+    Enrichment re-queues jobs automatically when their description grows, but
+    only for verdicts it reached by reading one — and never for a job you
+    already have an application for. This is the manual door: a posting you
+    think was judged wrongly, re-read against the profile as it stands today.
+
+    Synchronous rather than queued. It is one LLM call on an explicit click,
+    and the whole point is to see the new score — "queued, come back later"
+    for a button you pressed because you disagreed with a number is barely
+    better than not having the button.
+
+    Everything else comes for free by calling the real `match_job`: the verdict
+    lands in the score history beside the old one, the second-opinion pass runs
+    if the score is a close call, and structured details are extracted if they
+    were never read. A path of its own would have had to remember all three.
+
+    A normal re-score is a few seconds. The pathological one — a provider
+    rate-limiting us into the retry loop — can outlast Caddy's 60-second read
+    timeout, and the browser then shows an error. That is untidy rather than
+    harmful: the commit below happens on the server either way, so the new
+    score is there on the next page load.
+    """
+    from app.models.profile import Profile
+    from app.services.matcher import match_job
+    from app.services.tunables import value as tunable
+
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    profile = db.query(Profile).first()
+    profile_data = (profile.data if profile else None) or {}
+
+    try:
+        outcome = match_job(
+            db, job, profile_data,
+            settings.NVIDIA_NIM_API_KEY, settings.NVIDIA_NIM_BASE_URL,
+            tunable(profile_data, "nvidia_nim_model"),
+        )
+        db.commit()
+    except Exception as exc:
+        # The job keeps whatever it had. A failed re-score must not leave it
+        # worse off than not pressing the button.
+        db.rollback()
+        logger.error("rematch: scoring job %s failed: %s", job_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not score this job right now: {exc}",
+        ) from exc
+
+    if outcome == "rate_limited":
+        # `match_job` leaves the job `new` so the scheduled pass retries it.
+        # Saying so beats a card that looks unchanged for no visible reason.
+        raise HTTPException(
+            status_code=503,
+            detail="Every model provider refused that call. The job is queued "
+                   "for the next scheduled matching pass.",
+        )
+
+    logger.info("rematch: job %s re-scored by hand — %s", job_id, outcome)
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",
         {"request": request, "job": job},

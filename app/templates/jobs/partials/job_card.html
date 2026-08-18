@@ -175,6 +175,24 @@
         Apply direct &nearr;
       </a>
       {% endif %}
+      {# Score it again, now. Enrichment re-queues jobs on its own when their
+         description grows, but only for verdicts it reached by reading one and
+         never for a job that already has an application — this is the manual
+         door for a posting you think was judged wrongly. It takes an LLM call,
+         so the button says so while it waits. #}
+      <button
+        hx-post="/jobs/{{ job.id }}/rematch"
+        hx-target="#job-{{ job.id }}"
+        hx-swap="outerHTML"
+        hx-disabled-elt="this"
+        hx-indicator="#rematch-{{ job.id }}"
+        title="Score this job again against your profile as it is now"
+        class="text-xs text-gray-500 hover:text-blue-600 underline whitespace-nowrap">
+        Re-match
+      </button>
+      <span id="rematch-{{ job.id }}" class="htmx-indicator text-xs text-blue-500">
+        scoring&hellip;
+      </span>
       {% if job.status.value in ['matched', 'filtered_out'] %}
       <button
         hx-post="/jobs/{{ job.id }}/override"
