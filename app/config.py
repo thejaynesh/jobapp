@@ -454,6 +454,14 @@ class Settings(BaseSettings):
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates
     JUNIOR_MAX_YEARS: float = 3.0  # candidate is "junior" below this many years of experience
 
+    # Postings written in a language you don't read. Arbeitnow returns German
+    # listings with English titles, so the title gate passes them and the model
+    # is then asked to score a description nobody involved can act on.
+    FILTER_BY_LANGUAGE: bool = True
+    # Comma-separated ISO 639-1 codes. Env-only rather than a tunable: it is a
+    # fact about the person, not a dial you turn while reading results.
+    MATCH_LANGUAGES: str = "en"
+
     # ---- Posting liveness -----------------------------------------------
     # Re-check matched/docs-generated jobs against the employer's page and
     # mark the ones that closed, so a dead posting wears a badge instead of

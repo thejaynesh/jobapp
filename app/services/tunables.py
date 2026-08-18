@@ -97,6 +97,16 @@ TUNABLES: list[Tunable] = [
              "active below the junior threshold below.",
     ),
     Tunable(
+        key="filter_by_language", env="FILTER_BY_LANGUAGE", kind="bool",
+        group="Filtering",
+        label="Skip postings not written in English",
+        help="Arbeitnow and friends return German listings under English "
+             "titles, so the title gate passes them and a model is then asked "
+             "to score a description you could not act on. A posting whose "
+             "language could not be read is always kept — set MATCH_LANGUAGES "
+             "to accept more than English.",
+    ),
+    Tunable(
         key="junior_max_years", env="JUNIOR_MAX_YEARS", kind="float",
         minimum=0, maximum=30, group="Filtering",
         label="Junior threshold (years)",

@@ -128,6 +128,42 @@ def _blocked_by_seniority(job, profile_data: dict) -> bool:
     )
 
 
+def accepted_languages() -> set[str]:
+    """The ISO codes worth scoring, lowercased."""
+    raw = getattr(settings, "MATCH_LANGUAGES", "en") or "en"
+    return {
+        code.strip().lower() for code in str(raw).replace(";", ",").split(",")
+        if code.strip()
+    } or {"en"}
+
+
+def _blocked_by_language(job, profile_data: dict) -> str | None:
+    """
+    The posting's language, if it is one the candidate cannot act on.
+
+    Fails open, and that is the whole design. `language` is filled by the
+    detail extraction, which only runs on descriptions long enough to read —
+    so a job with no description, or one stored before that existed, has no
+    language at all. Treating unknown as foreign would silently drop most of
+    the backlog on a field that was never populated, and a wrongly-skipped job
+    is one the user never sees.
+
+    Codes are compared on the base tag: "en-GB" and "en_US" are English, and a
+    model that returns either should not cost a posting.
+    """
+    from app.services.tunables import value as tunable
+
+    if not tunable(profile_data, "filter_by_language"):
+        return None
+    code = getattr(job, "language", None)
+    if not isinstance(code, str) or not code.strip():
+        return None
+    base = code.strip().lower().replace("_", "-").split("-")[0]
+    if not base or base in accepted_languages():
+        return None
+    return base
+
+
 class FilterOutcome(NamedTuple):
     """Why the keyword prefilter decided what it decided."""
     passed: bool
@@ -149,6 +185,18 @@ FILTER_REASON_LABELS = {
     "restricted": "Restricted to US citizens",
     "duplicate": "Same posting already has an application",
     "manual": "You filtered it manually",
+    "language": "Posting isn't written in a language you read",
+}
+
+# Human names for the codes that actually turn up, so the reason reads as a
+# sentence rather than as a two-letter puzzle.
+_LANGUAGE_NAMES = {
+    "de": "German", "fr": "French", "es": "Spanish", "nl": "Dutch",
+    "it": "Italian", "pt": "Portuguese", "pl": "Polish", "sv": "Swedish",
+    "da": "Danish", "no": "Norwegian", "fi": "Finnish", "cs": "Czech",
+    "ru": "Russian", "tr": "Turkish", "ja": "Japanese", "zh": "Chinese",
+    "ko": "Korean", "ar": "Arabic", "he": "Hebrew", "uk": "Ukrainian",
+    "ro": "Romanian", "hu": "Hungarian", "el": "Greek", "en": "English",
 }
 
 # Verdicts that were reached by reading the description, and are therefore
@@ -230,6 +278,20 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
         return FilterOutcome(
             False, 0.0, "blocked_title",
             f"Title contains {blocked_word!r}, which you blocked from the jobs list.",
+        )
+
+    # Before seniority and skills on purpose. A German posting will usually
+    # fail one of those too, and being told a Stellenausschreibung has "too few
+    # skills" is a true statement that explains nothing.
+    foreign = _blocked_by_language(job, profile_data)
+    if foreign:
+        wanted = ", ".join(
+            _LANGUAGE_NAMES.get(code, code) for code in sorted(accepted_languages())
+        )
+        return FilterOutcome(
+            False, 0.0, "language",
+            f"The posting is written in {_LANGUAGE_NAMES.get(foreign, foreign)}, "
+            f"and you read {wanted}.",
         )
 
     if _blocked_by_seniority(job, profile_data):
@@ -889,6 +951,26 @@ def _match_job(
         except Exception as exc:
             # Details are an improvement to scoring, not a precondition for it.
             logger.warning("match_job: detail extraction failed for %s: %s", job.id, exc)
+
+        # Extraction is where a posting's language is first learned, so the gate
+        # above could not have seen it. Checking again here is what turns a
+        # German listing into one wasted call instead of three — this one, the
+        # scoring call, and the second opinion behind it.
+        foreign = _blocked_by_language(job, profile_data)
+        if foreign:
+            job.status = JobStatus.filtered_out
+            job.llm_score = None
+            job.llm_score_deep = None
+            job.deep_matched_by = None
+            job.filter_reason = "language"
+            job.filter_detail = (
+                f"The posting is written in "
+                f"{_LANGUAGE_NAMES.get(foreign, foreign)}, and you read "
+                + ", ".join(_LANGUAGE_NAMES.get(code, code)
+                            for code in sorted(accepted_languages()))
+                + "."
+            )
+            return "filtered_out"
 
     try:
         llm_result = llm_score_job(job, profile_data, api_key, base_url, model, budget=budget)
