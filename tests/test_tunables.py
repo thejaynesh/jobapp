@@ -19,6 +19,19 @@ def _profile_data(**overrides):
     return {"settings": overrides}
 
 
+class _TitleOnlyJob:
+    """
+    A posting that states no required years, so only its title is evidence.
+
+    `_blocked_by_seniority` takes the job rather than the title now: a posting
+    that states a number is judged on the number, and the title rule is the
+    fallback for one that says nothing.
+    """
+
+    def __init__(self, title, required_years=None):
+        self.title = title
+        self.required_years = required_years
+
 class TestResolvingAValue:
     def test_an_unset_tunable_falls_back_to_the_environment(self):
         assert tunables.value({}, "max_job_age_days") == env_settings.MAX_JOB_AGE_DAYS
@@ -166,16 +179,16 @@ class TestTheyActuallyTakeEffect:
     def test_the_senior_title_filter_can_be_switched_off(self):
         from app.services.matcher import _blocked_by_seniority
         assert _blocked_by_seniority(
-            "Senior Backend Engineer", self._profile()) is True
+            _TitleOnlyJob("Senior Backend Engineer"), self._profile()) is True
         assert _blocked_by_seniority(
-            "Senior Backend Engineer",
+            _TitleOnlyJob("Senior Backend Engineer"),
             self._profile(filter_senior_titles=False)) is False
 
     def test_the_junior_threshold_can_be_lowered(self):
         """One year of experience stops counting as junior below a 0.5 cutoff."""
         from app.services.matcher import _blocked_by_seniority
         assert _blocked_by_seniority(
-            "Senior Backend Engineer",
+            _TitleOnlyJob("Senior Backend Engineer"),
             self._profile(junior_max_years=0.5)) is False
 
     def test_the_minimum_skill_count_is_honoured(self):

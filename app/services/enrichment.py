@@ -58,8 +58,9 @@ THIN_DESCRIPTION_CHARS = 1500
 # work done while changing nothing.
 MIN_IMPROVEMENT_CHARS = 200
 
-# Filter reasons that mean "we judged this on data we didn't have". A job
-# rejected for either gets another go the moment a real description arrives.
+# Filter reasons that mean "we judged this on data we didn't have". These two
+# name the missing data outright, which is why enrichment goes looking for
+# their jobs first — see `select_targets`.
 RESCUABLE_FILTER_REASONS = ("no_description", "few_skills")
 
 DEFAULT_TIMEOUT = 15
@@ -599,6 +600,8 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
     """
     from sqlalchemy import func, or_
 
+    from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
+
     thin = or_(
         Job.description.is_(None),
         func.length(Job.description) < THIN_DESCRIPTION_CHARS,
@@ -610,7 +613,11 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
             Job.closed_at.is_(None),
             or_(
                 Job.status != JobStatus.filtered_out,
-                Job.filter_reason.in_(RESCUABLE_FILTER_REASONS),
+                # Every verdict that was reached by reading the description,
+                # not just the two that name the missing data outright — a job
+                # scored 45 on a 500-character stub is as much a victim of thin
+                # data as one rejected for having none.
+                Job.filter_reason.in_(sorted(DESCRIPTION_DEPENDENT_REASONS)),
             ),
         )
         .order_by(Job.fetched_at.desc())
@@ -661,16 +668,39 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     if location and not (job.location or "").strip():
         job.location = str(location)[:255]
 
-    if (
-        job.status == JobStatus.filtered_out
-        and job.filter_reason in RESCUABLE_FILTER_REASONS
-    ):
+    if _worth_rescoring(job):
         job.status = JobStatus.new
         job.filter_reason = None
         job.filter_detail = None
         outcome["requeued"] = True
 
     return outcome
+
+
+def _worth_rescoring(job: Job) -> bool:
+    """
+    Whether a fuller description should send this job back to be scored again.
+
+    Only for verdicts that were reached by reading the description. The big
+    one by volume is `low_score`: a job scored 45 on a 500-character stub was
+    scored on a teaser, and the real posting routinely tells a different story
+    — which is the entire reason enrichment exists.
+
+    Three things are deliberately left alone. A verdict the user made, because
+    a fuller description is not grounds for overruling somebody who looked at a
+    job and said no. A verdict that never read the description (a title or
+    location mismatch), because re-scoring reaches the same answer and costs a
+    call. And anything already carrying an application, because that is the
+    user's pipeline and re-scoring could strand documents already written for
+    it — refreshing those is what roadmap 4.1 is for.
+    """
+    from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
+
+    if job.status != JobStatus.filtered_out:
+        return False
+    if job.filter_reason not in DESCRIPTION_DEPENDENT_REASONS:
+        return False
+    return not job.applications
 
 
 def _parse_datetime(raw) -> datetime | None:

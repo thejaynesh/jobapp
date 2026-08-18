@@ -18,6 +18,19 @@ from app.services.experience import (
 )
 
 
+class _TitleOnlyJob:
+    """
+    A posting that states no required years, so only its title is evidence.
+
+    `_blocked_by_seniority` takes the job rather than the title now: a posting
+    that states a number is judged on the number, and the title rule is the
+    fallback for one that says nothing.
+    """
+
+    def __init__(self, title, required_years=None):
+        self.title = title
+        self.required_years = required_years
+
 class TestParsingTheDatesPeopleActuallyType:
     @pytest.mark.parametrize("text,expected", [
         ("Sep 2024", date(2024, 9, 1)),
@@ -182,7 +195,7 @@ class TestWhatTheMatcherDoesWithIt:
             {"role": "Engineer", "company": "Acme",
              "start_date": "Jan 2018", "end_date": "Jan 2024"},
         ])
-        assert _blocked_by_seniority("Senior Backend Engineer", profile) is False
+        assert _blocked_by_seniority(_TitleOnlyJob("Senior Backend Engineer"), profile) is False
 
     def test_a_genuinely_junior_candidate_is_still_protected(self):
         from app.services.matcher import _blocked_by_seniority
@@ -190,4 +203,4 @@ class TestWhatTheMatcherDoesWithIt:
             {"role": "Intern", "company": "Acme",
              "start_date": "Jun 2024", "end_date": "Sep 2024"},
         ])
-        assert _blocked_by_seniority("Senior Backend Engineer", profile) is True
+        assert _blocked_by_seniority(_TitleOnlyJob("Senior Backend Engineer"), profile) is True

@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     # and the parse fails. Costs nothing when a model does not use it — only
     # tokens actually produced are generated.
     NIM_MATCH_MAX_TOKENS: int = 1536
+    # How much of a posting the scoring prompt carries. Was 4,000 characters,
+    # chosen when descriptions were mostly 500-character stubs and the ceiling
+    # never bound; now that enrichment fetches the real text it was cutting off
+    # mid-requirements, so the model judged skill and seniority fit against the
+    # marketing half. Several times longer than the longest real posting — a
+    # ceiling against a page that cleaned badly, not against job descriptions.
+    MATCH_DESCRIPTION_CHARS: int = 24000
 
     # ---- LLM call log ---------------------------------------------------
     # Every request and reply, stored together. The existing log lines say a

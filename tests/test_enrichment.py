@@ -628,3 +628,87 @@ class TestLinkedInNudge:
         self._linkedin_job(db, description=LONG)
         db.commit()
         assert "jobs have no description" not in client.get("/runs").text
+
+
+class TestRescoringAfterGrowth:
+    """
+    A verdict reached by reading a 500-character stub was reached on a teaser.
+    Once the real posting arrives it deserves another look — but only the
+    verdicts that actually read the description, and never one the user made.
+    """
+
+    def _filtered(self, db, reason, description="tiny", **kwargs):
+        job = _job(
+            description=description, status=JobStatus.filtered_out,
+            filter_reason=reason, filter_detail="because",
+            url=f"https://x/{uuid.uuid4()}", **kwargs,
+        )
+        job.source_urls = [job.url]
+        db.add(job)
+        db.commit()
+        return job
+
+    def _enrich(self, db, job):
+        return enrichment.apply_extraction(
+            db, job, enrichment.Extraction(description=LONG, method="ats_api")
+        )
+
+    def test_a_low_score_is_reconsidered(self, db):
+        """
+        The one that matters by volume: scored 45 on a stub, and the real
+        posting routinely tells a different story.
+        """
+        job = self._filtered(db, "low_score")
+        assert self._enrich(db, job)["requeued"] is True
+        assert job.status == JobStatus.new
+        assert job.filter_reason is None
+
+    def test_every_description_dependent_verdict_is_reconsidered(self, db):
+        for reason in ("no_description", "few_skills", "low_score",
+                       "restricted", "seniority"):
+            job = self._filtered(db, reason)
+            assert self._enrich(db, job)["requeued"] is True, reason
+
+    def test_a_verdict_that_never_read_the_description_is_not(self, db):
+        # Re-scoring reaches the same answer and costs a call.
+        for reason in ("title_mismatch", "location"):
+            job = self._filtered(db, reason)
+            assert self._enrich(db, job)["requeued"] is False, reason
+            assert job.status == JobStatus.filtered_out, reason
+
+    def test_a_verdict_the_user_made_is_never_overruled(self, db):
+        for reason in ("manual", "blocked_title", "excluded_company", "duplicate"):
+            job = self._filtered(db, reason)
+            assert self._enrich(db, job)["requeued"] is False, reason
+            assert job.status == JobStatus.filtered_out, reason
+            assert job.filter_reason == reason, reason
+
+    def test_a_job_with_an_application_is_left_alone(self, db):
+        """
+        That is the user's pipeline; re-scoring could strand documents already
+        written for it. Refreshing those is roadmap 4.1's job.
+        """
+        from app.models.application import Application
+
+        job = self._filtered(db, "low_score")
+        db.add(Application(job_id=job.id))
+        db.commit()
+        db.refresh(job)
+
+        assert self._enrich(db, job)["requeued"] is False
+        assert job.status == JobStatus.filtered_out
+
+    def test_the_description_is_still_stored_even_when_not_requeued(self, db):
+        # The text is worth having whatever happens to the verdict.
+        job = self._filtered(db, "manual")
+        outcome = self._enrich(db, job)
+        assert outcome["improved"] is True
+        assert job.description == LONG
+
+    def test_low_score_jobs_are_enrichment_targets(self, db):
+        job = self._filtered(db, "low_score")
+        assert job.id in {j.id for j in enrichment.select_targets(db, {}, limit=50)}
+
+    def test_title_rejects_are_not_enrichment_targets(self, db):
+        job = self._filtered(db, "title_mismatch")
+        assert job.id not in {j.id for j in enrichment.select_targets(db, {}, limit=50)}

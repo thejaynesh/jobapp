@@ -82,13 +82,26 @@ def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
 
 _SENIOR_TITLE_WORDS = ("senior", "sr", "staff", "principal", "lead", "director", "vp", "head")
 
+# How far past the candidate's experience a stated requirement may reach and
+# still be worth a scoring call. Requirements are written as wishes, and the
+# model can weigh substantial projects and adjacent experience against them —
+# which is exactly the judgement this prefilter cannot make.
+SENIORITY_YEARS_TOLERANCE = 1.5
 
-def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
+
+def _blocked_by_seniority(job, profile_data: dict) -> bool:
     """
-    Junior candidates waste LLM calls (and get penalized anyway) on jobs whose
-    TITLE is explicitly senior-level, so drop them up front. Only title words
-    count — 'senior' in a description is too noisy. Words that appear in the
-    candidate's own target roles are never blocked.
+    Whether this posting is too senior to be worth a scoring call.
+
+    A title word is a guess about the number. Now that postings state the
+    number (see `services.job_details`), the number wins: a "Senior Engineer"
+    asking for 3 years is a job a 2.4-year candidate should be scored against,
+    and dropping it on the word "Senior" is exactly the kind of confident
+    mistake that makes the list smaller than it should be.
+
+    The title rule still applies when the posting says nothing, because a title
+    is the only evidence left. Words appearing in the candidate's own target
+    roles are never blocked either way.
     """
     from app.services.experience import total_years as _total_years
     from app.services.tunables import value as tunable
@@ -100,11 +113,15 @@ def _blocked_by_seniority(title: str, profile_data: dict) -> bool:
     if total_years >= tunable(profile_data, "junior_max_years"):
         return False
 
+    required = getattr(job, "required_years", None)
+    if isinstance(required, (int, float)) and not isinstance(required, bool):
+        return float(required) > total_years + SENIORITY_YEARS_TOLERANCE
+
     role_words = {
         w for role in profile_data.get("target_roles", [])
         for w in re.findall(r"[a-z]+", role.lower())
     }
-    title_lower = title.lower()
+    title_lower = (getattr(job, "title", "") or "").lower()
     return any(
         word not in role_words and re.search(rf"\b{word}\b", title_lower)
         for word in _SENIOR_TITLE_WORDS
@@ -133,6 +150,24 @@ FILTER_REASON_LABELS = {
     "duplicate": "Same posting already has an application",
     "manual": "You filtered it manually",
 }
+
+# Verdicts that were reached by reading the description, and are therefore
+# worth reaching again once there is more of it. `low_score` is the one that
+# matters most by volume: a job scored 45 on Adzuna's 500-character stub is a
+# job scored on a teaser, and the real posting routinely tells a different
+# story.
+#
+# `title_mismatch` and `location` are deliberately absent. Neither reads the
+# description, so re-scoring them would cost a call and reach the same answer.
+DESCRIPTION_DEPENDENT_REASONS = frozenset({
+    "no_description", "few_skills", "low_score", "restricted", "seniority",
+})
+
+# Verdicts the user made. A fuller description is not a reason to overrule
+# somebody who looked at a job and said no.
+USER_CHOICE_REASONS = frozenset({
+    "manual", "blocked_title", "excluded_company", "duplicate",
+})
 
 
 def _title_match_roles(profile_data: dict) -> list[str]:
@@ -197,18 +232,31 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
             f"Title contains {blocked_word!r}, which you blocked from the jobs list.",
         )
 
-    if _blocked_by_seniority(job.title, profile_data):
-        hit = next(
-            (w for w in _SENIOR_TITLE_WORDS
-             if re.search(rf"\b{w}\b", (job.title or "").lower())),
-            "senior",
-        )
-        max_years = getattr(settings, "JUNIOR_MAX_YEARS", 3.0)
-        return FilterOutcome(
-            False, 0.0, "seniority",
-            f"Title contains {hit!r}, which is filtered while your profile shows "
-            f"under {max_years:g} years of experience.",
-        )
+    if _blocked_by_seniority(job, profile_data):
+        from app.services.experience import total_years as _total_years
+
+        required = getattr(job, "required_years", None)
+        if isinstance(required, (int, float)) and not isinstance(required, bool):
+            # The posting stated a number, so the reason names the number
+            # rather than a word we read off the title.
+            yours = _total_years(profile_data.get("experience", []))
+            detail = (
+                f"The posting asks for {float(required):g} years; your profile "
+                f"shows {yours:g}, more than {SENIORITY_YEARS_TOLERANCE:g} short."
+            )
+        else:
+            hit = next(
+                (w for w in _SENIOR_TITLE_WORDS
+                 if re.search(rf"\b{w}\b", (job.title or "").lower())),
+                "senior",
+            )
+            max_years = getattr(settings, "JUNIOR_MAX_YEARS", 3.0)
+            detail = (
+                f"Title contains {hit!r} and the posting states no required "
+                f"years, which is filtered while your profile shows under "
+                f"{max_years:g} years of experience."
+            )
+        return FilterOutcome(False, 0.0, "seniority", detail)
 
     # Drop jobs whose location clearly belongs to a region the candidate did
     # not choose; ambiguous/unknown locations continue to the LLM.
@@ -268,6 +316,30 @@ def keyword_filter(job, profile_data: dict) -> tuple[bool, float]:
     """Pass/score only — see evaluate_keyword_filter for the reasoning."""
     outcome = evaluate_keyword_filter(job, profile_data)
     return outcome.passed, outcome.score
+
+
+def _description_for_prompt(job) -> str:
+    """
+    The posting as the model should see it: all of it, for any real posting.
+
+    It used to be the first 4,000 characters, chosen when descriptions were
+    mostly Adzuna's 500-character stubs and the ceiling never bound. Now that
+    enrichment fetches the real text, 4,000 characters routinely cut off
+    mid-requirements — so the model was scoring seniority and skill fit against
+    the marketing half of the posting and never saw the part that says what the
+    job needs.
+
+    There is still a ceiling, because "the full text" and "unbounded" are not
+    the same promise. A page that cleaned badly can be hundreds of kilobytes,
+    and putting that into every scoring call would cost minutes per batch for
+    text that is not a job description at all. The default is several times
+    longer than the longest real posting.
+    """
+    text = job.description or ""
+    limit = max(1000, int(getattr(settings, "MATCH_DESCRIPTION_CHARS", 24000)))
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n[description truncated]"
 
 
 def _stated_facts(job) -> str:
@@ -417,11 +489,7 @@ def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
         f"Location: {job.location or 'Unknown'} (remote: {job.is_remote})\n"
         f"Experience level: {job.experience_level or 'unknown'}\n"
         + _stated_facts(job)
-        # Still excerpted. Raising this ceiling is its own change with its own
-        # token-budget consequences (roadmap 3.1); the stated facts above are
-        # what the excerpt was most likely to cut off, and they now arrive
-        # whole regardless of where the description gets truncated.
-        + f"Description:\n{(job.description or '')[:4000]}"
+        + f"Description:\n{_description_for_prompt(job)}"
     )
 
     return [

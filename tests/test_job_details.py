@@ -354,3 +354,107 @@ class TestJobCardPills:
         body = client.get("/jobs").text
         assert "Plain Engineer" in body
         assert "asks " not in body
+
+
+class TestSeniorityTrustsTheStatedNumber:
+    """
+    A title word is a guess about a number. Now that postings state the number,
+    the number wins — a "Senior Engineer" asking for 3 years is a job a
+    2.4-year candidate should be scored against, and dropping it on the word
+    "Senior" is the kind of confident mistake that makes the list smaller than
+    it should be.
+    """
+
+    def _profile(self):
+        """
+        A candidate with ~2.4 years, derived from dates the way the filter
+        reads them. Fixed dates rather than relative ones: a profile that
+        drifts past the junior threshold as time passes would make this suite
+        start passing for the wrong reason.
+        """
+        return {
+            "target_roles": ["Backend Engineer"],
+            "skills": {"lang": ["Python"]},
+            "experience": [{
+                "role": "Engineer", "company": "Acme",
+                "start_date": "Apr 2024", "end_date": "Aug 2026",
+            }],
+        }
+
+    def test_a_senior_title_asking_few_years_reaches_the_model(self):
+        from app.services.matcher import _blocked_by_seniority
+
+        job = _job(title="Senior Backend Engineer", required_years=3.0)
+        assert _blocked_by_seniority(job, self._profile()) is False
+
+    def test_a_senior_title_asking_many_years_is_still_dropped(self):
+        from app.services.matcher import _blocked_by_seniority
+
+        job = _job(title="Senior Backend Engineer", required_years=10.0)
+        assert _blocked_by_seniority(job, self._profile()) is True
+
+    def test_a_junior_title_asking_many_years_is_dropped_too(self):
+        # The number cuts both ways: the title said nothing alarming, and the
+        # posting did.
+        from app.services.matcher import _blocked_by_seniority
+
+        job = _job(title="Backend Engineer", required_years=12.0)
+        assert _blocked_by_seniority(job, self._profile()) is True
+
+    def test_a_posting_stating_nothing_falls_back_to_the_title(self):
+        from app.services.matcher import _blocked_by_seniority
+
+        assert _blocked_by_seniority(
+            _job(title="Senior Backend Engineer"), self._profile()) is True
+        assert _blocked_by_seniority(
+            _job(title="Backend Engineer"), self._profile()) is False
+
+    def test_the_reason_names_the_number_when_there_is_one(self, db):
+        from app.services.matcher import evaluate_keyword_filter
+
+        outcome = evaluate_keyword_filter(
+            _job(title="Backend Engineer", required_years=12.0, description=LONG),
+            self._profile(),
+        )
+        assert outcome.reason == "seniority"
+        assert "asks for 12 years" in outcome.detail
+
+    def test_the_reason_says_so_when_only_the_title_was_evidence(self, db):
+        from app.services.matcher import evaluate_keyword_filter
+
+        outcome = evaluate_keyword_filter(
+            _job(title="Senior Backend Engineer", description=LONG), self._profile()
+        )
+        assert outcome.reason == "seniority"
+        assert "states no required years" in outcome.detail
+
+
+class TestTheModelSeesTheWholePosting:
+    def test_a_long_description_is_no_longer_cut_at_4000_chars(self):
+        """
+        4,000 characters was chosen when descriptions were 500-character
+        stubs. Once enrichment fetched the real text it cut off
+        mid-requirements, so the model scored skill and seniority fit against
+        the marketing half of the posting.
+        """
+        from app.services.matcher import _build_match_prompt
+
+        marketing = "We are a mission-driven company changing the world. " * 100
+        requirements = "You must have deep Kubernetes and Rust experience."
+        job = _job(description=marketing + requirements)
+
+        user = _build_match_prompt(job, {"target_roles": ["Backend Engineer"]})[1]["content"]
+        assert len(marketing) > 4000
+        assert requirements in user
+
+    def test_a_pathological_page_is_still_capped(self):
+        # "The full text" and "unbounded" are not the same promise: a page that
+        # cleaned badly can be hundreds of kilobytes and is not a posting.
+        from app.config import settings
+        from app.services.matcher import _build_match_prompt
+
+        job = _job(description="x" * (settings.MATCH_DESCRIPTION_CHARS + 50_000))
+        user = _build_match_prompt(job, {"target_roles": ["Backend Engineer"]})[1]["content"]
+
+        assert "[description truncated]" in user
+        assert len(user) < settings.MATCH_DESCRIPTION_CHARS + 5000
