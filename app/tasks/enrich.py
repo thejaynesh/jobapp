@@ -38,13 +38,22 @@ _EMPTY = {
     soft_time_limit=1500,
     time_limit=1740,
 )
-def enrich_jobs(limit: int | None = None, match_after: bool = True) -> dict:
+def enrich_jobs(limit: int | None = None, match_after: bool = True,
+                depth: int = 0) -> dict:
     """
-    Enrich one batch, then hand the rescued jobs back to matching.
+    Enrich one batch, hand the rescued jobs back to matching, and — while there
+    is more to do — queue the next batch immediately.
 
-    Bounded per run rather than exhaustive: the backlog is tens of thousands of
-    jobs, and a pass with no ceiling holds a worker slot for hours while the
-    jobs it already rescued wait behind it to be scored.
+    Still bounded per run rather than exhaustive: a pass with no ceiling holds
+    a worker slot for hours while the jobs it already rescued wait behind it to
+    be scored. Chaining gets the same work done at the same batch size without
+    the half-hour of idleness between passes, which is what the schedule alone
+    produced — a 200-job batch takes under a minute.
+
+    Safe to chain only because a pass now stamps every job it attempted (see
+    `enrichment.select_targets`): the queue strictly shrinks, so the chain ends
+    on its own rather than re-fetching the same wall forever. `depth` is belt
+    and braces on top of that.
     """
     if not settings.ENRICH_ENABLED:
         return {**_EMPTY, "skipped_reason": "disabled"}
@@ -54,6 +63,7 @@ def enrich_jobs(limit: int | None = None, match_after: bool = True) -> dict:
         return {**_EMPTY, "skipped_reason": "already running"}
 
     db = SessionLocal()
+    result: dict | None = None
     try:
         from app.services.enrichment import run
 
@@ -71,7 +81,47 @@ def enrich_jobs(limit: int | None = None, match_after: bool = True) -> dict:
         return dict(_EMPTY)
     finally:
         db.close()
+        # Released before the follow-up is published, or the next batch would
+        # find the lock still held and skip itself.
         release(key=ENRICH_LOCK_KEY)
+        _chain_if_more(result, limit, match_after, depth)
+
+
+def _chain_if_more(result, limit: int | None, match_after: bool, depth: int) -> None:
+    """
+    Queue the next batch when this one filled up.
+
+    A full batch means `select_targets` had at least a batch's worth to offer,
+    so there is almost certainly more — and asking that question by counting
+    the backlog would be a sequential scan over a six-figure table on every
+    pass, to learn something the batch size already implies.
+
+    An unfull batch ends the chain and leaves the rest to the schedule, which
+    is the right place for "a few new jobs arrived" rather than "there is a
+    backlog".
+    """
+    if not settings.ENRICH_CHAIN_PASSES or not isinstance(result, dict):
+        return
+    if result.get("skipped_reason"):
+        return
+
+    ceiling = max(1, int(limit or settings.ENRICH_MAX_PER_RUN))
+    served = result.get("attempted", 0) + result.get("queued_browser", 0)
+    if served < ceiling:
+        return
+
+    cap = max(0, int(settings.ENRICH_MAX_CHAINED_PASSES))
+    if depth + 1 >= cap:
+        logger.info(
+            "enrich_jobs: stopping after %d chained passes; the schedule picks "
+            "up the rest", depth + 1,
+        )
+        return
+
+    try:
+        enrich_jobs.delay(limit=limit, match_after=match_after, depth=depth + 1)
+    except Exception as exc:
+        logger.error("enrich_jobs: could not queue the next batch: %s", exc)
 
 
 def main() -> None:

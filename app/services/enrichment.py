@@ -597,7 +597,16 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
     Title-passing jobs come first. Everything else is ordered newest first,
     because a posting from this morning is more likely to still be open than
     one from six weeks ago.
+
+    Jobs tried recently are excluded. Without that the queue never advances:
+    a posting whose description cannot be improved is unchanged by the attempt,
+    so it stays at the head of a newest-first ordering and every pass spends
+    itself on the same wall while the real backlog waits behind it. The window
+    is a cooloff rather than a write-off — a host that was down last week is
+    worth another request next week.
     """
+    from datetime import timedelta
+
     from sqlalchemy import func, or_
 
     from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
@@ -606,11 +615,18 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
         Job.description.is_(None),
         func.length(Job.description) < THIN_DESCRIPTION_CHARS,
     )
+    retry_after = datetime.now(timezone.utc) - timedelta(
+        days=max(0, int(getattr(settings, "ENRICH_RETRY_DAYS", 7)))
+    )
     rows = (
         db.query(Job)
         .filter(
             thin,
             Job.closed_at.is_(None),
+            or_(
+                Job.enrichment_attempted_at.is_(None),
+                Job.enrichment_attempted_at < retry_after,
+            ),
             or_(
                 Job.status != JobStatus.filtered_out,
                 # Every verdict that was reached by reading the description,
@@ -845,7 +861,14 @@ def enrich_jobs(
             ) as pool:
                 results = list(pool.map(_work, for_server))
 
+    attempted_at = datetime.now(timezone.utc)
     for job, found, error in results:
+        # Stamped whatever happened, before any early exit below. A job that
+        # cannot be enriched is otherwise unchanged by the attempt, so it stays
+        # at the front of `select_targets` and is picked again by every pass —
+        # which means the older backlog behind it is never reached at all.
+        job.enrichment_attempted_at = attempted_at
+
         if error is not None:
             stats.failed += 1
             host = _host(_target_url(job))

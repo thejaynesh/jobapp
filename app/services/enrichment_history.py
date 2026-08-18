@@ -113,6 +113,28 @@ def recent_runs(db: Session, limit: int = 15) -> list[EnrichmentRun]:
     )
 
 
+def _waiting(db: Session, thin) -> int:
+    """Thin jobs enrichment can pick up now, cooloff respected."""
+    from datetime import timedelta
+
+    from sqlalchemy import or_
+
+    from app.config import settings
+    from app.models.job import Job
+
+    retry_after = datetime.now(timezone.utc) - timedelta(
+        days=max(0, int(getattr(settings, "ENRICH_RETRY_DAYS", 7)))
+    )
+    return db.query(func.count(Job.id)).filter(
+        thin,
+        Job.closed_at.is_(None),
+        or_(
+            Job.enrichment_attempted_at.is_(None),
+            Job.enrichment_attempted_at < retry_after,
+        ),
+    ).scalar() or 0
+
+
 def backlog(db: Session) -> dict:
     """
     How much is left to do, so the panel can say whether it is draining.
@@ -138,6 +160,11 @@ def backlog(db: Session) -> dict:
             "thin": db.query(func.count(Job.id)).filter(
                 thin, Job.closed_at.is_(None)
             ).scalar() or 0,
+            # What is actually reachable right now. `thin` counts every job
+            # with a poor description; most of the difference is jobs already
+            # tried and cooling off, and a panel that only showed the larger
+            # number would read as a backlog that refuses to drain.
+            "waiting": _waiting(db, thin),
             "rescuable": db.query(func.count(Job.id)).filter(
                 Job.status == JobStatus.filtered_out,
                 Job.filter_reason.in_(RESCUABLE_FILTER_REASONS),
@@ -145,7 +172,7 @@ def backlog(db: Session) -> dict:
         }
     except Exception as exc:
         logger.warning("enrichment_history: backlog unavailable: %s", exc)
-        return {"thin": 0, "rescuable": 0}
+        return {"thin": 0, "waiting": 0, "rescuable": 0}
 
 
 def linkedin_state(db: Session) -> dict:

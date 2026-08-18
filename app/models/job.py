@@ -117,6 +117,16 @@ class Job(Base):
     details_extracted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When enrichment last went looking for a fuller description — whether or
+    # not it found one. Without this a job that cannot be enriched is picked
+    # again by every pass forever: nothing about it changes, so it stays at the
+    # front of the queue and the real backlog behind it is never reached.
+    #
+    # A stamp rather than a flag, so a host that was down in March is retried
+    # in April instead of being written off. See `ENRICH_RETRY_DAYS`.
+    enrichment_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     # Every verdict this job has been given, newest first. The columns above
     # hold only the latest one, and a job re-scored on a fuller description

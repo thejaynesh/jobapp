@@ -382,6 +382,20 @@ class Settings(BaseSettings):
     # between them.
     ENRICH_PER_HOST: int = 4
     ENRICH_HOST_DELAY_MS: int = 400
+    # Queue the next batch as soon as one fills up, instead of idling until the
+    # next scheduled pass. A 200-job batch takes under a minute, so the old
+    # behaviour spent 29 of every 30 minutes doing nothing while a six-figure
+    # backlog waited.
+    ENRICH_CHAIN_PASSES: bool = True
+    # A ceiling on one chain, so a bug cannot turn this into a permanent loop.
+    # The queue shrinks on its own (every attempt is stamped), so this is belt
+    # and braces rather than the thing that ends the chain.
+    ENRICH_MAX_CHAINED_PASSES: int = 50
+    # How long before a job that could not be enriched is worth trying again.
+    # A cooloff rather than a write-off: a host that was refusing us last week
+    # may not be next week. Without it the same unenrichable jobs sit at the
+    # head of a newest-first queue and no pass ever reaches the real backlog.
+    ENRICH_RETRY_DAYS: int = 7
 
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"
