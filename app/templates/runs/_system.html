@@ -299,7 +299,7 @@
                   {% else %}bg-gray-100 text-gray-500{% endif %}">{{ task.status }}</span>
               </td>
               <td class="py-0.5 text-gray-400 text-right">
-                {{ task.created_at.strftime('%H:%M') }}
+                {{ task.created_at | when("%H:%M") }}
               </td>
             </tr>
             {# What the server made of it. A task that succeeded and yielded

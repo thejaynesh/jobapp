@@ -73,7 +73,7 @@
       <tr class="border-t border-gray-100 hover:bg-gray-50 cursor-pointer"
           onclick="window.location='/llm/{{ call.id }}'">
         <td class="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">
-          {{ call.created_at.strftime('%d %b %H:%M:%S') }}
+          {{ call.created_at | when("%d %b %H:%M:%S") }}
         </td>
         <td class="px-3 py-2">
           <span class="font-mono text-xs text-gray-700">{{ call.stage }}</span>

@@ -397,6 +397,11 @@ class Settings(BaseSettings):
     # head of a newest-first queue and no pass ever reaches the real backlog.
     ENRICH_RETRY_DAYS: int = 7
 
+    # What zone the pages render times in. Storage stays UTC — this is purely
+    # a rendering concern. An IANA name rather than an offset, so the PST/PDT
+    # switch is handled instead of being an hour wrong two thirds of the year.
+    DISPLAY_TIMEZONE: str = "America/Los_Angeles"
+
     DEBUG: bool = False
     STORAGE_PATH: str = "/storage"
     DOCS_OUTPUT_DIR: str = "/storage"

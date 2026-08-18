@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -15,7 +15,7 @@ from app.tasks.generate import generate_docs
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/apps", tags=["apps"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 
 @router.get("", response_class=HTMLResponse)

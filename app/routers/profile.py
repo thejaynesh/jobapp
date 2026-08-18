@@ -3,7 +3,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -14,7 +14,7 @@ from app.services.profile_service import get_or_create_profile
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/profile", tags=["profile"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 templates.env.globals["region_options"] = REGION_OPTIONS
 templates.env.globals["location_prefs"] = normalize_prefs
 

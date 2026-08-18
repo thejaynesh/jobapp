@@ -9,7 +9,7 @@
 <div class="flex flex-wrap items-baseline justify-between gap-2 mt-2 mb-4">
   <h1 class="text-xl font-bold font-mono">{{ call.stage }}</h1>
   <p class="text-xs text-gray-400">
-    {{ call.created_at.strftime('%d %b %Y, %H:%M:%S') }} ·
+    {{ call.created_at | when("%d %b %Y, %H:%M:%S") }} ·
     {{ call.provider }}/{{ call.model }} ·
     {{ (call.duration_ms / 1000) | round(1) }}s
   </p>

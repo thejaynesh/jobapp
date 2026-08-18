@@ -107,7 +107,7 @@
       {% for run in runs %}
       <tr>
         <td class="px-3 py-2 text-gray-600 whitespace-nowrap">
-          {{ run.started_at.strftime("%b %d %H:%M") }}
+          {{ run.started_at | when("%b %d %H:%M") }}
         </td>
         <td class="px-3 py-2">
           <span class="text-xs px-1.5 py-0.5 rounded

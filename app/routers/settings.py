@@ -3,7 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -12,7 +12,7 @@ from app.services.profile_service import get_or_create_profile
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 
 def _settings_context(profile) -> dict:

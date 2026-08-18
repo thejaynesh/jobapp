@@ -17,11 +17,11 @@
       {{ msg.status | title }}
     </span>
     {% if msg.sent_at %}
-      <span class="text-[10px] text-gray-400">sent {{ msg.sent_at.strftime('%b %d') }}</span>
+      <span class="text-[10px] text-gray-400">sent {{ msg.sent_at | when("%b %d") }}</span>
     {% endif %}
     {% if msg.follow_up_due_at %}
       <span class="text-[10px] text-amber-600" title="A follow-up is drafted automatically after this date">
-        follow up {{ msg.follow_up_due_at.strftime('%b %d') }}
+        follow up {{ msg.follow_up_due_at | when("%b %d") }}
       </span>
     {% endif %}
     {% if msg.edited %}<span class="text-[10px] text-gray-400">edited</span>{% endif %}

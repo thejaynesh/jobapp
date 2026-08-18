@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # One router, no prefix: the page and its HTMX fragments live under /outreach,
 # while the JSON trigger stays where the API had it.
 router = APIRouter(tags=["outreach"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 
 # ---------------------------------------------------------------------------

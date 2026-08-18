@@ -28,6 +28,6 @@
     {% endif %}
   </td>
   <td class="px-4 py-3 text-gray-500 text-xs">
-    {{ app.applied_at.strftime('%Y-%m-%d') if app.applied_at else '—' }}
+    {{ app.applied_at | when("%Y-%m-%d") if app.applied_at else '—' }}
   </td>
 </tr>

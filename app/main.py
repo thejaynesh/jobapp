@@ -9,7 +9,7 @@ from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_templates = Jinja2Templates(directory="app/templates")
+_templates = build_templates()
 
 _HTTP_TITLES = {
     400: "Bad Request",

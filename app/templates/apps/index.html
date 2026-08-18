@@ -35,7 +35,7 @@
         {% endfor %}
       </select>
       {% if app.applied_at %}
-      <span class="text-xs text-gray-400">{{ app.applied_at.strftime('%b %d') }}</span>
+      <span class="text-xs text-gray-400">{{ app.applied_at | when("%b %d") }}</span>
       {% endif %}
     </div>
   </div>

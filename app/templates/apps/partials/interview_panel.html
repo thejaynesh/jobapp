@@ -59,7 +59,7 @@
            class="text-sm text-blue-600 hover:underline">{{ report.title[:110] }}</a>
       </div>
       <div class="text-[11px] text-gray-400 mt-0.5">
-        {{ report.posted_at.strftime('%b %Y') }}
+        {{ report.posted_at | on("%b %Y") }}
         {% if report.role_hint %} · {{ report.role_hint }}{% endif %}
       </div>
     </li>

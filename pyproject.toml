@@ -18,6 +18,10 @@ dependencies = [
     "anthropic==0.115.0",
     "python-multipart==0.0.20",
     "playwright==1.49.1",
+    # The IANA timezone database. `zoneinfo` reads it from the system, and
+    # python:3.12-slim does not reliably ship one — without this every page
+    # would quietly fall back to UTC, which is the bug this was added to fix.
+    "tzdata==2024.2",
 ]
 
 [project.optional-dependencies]

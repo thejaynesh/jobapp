@@ -109,7 +109,7 @@
     <tbody>
       {% for row in cohorts %}
       <tr class="border-t border-gray-100 text-right">
-        <td class="py-1 text-left text-gray-600">{{ row.day.strftime("%b %d") }}</td>
+        <td class="py-1 text-left text-gray-600">{{ row.day | when("%b %d") }}</td>
         <td class="py-1 text-gray-700 font-medium">{{ "{:,}".format(row.fetched) }}</td>
         <td class="py-1 {% if row.new %}text-blue-600{% else %}text-gray-300{% endif %}">
           {{ "{:,}".format(row.new) if row.new else "—" }}

@@ -15,7 +15,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -24,7 +24,7 @@ from app.services import funnel
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/funnel", tags=["funnel"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 DEFAULT_DAYS = 30
 # Fetch cycles to roll source ROI over. The same window the /runs page uses, so

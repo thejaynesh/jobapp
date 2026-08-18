@@ -16,7 +16,7 @@
       {% if app.job.location %}&bull; {{ app.job.location }}{% endif %}
       {% if app.job.is_remote %}<span class="ml-2 bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded">Remote</span>{% endif %}
       {% if app.job.closed_at %}
-      <span title="{{ app.job.closed_note or 'A check found this posting gone' }} ({{ app.job.closed_at.strftime('%b %d') }})"
+      <span title="{{ app.job.closed_note or 'A check found this posting gone' }} ({{ app.job.closed_at | when("%b %d") }})"
         class="ml-2 bg-red-100 text-red-700 text-xs px-2 py-0.5 rounded cursor-help">Posting closed</span>
       {% endif %}
     </p>
@@ -30,7 +30,7 @@
     {% if app.job.description_updated_at and app.documents_are_stale %}
     <p class="mt-2 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded px-3 py-2">
       The job description became fuller after these documents were generated
-      ({{ app.job.description_updated_at.strftime('%b %d') }}) — they were written
+      ({{ app.job.description_updated_at | when("%b %d") }}) — they were written
       from thinner text.
       {% if app.status.value == 'not_applied' %}
       A rewrite is queued automatically on the next sweep; the Rewrite button
@@ -111,7 +111,7 @@
               <a href="/apps/docs/{{ doc.id }}/download" class="text-blue-600 hover:underline">
                 v{{ doc.version }}
               </a>
-              <span class="text-gray-400">{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '' }}</span>
+              <span class="text-gray-400">{{ doc.created_at | when("%Y-%m-%d %H:%M") if doc.created_at else '' }}</span>
               {% if doc.generation_feedback %}
                 <span class="italic text-gray-400">&ldquo;{{ doc.generation_feedback[:60] }}{% if doc.generation_feedback|length > 60 %}…{% endif %}&rdquo;</span>
               {% endif %}
@@ -182,7 +182,7 @@
               <a href="/apps/docs/{{ doc.id }}/download" class="text-blue-600 hover:underline">
                 v{{ doc.version }}
               </a>
-              <span class="text-gray-400">{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '' }}</span>
+              <span class="text-gray-400">{{ doc.created_at | when("%Y-%m-%d %H:%M") if doc.created_at else '' }}</span>
               {% if doc.generated_by %}
                 <span class="text-purple-500">{{ doc.generated_by }}</span>
               {% endif %}
@@ -323,10 +323,10 @@
         <div class="flex justify-between"><dt class="font-medium">Source</dt><dd>{{ app.job.source | title }}</dd></div>
         {% endif %}
         {% if app.job.posted_at %}
-        <div class="flex justify-between"><dt class="font-medium">Posted</dt><dd>{{ app.job.posted_at.strftime("%b %d, %Y") }}</dd></div>
+        <div class="flex justify-between"><dt class="font-medium">Posted</dt><dd>{{ app.job.posted_at | on("%b %d, %Y") }}</dd></div>
         {% endif %}
         {% if app.job.fetched_at %}
-        <div class="flex justify-between"><dt class="font-medium">Fetched</dt><dd>{{ app.job.fetched_at.strftime("%b %d, %Y") }}</dd></div>
+        <div class="flex justify-between"><dt class="font-medium">Fetched</dt><dd>{{ app.job.fetched_at | when("%b %d, %Y") }}</dd></div>
         {% endif %}
         {% if app.job.experience_level %}
         <div class="flex justify-between"><dt class="font-medium">Experience level</dt><dd>{{ app.job.experience_level | title }}</dd></div>

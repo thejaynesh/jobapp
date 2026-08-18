@@ -63,9 +63,9 @@
       Open application
     </a>
     {% endif %}
-    {% if msg.sent_at %}<span class="text-[10px] text-gray-400">sent {{ msg.sent_at.strftime('%b %d') }}</span>{% endif %}
+    {% if msg.sent_at %}<span class="text-[10px] text-gray-400">sent {{ msg.sent_at | when("%b %d") }}</span>{% endif %}
     {% if msg.follow_up_due_at %}
-      <span class="text-[10px] text-amber-600">follow up {{ msg.follow_up_due_at.strftime('%b %d') }}</span>
+      <span class="text-[10px] text-amber-600">follow up {{ msg.follow_up_due_at | when("%b %d") }}</span>
     {% endif %}
   </div>
   <template id="msg-text-{{ msg.id }}">{{ msg.body }}</template>

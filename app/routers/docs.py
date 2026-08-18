@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,7 @@ from app.tasks.generate import generate_docs
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/jobs", tags=["docs"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 
 class GenerateDocsRequest(BaseModel):

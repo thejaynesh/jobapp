@@ -260,7 +260,9 @@ class TestRunsPage:
         self._record(db)
         response = client.get("/runs")
         assert response.status_code == 200
-        assert "Aug 03 06:00" in response.text
+        # 06:00 UTC is 23:00 the previous day in Pacific — a run is an instant
+        # and is shown on the reader's clock. See `services.timefmt`.
+        assert "Aug 02 23:00" in response.text
 
     def test_shows_each_source_and_its_failure_reason(self, db, client):
         self._record(db)

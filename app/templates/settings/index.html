@@ -226,7 +226,7 @@
           <td class="px-4 py-2 text-right text-gray-500">{{ board.total_job_count }}</td>
           <td class="px-4 py-2 text-right text-red-500">{{ board.consecutive_empty }}</td>
           <td class="px-4 py-2 text-xs text-gray-400">
-            {% if board.last_fetched_at %}{{ board.last_fetched_at.strftime("%b %d, %Y") }}{% else %}never{% endif %}
+            {% if board.last_fetched_at %}{{ board.last_fetched_at | when("%b %d, %Y") }}{% else %}never{% endif %}
           </td>
           <td class="px-4 py-2 text-right">
             <button

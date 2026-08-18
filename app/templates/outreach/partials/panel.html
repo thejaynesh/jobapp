@@ -20,7 +20,7 @@
 
   <p class="text-[11px] text-gray-400 mb-3">
     {% if app.outreach_checked_at %}
-      Last searched {{ app.outreach_checked_at.strftime('%b %d, %H:%M') }}
+      Last searched {{ app.outreach_checked_at | when("%b %d, %H:%M") }}
     {% else %}
       Searches the posting, Hunter.io, and (if configured) LinkedIn.
     {% endif %}
@@ -116,7 +116,7 @@
 
       {% for earlier in prior.get(contact.id, []) %}
       <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1 mt-2">
-        Already written to about {{ earlier.title }} on {{ earlier.sent_at.strftime('%b %d') }}{% if earlier.status == 'replied' %} &mdash; they replied{% endif %}.
+        Already written to about {{ earlier.title }} on {{ earlier.sent_at | when("%b %d") }}{% if earlier.status == 'replied' %} &mdash; they replied{% endif %}.
       </p>
       {% endfor %}
 

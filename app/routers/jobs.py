@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -16,7 +16,7 @@ from app.services.matcher import FILTER_REASON_LABELS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 # `new` belongs here: a freshly fetched job is real and worth seeing before the
 # matcher has had its say. Leaving it out made every job invisible until a

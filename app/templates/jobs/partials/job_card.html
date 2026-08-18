@@ -11,8 +11,8 @@
       <p class="text-xs text-gray-400 mt-0.5">
         {# Say which date this is: several sources don't report a posting date,
            and calling a fetch date "Posted" made the date sort look broken. #}
-        {% if job.posted_at %}Posted: {{ job.posted_at.strftime("%b %d, %Y") }}
-        {% else %}Fetched: {{ job.fetched_at.strftime("%b %d, %Y") }}
+        {% if job.posted_at %}Posted: {{ job.posted_at | on("%b %d, %Y") }}
+        {% else %}Fetched: {{ job.fetched_at | when("%b %d, %Y") }}
           <span class="text-gray-300" title="This source didn't report a posting date">·  no posted date</span>
         {% endif %}
       </p>
@@ -126,7 +126,7 @@
       {% endif %}
       {# A liveness check found the posting gone. The note says how it knew. #}
       {% if job.closed_at %}
-      <span title="{{ job.closed_note or 'A check found this posting gone' }} ({{ job.closed_at.strftime('%b %d') }})"
+      <span title="{{ job.closed_note or 'A check found this posting gone' }} ({{ job.closed_at | when("%b %d") }})"
         class="text-xs px-2 py-1 rounded font-medium bg-red-100 text-red-700 cursor-help">
         Posting closed
       </span>

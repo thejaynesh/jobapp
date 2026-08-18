@@ -3,7 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,7 @@ from app.database import get_db
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/llm", tags=["llm"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 PAGE_SIZE = 40
 

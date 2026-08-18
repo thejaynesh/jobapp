@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -11,7 +11,7 @@ from app.database import get_db
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
-templates = Jinja2Templates(directory="app/templates")
+templates = build_templates()
 
 # Enough to see a trend without turning the page into a wall.
 DEFAULT_RUNS_SHOWN = 15
