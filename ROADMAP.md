@@ -426,8 +426,8 @@ already exists across `jobs`/`fetch_runs`); per-source
 ## Build order
 
 ~~1.1 → 1.3 → 1.2+5.1 (together) → 1.4 → 1.5~~ (**Phase 1 done**)
-→ ~~Phase 2~~ (**done**) → then Phase 3, Phase 4, with 5.2/5.3 and Phase 6
-slotted between larger items.
+→ ~~Phase 2~~ (**done**) → ~~Phase 3~~ (**done**) → then Phase 4, with 5.2/5.3
+and Phase 6 slotted between larger items.
 
 Rationale: matching, documents, and coverage ROI all multiply off clean full
 descriptions, so data quality goes first; coverage second; intelligence third
@@ -511,6 +511,34 @@ others.
 **Not done, and deliberately:** JSearch, careerjet and findwork keep their
 adapters. Resting makes a dead key cost nothing, so deleting them would only
 remove the option of fixing a key later — that call is yours, not the code's.
+
+## Phase 3: what shipped
+
+- **3.1** The scoring prompt carries the whole posting (capped at
+  `MATCH_DESCRIPTION_CHARS`, several times the longest real one) instead of
+  the first 4,000 characters, which had started cutting off mid-requirements.
+  The seniority prefilter reads `required_years` when the posting states one,
+  so a "Senior" title asking three years reaches the model — and a plain
+  "Engineer" asking twelve no longer does.
+- **3.2** Migration 0025 adds `llm_score_deep`/`deep_matched_by`. Scores in the
+  55–85 band are re-scored by the strongest configured provider; both numbers
+  are kept, the deep one decides and is what the UI, sort and score filter use.
+  **Does nothing unless a second provider is configured** — set
+  `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`, or it skips rather than re-asking
+  the primary.
+- **3.3** A description that grows sends its job back to be scored again, for
+  the verdicts that actually read the description (`low_score` above all).
+  Never for a verdict you made, one that never read the description, or a job
+  already carrying an application.
+- **3.4** `python -m app.tasks.match_eval --build` writes a label file from
+  jobs you applied to and jobs you marked "not interested"; running it without
+  `--build` reports agreement, false rejects and false accepts. Do that before
+  and after any prompt or model change — the difference is the evidence.
+
+**Check after a few cycles:** `db_report` section 5b — `avg_shift` says which
+way the stronger model leans, and `rescued`/`dropped` say how often it changes
+the outcome. If `rescored` stays 0, no second provider is configured. Section 4
+should show `low_score` shrinking as enrichment sends those jobs back.
 
 ## Done so far (Aug 2026)
 
