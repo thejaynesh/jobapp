@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import String, Boolean, Float, Text, DateTime, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -117,6 +117,29 @@ class Job(Base):
     details_extracted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # Every verdict this job has been given, newest first. The columns above
+    # hold only the latest one, and a job re-scored on a fuller description
+    # would otherwise show no sign that it was ever judged differently.
+    #
+    # Eagerly loaded because the list page renders it on every card, and the
+    # alternative is fifty queries per page; it is a handful of narrow rows per
+    # job, capped (see `services.score_history`).
+    scores: Mapped[list["JobScore"]] = relationship(  # noqa: F821
+        "JobScore", cascade="all, delete-orphan", lazy="selectin",
+        order_by="desc(JobScore.created_at)", passive_deletes=True,
+    )
+
+    @property
+    def score_history(self) -> list:
+        """
+        The evaluations worth showing: only when there is more than one.
+
+        A job scored once has a history that says exactly what the card
+        already says, and putting a disclosure widget on every card for that
+        would be noise on the overwhelming majority of them.
+        """
+        return self.scores if len(self.scores or []) > 1 else []
 
     @property
     def effective_score(self) -> float | None:

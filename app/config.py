@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     LLM_LOG_KEEP_ROWS: int = 2000
     LLM_LOG_PRUNE_INTERVAL_HOURS: int = 6
 
+    # How many past verdicts to keep per job. Per job rather than per table on
+    # purpose: the LLM log's global cap means a job's first evaluation is gone
+    # within days on a pipeline making thousands of calls a week, and the first
+    # evaluation is the one worth comparing against. Twenty covers a job
+    # re-scored on every enrichment pass it will ever get.
+    SCORE_HISTORY_KEEP_PER_JOB: int = 20
+
     # ---- FreeInference --------------------------------------------------
     # OpenAI-compatible, free daily credit for the research community. It goes
     # ahead of the paid providers in both chains: it cannot bill, and the chain

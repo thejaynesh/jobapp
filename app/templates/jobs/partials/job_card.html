@@ -92,6 +92,8 @@
   <p class="text-sm text-gray-500 mt-2 italic">{{ job.llm_reasoning }}</p>
   {% endif %}
 
+  {% include "jobs/partials/score_history.html" %}
+
   <div class="flex flex-wrap gap-1 mt-3">
     {% for skill in (job.matched_skills or []) %}
       <span class="bg-blue-50 text-blue-700 text-xs px-2 py-0.5 rounded">{{ skill }}</span>

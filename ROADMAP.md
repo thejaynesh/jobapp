@@ -540,6 +540,29 @@ way the stronger model leans, and `rescued`/`dropped` say how often it changes
 the outcome. If `rescored` stays 0, no second provider is configured. Section 4
 should show `low_score` shrinking as enrichment sends those jobs back.
 
+## Score history (asked for during Phase 3)
+
+3.3 made re-scoring routine, and every re-score overwrote the verdict before
+it — so a job rescued from `low_score` showed only the score that rescued it,
+with no trace of the one it overturned. Migration 0026 adds `job_scores`: one
+row per evaluation, written in the same transaction as the score itself, with
+both passes, the resulting status, the filter reason and detail, the reasoning,
+the accept threshold in force at the time, and how many characters of
+description the verdict was reached on.
+
+Shown as a "Scored N times" disclosure on the job card and on the application
+page, only when there is more than one. Capped per job
+(`SCORE_HISTORY_KEEP_PER_JOB`, default 20) rather than per table, so a job's
+first verdict survives however many thousand LLM calls the pipeline makes
+after it — which the LLM log's global 2,000-row cap does not.
+
+**Check after a few cycles:** open a job that enrichment re-queued. The
+history should read "45, judged on 500 characters" above "82, judged on
+6,200", labelled *re-scored on a fuller description* — which is enrichment
+paying for itself, stated per job. If every row says *re-scored* rather than
+*re-scored on a fuller description*, jobs are being re-queued by something
+other than description growth and it is worth finding out what.
+
 ## Done so far (Aug 2026)
 
 - Code-review pass: 13 bug fixes (session-poisoning batch losses, profile

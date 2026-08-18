@@ -825,7 +825,31 @@ def match_job(
     db, job, profile_data: dict, api_key: str, base_url: str, model: str,
     budget: dict | None = None,
 ) -> str:
-    """Returns 'matched', 'filtered_out', or 'rate_limited'."""
+    """
+    Score one job and file it. Returns 'matched', 'filtered_out', or
+    'rate_limited'.
+
+    Every verdict is appended to the job's score history before the next one
+    can overwrite it. That matters because jobs are now re-scored routinely —
+    enrichment sends one back the moment its description grows — and without
+    the history a job rescued from `low_score` shows only the score that
+    rescued it, with no trace of the verdict it overturned.
+
+    A rate-limited pass records nothing: no decision was reached, the job stays
+    `new`, and a row saying so would be a history of the weather.
+    """
+    outcome = _match_job(db, job, profile_data, api_key, base_url, model, budget)
+    if outcome != "rate_limited":
+        from app.services import score_history
+
+        score_history.record(db, job, profile_data=profile_data, outcome=outcome)
+    return outcome
+
+
+def _match_job(
+    db, job, profile_data: dict, api_key: str, base_url: str, model: str,
+    budget: dict | None = None,
+) -> str:
     # One pass over the description feeds both halves of the eligibility read.
     # The advisory half is recorded whatever happens next — including on jobs
     # that go on to be filtered for an unrelated reason — because the note is a
@@ -840,6 +864,13 @@ def match_job(
         job.status = JobStatus.filtered_out
         job.keyword_score = 0.0
         job.llm_score = None
+        # Both halves of the previous score go, not just the first. A job that
+        # scored 78 and then 82 on a second look, and is now rejected on its
+        # title, kept `llm_score_deep` — and `effective_score` reads that
+        # first, so the card showed 82 beside "filtered out" and the history
+        # would have recorded a score this evaluation never gave it.
+        job.llm_score_deep = None
+        job.deep_matched_by = None
         job.filter_reason = outcome.reason
         job.filter_detail = outcome.detail
         return "filtered_out"

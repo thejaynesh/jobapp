@@ -242,6 +242,10 @@
       <p class="text-sm text-gray-600 italic mb-3">{{ app.job.llm_reasoning }}</p>
       {% endif %}
 
+      {% with job = app.job %}
+        {% include "jobs/partials/score_history.html" %}
+      {% endwith %}
+
       {% if app.job.matched_skills %}
       <p class="text-xs font-medium text-gray-600 mb-1">Matched skills</p>
       <div class="flex flex-wrap gap-1 mb-3">

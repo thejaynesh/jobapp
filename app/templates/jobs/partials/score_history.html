@@ -1,0 +1,67 @@
+{# Every verdict this job has been given, newest first.
+
+   Rendered only when there is more than one (see `Job.score_history`): a job
+   scored once has a history that repeats what is already on the card.
+
+   Deliberately shows what each verdict was reached ON, not just what it was.
+   "45, judged on 500 characters" and "45, judged on 6,200" are different
+   failures, and the first is the one enrichment exists to fix. #}
+{# `length > 1` rather than a plain truth test: this partial renders on every
+   card, including for the stand-in job objects the router tests build, and a
+   stub that is truthy but not indexable would take the whole page down. #}
+{% set rows = job.score_history %}
+{% if rows | length > 1 %}
+<details class="mt-2 border-t border-gray-100 pt-2">
+  <summary class="text-xs text-gray-400 hover:text-gray-600 cursor-pointer list-none select-none">
+    Scored {{ rows | length }} times &#9662;
+    {% set first = rows | last %}
+    {% if first.score is not none and rows[0].score is not none
+          and first.score != rows[0].score %}
+    <span class="text-gray-400">(was {{ "%g"|format(first.score) }}, now {{ "%g"|format(rows[0].score) }})</span>
+    {% endif %}
+  </summary>
+  <ol class="mt-2 space-y-2">
+    {% for row in rows %}
+    <li class="flex gap-3 text-xs">
+      <span class="shrink-0 w-14 text-right font-semibold
+        {% if row.score is none %}text-gray-300
+        {% elif row.score >= 75 %}text-green-600
+        {% elif row.score >= 50 %}text-yellow-600
+        {% else %}text-red-500{% endif %}">
+        {% if row.score is none %}&mdash;{% else %}{{ "%g"|format(row.score) }}{% endif %}
+      </span>
+      <div class="min-w-0">
+        <p class="text-gray-500">
+          {{ row.created_at.strftime("%b %d, %Y") }}
+          <span class="text-gray-300">&middot;</span>
+          {{ row.trigger_label }}
+          <span class="text-gray-300">&middot;</span>
+          {% if row.status == 'matched' %}<span class="text-green-600">matched</span>
+          {% else %}<span class="text-gray-500">filtered out</span>{% endif %}
+          {% if row.min_score is not none %}
+          <span class="text-gray-300" title="Your accept threshold at the time">(min {{ "%g"|format(row.min_score) }})</span>
+          {% endif %}
+        </p>
+        {% if row.llm_score_deep is not none and row.llm_score is not none %}
+        <p class="text-[10px] text-gray-400">
+          {{ "%g"|format(row.llm_score) }} ({{ row.matched_by or "first pass" }})
+          &rarr; {{ "%g"|format(row.llm_score_deep) }} ({{ row.deep_matched_by or "second look" }})
+        </p>
+        {% elif row.matched_by %}
+        <p class="text-[10px] text-gray-400">{{ row.matched_by }}</p>
+        {% endif %}
+        {% if row.reasoning %}
+        <p class="text-gray-500 italic mt-0.5">{{ row.reasoning }}</p>
+        {% elif row.filter_detail %}
+        <p class="text-gray-500 mt-0.5">{{ row.filter_detail }}</p>
+        {% endif %}
+        <p class="text-[10px] text-gray-300 mt-0.5"
+           title="How much description this verdict was reached on">
+          judged on {{ "{:,}".format(row.description_chars) }} characters
+        </p>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+</details>
+{% endif %}
