@@ -47,6 +47,17 @@ services:
       - storage_data:/storage
     env_file: .env
     restart: unless-stopped
+    # Long enough for a task to finish on its own. Celery treats SIGTERM as a
+    # warm shutdown — stop taking work, finish what is in hand — but Docker's
+    # default is to wait ten seconds and then SIGKILL, which is shorter than an
+    # enrichment pass or a document generation.
+    #
+    # A hard kill loses nothing (late acks put the task back on the queue), but
+    # it skips the `finally` that releases the Redis lock, and those have a
+    # thirty-minute TTL. So a deploy mid-pass bought half an hour of enrichment
+    # logging "already running" and doing nothing, which reads exactly like a
+    # broken deploy.
+    stop_grace_period: 120s
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,6 +69,9 @@ services:
     command: celery -A app.celery_app beat --loglevel=info
     env_file: .env
     restart: unless-stopped
+    # Beat only publishes; there is nothing to finish. A short grace keeps a
+    # deploy from waiting on a process that has no work in hand.
+    stop_grace_period: 15s
     depends_on:
       redis:
         condition: service_healthy
