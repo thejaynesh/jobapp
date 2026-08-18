@@ -437,6 +437,18 @@ class Settings(BaseSettings):
     # row only needs to outlive anyone's interest in the detail.
     BROWSER_TASK_KEEP_DAYS: int = 14
 
+    # A nightly dump, on this machine and nowhere else. This protects against
+    # the failures that actually happen here — a bad migration, a DROP in the
+    # wrong shell, a container rebuilt with the volume detached. It does not
+    # protect against losing the machine; see `services.backups`.
+    BACKUP_ENABLED: bool = True
+    BACKUP_DIR: str = "/storage/backups"
+    BACKUP_INTERVAL_HOURS: int = 24
+    # Two weeks. Long enough that damage done on a Friday and noticed the
+    # following Monday week is still recoverable, which is the realistic
+    # detection lag for a system nobody watches full time.
+    BACKUP_KEEP: int = 14
+
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates

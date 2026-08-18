@@ -181,7 +181,7 @@ def _system_context(db: Session) -> dict:
 
     context: dict = {
         "agent": None, "mailbox": None, "corpus": None, "pool": None,
-        "pipeline": None, "providers": None, "errors": [],
+        "pipeline": None, "providers": None, "backups": None, "errors": [],
     }
 
     try:
@@ -220,6 +220,13 @@ def _system_context(db: Session) -> dict:
         context["pool"] = pool_status()
     except Exception as exc:
         logger.warning("runs: pool status unavailable: %s", exc)
+
+    try:
+        from app.services import backups
+
+        context["backups"] = backups.status(db)
+    except Exception as exc:
+        logger.warning("runs: backup status unavailable: %s", exc)
 
     try:
         context["mailbox"] = mailbox.status(db)

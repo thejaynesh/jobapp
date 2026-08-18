@@ -345,6 +345,60 @@
       {% endif %}
     </div>
 
+    {# ---- Backups ------------------------------------------------------
+       The most common way this fails is not an error: it is a job that
+       stopped running in March and was noticed in September. So the age is
+       what this panel judges, not the fact that files exist. #}
+    <div class="border rounded p-3
+      {% if system.backups and system.backups.enabled and system.backups.stale %}
+        border-red-200 bg-red-50
+      {% else %}border-gray-100{% endif %}">
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">Backups</h3>
+      {% if not system.backups %}
+        <p class="text-xs text-gray-400">Status unavailable.</p>
+      {% elif not system.backups.enabled %}
+        <p class="text-xs text-gray-500">
+          Switched off. Nothing else in this system can recover the database if
+          it is lost — set <code>BACKUP_ENABLED=true</code>.
+        </p>
+      {% else %}
+        {% if system.backups.newest %}
+        <p class="text-[11px] text-gray-600">
+          Newest: <span class="font-medium">{{ system.backups.newest }}</span>
+          ({{ "%.0f"|format((system.backups.newest_bytes or 0) / 1000000) }} MB,
+          {{ system.backups.age_hours }} hours old)
+        </p>
+        <p class="text-[11px] text-gray-500">
+          {{ system.backups.count }} kept of {{ system.backups.keep }},
+          {{ "%.0f"|format(system.backups.total_bytes / 1000000) }} MB total in
+          <code>{{ system.backups.directory }}</code>
+        </p>
+        {% else %}
+        <p class="text-[11px] text-red-700">
+          No backup has ever been written.
+        </p>
+        {% endif %}
+
+        {% if system.backups.stale %}
+        <p class="text-[11px] text-red-700 mt-1.5">
+          This is stale — backups run every {{ system.backups.interval_hours }}
+          hours. Check that <code>beat</code> is up and that the image has
+          <code>pg_dump</code>. Run one now with
+          <code>python -m app.tasks.backup</code>.
+        </p>
+        {% endif %}
+        {% if system.backups.last_error %}
+        <p class="text-[11px] text-red-700 mt-1.5 break-words">
+          Last attempt failed: {{ system.backups.last_error }}
+        </p>
+        {% endif %}
+        <p class="text-[10px] text-gray-400 mt-1.5">
+          On this machine only. A dump beside the database survives a bad
+          migration or a dropped table; it does not survive losing the box.
+        </p>
+      {% endif %}
+    </div>
+
     {# ---- Mailbox ------------------------------------------------------ #}
     <div class="border border-gray-100 rounded p-3">
       <h3 class="text-sm font-semibold text-gray-700 mb-2">Mailbox</h3>

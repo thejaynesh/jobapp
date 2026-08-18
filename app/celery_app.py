@@ -12,7 +12,7 @@ celery_app = Celery(
         "app.tasks.backfill", "app.tasks.compare_models", "app.tasks.outreach",
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
-        "app.tasks.match_eval",
+        "app.tasks.match_eval", "app.tasks.backup",
     ],
 )
 
@@ -112,6 +112,13 @@ celery_app.conf.beat_schedule = {
     "draft-due-outreach-followups": {
         "task": "app.tasks.outreach.process_followups",
         "schedule": celery_schedule(settings.OUTREACH_FOLLOWUP_INTERVAL_HOURS * 3600),
+    },
+    # A nightly copy of the database, on this machine and nowhere else.
+    # Everything else in this file assumes the data survives, and it is the one
+    # thing nothing else in the system can recover from.
+    "take-backup": {
+        "task": "app.tasks.backup.take_backup",
+        "schedule": celery_schedule(settings.BACKUP_INTERVAL_HOURS * 3600),
     },
     "poll-mailbox": {
         "task": "app.tasks.outreach.poll_mailbox",
