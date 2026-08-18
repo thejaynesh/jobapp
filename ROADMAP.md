@@ -599,6 +599,45 @@ If the answer is no, `SELF_REVIEW_ENABLED=false` and nothing else changes. For
 4.1, watch that the same application is not re-queued every sweep; that would
 mean documents are being written with timestamps behind `description_updated_at`.
 
+## Phase 5: what shipped
+
+(5.1 shipped with 1.2 — the enrichment panel.)
+
+- **5.2** Migration 0027 adds `agent_events`: one row per thing the extension
+  did, keyed by a closed `kind` and the *host* rather than the URL. Events come
+  from both ends — the server records harvests and finished tasks, the
+  extension posts what only it can see (autofill outcomes, overlay lookups,
+  resume attachments) to the new `POST /api/agent/report`. The extension also
+  keeps its last 50 in `chrome.storage` and shows them on the options page,
+  because that copy still works when the server is the broken thing. A
+  **Browser agent** panel on `/runs` reads it.
+  Also: `browser_tasks` is finally pruned (by age; events by row count), the
+  per-agent record is a map instead of a single slot, and two display bugs are
+  fixed — see below.
+- **5.3** A **Funnel** page (`/funnel`, linked in the nav): the whole pipeline
+  as counts, the drop broken out by filter reason, a per-day cohort view, source
+  yield as new-per-1,000-fetched, per-model score distributions in bands, and
+  the two self-correcting steps (second opinion, enrichment) as numbers.
+
+**Also fixed while in there:** the browser-task panel had no branch for an
+enrichment ingest note, so the commonest task kind rendered a blank line under
+a "done" badge — exactly the "succeeded and yielded nothing looks like never
+ran" failure the note existed to prevent. And `_ingest_resolve_link` returned
+in silence when no URL came back, leaving no note at all.
+
+**Deliberately not claimed:** source ROI is per thousand *fetched*, not per
+thousand requests. Nothing counts requests — a board source makes one per
+company, an API source one per page — so a per-request figure would be
+invented. Likewise the per-day view is a cohort ("of the jobs fetched that day,
+what they are now"), not a flow, because the status column holds current state
+and not a history.
+
+**Check after a few cycles:** `/funnel` — the source yield table is the one to
+act on, since a source returning thousands and contributing single digits is
+pure request spend. The score distribution is the other: if a model's bands are
+one tall column, it has found a safe answer rather than a judgement, and
+`match_eval` (3.4) is how you confirm that before changing anything.
+
 ## Done so far (Aug 2026)
 
 - Code-review pass: 13 bug fixes (session-poisoning batch losses, profile

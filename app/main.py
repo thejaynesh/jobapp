@@ -25,6 +25,7 @@ from app.routers.settings import router as settings_router
 from app.routers.outreach import router as outreach_router  # /outreach pages + /api/apps trigger
 from app.routers.runs import router as runs_router
 from app.routers.llm import router as llm_router
+from app.routers.funnel import router as funnel_router
 from app.routers.agent import router as agent_router
 
 # ---------------------------------------------------------------------------
@@ -157,6 +158,7 @@ app.include_router(apps_router)
 app.include_router(settings_router)
 app.include_router(outreach_router)
 app.include_router(runs_router)
+app.include_router(funnel_router)
 app.include_router(llm_router)
 
 

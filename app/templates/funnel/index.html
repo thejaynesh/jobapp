@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% block title %}Funnel — JobApp{% endblock %}
+{% block content %}
+
+<div class="flex flex-wrap items-baseline justify-between gap-2 mb-6">
+  <h1 class="text-2xl font-bold">Funnel</h1>
+  <p class="text-xs text-gray-400">
+    Where the jobs go: fetched → filtered → matched → written → sent.
+  </p>
+</div>
+
+{# ---- The whole machine as one line ----------------------------------- #}
+{% if overview %}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 text-center">
+    {% for label, value, tone in [
+        ("fetched", overview.total, "text-gray-800"),
+        ("awaiting match", overview.by_status.new, "text-blue-600"),
+        ("filtered out", overview.by_status.filtered_out, "text-gray-400"),
+        ("matched", overview.by_status.matched, "text-green-600"),
+        ("documents written", overview.by_status.docs_generated, "text-purple-600")
+    ] %}
+    <div>
+      <p class="text-2xl font-bold {{ tone }}">{{ "{:,}".format(value) }}</p>
+      <p class="text-xs text-gray-500">{{ label }}</p>
+    </div>
+    {% endfor %}
+  </div>
+
+  <p class="text-xs text-gray-500 mt-4 border-t border-gray-100 pt-3">
+    <span class="font-medium text-gray-700">{{ "{:,}".format(overview.sent) }}</span>
+    application{{ '' if overview.sent == 1 else 's' }} actually sent — that is
+    <span class="font-medium text-gray-700">{{ overview.sent_per_thousand }}</span>
+    per thousand jobs fetched.
+    {% if overview.applications.not_applied %}
+    Another {{ "{:,}".format(overview.applications.not_applied) }} have documents
+    written and were never sent.
+    {% endif %}
+  </p>
+</div>
+
+{# ---- Where the volume stops ------------------------------------------ #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Why jobs were dropped</h2>
+    <p class="text-xs text-gray-400">
+      The total on its own says nothing — a hundred thousand dropped on a title
+      mismatch is the system working; the same number dropped for having no
+      description is a fetching problem wearing a filter's clothes.
+    </p>
+  </div>
+  {% if overview.filter_reasons %}
+  <table class="w-full text-sm">
+    <tbody>
+      {% for row in overview.filter_reasons %}
+      <tr class="border-t border-gray-100">
+        <td class="py-1.5 text-gray-700">{{ row.label }}</td>
+        <td class="py-1.5 text-gray-400 text-xs">{{ row.reason }}</td>
+        <td class="py-1.5 text-right text-gray-700 font-medium w-24">
+          {{ "{:,}".format(row.count) }}
+        </td>
+        <td class="py-1.5 w-40">
+          <div class="bg-gray-100 rounded h-2">
+            <div class="bg-gray-400 rounded h-2" style="width: {{ row.share }}%"></div>
+          </div>
+        </td>
+        <td class="py-1.5 text-right text-gray-400 text-xs w-14">{{ row.share }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-xs text-gray-400">Nothing has been filtered out yet.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ---- What each fetching day produced --------------------------------- #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">By the day they arrived</h2>
+    <p class="text-xs text-gray-400">
+      Of the jobs fetched that day, what they are <em>now</em> — the status
+      column holds the current state, not a history, so this is a cohort rather
+      than a flow.
+    </p>
+  </div>
+  {% if cohorts %}
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-xs text-gray-400 text-right">
+        <th class="text-left font-medium py-1">Day</th>
+        <th class="font-medium">Fetched</th>
+        <th class="font-medium">Still new</th>
+        <th class="font-medium">Filtered</th>
+        <th class="font-medium">Matched</th>
+        <th class="font-medium">Docs</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in cohorts %}
+      <tr class="border-t border-gray-100 text-right">
+        <td class="py-1 text-left text-gray-600">{{ row.day.strftime("%b %d") }}</td>
+        <td class="py-1 text-gray-700 font-medium">{{ "{:,}".format(row.fetched) }}</td>
+        <td class="py-1 {% if row.new %}text-blue-600{% else %}text-gray-300{% endif %}">
+          {{ "{:,}".format(row.new) if row.new else "—" }}
+        </td>
+        <td class="py-1 text-gray-400">{{ "{:,}".format(row.filtered) }}</td>
+        <td class="py-1 {% if row.matched %}text-green-600{% else %}text-gray-300{% endif %}">
+          {{ "{:,}".format(row.matched) if row.matched else "—" }}
+        </td>
+        <td class="py-1 {% if row.docs %}text-purple-600{% else %}text-gray-300{% endif %}">
+          {{ "{:,}".format(row.docs) if row.docs else "—" }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-xs text-gray-400">Nothing fetched in the last {{ days }} days.</p>
+  {% endif %}
+</div>
+
+{# ---- Which fetching is worth doing ----------------------------------- #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Source yield</h2>
+    <p class="text-xs text-gray-400">
+      New jobs per thousand fetched, over the last {{ rollup_runs }} cycles.
+      Per fetched rather than per request: nothing counts requests, so a
+      per-request figure would be invented.
+    </p>
+  </div>
+  {% if sources %}
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-xs text-gray-400 text-right">
+        <th class="text-left font-medium py-1">Source</th>
+        <th class="font-medium">Fetched</th>
+        <th class="font-medium">New</th>
+        <th class="font-medium">Merged</th>
+        <th class="font-medium">New / 1k</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in sources %}
+      <tr class="border-t border-gray-100 text-right">
+        <td class="py-1 text-left text-gray-700">
+          {{ row.source }}
+          {% if row.failed_runs %}
+          <span class="text-red-500 text-xs">· {{ row.failed_runs }} failed</span>
+          {% endif %}
+        </td>
+        <td class="py-1 text-gray-500">{{ "{:,}".format(row.fetched) }}</td>
+        <td class="py-1 text-gray-700 font-medium">{{ "{:,}".format(row.inserted) }}</td>
+        <td class="py-1 text-gray-400">{{ "{:,}".format(row.merged) }}</td>
+        <td class="py-1 w-24
+          {% if row.silent %}text-gray-300
+          {% elif row.new_per_thousand >= 50 %}text-green-600 font-medium
+          {% elif row.new_per_thousand > 0 %}text-gray-600
+          {% else %}text-amber-600{% endif %}">
+          {% if row.silent %}returned nothing{% else %}{{ row.new_per_thousand }}{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="text-xs text-gray-400 mt-2">
+    A source returning plenty and contributing nothing is spending requests to
+    re-read jobs already stored. One returning nothing at all is a different
+    problem with the same ratio, so it is named rather than scored.
+  </p>
+  {% else %}
+  <p class="text-xs text-gray-400">No fetch history yet.</p>
+  {% endif %}
+</div>
+
+{# ---- Is the model judging, or has it found a safe answer? ------------- #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Score distribution</h2>
+    <p class="text-xs text-gray-400">
+      A model whose scores all land in one band is not judging — and an average
+      cannot tell you that, because it is the same average either way.
+    </p>
+  </div>
+  {% if scores %}
+  {% for row in scores %}
+  <div class="border-t border-gray-100 py-3">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <p class="text-sm text-gray-700">
+        {{ row.model }}
+        <span class="text-xs text-gray-400">· {{ row["pass"] }}</span>
+      </p>
+      <p class="text-xs text-gray-500">
+        {{ "{:,}".format(row.count) }} job{{ '' if row.count == 1 else 's' }}
+        {% if row.average is not none %}· average {{ row.average }}{% endif %}
+      </p>
+    </div>
+    <div class="flex gap-1 mt-2">
+      {% for band in row.bands %}
+      <div class="flex-1 text-center" title="{{ band.count }} scored {{ band.low }}–{{ band.high - 1 }}">
+        <div class="bg-gray-100 rounded h-14 flex items-end">
+          <div class="w-full rounded
+            {% if band.low >= 75 %}bg-green-400
+            {% elif band.low >= 50 %}bg-yellow-400
+            {% else %}bg-red-300{% endif %}"
+            style="height: {{ band.share }}%"></div>
+        </div>
+        <p class="text-[10px] text-gray-400 mt-0.5">{{ band.low }}</p>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="text-xs text-gray-400">Nothing has been scored by a model yet.</p>
+  {% endif %}
+</div>
+
+{# ---- The two self-correcting steps, as numbers ------------------------ #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+  <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+    <h2 class="text-base font-semibold text-gray-800 mb-2">Second opinion</h2>
+    {% if second_opinion and second_opinion.rescored %}
+    <p class="text-sm text-gray-600">
+      <span class="font-medium">{{ "{:,}".format(second_opinion.rescored) }}</span>
+      close calls were scored again by a stronger model. It moved the score by
+      <span class="font-medium">{{ second_opinion.avg_shift }}</span>
+      points on average, rescuing
+      <span class="text-green-600 font-medium">{{ second_opinion.rescued }}</span>
+      and dropping
+      <span class="text-gray-500 font-medium">{{ second_opinion.dropped }}</span>.
+    </p>
+    <p class="text-xs text-gray-400 mt-2">
+      A pass that shifts scores a little and changes no outcomes is a paid call
+      buying agreement.
+    </p>
+    {% else %}
+    <p class="text-xs text-gray-400">
+      Nothing has been re-scored. The second pass needs a provider stronger than
+      the primary — set <code>ANTHROPIC_API_KEY</code> or
+      <code>GEMINI_API_KEY</code>, or it skips rather than re-asking the same
+      model the same question.
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+    <h2 class="text-base font-semibold text-gray-800 mb-2">Enrichment</h2>
+    {% if enrichment and enrichment.rescored %}
+    <p class="text-sm text-gray-600">
+      <span class="font-medium">{{ "{:,}".format(enrichment.rescored) }}</span>
+      job{{ '' if enrichment.rescored == 1 else 's' }} were scored again after
+      their description grew, on
+      {{ "{:,}".format(enrichment.avg_chars) }} characters on average — and
+      <span class="text-green-600 font-medium">{{ "{:,}".format(enrichment.now_matched) }}</span>
+      of those verdicts came out as a match.
+    </p>
+    <p class="text-xs text-gray-400 mt-2">
+      Read from the per-job score history, because the job itself only holds the
+      verdict that stuck.
+    </p>
+    {% else %}
+    <p class="text-xs text-gray-400">
+      Nothing has been re-scored on a fuller description yet. The score history
+      only records evaluations made since it was added, so this stays empty
+      until enrichment next sends a job back.
+    </p>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
