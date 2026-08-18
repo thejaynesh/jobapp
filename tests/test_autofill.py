@@ -119,6 +119,11 @@ class TestWhatItWithholds:
         assert set(body) == {
             "first_name", "last_name", "full_name", "email", "phone", "location",
             "linkedin", "github", "website", "school", "degree", "field_of_study",
+            # The screening answers are on this list deliberately: they are
+            # written on the profile's Screening tab *in order* to be typed
+            # into forms, which is not true of anything else in the profile.
+            "work_authorization", "sponsorship_required", "start_date",
+            "salary_expectation", "referral_source",
         }
 
     def test_the_narrative_stays_home(self, agent, profile):

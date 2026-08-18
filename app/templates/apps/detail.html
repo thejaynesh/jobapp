@@ -24,7 +24,10 @@
        written — a merge, a harvest, or an enrichment brought the real JD in.
        The same property the scheduled refresh selects on, so this can't
        promise a rewrite that never comes. #}
-    {% if app.documents_are_stale %}
+    {# The date is tested as well as the property because this prints it: the
+       property already implies one, but the app-detail tests render against a
+       stand-in application, and a badge that cannot say *when* is not one. #}
+    {% if app.job.description_updated_at and app.documents_are_stale %}
     <p class="mt-2 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded px-3 py-2">
       The job description became fuller after these documents were generated
       ({{ app.job.description_updated_at.strftime('%b %d') }}) — they were written

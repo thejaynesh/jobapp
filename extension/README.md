@@ -171,9 +171,52 @@ Three rules it will not break:
 
 Values are fetched when you press the button, not on page load, so your details
 reach a page only when you have asked for them to be typed there. What travels
-is a fixed list — name, email, phone, location, links, and your most recent
-degree. Your narrative, preferences, templates, match scores and application
-history are not part of it.
+is a fixed list — name, email, phone, location, links, your most recent degree,
+and the five screening answers below. Your narrative, preferences, templates,
+match scores and application history are not part of it.
+
+#### The five questions, answered once
+
+**Profile → Screening.** Work authorization, whether you need sponsorship,
+earliest start date, salary expectation, and how you heard about us. Every ATS
+asks all five, in a different order and with different wording, and they are the
+part of an application that actually takes the time.
+
+They are free text rather than a fixed yes/no, because the same fact is a
+sentence in one form's textarea and an option in another's dropdown — and the
+autofill now handles `<select>` as well as text inputs, matching your written
+answer against the options.
+
+Two refusals worth knowing about, both for the same reason — these are
+declarations going to an employer, and a wrong one looks deliberate in a way an
+empty box does not:
+
+- **A dropdown whose options don't clearly contain your answer is left alone**
+  and named in the panel, rather than set to the nearest option.
+- **A question that asks about sponsorship and authorization at once** — "are
+  you authorized to work without requiring sponsorship?" is real and common —
+  **is skipped entirely.** The two are asked inverted from each other, and there
+  is no way to tell from the field which way round this one means it.
+
+#### Attaching your resume
+
+**Attach resume** puts the tailored PDF into the form's file input. This is the
+one part of an application autofill could never reach, and it works because a
+content script genuinely can set `input.files` through a `DataTransfer`. What it
+cannot do is fetch the file — that is behind your token — so the service worker
+fetches it and passes the bytes through.
+
+If the page has several uploads and none of them says which is the resume, it
+says so and leaves them alone: a cover letter filed as a resume is worse than an
+empty slot you fill yourself.
+
+#### Marking it applied
+
+**Mark applied** records the application from the page you applied on. The
+moment you press Submit on the employer's form is the only moment you know for
+certain that you applied, and it is the moment you are furthest from the
+tracker — every application marked days later, or never, is that gap. Pressing
+it twice is safe, and it never walks an interviewing application backwards.
 
 Two things about how it is built. It draws inside a **closed shadow root**,
 because job sites ship aggressive global CSS and a plain injected div inherits

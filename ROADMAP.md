@@ -563,6 +563,42 @@ paying for itself, stated per job. If every row says *re-scored* rather than
 *re-scored on a fuller description*, jobs are being re-queued by something
 other than description growth and it is worth finding out what.
 
+## Phase 4: what shipped
+
+- **4.1** `refresh_stale_docs` runs every `DOC_REFRESH_INTERVAL_HOURS` and
+  rewrites documents whose job description grew after they were written.
+  Only for applications still at `not_applied` with an idle generation and
+  current documents — sent is sent, a failed one has a button, and one with no
+  documents belongs to `sweep_generations`. It carries your last Rewrite
+  instruction into the new run, so an automatic refresh cannot undo a manual
+  one. Bounded by `DOC_REFRESH_MAX_PER_RUN` (25). The staleness test now lives
+  on `Application.documents_are_stale`, shared with the badge.
+- **4.2** A critique call reads the whole draft against the JD and returns
+  concrete objections split by document; the existing rewriters then run again
+  with those as feedback. It is allowed to return nothing, and does nothing
+  when it does. Runs before the ATS keyword pass so that pass keeps the last
+  word. `SELF_REVIEW_ENABLED=false` turns it off. Stages `doc_critique`,
+  `doc_revise_bullets`, `doc_revise_summary`, `doc_revise_cover`.
+- **4.3** Overlay gains **Attach resume** (fetches the current PDF through the
+  service worker and sets `input.files` via a `DataTransfer`), **Mark applied**
+  (`POST /api/agent/mark-applied`, idempotent, never walks a status backwards),
+  and a **Profile → Screening** answer bank for the five questions every form
+  asks. Autofill now handles `<select>`, and refuses two things on purpose: a
+  dropdown whose options don't clearly match, and any field that asks about
+  sponsorship and authorization at once.
+
+**Also fixed while in there:** `extension/overlay.js` shadowed the global `CSS`
+with its stylesheet constant, so `CSS.escape` in `describe()` threw on any
+field with an `id` — which is most of them. Autofill had been reading far fewer
+labels than it looked like it was. The constant is now `PANEL_CSS`.
+
+**Check after a few cycles:** the LLM log filtered to `doc_critique` — read a
+few and see whether the objections are worth the revision, since this is the
+one addition here whose value is a judgement call rather than a measurement.
+If the answer is no, `SELF_REVIEW_ENABLED=false` and nothing else changes. For
+4.1, watch that the same application is not re-queued every sweep; that would
+mean documents are being written with timestamps behind `description_updated_at`.
+
 ## Done so far (Aug 2026)
 
 - Code-review pass: 13 bug fixes (session-poisoning batch losses, profile

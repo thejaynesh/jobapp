@@ -1,0 +1,32 @@
+{# The five questions every application form asks, answered once.
+
+   Free text rather than a fixed vocabulary on purpose: "Authorized to work in
+   the US without sponsorship" is a sentence one form wants in a textarea and
+   another wants matched against a dropdown option, and a yes/no schema serves
+   neither. What is written here is what gets typed. #}
+<form hx-post="/profile/screening" hx-target="this" hx-swap="outerHTML" class="space-y-5 max-w-2xl">
+  {% if saved %}
+  <p class="text-green-600 text-sm success-flash">Saved.</p>
+  {% endif %}
+
+  <p class="text-sm text-gray-500">
+    The extension's <span class="font-medium">Fill this form</span> button types
+    these into application forms, including dropdowns. Anything left blank is
+    left blank on the form — these are declarations going to an employer, so
+    nothing here is ever guessed or defaulted.
+  </p>
+
+  {% for key, label, help, placeholder in screening_fields %}
+  <div>
+    <label class="block text-sm font-medium text-gray-700">{{ label }}</label>
+    <input type="text" name="{{ key }}" value="{{ screening[key] }}"
+           placeholder="{{ placeholder }}"
+           class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
+    <p class="text-xs text-gray-400 mt-1">{{ help }}</p>
+  </div>
+  {% endfor %}
+
+  <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
+    Save
+  </button>
+</form>

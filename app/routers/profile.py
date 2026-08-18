@@ -19,7 +19,7 @@ templates.env.globals["region_options"] = REGION_OPTIONS
 templates.env.globals["location_prefs"] = normalize_prefs
 
 TABS = ["personal", "experience", "projects", "skills", "education",
-        "templates", "narrative", "ai prompt", "check"]
+        "screening", "templates", "narrative", "ai prompt", "check"]
 
 
 @router.get("", response_class=HTMLResponse)
@@ -29,6 +29,11 @@ def get_profile(request: Request, tab: str = "personal", db: Session = Depends(g
     profile = get_or_create_profile(db)
     db.commit()
     context = {"request": request, "profile": profile.data, "active_tab": tab}
+    if tab == "screening":
+        from app.services import screening
+
+        context["screening_fields"] = screening.FIELDS
+        context["screening"] = screening.answers(profile.data)
     if tab == "ai prompt":
         context["preview"] = _preview(db)
     if tab == "check":
@@ -94,6 +99,36 @@ def save_personal(
     return templates.TemplateResponse(
         "profile/partials/personal.html",
         {"request": request, "profile": profile.data, "saved": True},
+    )
+
+
+@router.post("/screening", response_class=HTMLResponse)
+async def save_screening(request: Request, db: Session = Depends(get_db)):
+    """
+    The answer bank the extension types into application forms.
+
+    Read straight off the form rather than through named `Form(...)` arguments,
+    because the field list lives in `services.screening` and is shared with the
+    autofill projection — a second copy of it in this signature is a second
+    place to forget to update.
+    """
+    from app.services import screening
+    from app.services.profile_service import save_section
+
+    form = await request.form()
+    profile = save_section(
+        db, "screening_answers", screening.clean(dict(form))
+    )
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/screening.html",
+        {
+            "request": request,
+            "profile": profile.data,
+            "screening_fields": screening.FIELDS,
+            "screening": screening.answers(profile.data),
+            "saved": True,
+        },
     )
 
 

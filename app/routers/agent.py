@@ -26,6 +26,7 @@ fetch keeps the worker alive; a poll longer than the timeout would not.
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
@@ -238,6 +239,8 @@ def _autofill_fields(db: Session) -> dict:
     education = (data.get("education") or [])
     latest = education[0] if education else {}
 
+    from app.services import screening
+
     return {
         "first_name": first,
         "last_name": last.strip(),
@@ -251,6 +254,11 @@ def _autofill_fields(db: Session) -> dict:
         "school": (latest.get("school") or "").strip(),
         "degree": (latest.get("degree") or "").strip(),
         "field_of_study": (latest.get("field") or "").strip(),
+        # The five questions every form asks and nobody enjoys retyping. Blank
+        # when unset, and blank is left blank: these are declarations going to
+        # an employer, and a guessed answer is worse than an empty box because
+        # the empty box gets noticed.
+        **screening.answers(data),
     }
 
 
@@ -263,6 +271,137 @@ async def autofill_fields(db: Session = Depends(get_db)):
     values reach a page only when they have asked for them to be typed there.
     """
     return await run_in_threadpool(_autofill_fields, db)
+
+
+def _resume(db: Session, url: str) -> dict:
+    """
+    The current resume for the posting on screen, as bytes the page can attach.
+
+    A content script *can* fill a file input — build a `File`, put it in a
+    `DataTransfer`, assign `input.files` — but it cannot get the bytes: the PDF
+    lives behind the agent token, which is held by the background worker and
+    has no business being handed to an employer's page. So the worker fetches
+    it here and passes it through.
+
+    Base64 in JSON rather than a binary response because that is what survives
+    `chrome.runtime.sendMessage`, which cannot carry a Blob.
+    """
+    import base64
+    from pathlib import Path
+
+    from app.models.application import Application, ApplicationDocument, DocType
+    from app.services.job_context import find_job
+
+    job = find_job(db, url)
+    if job is None:
+        return {"ok": False, "detail": "This posting isn't in your tracker yet."}
+
+    application = (
+        db.query(Application)
+        .filter(Application.job_id == job.id)
+        .order_by(Application.created_at.desc())
+        .first()
+    )
+    if application is None:
+        return {"ok": False, "detail": "No application for this job yet."}
+
+    document = (
+        db.query(ApplicationDocument)
+        .filter(
+            ApplicationDocument.application_id == application.id,
+            ApplicationDocument.doc_type == DocType.resume,
+            ApplicationDocument.is_current.is_(True),
+        )
+        .order_by(ApplicationDocument.created_at.desc())
+        .first()
+    )
+    if document is None:
+        return {"ok": False, "detail": "No resume has been written for this yet."}
+
+    path = Path(document.path)
+    if not path.exists():
+        # The row outlives the file when a volume is remounted or a container
+        # rebuilt. Saying which is the difference between a fixable problem
+        # and a mysterious one.
+        logger.warning("agent: resume row %s points at a missing file %s",
+                       document.id, path)
+        return {"ok": False, "detail": "The resume file is missing on the server."}
+
+    data = path.read_bytes()
+    # A name the employer sees. The stored filename is a UUID and a version.
+    company = "".join(
+        ch for ch in (job.company or "") if ch.isalnum() or ch in " -_"
+    ).strip().replace(" ", "_")
+    return {
+        "ok": True,
+        "filename": f"resume_{company}.pdf" if company else "resume.pdf",
+        "content_type": "application/pdf",
+        "size": len(data),
+        "data": base64.b64encode(data).decode("ascii"),
+    }
+
+
+@router.get("/resume")
+async def resume_for_posting(url: str = "", db: Session = Depends(get_db)):
+    """The current resume for this posting, for the overlay to attach."""
+    if not url.strip():
+        return JSONResponse({"detail": "No url."}, status_code=400)
+    return await run_in_threadpool(_resume, db, url)
+
+
+def _mark_applied(db: Session, url: str) -> dict:
+    """
+    Record that this posting was applied to, from the page it was applied on.
+
+    The moment the user presses Submit on the employer's form is the only
+    moment they know for certain that they applied — and it is the moment they
+    are furthest from the tracker. Every application marked days later, or not
+    at all, is this gap.
+
+    Idempotent: pressing it twice is the obvious thing to do when you are not
+    sure whether the first press worked, and it must not move `applied_at`
+    backwards or forwards on the second try.
+    """
+    from app.models.application import Application, ApplicationStatus
+    from app.services.job_context import find_job
+
+    job = find_job(db, url)
+    if job is None:
+        return {"ok": False, "detail": "This posting isn't in your tracker yet."}
+
+    application = (
+        db.query(Application)
+        .filter(Application.job_id == job.id)
+        .order_by(Application.created_at.desc())
+        .first()
+    )
+    if application is None:
+        return {"ok": False, "detail": "No application for this job yet."}
+
+    if application.status != ApplicationStatus.not_applied:
+        return {
+            "ok": True,
+            "status": application.status.value,
+            "changed": False,
+            "detail": f"Already marked {application.status.value.replace('_', ' ')}.",
+        }
+
+    application.status = ApplicationStatus.applied
+    application.applied_at = datetime.now(timezone.utc)
+    db.commit()
+    logger.info("agent: marked application %s applied from the overlay",
+                application.id)
+    return {"ok": True, "status": "applied", "changed": True}
+
+
+@router.post("/mark-applied")
+async def mark_applied(request: Request, db: Session = Depends(get_db)):
+    """Mark the posting at this URL as applied. Body: {"url": "..."}"""
+    body = await _json_body(request)
+    url = str(body.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"detail": "No url."}, status_code=400)
+    return await run_in_threadpool(_mark_applied, db, url)
 
 
 def _prepare(db: Session, url: str, posting: dict) -> dict:
