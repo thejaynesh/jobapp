@@ -8,7 +8,7 @@ from typing import NamedTuple
 from openai import OpenAI, RateLimitError
 
 from app.config import settings
-from app.llm.providers import call_provider, matching_fallbacks
+from app.llm.providers import call_provider, matching_fallbacks, provider_label
 from app.services import eligibility
 from app.services.locations import describe_prefs, location_allowed, normalize_prefs
 from app.models.application import Application
@@ -740,6 +740,87 @@ def _llm_score_job(
     raise LLMUnavailableError(str(last_exc)) from last_exc
 
 
+def _penalized(result: dict) -> float:
+    """
+    The score after the seniority adjustment both passes share.
+
+    A seniority mismatch is a penalty rather than a hard block: the role might
+    still be worth applying to, and the model is judging a requirement written
+    as a wish.
+    """
+    score = result["score"]
+    return max(0, score - 15) if not result.get("seniority_fit", True) else score
+
+
+def _deep_band() -> tuple[float, float]:
+    low = float(getattr(settings, "DEEP_MATCH_BAND_LOW", 55))
+    high = float(getattr(settings, "DEEP_MATCH_BAND_HIGH", 85))
+    return (low, high) if low <= high else (high, low)
+
+
+def _deep_score(job, profile_data: dict, score: float,
+                budget: dict | None = None) -> dict | None:
+    """
+    Ask the strongest configured model to score this job again. None when it
+    didn't run.
+
+    Only for scores inside the band, because that is where the answer is
+    genuinely in doubt: outside it the second model agrees with the first and
+    the call buys nothing. The band is also where a cheap model's guess decides
+    whether the user ever sees a job, which is the whole argument for paying
+    for a better one.
+
+    Returns None rather than raising when the deep pass fails. The first score
+    is a real answer, and losing it because a second opinion was unavailable
+    would be strictly worse than not asking.
+    """
+    from app.llm.providers import deep_matching_provider
+    from app.services import llm_log
+
+    if not getattr(settings, "DEEP_MATCH_ENABLED", True):
+        return None
+    low, high = _deep_band()
+    if not (low <= score <= high):
+        return None
+
+    provider = deep_matching_provider()
+    if provider is None:
+        # Nothing configured that is stronger than the primary: re-asking the
+        # same model the same question is a call spent to hear the same answer.
+        return None
+
+    cap = int(getattr(settings, "DEEP_MATCH_MAX_PER_CYCLE", 100) or 0)
+    if cap and budget is not None and budget.get("deep_calls", 0) >= cap:
+        logger.info(
+            "match_job: deep-scoring budget (%d) spent this cycle; job %s keeps "
+            "its first score", cap, getattr(job, "id", "?"),
+        )
+        return None
+
+    messages = _build_match_prompt(job, profile_data)
+    try:
+        with llm_log.stage("match_deep", job_id=getattr(job, "id", None)):
+            raw = call_provider(
+                provider, messages, temperature=0.1, max_tokens=_match_max_tokens()
+            )
+        result = _parse_llm_response(raw)
+    except Exception as exc:
+        logger.warning(
+            "match_job: deep scoring failed for %s (%s); keeping the first score",
+            getattr(job, "id", "?"), exc,
+        )
+        return None
+    finally:
+        # Counted whether or not it worked: a failed paid call can still be a
+        # billed one, and a provider erroring on every job would otherwise
+        # retry through the whole batch.
+        if budget is not None:
+            budget["deep_calls"] = budget.get("deep_calls", 0) + 1
+
+    result["scored_by"] = provider_label(provider)
+    return result
+
+
 def match_job(
     db, job, profile_data: dict, api_key: str, base_url: str, model: str,
     budget: dict | None = None,
@@ -784,10 +865,7 @@ def match_job(
         # Leave status as `new` so the next cycle retries this job
         return "rate_limited"
 
-    score = llm_result["score"]
-    # Seniority mismatch: penalize but don't hard-block (role might still be worth applying)
-    if not llm_result.get("seniority_fit", True):
-        score = max(0, score - 15)
+    score = _penalized(llm_result)
 
     from app.services.tunables import value as tunable
     min_score = tunable(profile_data, "min_match_score")
@@ -797,6 +875,22 @@ def match_job(
     job.matched_skills = llm_result["matched_skills"]
     job.missing_skills = llm_result["missing_skills"]
     job.matched_by = llm_result.get("scored_by")
+    job.llm_score_deep = None
+    job.deep_matched_by = None
+
+    # A close call gets a second opinion. Everything outside the band is not a
+    # close call — a 20 is a 20 and a 95 is a 95 whoever reads them — so the
+    # stronger model is spent only where its answer can change the outcome.
+    deep_result = _deep_score(job, profile_data, score, budget)
+    if deep_result is not None:
+        score = _penalized(deep_result)
+        job.llm_score_deep = score
+        job.deep_matched_by = deep_result.get("scored_by")
+        # The deep reasoning explains the decision that was actually made;
+        # keeping the first pass's would describe a verdict nobody acted on.
+        job.llm_reasoning = deep_result["reasoning"] or job.llm_reasoning
+        job.matched_skills = deep_result["matched_skills"] or job.matched_skills
+        job.missing_skills = deep_result["missing_skills"] or job.missing_skills
 
     if score >= min_score:
         if not job.applications:
@@ -875,8 +969,10 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None) -> dict[st
     filtered_out = 0
     rate_limited = 0
     errors = 0
-    # One shared paid-call budget for the whole cycle (see _score_via_fallbacks).
-    budget = {"paid_calls": 0}
+    # One shared budget for the whole cycle: paid failover calls
+    # (see _score_via_fallbacks) and second-opinion calls (see _deep_score),
+    # counted separately because they are spent for different reasons.
+    budget = {"paid_calls": 0, "deep_calls": 0}
 
     for job in new_jobs:
         try:

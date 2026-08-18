@@ -116,6 +116,21 @@ class Settings(BaseSettings):
     # and the cap is hit, remaining jobs simply stay `new` and retry next cycle.
     MAX_PAID_MATCH_CALLS_PER_CYCLE: int = 150
 
+    # ---- Second-opinion scoring ------------------------------------------
+    # A fast model scores everything, and most of its answers are not close
+    # calls: a 20 is a 20 and a 95 is a 95 whoever reads them. The band in the
+    # middle is where accept and reject actually flip, and where a cheap
+    # model's guess decides whether a job is ever seen — so those get scored
+    # again by the strongest configured provider.
+    #
+    # Skipped entirely when nothing stronger than the primary is configured:
+    # re-asking the same model the same question spends a call to hear the
+    # same answer.
+    DEEP_MATCH_ENABLED: bool = True
+    DEEP_MATCH_BAND_LOW: int = 55
+    DEEP_MATCH_BAND_HIGH: int = 85
+    DEEP_MATCH_MAX_PER_CYCLE: int = 100
+
     # ---- Outreach -------------------------------------------------------
     HUNTER_IO_API_KEY: str = ""
     OUTREACH_ENABLED: bool = True

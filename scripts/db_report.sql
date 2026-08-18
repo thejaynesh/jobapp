@@ -90,6 +90,21 @@ FROM jobs WHERE llm_score IS NOT NULL
 GROUP BY 1 ORDER BY 1;
 
 \echo ''
+\echo '=== 5b. Second-opinion scoring: did the stronger model disagree? ==='
+\echo '--- the gap is the only evidence of whether the deep pass earns its cost'
+SELECT count(*) AS rescored,
+       round(avg(llm_score)::numeric, 1) AS avg_first,
+       round(avg(llm_score_deep)::numeric, 1) AS avg_deep,
+       round(avg(llm_score_deep - llm_score)::numeric, 1) AS avg_shift,
+       count(*) FILTER (WHERE llm_score_deep >= 70 AND llm_score < 70) AS rescued,
+       count(*) FILTER (WHERE llm_score_deep < 70 AND llm_score >= 70) AS dropped
+FROM jobs WHERE llm_score_deep IS NOT NULL;
+
+SELECT coalesce(deep_matched_by, '(unset)') AS second_pass_model, count(*)
+FROM jobs WHERE llm_score_deep IS NOT NULL
+GROUP BY 1 ORDER BY 2 DESC;
+
+\echo ''
 \echo '=== 6. Which provider/model scored them ==='
 SELECT coalesce(matched_by, '(unset)') AS scored_by, count(*)
 FROM jobs WHERE llm_score IS NOT NULL

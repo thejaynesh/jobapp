@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.tasks.backfill", "app.tasks.compare_models", "app.tasks.outreach",
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
+        "app.tasks.match_eval",
     ],
 )
 

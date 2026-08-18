@@ -47,6 +47,24 @@ _context: contextvars.ContextVar[Context] = contextvars.ContextVar(
 )
 
 
+def _as_uuid(value):
+    """
+    A UUID, or None for anything that isn't one.
+
+    These columns are foreign-key-shaped, and a caller scoring something that
+    is not a stored row — the match-quality fixture is exactly that — used to
+    hand over a plain string and make every INSERT in the batch fail with a
+    cast error. The rule this file opens with is that logging never makes
+    things worse, and an unloggable id should cost the id, not the row.
+    """
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 @contextlib.contextmanager
 def stage(name: str, job_id=None, application_id=None):
     """
@@ -59,8 +77,8 @@ def stage(name: str, job_id=None, application_id=None):
     current = _context.get()
     token = _context.set(Context(
         stage=name,
-        job_id=job_id if job_id is not None else current.job_id,
-        application_id=(application_id if application_id is not None
+        job_id=_as_uuid(job_id) if job_id is not None else current.job_id,
+        application_id=(_as_uuid(application_id) if application_id is not None
                         else current.application_id),
     ))
     try:

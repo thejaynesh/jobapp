@@ -58,6 +58,12 @@ def _make_job(status=JobStatus.matched, title="Backend Engineer", company="Acme"
     job.url = "https://example.com/job"
     job.status = status
     job.llm_score = 85
+    # The card shows whichever score decided the job's fate. A MagicMock
+    # invents this attribute otherwise, and the template compares it to a
+    # number — so it has to be a number.
+    job.llm_score_deep = None
+    job.deep_matched_by = None
+    job.effective_score = 85
     job.keyword_score = 0.8
     job.llm_reasoning = "Strong fit."
     job.matched_skills = ["Python", "FastAPI"]

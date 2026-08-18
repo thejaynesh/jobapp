@@ -83,6 +83,10 @@ def _filter_reason_counts(db: Session) -> list[tuple[str, int]]:
 # bottom under a recent-looking date. Sort on the same expression we display.
 _EFFECTIVE_DATE = func.coalesce(Job.posted_at, Job.fetched_at)
 
+# The score that decided the job's fate: the second opinion where one was
+# taken, the first otherwise. Mirrors Job.effective_score, in SQL.
+_EFFECTIVE_SCORE = func.coalesce(Job.llm_score_deep, Job.llm_score)
+
 
 def _undated_count(db: Session) -> int:
     """How many visible jobs never reported a posting date."""
@@ -118,8 +122,11 @@ def _priced_count(db: Session) -> int:
 
 
 _SORT_OPTIONS = {
-    "score_desc": Job.llm_score.desc().nullslast(),
-    "score_asc": Job.llm_score.asc().nullsfirst(),
+    # Sort and filter on the score the card actually shows. Ranking by the
+    # first pass while displaying the second would put an 82 above a 91 with
+    # no visible reason.
+    "score_desc": _EFFECTIVE_SCORE.desc().nullslast(),
+    "score_asc": _EFFECTIVE_SCORE.asc().nullsfirst(),
     "posted_desc": _EFFECTIVE_DATE.desc(),
     "posted_asc": _EFFECTIVE_DATE.asc(),
     "company_asc": Job.company.asc(),
@@ -179,7 +186,7 @@ def get_jobs(
         query = query.filter(Job.experience_level == exp_level)
     if min_score:
         try:
-            query = query.filter(Job.llm_score >= int(min_score))
+            query = query.filter(_EFFECTIVE_SCORE >= int(min_score))
         except ValueError:
             pass
     if min_salary:

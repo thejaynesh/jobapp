@@ -18,13 +18,31 @@
       </p>
     </div>
     <div class="text-right shrink-0">
-      {% if job.llm_score is not none %}
-        <span class="text-2xl font-bold {% if job.llm_score >= 75 %}text-green-600{% elif job.llm_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
-          {{ job.llm_score }}
+      {% set shown_score = job.effective_score %}
+      {% if shown_score is not none %}
+        <span class="text-2xl font-bold {% if shown_score >= 75 %}text-green-600{% elif shown_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
+          {{ shown_score }}
         </span>
+        {# The deep pass ran because the first answer was a close call, so it is
+           the number the decision used — but the first one is worth showing
+           beside it, since the gap is the only evidence of whether the second
+           pass is earning what it costs. #}
+        {% if job.llm_score_deep is not none %}
+        <p class="text-xs text-gray-400" title="Re-scored by a stronger model because the first score was a close call">
+          second look
+        </p>
+        <p class="text-[10px] text-gray-300 mt-0.5"
+           title="First pass: {{ job.matched_by or 'unknown' }}">
+          was {{ job.llm_score }}
+        </p>
+        {% if job.deep_matched_by %}
+        <p class="text-[10px] text-gray-300" title="Model that took the second look">{{ job.deep_matched_by }}</p>
+        {% endif %}
+        {% else %}
         <p class="text-xs text-gray-400">score</p>
         {% if job.matched_by %}
         <p class="text-[10px] text-gray-300 mt-0.5" title="AI model that scored this job">{{ job.matched_by }}</p>
+        {% endif %}
         {% endif %}
       {% endif %}
     </div>

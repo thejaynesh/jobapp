@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 GENERATION_PREFERENCE = ["freeinference", "anthropic", "gemini"]
 MATCHING_PREFERENCE = ["freeinference", "gemini", "anthropic"]
 
+# The second-opinion pass, in quality order rather than free-first order.
+#
+# Both chains above start with FreeInference because they run on everything and
+# a free credit is worth spending before a paid one. The deep pass is the
+# opposite case: a small, deliberately-chosen subset of jobs where the first
+# answer was a close call, so being right matters more than being free — and a
+# "second opinion" from a model no better than the first is not a second
+# opinion at all.
+DEEP_MATCHING_PREFERENCE = ["anthropic", "gemini", "freeinference"]
+
 # Records which provider/model served each successful LLM call, so callers
 # (e.g. document generation) can persist "who wrote this". Only active between
 # start_llm_log() and collect_llm_log(); calls outside a log window are not
@@ -240,6 +250,26 @@ _MATCH_MODELS = {
     "anthropic": lambda s: getattr(s, "ANTHROPIC_MATCH_MODEL", "claude-haiku-4-5"),
     "freeinference": lambda s: getattr(s, "FREEINFERENCE_MATCH_MODEL", ""),
 }
+
+
+def deep_matching_provider() -> Provider | None:
+    """
+    The strongest provider configured for a second opinion, or None.
+
+    None means "do not bother": with nothing but the primary NIM endpoint
+    configured, a deep pass would re-ask the same model the same question and
+    spend a call to hear the same answer. Skipping is the honest outcome, and
+    the caller reports it rather than pretending a second pass happened.
+
+    Uses each provider's *generation* model, not its cheap matching sibling —
+    a second opinion from the cut-down model would be the same compromise
+    twice.
+    """
+    providers = configured_providers()
+    for name in DEEP_MATCHING_PREFERENCE:
+        if name in providers:
+            return providers[name]
+    return None
 
 
 def generation_chat(

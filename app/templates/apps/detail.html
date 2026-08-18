@@ -213,14 +213,27 @@
       </div>
       {% endif %}
 
-      {% if app.job.llm_score is not none %}
+      {% set shown_score = app.job.effective_score %}
+      {% if shown_score is not none %}
       <div class="flex items-baseline gap-2 mb-2">
-        <span class="text-3xl font-bold {% if app.job.llm_score >= 75 %}text-green-600{% elif app.job.llm_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
-          {{ app.job.llm_score }}
+        <span class="text-3xl font-bold {% if shown_score >= 75 %}text-green-600{% elif shown_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
+          {{ shown_score }}
         </span>
         <span class="text-xs text-gray-400">match score</span>
       </div>
-      {% if app.job.matched_by %}
+      {# Both numbers, when there are two: the first score landed close enough
+         to the threshold that a stronger model was asked to settle it, and the
+         gap between them is the only evidence of whether that is worth it. #}
+      {% if app.job.llm_score_deep is not none %}
+      <p class="text-[10px] text-gray-400 mb-2">
+        A close call, so a stronger model looked again:
+        <span class="text-gray-500">{{ app.job.llm_score }}</span>
+        ({{ app.job.matched_by or "first pass" }})
+        →
+        <span class="text-gray-700 font-medium">{{ app.job.llm_score_deep }}</span>
+        ({{ app.job.deep_matched_by or "second pass" }})
+      </p>
+      {% elif app.job.matched_by %}
       <p class="text-[10px] text-gray-400 mb-2" title="AI model that scored this job">scored by {{ app.job.matched_by }}</p>
       {% endif %}
       {% endif %}

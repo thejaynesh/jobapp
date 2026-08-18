@@ -318,3 +318,34 @@ class TestThePage:
 
     def test_it_is_in_the_navigation(self, client, db):
         assert 'href="/llm"' in client.get("/jobs").text
+
+
+class TestAnUnloggableIdCostsTheIdNotTheRow:
+    """
+    `job_id` is a foreign key. A caller scoring something that is not a stored
+    row — the match-quality fixture is exactly that — used to hand over a plain
+    string and make every insert in the batch fail on a cast, which is the
+    opposite of what this module promises.
+    """
+
+    def test_a_non_uuid_job_id_is_dropped(self):
+        from app.services import llm_log
+
+        with llm_log.stage("match", job_id="fixture"):
+            assert llm_log._context.get().job_id is None
+
+    def test_a_uuid_string_is_still_accepted(self):
+        import uuid as _uuid
+        from app.services import llm_log
+
+        wanted = _uuid.uuid4()
+        with llm_log.stage("match", job_id=str(wanted)):
+            assert llm_log._context.get().job_id == wanted
+
+    def test_a_real_uuid_passes_through(self):
+        import uuid as _uuid
+        from app.services import llm_log
+
+        wanted = _uuid.uuid4()
+        with llm_log.stage("match", job_id=wanted):
+            assert llm_log._context.get().job_id == wanted

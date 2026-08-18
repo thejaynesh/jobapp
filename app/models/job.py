@@ -46,8 +46,14 @@ class Job(Base):
     experience_level: Mapped[str | None] = mapped_column(String, nullable=True)
     keyword_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     llm_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # A second opinion, from the strongest configured provider, on the jobs
+    # whose first score landed in the band where accept and reject flip. Kept
+    # alongside the first rather than replacing it: comparing the two is the
+    # only way to learn whether the second pass earns what it costs.
+    llm_score_deep: Mapped[float | None] = mapped_column(Float, nullable=True)
     llm_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     matched_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    deep_matched_by: Mapped[str | None] = mapped_column(String, nullable=True)
     matched_skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
     missing_skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
     status: Mapped[JobStatus] = mapped_column(
@@ -111,6 +117,17 @@ class Job(Base):
     details_extracted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    @property
+    def effective_score(self) -> float | None:
+        """
+        The score that decided this job's fate, and the one to show.
+
+        The deep pass ran because the first answer was a close call, so where
+        there is one it is the better number — and displaying the first would
+        contradict the decision that was actually made.
+        """
+        return self.llm_score_deep if self.llm_score_deep is not None else self.llm_score
 
     @property
     def salary_label(self) -> str | None:
