@@ -661,8 +661,16 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     "no description" was never rejected on its merits, so once it has one it
     goes back to `new` and the next matching pass scores it properly.
     """
+    from app.services.job_edits import is_manual
+
     outcome = {"improved": False, "chars_gained": 0, "requeued": False}
     if not found or not found.description:
+        return outcome
+
+    # A description the user pasted is the posting they were actually reading.
+    # It loses on length to a listing page padded with boilerplate, which is
+    # exactly the comparison below — so it never gets made.
+    if is_manual(job, "description"):
         return outcome
 
     before = len(job.description or "")
@@ -681,7 +689,7 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
             job.posted_at = parsed
 
     location = (found.details or {}).get("location")
-    if location and not (job.location or "").strip():
+    if location and not (job.location or "").strip() and not is_manual(job, "location"):
         job.location = str(location)[:255]
 
     if _worth_rescoring(job):

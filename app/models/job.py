@@ -128,6 +128,19 @@ class Job(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
 
+    # Fields the user set by hand. Every automatic writer checks this before
+    # overwriting, because all of them decide what to keep by comparing lengths
+    # or checking for null — the right rule between two machines, the wrong one
+    # against a person who pasted the description off the posting itself.
+    #
+    # See `services.job_edits`, which owns both the writing and the checking.
+    manual_fields: Mapped[list] = mapped_column(
+        ARRAY(String), nullable=False, default=list, server_default="{}"
+    )
+    edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Every verdict this job has been given, newest first. The columns above
     # hold only the latest one, and a job re-scored on a fuller description
     # would otherwise show no sign that it was ever judged differently.

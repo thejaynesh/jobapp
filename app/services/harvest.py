@@ -367,9 +367,13 @@ def _apply_salary(job, data: dict) -> None:
     the same posting. First stated figure wins, and a card that says nothing
     leaves the column alone rather than blanking it.
     """
+    from app.services.job_edits import is_manual
+
     if data.get("salary_min") is None and data.get("salary_max") is None:
         return
     if job.salary_min is not None or job.salary_max is not None:
+        return
+    if is_manual(job, "salary_min") or is_manual(job, "salary_max"):
         return
     job.salary_min = data.get("salary_min")
     job.salary_max = data.get("salary_max")
@@ -423,8 +427,12 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                         and existing.source_job_id == source_job_id
                         and existing.source == source
                     ):
+                        from app.services.job_edits import is_manual
+
                         old_length = len(existing.description or "")
-                        if description and len(description) > old_length:
+                        if is_manual(existing, "description"):
+                            counts["skipped"] += 1
+                        elif description and len(description) > old_length:
                             existing.description = description
                             from app.services.deduplication import note_description_growth
                             note_description_growth(existing, old_length)

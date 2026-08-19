@@ -193,6 +193,14 @@
       <span id="rematch-{{ job.id }}" class="htmx-indicator text-xs text-blue-500">
         scoring&hellip;
       </span>
+      {# Correct the posting by hand. A full page rather than an inline box:
+         the field worth fixing is almost always the description, and that is
+         not something to paste into a one-line control. #}
+      <a href="/jobs/{{ job.id }}/edit?next=/jobs"
+         title="Fix this job's description or details by hand"
+         class="text-xs text-gray-500 hover:text-blue-600 underline whitespace-nowrap">
+        Edit
+      </a>
       {% if job.status.value in ['matched', 'filtered_out'] %}
       <button
         hx-post="/jobs/{{ job.id }}/override"

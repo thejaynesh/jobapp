@@ -221,9 +221,18 @@ def needs_extraction(job) -> bool:
 
 
 def apply(job, details: dict) -> None:
-    """Write extracted details onto the job, stamping when it was read."""
+    """
+    Write extracted details onto the job, stamping when it was read.
+
+    Fields the user set by hand are skipped. A salary band read out of prose by
+    a model is a good guess; a figure a person typed after reading the posting
+    is not a guess at all, and this ran on every description change — so
+    without the check one enrichment pass would quietly undo the correction.
+    """
+    from app.services.job_edits import is_manual
+
     for field, value in details.items():
-        if hasattr(job, field):
+        if hasattr(job, field) and not is_manual(job, field):
             setattr(job, field, value)
     job.details_extracted_at = datetime.now(timezone.utc)
 

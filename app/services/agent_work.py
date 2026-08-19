@@ -247,10 +247,11 @@ def _ingest_enrichment(db, task: BrowserTask, payload: dict, final_url: str,
 
     # An apply URL is worth taking from this trip too, since the browser
     # followed the whole chain to get here.
+    from app.services.job_edits import is_manual
     from app.services.link_resolver import is_aggregator
 
     if final_url and final_url != payload.get("url") and not is_aggregator(final_url):
-        if not job.apply_url:
+        if not job.apply_url and not is_manual(job, "apply_url"):
             job.apply_url = final_url
 
     db.commit()
@@ -306,9 +307,16 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
 
     updated = 0
     if final_url != original and not is_aggregator(final_url):
+        # `apply_url IS NULL` already spares a job whose link the user typed —
+        # except for one they deliberately cleared, which is a statement that
+        # the resolved link was wrong. The array check honours that too.
         updated = (
             db.query(Job)
-            .filter(Job.url == original, Job.apply_url.is_(None))
+            .filter(
+                Job.url == original,
+                Job.apply_url.is_(None),
+                ~Job.manual_fields.any("apply_url"),
+            )
             .update({"apply_url": final_url}, synchronize_session=False)
         )
         if updated:

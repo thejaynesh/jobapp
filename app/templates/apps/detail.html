@@ -198,11 +198,26 @@
 
     <!-- Job description -->
     <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      {% set description = app.job.description or "" %}
       <details>
-        <summary class="text-base font-semibold text-gray-800 cursor-pointer">Job Description</summary>
+        <summary class="text-base font-semibold text-gray-800 cursor-pointer">
+          Job Description
+          {# The length is the fastest read on whether this is the real posting
+             or a listing-page teaser, which is the question worth answering
+             before writing documents from it. #}
+          <span class="text-xs font-normal text-gray-400 ml-1">
+            ({{ description | length }} characters{% if "description" in (app.job.manual_fields or []) %}, edited by you{% endif %})
+          </span>
+        </summary>
         <div class="mt-3 text-sm text-gray-600 whitespace-pre-wrap leading-relaxed max-h-96 overflow-y-auto">
-          {{ app.job.description or "No description available." }}
+          {{ description or "No description available." }}
         </div>
+        <p class="mt-3 pt-3 border-t border-gray-100 text-xs text-gray-400">
+          Found a fuller version on the posting?
+          <a href="/jobs/{{ app.job.id }}/edit?next=/apps/{{ app.id }}"
+             class="text-blue-600 hover:text-blue-800 underline">Paste it in</a>
+          &mdash; nothing automatic will overwrite it.
+        </p>
       </details>
     </div>
 

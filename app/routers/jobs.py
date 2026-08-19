@@ -412,6 +412,112 @@ def rematch_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_d
     )
 
 
+def _safe_next(raw: str, fallback: str) -> str:
+    """
+    Where to go after saving, when the caller said.
+
+    Only a path on this app: `next` arrives in a query string, and an absolute
+    URL there is an open redirect waiting to be pasted into a message. There is
+    one user here and nobody to phish, but a redirect that can leave the site
+    is also just wrong — the button says "back to the job".
+    """
+    target = (raw or "").strip()
+    if target.startswith("/") and not target.startswith("//"):
+        return target
+    return fallback
+
+
+@router.get("/{job_id}/edit", response_class=HTMLResponse)
+def edit_job_form(
+    job_id: uuid.UUID,
+    request: Request,
+    next: str = "",
+    db: Session = Depends(get_db),
+):
+    """The form for correcting a job by hand."""
+    from app.services import job_edits
+
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return templates.TemplateResponse(
+        "jobs/edit.html",
+        {
+            "request": request,
+            "job": job,
+            "fields": job_edits.EDITABLE,
+            "locked": job_edits.locked(job),
+            "next": _safe_next(next, f"/jobs/{job.id}/application"),
+            "errors": {},
+        },
+    )
+
+
+@router.post("/{job_id}/edit", response_class=HTMLResponse)
+async def save_job_edit(
+    job_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Store hand-edited fields, and lock them against everything automatic.
+
+    The whole form is read from the raw body rather than declared as `Form(...)`
+    parameters: the editable set lives in `job_edits.EDITABLE` and adding a
+    field there should not also require a signature change here.
+
+    Unchecked checkboxes are absent from a form post, which for `is_remote`
+    means "off" rather than "leave alone" — so the form carries a marker naming
+    every checkbox it rendered, and the missing ones are filled in as false.
+    """
+    from app.services import job_edits
+
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    form = await request.form()
+    values = {
+        field: form[field]
+        for field in job_edits.EDITABLE
+        if field in form
+    }
+    for field in form.getlist("_checkbox"):
+        values.setdefault(field, "")
+
+    destination = _safe_next(str(form.get("next") or ""), f"/jobs/{job.id}/application")
+
+    try:
+        outcome = job_edits.apply(
+            db, job, values, release_fields=form.getlist("release")
+        )
+        db.commit()
+    except job_edits.EditError as exc:
+        db.rollback()
+        return templates.TemplateResponse(
+            "jobs/edit.html",
+            {
+                "request": request, "job": job,
+                "fields": job_edits.EDITABLE,
+                "locked": job_edits.locked(job),
+                "next": destination,
+                "errors": {"form": str(exc)},
+            },
+            status_code=422,
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error("edit: saving job %s failed: %s", job_id, exc)
+        raise HTTPException(status_code=502, detail=f"Could not save: {exc}") from exc
+
+    logger.info(
+        "edit: job %s — changed %s, released %s",
+        job_id, outcome["changed"] or "nothing", outcome["released"] or "nothing",
+    )
+    return RedirectResponse(url=destination, status_code=303)
+
+
 @router.post("/{job_id}/override", response_class=HTMLResponse)
 def override_job_status(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
     job = db.query(Job).filter(Job.id == job_id).first()

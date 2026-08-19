@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Edit — {{ job.title }}{% endblock %}
+{% block content %}
+
+<div class="flex justify-between items-start gap-3 mb-4">
+  <div class="min-w-0">
+    <h1 class="text-2xl font-bold text-gray-800 break-words">Edit job</h1>
+    <p class="text-sm text-gray-500 mt-0.5 break-words">
+      {{ job.title }} &bull; {{ job.company }}
+    </p>
+  </div>
+  <a href="{{ next }}" class="text-sm text-gray-500 hover:text-blue-600 underline whitespace-nowrap shrink-0">
+    Cancel
+  </a>
+</div>
+
+{# Said once, at the top, because it is the whole contract of this page: what
+   you change here stops being managed by anything automatic. #}
+<div class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 mb-6">
+  <p class="text-sm text-blue-800">
+    Anything you change here is locked: enrichment, the browser harvest and
+    cross-post merges will never overwrite it again.
+    {% if locked %}
+    Fields already locked are marked below — untick <em>managed automatically</em>
+    to hand one back.
+    {% endif %}
+  </p>
+</div>
+
+{% if errors.form %}
+<div class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-6">
+  <p class="text-sm text-red-700">{{ errors.form }}</p>
+</div>
+{% endif %}
+
+<form method="post" action="/jobs/{{ job.id }}/edit" class="space-y-5">
+  <input type="hidden" name="next" value="{{ next }}">
+
+  {% for name, spec in fields.items() %}
+  {% set is_locked = name in locked %}
+  <div class="bg-white border {% if is_locked %}border-amber-200{% else %}border-gray-200{% endif %} rounded-lg p-4 shadow-sm">
+    <div class="flex items-center justify-between gap-3 mb-1.5">
+      <label for="field-{{ name }}" class="text-sm font-semibold text-gray-700">
+        {{ spec.label }}
+      </label>
+      {% if is_locked %}
+      {# The release control only exists for a locked field, so its absence is
+         never ambiguous: an unlocked field has nothing to give back. #}
+      <label class="text-xs text-amber-700 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+             title="Let enrichment and the harvest manage this field again">
+        <input type="checkbox" name="release" value="{{ name }}" class="rounded border-amber-300">
+        managed automatically
+      </label>
+      {% endif %}
+    </div>
+
+    {% if spec.kind == "textarea" %}
+    <textarea id="field-{{ name }}" name="{{ name }}" rows="20"
+      class="w-full border border-gray-300 rounded px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500">{{ job.description or "" }}</textarea>
+
+    {% elif spec.kind == "checkbox" %}
+    {# Named here so the server can tell "unticked" from "not on the form": an
+       unchecked box sends nothing at all, which would otherwise read as
+       "leave this field alone" and make the box impossible to turn off. #}
+    <input type="hidden" name="_checkbox" value="{{ name }}">
+    <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+      <input type="checkbox" id="field-{{ name }}" name="{{ name }}" value="1"
+             class="rounded border-gray-300"
+             {% if job[name] %}checked{% endif %}>
+      Yes
+    </label>
+
+    {% elif spec.kind == "choice" %}
+    <select id="field-{{ name }}" name="{{ name }}"
+      class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="">Not stated</option>
+      {% for option in spec.options %}
+      <option value="{{ option }}" {% if job[name] == option %}selected{% endif %}>
+        {{ option | replace("_", " ") | title }}
+      </option>
+      {% endfor %}
+    </select>
+
+    {% else %}
+    <input type="{% if spec.kind == 'number' %}number{% elif spec.kind == 'url' %}url{% else %}text{% endif %}"
+      {% if spec.kind == "number" %}step="any" min="0"{% endif %}
+      id="field-{{ name }}" name="{{ name }}"
+      value="{% if job[name] is not none %}{{ job[name] }}{% endif %}"
+      class="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+    {% endif %}
+
+    {% if spec.help %}
+    <p class="text-xs text-gray-400 mt-1.5">{{ spec.help }}</p>
+    {% endif %}
+    {% if name == "description" %}
+    <p class="text-xs text-gray-400 mt-1">
+      Currently {{ (job.description or "") | length }} characters.
+      {% if job.description_updated_at %}
+      Last grew {{ job.description_updated_at | when("%b %d, %Y at %H:%M") }} {{ tz_label() }}.
+      {% endif %}
+    </p>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <div class="flex flex-wrap items-center gap-3">
+    <button type="submit"
+      class="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded hover:bg-blue-700">
+      Save
+    </button>
+    <a href="{{ next }}" class="text-sm text-gray-500 hover:text-blue-600 underline">Cancel</a>
+    <a href="{{ job.url }}" target="_blank"
+       class="text-sm text-gray-500 hover:text-blue-600 underline ml-auto whitespace-nowrap">
+      Open the posting &nearr;
+    </a>
+  </div>
+</form>
+
+{% endblock %}

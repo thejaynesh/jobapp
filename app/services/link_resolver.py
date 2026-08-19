@@ -450,7 +450,14 @@ def retarget_tracker_links(
             and destination != result.original_url
             and not is_aggregator(destination)
         )
-        query = db.query(Job).filter(Job.apply_url == result.original_url)
+        # A hand-typed apply link is never a tracker in the first place, so
+        # this is belt and braces — but the branch below *clears* the column,
+        # and quietly deleting something the user typed is the one outcome
+        # here worth being certain about.
+        query = db.query(Job).filter(
+            Job.apply_url == result.original_url,
+            ~Job.manual_fields.any("apply_url"),
+        )
         if reached_employer:
             counts["repaired"] += query.update(
                 {"apply_url": destination}, synchronize_session=False

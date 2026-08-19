@@ -196,6 +196,14 @@ def merge_or_skip(
     if new_url not in existing.source_urls:
         existing.source_urls = existing.source_urls + [new_url]
 
+    # The cross-post is still worth recording as a source URL above — it is a
+    # real second listing of this job. Its description is not: the user already
+    # replaced that text with the posting they read.
+    from app.services.job_edits import is_manual
+
+    if is_manual(existing, "description"):
+        return
+
     # Cleaned before the comparison, never after. Raw markup inflates a
     # description's length by roughly a third, so an HTML cross-post would beat
     # a longer plain-text description on the tape measure alone and replace
