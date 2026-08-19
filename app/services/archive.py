@@ -60,18 +60,20 @@ def enabled() -> bool:
     return bool(getattr(settings, "ARCHIVE_ENABLED", True))
 
 
-def candidates(db, days: int | None = None, limit: int | None = None) -> list:
+def _eligible(db, days: int | None):
     """
-    The jobs it is safe to archive, oldest first.
+    The query behind both `candidates` and `remaining`.
 
-    Oldest first so a bounded run always makes progress on the worst of the
-    backlog rather than skimming whatever the planner happened to return.
+    Shared rather than written twice: the two answer the same question — "what
+    may be archived" — and a protection added to one but not the other would
+    make the count on the page disagree with what the run actually does, which
+    is the kind of drift nobody notices until rows are already gone.
     """
     from app.models.application import Application
     from app.models.job import Job, JobStatus
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=_days() if days is None else days)
-    query = (
+    return (
         db.query(Job)
         .outerjoin(Application, Application.job_id == Job.id)
         .filter(
@@ -83,10 +85,29 @@ def candidates(db, days: int | None = None, limit: int | None = None) -> list:
             # Never a verdict the user made — see PROTECTED_REASONS.
             (Job.filter_reason.is_(None))
             | (Job.filter_reason.notin_(tuple(PROTECTED_REASONS))),
+            # Never one they starred. A favourite that was also filtered out is
+            # the most explicit disagreement with the matcher there is, and it
+            # is exactly the row a 60-day sweep would otherwise take.
+            Job.favourite.is_(False),
         )
-        .order_by(Job.fetched_at.asc())
     )
-    return query.limit(_batch() if limit is None else max(1, limit)).all()
+
+
+def candidates(db, days: int | None = None, limit: int | None = None) -> list:
+    """
+    The jobs it is safe to archive, oldest first.
+
+    Oldest first so a bounded run always makes progress on the worst of the
+    backlog rather than skimming whatever the planner happened to return.
+    """
+    from app.models.job import Job
+
+    return (
+        _eligible(db, days)
+        .order_by(Job.fetched_at.asc())
+        .limit(_batch() if limit is None else max(1, limit))
+        .all()
+    )
 
 
 def archive(db, days: int | None = None, limit: int | None = None) -> dict:
@@ -162,22 +183,7 @@ def archive(db, days: int | None = None, limit: int | None = None) -> dict:
 
 def remaining(db, days: int | None = None) -> int:
     """How many are still eligible — the caller's cue to run again."""
-    from app.models.application import Application
-    from app.models.job import Job, JobStatus
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_days() if days is None else days)
-    return (
-        db.query(Job)
-        .outerjoin(Application, Application.job_id == Job.id)
-        .filter(
-            Job.status == JobStatus.filtered_out,
-            Job.fetched_at < cutoff,
-            Application.id.is_(None),
-            (Job.filter_reason.is_(None))
-            | (Job.filter_reason.notin_(tuple(PROTECTED_REASONS))),
-        )
-        .count()
-    )
+    return _eligible(db, days).count()
 
 
 def status(db) -> dict:

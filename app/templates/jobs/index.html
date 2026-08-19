@@ -2,9 +2,22 @@
 {% block title %}Jobs — JobApp{% endblock %}
 {% block content %}
 <div class="flex justify-between items-center mb-4">
-  <h1 class="text-2xl font-bold text-gray-800">Jobs</h1>
+  <h1 class="text-2xl font-bold text-gray-800">
+    {% if favourite_filter == "1" %}&#9733; Favourites{% else %}Jobs{% endif %}
+  </h1>
   <span class="text-sm text-gray-500">{{ total }} total &bull; showing {{ jobs|length }}</span>
 </div>
+
+{% if favourite_filter == "1" %}
+{# Said plainly, because this list intentionally ignores the pipeline: a job you
+   starred and the matcher later rejected belongs here, and its absence would
+   look like the star had not saved. #}
+<p class="text-sm text-gray-500 -mt-2 mb-4">
+  Every job you starred, whatever the matcher made of it. Favourites are never
+  archived.
+  <a href="/jobs" class="text-blue-600 hover:text-blue-800 underline ml-1">All jobs</a>
+</p>
+{% endif %}
 
 <form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm space-y-3">
   <input type="hidden" name="page" value="0">
@@ -106,11 +119,23 @@
       <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>
       <option value="posted_asc" {% if sort == "posted_asc" %}selected{% endif %}>Oldest posted</option>
       <option value="company_asc" {% if sort == "company_asc" %}selected{% endif %}>Company A → Z</option>
+      {% if favourite_filter == "1" %}
+      <option value="favourited_desc" {% if sort == "favourited_desc" %}selected{% endif %}>Recently starred</option>
+      {% endif %}
     </select>
+
+    {# Carried through the form so filtering inside the shortlist keeps you in
+       it, rather than silently dropping you back into every job. #}
+    <label class="flex items-center gap-1.5 text-sm text-gray-600 whitespace-nowrap"
+           title="Only jobs you starred">
+      <input type="checkbox" name="favourite" value="1" class="rounded border-gray-300"
+        {% if favourite_filter == "1" %}checked{% endif %}>
+      &#9733; Favourites{% if favourite_count %} ({{ favourite_count }}){% endif %}
+    </label>
 
     <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
-    {% if status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter %}
+    {% if status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or favourite_filter %}
     <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
     {% endif %}
   </div>
@@ -150,7 +175,7 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&min_salary=" ~ min_salary_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&dated=" ~ dated_filter ~ "&sort=" ~ sort %}
+{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&min_salary=" ~ min_salary_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&dated=" ~ dated_filter ~ "&favourite=" ~ favourite_filter ~ "&sort=" ~ sort %}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
   <a href="/jobs?page={{ page - 1 }}&{{ qs }}"

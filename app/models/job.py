@@ -141,6 +141,18 @@ class Job(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Picked out by the user as one to apply to. Orthogonal to `status` on
+    # purpose: starring a job does not un-filter it and filtering one does not
+    # un-star it, so neither can quietly overwrite the other.
+    #
+    # A favourite is never archived, whatever its verdict or age.
+    favourite: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    favourited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Every verdict this job has been given, newest first. The columns above
     # hold only the latest one, and a job re-scored on a fuller description
     # would otherwise show no sign that it was ever judged differently.

@@ -1,6 +1,7 @@
 import re
 import uuid
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -89,6 +90,19 @@ _EFFECTIVE_DATE = func.coalesce(Job.posted_at, Job.fetched_at)
 _EFFECTIVE_SCORE = func.coalesce(Job.llm_score_deep, Job.llm_score)
 
 
+def _favourite_count(db: Session) -> int:
+    """
+    How many jobs are starred.
+
+    Counted without the status filter the rest of this page uses: a favourite
+    the matcher later filtered out is still on the shortlist, and a number that
+    disagreed with what the favourites view shows would be worse than none.
+    """
+    return (
+        db.query(func.count(Job.id)).filter(Job.favourite.is_(True)).scalar()
+    ) or 0
+
+
 def _undated_count(db: Session) -> int:
     """How many visible jobs never reported a posting date."""
     return (
@@ -131,6 +145,10 @@ _SORT_OPTIONS = {
     "posted_desc": _EFFECTIVE_DATE.desc(),
     "posted_asc": _EFFECTIVE_DATE.asc(),
     "company_asc": Job.company.asc(),
+    # The useful order on the favourites view, and the default there. Sorting a
+    # shortlist by score would bury the job starred this morning under one
+    # starred last month that happened to score higher.
+    "favourited_desc": Job.favourited_at.desc().nullslast(),
 }
 
 
@@ -148,11 +166,21 @@ def get_jobs(
     exp_level: str = "",
     filter_reason: str = "",
     dated: str = "",
+    favourite: str = "",
     sort: str = "score_desc",
     page: int = 0,
     db: Session = Depends(get_db),
 ):
     query = db.query(Job).filter(Job.status.in_(_FILTERABLE_STATUSES))
+
+    # Checked before anything else so the shortlist is the shortlist: a starred
+    # job that the matcher filtered out must still appear here, and a status or
+    # score filter carried over from the previous view would hide the very rows
+    # this page exists to show.
+    if favourite == "1":
+        query = query.filter(Job.favourite.is_(True))
+        if sort == "score_desc":
+            sort = "favourited_desc"
 
     if status:
         try:
@@ -237,6 +265,8 @@ def get_jobs(
             "exp_level_filter": exp_level,
             "dated_filter": dated,
             "undated_count": _undated_count(db),
+            "favourite_filter": favourite,
+            "favourite_count": _favourite_count(db),
             "sort": sort,
             "page": page,
             "total": total,
@@ -406,6 +436,31 @@ def rematch_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_d
         )
 
     logger.info("rematch: job %s re-scored by hand — %s", job_id, outcome)
+    return templates.TemplateResponse(
+        "jobs/partials/job_card.html",
+        {"request": request, "job": job},
+    )
+
+
+@router.post("/{job_id}/favourite", response_class=HTMLResponse)
+def toggle_favourite(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    """
+    Star or unstar a job.
+
+    Deliberately touches nothing but the two favourite columns. Starring a job
+    the matcher filtered out is a common and meaningful thing to do — it is the
+    clearest disagreement with a verdict there is — and silently re-opening it
+    would turn a bookmark into an override the user did not ask for. The one
+    consequence is that a favourite is never archived.
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job.favourite = not job.favourite
+    job.favourited_at = datetime.now(timezone.utc) if job.favourite else None
+    db.commit()
+
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",
         {"request": request, "job": job},

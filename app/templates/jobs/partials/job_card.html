@@ -2,6 +2,19 @@
   {% set app = job.applications[0] if job.applications else none %}
   <div class="flex justify-between items-start gap-3">
     <div class="min-w-0">
+      {# The star sits on the title rather than down with the actions: it is
+         the one control you reach for while reading the job, not after
+         deciding what to do about it. #}
+      <button
+        hx-post="/jobs/{{ job.id }}/favourite"
+        hx-target="#job-{{ job.id }}"
+        hx-swap="outerHTML"
+        title="{% if job.favourite %}Remove from favourites{% else %}Save to favourites{% endif %}"
+        aria-label="{% if job.favourite %}Remove from favourites{% else %}Save to favourites{% endif %}"
+        aria-pressed="{{ 'true' if job.favourite else 'false' }}"
+        class="align-middle mr-1 text-lg leading-none {% if job.favourite %}text-amber-400 hover:text-amber-500{% else %}text-gray-300 hover:text-amber-400{% endif %}">
+        {% if job.favourite %}&#9733;{% else %}&#9734;{% endif %}
+      </button>
       <a href="/jobs/{{ job.id }}/application" class="text-base font-semibold text-blue-600 hover:underline break-words">
         {{ job.title }}
       </a>
