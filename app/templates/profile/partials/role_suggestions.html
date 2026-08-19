@@ -1,0 +1,58 @@
+{# Proposals, never applied. Target roles decide what the whole pipeline is
+   allowed to see, so widening the list is a click the user makes. #}
+<div id="role-suggestions" class="mt-3">
+  {% if error %}
+  <p class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+    {{ error }}
+  </p>
+
+  {% elif not suggestions %}
+  <p class="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded px-3 py-2">
+    Nothing to add — your target roles already cover what the profile supports.
+  </p>
+
+  {% else %}
+  <div class="border border-gray-200 rounded-lg divide-y divide-gray-100">
+    {% for item in suggestions %}
+    <div class="flex items-start justify-between gap-3 px-3 py-2">
+      <div class="min-w-0">
+        <p class="text-sm font-medium text-gray-800">
+          {{ item.title }}
+          {% if item.covered %}
+          {# Shown rather than hidden: "this already gets through" is a useful
+             thing to learn about your own list, and dropping it silently would
+             leave you wondering why an obvious title never appears. #}
+          <span class="ml-1 text-[10px] font-normal bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded"
+                title="A title sharing one word with a role you already target passes the filter, so adding this changes nothing">
+            already gets through
+          </span>
+          {% endif %}
+        </p>
+        {% if item.why %}
+        <p class="text-xs text-gray-500 mt-0.5">{{ item.why }}</p>
+        {% endif %}
+      </div>
+      {% if not item.covered %}
+      <button
+        hx-post="/profile/roles/add"
+        hx-vals='{"title": {{ item.title | tojson }}}'
+        hx-target="#skills-form"
+        hx-swap="outerHTML"
+        class="shrink-0 text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
+        Add
+      </button>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  {# The consequence, said once and where the decision is made. The title gate
+     passes anything sharing a single meaningful word with any target role, so
+     one broad addition is not a small one. #}
+  <p class="text-xs text-gray-400 mt-2">
+    Adding a role widens what gets past the title filter — a title needs only
+    one word in common with any of your roles. "Flutter Developer" admits every
+    posting with "Flutter" <em>or</em> "Developer" in the title.
+  </p>
+  {% endif %}
+</div>

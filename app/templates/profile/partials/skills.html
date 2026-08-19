@@ -1,4 +1,4 @@
-<form hx-post="/profile/skills" hx-target="this" hx-swap="outerHTML" class="space-y-5 max-w-xl">
+<form id="skills-form" hx-post="/profile/skills" hx-target="this" hx-swap="outerHTML" class="space-y-5 max-w-xl">
   {% if saved %}<p class="text-green-600 text-sm success-flash">Saved.</p>{% endif %}
   <div>
     <label class="block text-sm font-medium text-gray-700">Languages <span class="text-gray-400 text-xs">(comma-separated)</span></label>
@@ -20,6 +20,24 @@
   <div>
     <label class="block text-sm font-medium text-gray-700">Target Roles <span class="text-gray-400 text-xs">(one per line)</span></label>
     <textarea name="target_roles" rows="3" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">{{ profile.target_roles | join('\n') }}</textarea>
+
+    {# This list is typed once during setup and then quietly decides what the
+       whole pipeline is allowed to see. A skill picked up since never becomes
+       a role on its own, so the postings naming it are rejected on the title
+       before anything reads them. #}
+    <button type="button"
+      hx-post="/profile/roles/suggest"
+      hx-target="#role-suggestions"
+      hx-swap="outerHTML"
+      hx-disabled-elt="this"
+      hx-indicator="#role-suggest-spinner"
+      class="mt-2 text-xs text-blue-600 hover:text-blue-800 underline">
+      Suggest roles from my profile
+    </button>
+    <span id="role-suggest-spinner" class="htmx-indicator text-xs text-blue-500 ml-1">
+      thinking&hellip;
+    </span>
+    <div id="role-suggestions"></div>
   </div>
   {% set prefs = location_prefs(profile) %}
   <div>

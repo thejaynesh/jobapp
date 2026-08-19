@@ -214,6 +214,62 @@ def delete_project_item(request: Request, item_id: str, db: Session = Depends(ge
 
 
 # Skills
+@router.post("/roles/suggest", response_class=HTMLResponse)
+def suggest_roles(request: Request, db: Session = Depends(get_db)):
+    """
+    Propose target roles the profile supports but the list does not name.
+
+    `target_roles` is the narrowest gate in the pipeline and the one nobody
+    revisits: it is typed once during setup and then quietly decides what the
+    whole system is allowed to see. A skill picked up since never becomes a
+    role, so the postings naming it are rejected on the title before anything
+    reads them.
+
+    Suggestions only. Accepting one is a separate click, because widening this
+    list changes the meaning of every number on every other page.
+    """
+    from app.config import settings
+    from app.services import role_suggest
+    from app.services.tunables import value as tunable
+
+    profile = get_or_create_profile(db)
+    profile_data = profile.data or {}
+
+    outcome = role_suggest.suggest(
+        profile_data,
+        settings.NVIDIA_NIM_API_KEY, settings.NVIDIA_NIM_BASE_URL,
+        tunable(profile_data, "nvidia_nim_model"),
+    )
+    return templates.TemplateResponse(
+        "profile/partials/role_suggestions.html",
+        {"request": request, "profile": profile_data, **outcome},
+    )
+
+
+@router.post("/roles/add", response_class=HTMLResponse)
+def add_target_role(request: Request, title: str = Form(...),
+                    db: Session = Depends(get_db)):
+    """Accept one suggested role. Returns the skills form, so it shows up."""
+    from app.services.profile_service import save_section
+
+    profile = get_or_create_profile(db)
+    save_section(db, "target_roles",
+                 role_suggest_add(profile.data or {}, title))
+    db.commit()
+
+    profile = get_or_create_profile(db)
+    return templates.TemplateResponse(
+        "profile/partials/skills.html",
+        {"request": request, "profile": profile.data or {}, "saved": True},
+    )
+
+
+def role_suggest_add(profile_data: dict, title: str) -> list[str]:
+    from app.services.role_suggest import add_role
+
+    return add_role(profile_data, title)
+
+
 @router.post("/skills", response_class=HTMLResponse)
 def save_skills(
     request: Request,
