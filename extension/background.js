@@ -21,6 +21,10 @@
  *      minutes.
  */
 
+// The sites harvesting can read. Shared with the options page rather than
+// written out in both — see sites.js for how to add one.
+import { HARVEST_SITES } from "./sites.js";
+
 const ALARM_NAME = "jobapp-poll";
 const DEFAULTS = {
   serverUrl: "",
@@ -503,47 +507,7 @@ async function pollOnce() {
  * declared in the manifest, so installing the extension does not ask for
  * LinkedIn access on behalf of a feature that is off.
  */
-/**
- * The sites harvesting can read, each behind its own toggle and its own host
- * permission.
- *
- * One entry per site rather than one wildcard on purpose. The server-side
- * extractor was always host-agnostic — it finds anything shaped like a job in
- * any JSON — and only this registration ever limited it to LinkedIn. Widening
- * it is a matter of adding a row here, but it must stay a row per site:
- * "read every job board you visit" is a different thing to consent to than
- * "read LinkedIn", and it should be asked for separately and revocable
- * separately.
- *
- * `storageKey` keeps LinkedIn on the original `harvest` key so an existing
- * install keeps working without a migration.
- */
-const HARVEST_SITES = [
-  {
-    id: "linkedin",
-    label: "LinkedIn",
-    storageKey: "harvest",
-    matches: ["https://www.linkedin.com/*"],
-  },
-  {
-    id: "indeed",
-    label: "Indeed",
-    storageKey: "harvestIndeed",
-    matches: ["https://*.indeed.com/*"],
-  },
-  {
-    id: "glassdoor",
-    label: "Glassdoor",
-    storageKey: "harvestGlassdoor",
-    matches: ["https://*.glassdoor.com/*"],
-  },
-  {
-    id: "workday",
-    label: "Workday",
-    storageKey: "harvestWorkday",
-    matches: ["https://*.myworkdayjobs.com/*"],
-  },
-];
+/* HARVEST_SITES is imported at the top of this file — see sites.js. */
 
 /** Kept for the options page and for anything still reading one site. */
 const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };

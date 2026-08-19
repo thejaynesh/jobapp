@@ -65,15 +65,19 @@ Those requests are sent **without cookies**. Resolving a public redirect does
 not need your sessions, and sending them to an arbitrary aggregator would widen
 what this can leak for no benefit.
 
-### Harvest jobs from LinkedIn
+### Harvest jobs from the sites you browse
 
-A third toggle, and the only feature that reads pages you visit.
+One toggle per site, and the only feature that reads pages you visit.
 
-While you browse LinkedIn normally, the page asks its own API for job cards and
-receives far more than it renders — full descriptions, applicant counts, salary
-bands. This reads those responses as they arrive and forwards them to your
-server. **No extra requests are made.** Nothing is fetched, nothing is clicked,
-nothing is automated; the traffic is a person using the site, because it is.
+While you browse normally, the page asks its own API for job cards and receives
+far more than it renders — full descriptions, applicant counts, salary bands.
+This reads those responses as they arrive and forwards them to your server.
+**No extra requests are made.** Nothing is fetched, nothing is clicked, nothing
+is automated; the traffic is a person using the site, because it is.
+
+It also needs no API keys, doc IDs or query IDs. The wrapper reads a copy of
+whatever the page already fetched, so whichever identifiers the site rotates
+are the site's problem rather than something to keep up to date here.
 
 That matters most for LinkedIn specifically. The guest API your server polls
 returns ten cards a page and needs a separate request per description, which is
@@ -82,10 +86,16 @@ Voyager returns descriptions inline, so the ceiling disappears — and harvested
 copies merge into jobs you already have, filling in descriptions the guest API
 never returned.
 
-It asks for **linkedin.com only** — not the broad access that link resolving
-needs. The content scripts are registered when you tick it and unregistered when
-you untick it, rather than declared in the manifest, so installing the extension
-does not request LinkedIn access for a feature that is off.
+Each site is a **separate permission**, asked for when you tick its box and
+given back when you untick it — "read every job board you visit" is a different
+thing to agree to than "read LinkedIn", so they are not bundled. The content
+scripts are registered from the toggles at runtime rather than declared in the
+manifest, so installing the extension requests nothing on behalf of a feature
+that is off, and an unticked site has no script running on it at all.
+
+The list of sites lives in one place, `sites.js`, and both this worker and the
+options page read it. Adding a site is a row there plus a source name on the
+server — see [docs/HARVEST.md](../docs/HARVEST.md).
 
 ### Open blocked pages in a hidden window
 
@@ -134,7 +144,16 @@ like an empty page.
 The parser on the server is shape-based for the same reason: it walks the whole
 payload looking for anything with a title, a company, and an identifier, rather
 than following `elements[].jobCardUnion.jobPosting.title`. LinkedIn can
-reorganize its response and the harvest keeps working.
+reorganize its response and the harvest keeps working — and a site nobody wrote
+a parser for usually works on the first try, which is why adding one is a row
+in `sites.js`.
+
+The failure this design still has is a payload renaming *every* field at once.
+Then the reader keeps running, keeps forwarding and finds nothing, which is
+invisible. So the **Harvest by site** table on `/runs` splits its window in half
+and compares: a site that was yielding, still has traffic, and now finds nothing
+is reported as *Stopped finding jobs*. Fixing one is a handful of field aliases
+— see [docs/HARVEST.md](../docs/HARVEST.md).
 
 ### Show the overlay on job pages
 
@@ -338,19 +357,22 @@ Two permissions, asked for separately because they are not the same ask:
   when you untick it. Used to follow aggregator redirects, with cookies
   omitted, and for nothing else — the extension never leases a task kind it
   cannot run, so declining this leaves that work queued rather than attempted.
-- **linkedin.com**, requested only when you tick **Harvest jobs from
-  LinkedIn**, and removed when you untick it.
+- **One harvest site**, requested per box when you tick it and removed when you
+  untick it. Ticking LinkedIn buys access to linkedin.com and nothing else;
+  every other site is its own separate ask.
 - **The named job boards**, requested only when you tick **Show the overlay on
   job pages**. The overlay reads the page it is on only when you open the
   panel, and only to fill in a posting you asked it to save.
 
-With harvest off, nothing is read from pages you browse at all: `resolve_link`
-fetches only URLs the server queued, every one of them an aggregator link that
-came from your own job results.
+With every harvest box off, nothing is read from pages you browse at all:
+`resolve_link` fetches only URLs the server queued, every one of them an
+aggregator link that came from your own job results.
 
-With harvest on, job data from LinkedIn pages you visit is sent to your own
-server and nowhere else. Only responses containing job-shaped JSON are
-forwarded; the server discards anything it cannot recognize as a posting.
+With a box on, job data from that site's pages is sent to your own server and
+nowhere else. Only responses whose URL looks job-related and whose body
+contains job-shaped JSON are forwarded — the filter runs in the page, before
+anything reaches the extension — and the server discards whatever it cannot
+recognize as a posting.
 Messages, connections and your feed are not job-shaped and do not survive the
 parser — but the honest statement is that the interceptor sees LinkedIn API
 responses on pages you open, and forwards the ones that mention a job title or

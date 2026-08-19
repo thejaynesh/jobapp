@@ -9,15 +9,54 @@
  * narrower and honest.
  */
 
+import { HARVEST_SITES } from "./sites.js";
+
+/**
+ * Draw one checkbox per harvest site.
+ *
+ * Rendered rather than written into options.html because the list is shared
+ * with background.js: a site added there but forgotten here was a site that
+ * registered and permissioned correctly and had no way to be turned on.
+ */
+function renderHarvestSites() {
+  const container = document.getElementById("harvest-sites");
+  if (!container) return;
+  for (const site of HARVEST_SITES) {
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = site.storageKey;
+
+    const label = document.createElement("label");
+    label.htmlFor = site.storageKey;
+    label.textContent = `Harvest jobs from ${site.label}`;
+
+    row.append(box, label);
+    container.append(row);
+
+    if (site.note) {
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = site.note;
+      container.append(hint);
+    }
+  }
+}
+
+renderHarvestSites();
+
+/** The checkbox for one site. Its id is the storage key, so there is one name. */
+function harvestBox(site) {
+  return document.getElementById(site.storageKey);
+}
+
 const els = {
   serverUrl: document.getElementById("serverUrl"),
   token: document.getElementById("token"),
   enabled: document.getElementById("enabled"),
   resolveLinks: document.getElementById("resolveLinks"),
-  harvest: document.getElementById("harvest"),
-  harvestIndeed: document.getElementById("harvestIndeed"),
-  harvestGlassdoor: document.getElementById("harvestGlassdoor"),
-  harvestWorkday: document.getElementById("harvestWorkday"),
   useTabs: document.getElementById("useTabs"),
   overlay: document.getElementById("overlay"),
   save: document.getElementById("save"),
@@ -42,29 +81,6 @@ const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
 
 /** Harvest needs one site, not the web. Asked for separately for that reason. */
 const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
-
-/**
- * Every site harvesting can read, one row each.
- *
- * A row per site rather than one wildcard: "read every job board you visit" is
- * a different thing to consent to than "read LinkedIn", so each is asked for
- * separately, shown separately, and given back separately. LinkedIn keeps the
- * original `harvest` storage key so existing installs need no migration.
- */
-const HARVEST_SITES = [
-  { key: "harvest", el: "harvest", origins: ["https://www.linkedin.com/*"] },
-  { key: "harvestIndeed", el: "harvestIndeed", origins: ["https://*.indeed.com/*"] },
-  {
-    key: "harvestGlassdoor",
-    el: "harvestGlassdoor",
-    origins: ["https://*.glassdoor.com/*"],
-  },
-  {
-    key: "harvestWorkday",
-    el: "harvestWorkday",
-    origins: ["https://*.myworkdayjobs.com/*"],
-  },
-];
 
 /** Where the overlay draws. Named boards rather than a wildcard. */
 const OVERLAY_HOSTS = {
@@ -102,7 +118,7 @@ async function load() {
   const stored = await chrome.storage.local.get({
     serverUrl: "", token: "", enabled: false, overlay: false,
     useTabs: true, agentId: "", status: {}, events: [],
-    ...Object.fromEntries(HARVEST_SITES.map((site) => [site.key, false])),
+    ...Object.fromEntries(HARVEST_SITES.map((site) => [site.storageKey, false])),
   });
   els.serverUrl.value = stored.serverUrl;
   els.token.value = stored.token;
@@ -112,11 +128,11 @@ async function load() {
   // A ticked box with the permission revoked out from under it is a lie, so
   // each one is shown as the AND of the two.
   for (const site of HARVEST_SITES) {
-    const box = els[site.el];
+    const box = harvestBox(site);
     if (!box) continue;
     box.checked =
-      Boolean(stored[site.key]) &&
-      (await chrome.permissions.contains({ origins: site.origins }));
+      Boolean(stored[site.storageKey]) &&
+      (await chrome.permissions.contains({ origins: site.matches }));
   }
   els.overlay.checked =
     stored.overlay && (await chrome.permissions.contains(OVERLAY_HOSTS));
@@ -226,9 +242,9 @@ async function save() {
   // Harvest, same shape, once per site: the permission follows the checkbox
   // both ways, and the content scripts follow the permission.
   for (const site of HARVEST_SITES) {
-    const box = els[site.el];
+    const box = harvestBox(site);
     if (!box) continue;
-    const hosts = { origins: site.origins };
+    const hosts = { origins: site.matches };
     const held = await chrome.permissions.contains(hosts);
     if (box.checked && !held) {
       if (!(await chrome.permissions.request(hosts))) box.checked = false;
@@ -249,9 +265,9 @@ async function save() {
 
   await chrome.storage.local.set({
     ...Object.fromEntries(
-      HARVEST_SITES.filter((site) => els[site.el]).map((site) => [
-        site.key,
-        els[site.el].checked,
+      HARVEST_SITES.filter(harvestBox).map((site) => [
+        site.storageKey,
+        harvestBox(site).checked,
       ]),
     ),
     overlay: els.overlay.checked,

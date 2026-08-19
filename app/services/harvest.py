@@ -49,11 +49,23 @@ HARVEST_SOURCE = "linkedin_harvest"
 # interceptor's registration decided it saw LinkedIn and nothing else. Now that
 # it can be registered per site, each host gets its own source name — otherwise
 # Indeed's yield disappears into LinkedIn's number and neither can be judged.
+# Keep in step with `HARVEST_SITES` in extension/sites.js: a host the extension
+# harvests but this does not name still works — the extractor never looked at
+# the host — but its yield lands in LinkedIn's bucket, where nobody can judge
+# it. See docs/HARVEST.md.
 HARVEST_SOURCES = {
     "linkedin.com": HARVEST_SOURCE,
     "indeed.com": "indeed_harvest",
     "glassdoor.com": "glassdoor_harvest",
     "myworkdayjobs.com": "workday_harvest",
+    "dice.com": "dice_harvest",
+    "ziprecruiter.com": "ziprecruiter_harvest",
+    "wellfound.com": "wellfound_harvest",
+    "builtin.com": "builtin_harvest",
+    "simplyhired.com": "simplyhired_harvest",
+    "monster.com": "monster_harvest",
+    "otta.com": "otta_harvest",
+    "welcometothejungle.com": "otta_harvest",
 }
 
 

@@ -204,6 +204,10 @@ def summary(db, days: int = 7) -> dict:
         "by_kind": by_kind,
         "failing_hosts": [{"host": host, "count": int(count)} for host, count in failing],
         "harvest": harvest_yield(db, days=days),
+        # A longer window than the rest of the panel on purpose: this one is
+        # answering "did something change", and half of a seven-day window is
+        # too short to tell a redesign from a quiet weekend.
+        "harvest_health": harvest_health(db, days=max(14, days * 2)),
         "recent": recent(db, limit=12),
     }
 
@@ -237,6 +241,112 @@ def harvest_yield(db, days: int = 7) -> dict:
         "found": int(found or 0),
         "inserted": int(inserted or 0),
     }
+
+
+# How many payloads a site must have forwarded in the recent half of the window
+# before "it found nothing" is worth saying out loud. Below this, silence is
+# just as likely to be a couple of stray page loads.
+_MIN_PAYLOADS_TO_JUDGE = 15
+
+HEALTH_LABELS = {
+    "healthy": "Working",
+    "regressed": "Stopped finding jobs",
+    "silent": "Forwarding, never finds jobs",
+    "quiet": "Not browsed lately",
+}
+
+
+def harvest_health(db, days: int = 14) -> list[dict]:
+    """
+    Per site: is the harvest still reading this one?
+
+    The failure this exists for is specific and silent. The interceptor reads
+    the page's own API responses, so it survives redesigns that would break a
+    CSS selector — but not a payload whose field names all change at once. When
+    that happens the extension keeps running, keeps forwarding, and keeps
+    finding nothing, and the only visible symptom is that a source quietly
+    stops contributing.
+
+    A zero is not itself the signal: browsing a feed forwards plenty of
+    responses that legitimately contain no jobs, so `found == 0` is a normal
+    outcome many times a day. The signal is the *change* — a site that was
+    yielding in the first half of the window and yields nothing in the second,
+    with enough traffic in the second half for that to mean something.
+
+    Hence the split window rather than a threshold. It is the difference
+    between "LinkedIn changed something" and "you did not open LinkedIn."
+    """
+    from sqlalchemy import case, func
+
+    from app.models.agent_event import AgentEvent
+
+    days = max(2, days)
+    since = _window_start(days)
+    midpoint = _window_start(days // 2)
+
+    found = func.coalesce(AgentEvent.summary["found"].astext.cast(Integer), 0)
+    inserted = func.coalesce(AgentEvent.summary["inserted"].astext.cast(Integer), 0)
+    merged = func.coalesce(AgentEvent.summary["merged"].astext.cast(Integer), 0)
+    is_recent = AgentEvent.created_at >= midpoint
+
+    rows = (
+        db.query(
+            AgentEvent.host,
+            func.count(AgentEvent.id),
+            func.sum(case((is_recent, 1), else_=0)),
+            func.sum(case((is_recent, found), else_=0)),
+            func.sum(case((is_recent, inserted), else_=0)),
+            func.sum(case((is_recent, merged), else_=0)),
+            func.sum(case((is_recent, 0), else_=found)),
+            func.max(case((found > 0, AgentEvent.created_at))),
+        )
+        .filter(
+            AgentEvent.created_at >= since,
+            AgentEvent.kind == "harvest",
+            AgentEvent.host.isnot(None),
+        )
+        .group_by(AgentEvent.host)
+        .all()
+    )
+
+    out = []
+    for (host, payloads, recent_payloads, recent_found, recent_inserted,
+         recent_merged, earlier_found, last_found_at) in rows:
+        recent_payloads = int(recent_payloads or 0)
+        recent_found = int(recent_found or 0)
+        earlier_found = int(earlier_found or 0)
+
+        if recent_found:
+            verdict = "healthy"
+        elif recent_payloads < _MIN_PAYLOADS_TO_JUDGE:
+            # Too little traffic to distinguish a broken reader from a site
+            # nobody opened.
+            verdict = "quiet"
+        elif earlier_found:
+            verdict = "regressed"
+        else:
+            verdict = "silent"
+
+        out.append({
+            "host": host,
+            "verdict": verdict,
+            "label": HEALTH_LABELS[verdict],
+            "payloads": int(payloads or 0),
+            "recent_payloads": recent_payloads,
+            "found": recent_found,
+            "inserted": int(recent_inserted or 0),
+            "merged": int(recent_merged or 0),
+            "earlier_found": earlier_found,
+            "last_found_at": last_found_at,
+            "days": days,
+        })
+
+    # Anything wrong first, then by how much the site is contributing. The
+    # panel is read to find a problem, and a regression buried under four
+    # working sites is a regression nobody sees.
+    order = {"regressed": 0, "silent": 1, "healthy": 2, "quiet": 3}
+    out.sort(key=lambda row: (order[row["verdict"]], -row["found"]))
+    return out
 
 
 def recent(db, limit: int = 12) -> list:

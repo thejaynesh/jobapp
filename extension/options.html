@@ -80,40 +80,19 @@
     and closes it. One at a time. Untick to let those tasks simply fail instead.
   </div>
 
-  <div class="row">
-    <input type="checkbox" id="harvest">
-    <label for="harvest">Harvest jobs from LinkedIn</label>
-  </div>
   <div class="hint">
-    While you browse LinkedIn normally, reads the job data the page already
-    received and sends it to your server — full descriptions and salary bands
-    the guest API never returns, at no extra requests. LinkedIn answers the
-    server with a challenge, so for those postings this is the only way the
-    descriptions arrive at all; leaving it off is why thousands of stored
-    LinkedIn jobs have none. Needs access to linkedin.com only, requested when
-    you tick it. Nothing is sent from any other site.
+    While you browse a job site normally, harvesting reads the job data the page
+    already received and sends it to your server — full descriptions and salary
+    bands the public APIs never return, at no extra requests. Each site below is
+    a separate permission, asked for when you tick it and given back when you
+    untick it: "read every job board you visit" is a different thing to agree to
+    than "read LinkedIn", so they are not bundled. Nothing is sent from any site
+    you have not ticked.
   </div>
 
-  <div class="row">
-    <input type="checkbox" id="harvestIndeed">
-    <label for="harvestIndeed">Harvest jobs from Indeed</label>
-  </div>
-  <div class="row">
-    <input type="checkbox" id="harvestGlassdoor">
-    <label for="harvestGlassdoor">Harvest jobs from Glassdoor</label>
-  </div>
-  <div class="row">
-    <input type="checkbox" id="harvestWorkday">
-    <label for="harvestWorkday">Harvest jobs from Workday career sites</label>
-  </div>
-  <div class="hint">
-    The same thing, on the other sites that refuse the server outright. Each is
-    a separate permission asked for when you tick it, and given back when you
-    untick it — "read every job board you visit" is a different thing to agree
-    to than "read LinkedIn", so they are not bundled. Indeed and Glassdoor both
-    answer a datacenter IP with a challenge; Workday career sites are per
-    employer, so browsing one is the only way its postings are seen at all.
-  </div>
+  <!-- Filled in by options.js from the shared list in sites.js, so adding a
+       site is one edit rather than three that have to agree. -->
+  <div id="harvest-sites"></div>
 
   <div class="row">
     <input type="checkbox" id="overlay">
@@ -155,6 +134,8 @@
     <table id="events"><tbody></tbody></table>
   </details>
 
-  <script src="options.js"></script>
+  <!-- A module so it can import the shared site list. Modules are deferred, so
+       the DOM is complete by the time the checkboxes are drawn. -->
+  <script type="module" src="options.js"></script>
 </body>
 </html>

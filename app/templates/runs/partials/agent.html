@@ -41,6 +41,62 @@
   </p>
   {% endif %}
 
+  {# Per site, because the failure worth catching is per site: the interceptor
+     reads each page's own API responses, and a payload whose field names all
+     change at once keeps the extension running, keeps it forwarding, and
+     quietly stops it finding anything. #}
+  {% set health = agent_events.harvest_health %}
+  {% if health %}
+  <div class="mb-4">
+    <p class="text-xs font-medium text-gray-600 mb-1">Harvest by site</p>
+    <table class="w-full text-xs">
+      <tbody>
+        {% for row in health %}
+        <tr class="border-t border-gray-100">
+          <td class="py-1 text-gray-600">{{ row.host }}</td>
+          <td class="py-1 text-right text-gray-500 whitespace-nowrap">
+            {{ "{:,}".format(row.found) }} found &middot;
+            {{ "{:,}".format(row.inserted) }} new
+          </td>
+          <td class="py-1 pl-3 text-right whitespace-nowrap">
+            <span class="px-1.5 py-0.5 rounded font-medium
+              {% if row.verdict == 'healthy' %}bg-green-50 text-green-700
+              {% elif row.verdict == 'regressed' %}bg-red-50 text-red-700
+              {% elif row.verdict == 'silent' %}bg-amber-50 text-amber-700
+              {% else %}bg-gray-50 text-gray-500{% endif %}">
+              {{ row.label }}
+            </span>
+          </td>
+        </tr>
+        {% if row.verdict == 'regressed' %}
+        {# The one row that is a call to action rather than a statistic. #}
+        <tr>
+          <td colspan="3" class="pb-2 text-[11px] text-red-600 leading-relaxed">
+            {{ "{:,}".format(row.recent_payloads) }} responses forwarded since
+            {% if row.last_found_at %}
+            the last job was read on {{ row.last_found_at | when("%b %d") }},
+            {% else %}
+            the window opened,
+            {% endif %}
+            and none of them were job-shaped. The site most likely renamed the
+            fields the reader matches on — see docs/HARVEST.md.
+          </td>
+        </tr>
+        {% elif row.verdict == 'silent' %}
+        <tr>
+          <td colspan="3" class="pb-2 text-[11px] text-amber-600 leading-relaxed">
+            Forwarding responses but nothing job-shaped has ever come out of
+            them. Either its payloads use field names the reader doesn't know,
+            or these were listing pages rather than job pages.
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div>
       <p class="text-xs font-medium text-gray-600 mb-1">What happened</p>
