@@ -106,8 +106,13 @@ def _chain_if_more(result, limit: int | None, match_after: bool, depth: int) -> 
         return
 
     ceiling = max(1, int(limit or settings.ENRICH_MAX_PER_RUN))
-    served = result.get("attempted", 0) + result.get("queued_browser", 0)
-    if served < ceiling:
+    # Only work this pass actually did. Queued browser tasks used to count
+    # here, and that was wrong twice over: handing two hundred URLs to a queue
+    # is a second's work, so a batch made entirely of walled-off hosts chained
+    # instantly and burned all fifty passes in under a minute — and the thing
+    # it was racing to do more of is drained by a browser at human pace, which
+    # no amount of chaining speeds up.
+    if result.get("attempted", 0) < ceiling:
         return
 
     cap = max(0, int(settings.ENRICH_MAX_CHAINED_PASSES))

@@ -419,6 +419,10 @@ class Settings(BaseSettings):
     # may not be next week. Without it the same unenrichable jobs sit at the
     # head of a newest-first queue and no pass ever reaches the real backlog.
     ENRICH_RETRY_DAYS: int = 7
+    # Ceiling on browser tasks waiting at once. A browser drains these at human
+    # pace, so queueing faster than it can drain makes nothing arrive sooner —
+    # it only builds a backlog large enough that most of it expires unread.
+    ENRICH_MAX_BROWSER_OUTSTANDING: int = 500
 
     # What zone the pages render times in. Storage stays UTC — this is purely
     # a rendering concern. An IANA name rather than an offset, so the PST/PDT

@@ -177,12 +177,40 @@ def find_duplicate_application_job(db: Session, job) -> Job | None:
 MEANINGFUL_DESCRIPTION_GROWTH = 200
 
 
-def note_description_growth(job: Job, old_length: int) -> None:
-    """Stamp the job when its description just got meaningfully fuller."""
+def note_description_growth(job: Job, old_length: int) -> bool:
+    """
+    Stamp the job when its description just got meaningfully fuller, and let it
+    be judged again. Returns whether it went back in the matching queue.
+
+    The re-queue lives here rather than in each caller because this function is
+    what "the description got fuller" means, and every path that fills one in
+    should have the same consequence. Enrichment had it; a cross-post merge and
+    the browser harvest did not — so a job filtered as `no_description` could
+    have its description arrive from a harvest and sit there filtered out for
+    exactly the thing that was no longer true. With twelve thousand LinkedIn
+    jobs waiting on a harvest for their text, that gap was the difference
+    between the feature working and the feature being decorative.
+
+    The rule itself is enrichment's, imported rather than restated: only
+    verdicts reached by reading a description, and never a job that already
+    carries an application.
+    """
     from datetime import datetime, timezone
 
-    if len(job.description or "") - old_length >= MEANINGFUL_DESCRIPTION_GROWTH:
-        job.description_updated_at = datetime.now(timezone.utc)
+    if len(job.description or "") - old_length < MEANINGFUL_DESCRIPTION_GROWTH:
+        return False
+
+    job.description_updated_at = datetime.now(timezone.utc)
+
+    from app.models.job import JobStatus
+    from app.services.enrichment import _worth_rescoring
+
+    if not _worth_rescoring(job):
+        return False
+    job.status = JobStatus.new
+    job.filter_reason = None
+    job.filter_detail = None
+    return True
 
 
 def merge_or_skip(

@@ -105,13 +105,31 @@ class TestChaining:
         queued.assert_called_once()
         assert queued.call_args.kwargs["depth"] == 1
 
-    def test_browser_queued_jobs_count_towards_a_full_batch(self, db, monkeypatch):
-        # They were served by the pass — handed to the extension rather than
-        # fetched here — so a batch that was all browser hosts is still full.
+    def test_browser_queued_jobs_do_not_count_towards_a_full_batch(self, db,
+                                                                    monkeypatch):
+        # They were handed to a queue, not done. This test asserted the
+        # opposite until a run showed what it cost: a batch made entirely of
+        # walled-off hosts takes about a second, so it chained instantly and
+        # burned all fifty passes inside a minute — sixteen of them visible on
+        # the panel with the same timestamp, each queueing the same two hundred
+        # URLs again.
+        #
+        # And chaining could not have helped even if it were free: browser work
+        # is drained by a person's browser at a person's pace, which no amount
+        # of queueing ahead speeds up.
         monkeypatch.setattr(settings, "ENRICH_CHAIN_PASSES", True)
         monkeypatch.setattr(settings, "ENRICH_MAX_PER_RUN", 200)
 
-        self._run({"attempted": 50, "queued_browser": 150}).assert_called_once()
+        self._run({"attempted": 50, "queued_browser": 150}).assert_not_called()
+
+    def test_a_full_batch_of_real_fetches_still_chains_past_browser_work(
+        self, db, monkeypatch,
+    ):
+        # The guard must not turn chaining off: the backlog is why it exists.
+        monkeypatch.setattr(settings, "ENRICH_CHAIN_PASSES", True)
+        monkeypatch.setattr(settings, "ENRICH_MAX_PER_RUN", 200)
+
+        self._run({"attempted": 200, "queued_browser": 150}).assert_called_once()
 
     def test_an_unfull_batch_ends_the_chain(self, db, monkeypatch):
         # Nothing left to do, so the schedule is the right place for "a few new

@@ -895,14 +895,26 @@ def enrich_jobs(
         stats.requeued_for_matching += 1 if outcome["requeued"] else 0
         stats.via[found.method] = stats.via.get(found.method, 0) + 1
 
+    if queue_browser and for_browser:
+        stats.queued_browser = queue_for_browser(db, for_browser)
+        # Stamped for exactly the reason the server-tier jobs above are, and
+        # missing here until it produced sixteen passes a minute that each
+        # queued the same two hundred URLs. Handing a job to the browser *is*
+        # an attempt: nothing else about the row changes, so without the stamp
+        # it stays at the head of a newest-first ordering and every pass picks
+        # it again while the backlog behind it is never reached.
+        #
+        # Only the ones actually queued. A job skipped because the browser
+        # queue was full has not been attempted, and marking it would put it to
+        # sleep for a week over a moment of congestion.
+        for job in for_browser[:stats.queued_browser]:
+            job.enrichment_attempted_at = attempted_at
+
     try:
         db.commit()
     except Exception as exc:
         logger.error("enrichment: commit failed: %s", exc)
         db.rollback()
-
-    if queue_browser and for_browser:
-        stats.queued_browser = queue_for_browser(db, for_browser)
 
     logger.info(
         "enrichment: %d attempted — %d enriched (+%d chars), %d unchanged, "
@@ -913,6 +925,44 @@ def enrich_jobs(
     return stats
 
 
+def _browser_task_kind(url: str) -> str:
+    """
+    Which kind of browser work this host actually answers to.
+
+    `resolve_link` fetches the URL from the extension **without cookies** — a
+    deliberate choice, because resolving a public aggregator redirect has no
+    business carrying the user's sessions. For LinkedIn that means fetching the
+    page as a stranger, which returns a sign-in wall, which is why queueing
+    twelve thousand of these produced nothing at all.
+
+    `browse_page` opens the URL in a real tab. That tab has the session, and
+    the harvest interceptor reads the API responses the page makes for itself.
+    So any host the harvest covers gets browsed rather than fetched.
+    """
+    from app.services.harvest import HARVEST_SOURCES
+
+    host = _host(url)
+    covered = any(
+        host == domain or host.endswith(f".{domain}") for domain in HARVEST_SOURCES
+    )
+    return "browse_page" if covered else "resolve_link"
+
+
+def _outstanding_browser_work(db) -> set[str]:
+    """URLs already queued or leased. Queueing one twice buys nothing."""
+    from app.models.browser_task import BrowserTask
+
+    rows = (
+        db.query(BrowserTask.payload["url"].astext)
+        .filter(
+            BrowserTask.kind.in_(("resolve_link", "browse_page")),
+            BrowserTask.status.in_(("queued", "leased")),
+        )
+        .all()
+    )
+    return {row[0] for row in rows if row[0]}
+
+
 def queue_for_browser(db, jobs: list[Job]) -> int:
     """
     Hand the walled-off hosts to the extension.
@@ -921,22 +971,45 @@ def queue_for_browser(db, jobs: list[Job]) -> int:
     page; the difference is the residential IP and the user's own session,
     which is the entire reason the agent queue exists. Never blocks and never
     fails the pass — if nobody is listening the tasks simply expire.
+
+    Two ceilings, both learned the hard way. A URL already waiting is not
+    queued again, and the outstanding queue is capped: a browser drains this at
+    a human pace, so queueing faster than it can drain does not make anything
+    arrive sooner. It only builds a backlog large enough that most of it
+    expires unread, and hides the real work behind ten thousand duplicates.
     """
     from app.services import browser_tasks
 
+    outstanding = _outstanding_browser_work(db)
+    room = max(0, int(getattr(settings, "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
+               - len(outstanding))
+    if room <= 0:
+        logger.info(
+            "enrichment: browser queue already holds %d task(s); queueing none",
+            len(outstanding),
+        )
+        return 0
+
     queued = 0
     for job in jobs:
+        if queued >= room:
+            break
         url = _target_url(job)
-        if not url:
+        if not url or url in outstanding:
             continue
+        kind = _browser_task_kind(url)
+        payload = {"url": url, "purpose": "enrich", "job_id": str(job.id)}
+        if kind == "browse_page":
+            payload["settle_seconds"] = int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6))
+            payload["gap_seconds"] = int(getattr(settings, "BROWSE_GAP_SECONDS", 20))
         try:
             browser_tasks.enqueue(
-                db, "resolve_link",
-                {"url": url, "purpose": "enrich", "job_id": str(job.id)},
+                db, kind, payload,
                 # Below a user pressing a button, above background link tidying.
                 priority=2,
                 ttl_hours=48,
             )
+            outstanding.add(url)
             queued += 1
         except Exception as exc:
             logger.warning("enrichment: could not queue %s: %s", url, exc)
