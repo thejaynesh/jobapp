@@ -71,6 +71,7 @@ HARVEST_SOURCES = {
     "hiring.cafe": "hiringcafe_harvest",
     "amazon.jobs": "amazon_harvest",
     "google.com": "google_harvest",
+    "my.greenhouse.io": "greenhouse_harvest",
 }
 
 
@@ -492,10 +493,52 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
             logger.warning("harvest: could not store %r at %s: %s", title, company, exc)
             counts["invalid"] += 1
 
+    counts["boards"] = _mine_ats_boards(db, jobs)
+
     db.commit()
-    if counts["inserted"] or counts["merged"]:
+    if counts["inserted"] or counts["merged"] or counts["boards"]:
         logger.info(
-            "harvest: %d new, %d enriched, %d already known",
+            "harvest: %d new, %d enriched, %d already known, %d new ATS board(s)",
             counts["inserted"], counts["merged"], counts["skipped"],
+            counts["boards"],
         )
     return counts
+
+
+def _mine_ats_boards(db, jobs: list[dict]) -> int:
+    """
+    Company ATS boards named by the jobs we just harvested. Returns new ones.
+
+    This is the half of harvesting that compounds, and it was missing entirely:
+    the extractor saved the jobs and threw the slugs away.
+
+    The asymmetry is the point. A harvested posting is one job, once. A
+    Greenhouse slug is that company's *entire board* — every role they have
+    open and every one they open later, with full descriptions, through a free
+    API, on every future fetch cycle, with no browser involved. The two are not
+    the same size of prize.
+
+    It matters most on an aggregate board like `my.greenhouse.io`, which lists
+    postings across every company on the platform: one pass over it is a slug
+    mine, and each slug found there is a permanent new source. But it pays on
+    any page — a LinkedIn posting linking to the company's Greenhouse apply URL
+    names a slug just as well.
+
+    Nothing here validates. `company_boards` records the slug as pending and
+    `validate_pending` checks it against the live API before the fetch cycle
+    ever uses it, which is the right place for that: a wrong slug found here
+    should cost one 404 in a validation pass, not a broken source.
+    """
+    try:
+        from app.services.ats_discovery import discover_from_jobs
+        from app.services.company_boards import record_boards
+
+        found = discover_from_jobs(jobs)
+        if not found:
+            return 0
+        return record_boards(db, found, origin="harvest")
+    except Exception as exc:
+        # A posting that was saved is saved. Failing to mine a slug out of it
+        # is not a reason to lose the harvest that found it.
+        logger.warning("harvest: could not mine ATS boards: %s", exc)
+        return 0

@@ -76,15 +76,25 @@ class Board:
     search is one page — which for LinkedIn is twenty-five cards, and is why
     the crawl looked like it was not discovering anything. Depth is what turns
     a search into a sweep, and it costs nothing but more queued pages.
+
+    `feed_setting` names a setting holding the URLs instead, for a board whose
+    location filter is not composable — Greenhouse carries a place name, a
+    latitude, a longitude and a country code that all have to agree, so
+    substituting a location from the profile would produce coordinates in
+    Kansas labelled London. Those URLs are copied from the address bar with
+    `{q}` marking the keyword, and read at call time so changing them is a
+    setting rather than a deploy.
     """
 
     def __init__(self, key, host, label, search=None, entries=(),
-                 page_param=None, page_size=25, page_base=0):
+                 page_param=None, page_size=25, page_base=0,
+                 feed_setting=None):
         self.key = key
         self.host = host
         self.label = label
         self.search = search
         self.entries = tuple(entries)
+        self.feed_setting = feed_setting
         self.page_param = page_param
         self.page_size = max(1, page_size)
         # What the parameter reads on the first page. Boards count two
@@ -93,6 +103,24 @@ class Board:
         # second page of an ordinal board back into the first, so every search
         # would fetch page one twice and never reach page four.
         self.page_base = page_base
+
+    def resolve(self) -> tuple[str | None, tuple[str, ...]]:
+        """
+        This board's `(search, entries)`, reading its setting where it has one.
+
+        A configured URL containing `{q}` is a search template; one without is
+        a page to open as-is, for a filter set that needs no keyword. Splitting
+        on that rather than on a second setting keeps "paste what is in your
+        address bar" as the whole instruction.
+        """
+        if not self.feed_setting:
+            return self.search, self.entries
+
+        raw = str(getattr(settings, self.feed_setting, "") or "")
+        urls = [part.strip() for part in raw.split(",") if part.strip()]
+        searches = [url for url in urls if "{q}" in url]
+        fixed = tuple(url for url in urls if "{q}" not in url)
+        return (searches[0] if searches else None), fixed
 
     def pages(self, url: str, depth: int) -> list[str]:
         """
@@ -126,6 +154,24 @@ BOARDS = (
     Board(
         "hiringcafe", "hiring.cafe", "Hiring Cafe",
         entries=("https://hiring.cafe/",),
+    ),
+    # Greenhouse's own job-seeker board: every posting on the platform rather
+    # than one company's. Worth crawling for the postings, but worth far more
+    # for the slugs — the Greenhouse source adapter is entirely slug-driven,
+    # and one slug returns that company's whole board with full descriptions
+    # through a free API, forever. See `harvest._mine_ats_boards`.
+    #
+    # Login-only, so the server cannot reach it at all; the browser can,
+    # because it is already signed in.
+    #
+    # An entry URL rather than a search template because this board filters
+    # rather than searches — the URL carries location, date and salary but no
+    # keyword — so there is no `{q}` to fill in. It is `BROWSE_GREENHOUSE_FEED`
+    # so the filters can be changed without a deploy: paste a new one from the
+    # address bar after setting them how you want.
+    Board(
+        "greenhouse", "my.greenhouse.io", "Greenhouse (all companies)",
+        feed_setting="BROWSE_GREENHOUSE_FEED",
     ),
     Board(
         "handshake", "joinhandshake.com", "Handshake",
@@ -214,23 +260,26 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None) -> 
     pages = _depth() if depth is None else max(1, depth)
     urls: list[str] = []
     for board in (boards if boards is not None else BOARDS):
-        if board.search:
+        search, entries = board.resolve()
+        # Its fixed pages either way: a board can have both a keyword search
+        # and a filter set that needs no keyword, and the second is not a
+        # fallback for the first.
+        urls.extend(entries)
+
+        if search:
             if not roles:
-                # Nothing to search for. Its entry pages, if it had any, would
-                # still be worth opening — but a search board with no query is
-                # just the homepage.
+                # Nothing to search for. Its entry pages are already queued
+                # above; a search board with no query is just the homepage.
                 continue
             for role in roles[:6]:
                 for location in locations:
-                    first = board.search.format(
+                    first = search.format(
                         q=quote_plus(role), loc=quote_plus(location),
                     )
                     # Every result page, not just the first. One page is
                     # twenty-five cards, which is what made a "crawl" look like
                     # it was finding nothing.
                     urls.extend(board.pages(first, pages))
-        else:
-            urls.extend(board.entries)
     return urls
 
 

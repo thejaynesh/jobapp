@@ -73,6 +73,22 @@ class Settings(BaseSettings):
     # other, so this multiplies the run length: five pages of six roles across
     # two locations is sixty visits, which is one full run.
     BROWSE_SEARCH_PAGES: int = 5
+    # Greenhouse's job-seeker board — every company on the platform rather than
+    # one. Login-only, so only the browser can reach it.
+    #
+    # A setting rather than a constant because the location half of this URL is
+    # not composable: it carries a name, a latitude, a longitude and a country
+    # code that all have to agree, so substituting a location from the profile
+    # would produce coordinates in Kansas labelled London. Set the filters on
+    # the site, copy the address bar, and put `{q}` where the keyword is.
+    #
+    # A URL without `{q}` is crawled as-is, for a filter set that needs no
+    # keyword. Comma-separated for several.
+    BROWSE_GREENHOUSE_FEED: str = (
+        "https://my.greenhouse.io/jobs/search?query={q}"
+        "&location=United%20States&lat=39.71614&lon=-96.999246"
+        "&location_type=country&country_short_name=US"
+    )
     # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
     # On by default. Set false ONLY while the deployment is still on plain
     # http:// — with it on, the browser accepts the cookie at login and then

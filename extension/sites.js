@@ -133,6 +133,17 @@ export const HARVEST_SITES = [
     matches: ["https://hiring.cafe/*"],
   },
   {
+    id: "greenhouse",
+    label: "Greenhouse (all companies)",
+    storageKey: "harvestGreenhouse",
+    matches: ["https://my.greenhouse.io/*"],
+    note:
+      "Greenhouse's own job-seeker board — every company on the platform, not " +
+      "one. Login-only, so the server cannot see it at all. Worth more than " +
+      "the postings: each one names a company board the fetcher can then read " +
+      "by API forever.",
+  },
+  {
     id: "amazon",
     label: "Amazon Jobs",
     storageKey: "harvestAmazon",
