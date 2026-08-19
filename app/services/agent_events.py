@@ -204,10 +204,10 @@ def summary(db, days: int = 7) -> dict:
         "by_kind": by_kind,
         "failing_hosts": [{"host": host, "count": int(count)} for host, count in failing],
         "harvest": harvest_yield(db, days=days),
-        # A longer window than the rest of the panel on purpose: this one is
-        # answering "did something change", and half of a seven-day window is
-        # too short to tell a redesign from a quiet weekend.
-        "harvest_health": harvest_health(db, days=max(14, days * 2)),
+        # Not bounded by this panel's window: this one judges each site against
+        # its own last N payloads rather than against a stretch of calendar, so
+        # narrowing it to a week would only throw away the comparison.
+        "harvest_health": harvest_health(db),
         "recent": recent(db, limit=12),
     }
 
@@ -243,20 +243,35 @@ def harvest_yield(db, days: int = 7) -> dict:
     }
 
 
-# How many payloads a site must have forwarded in the recent half of the window
-# before "it found nothing" is worth saying out loud. Below this, silence is
-# just as likely to be a couple of stray page loads.
+# What "lately" means for one site: its most recent N forwarded payloads.
+#
+# Counted rather than dated, and that is the whole design decision here. A
+# calendar split — this week against last week — cannot say anything at all
+# until a week of history exists, and then says "not browsed lately" about a
+# site you used heavily on Monday and not since. Counting payloads makes the
+# comparison relative to *your browsing* instead of to the clock: thirty job
+# pages on one afternoon is a complete before-and-after, and a site you open
+# twice a month is judged on its own last thirty rather than declared broken
+# for being quiet.
+_RECENT_PAYLOADS = 25
+
+# Below this many recent payloads, "it found nothing" is not worth saying: a
+# handful of page loads is as likely to be a homepage as a broken reader.
 _MIN_PAYLOADS_TO_JUDGE = 15
+
+# An outer bound so the "before" is not something from six months ago. Wide,
+# because the payload count is what actually splits the two halves.
+_MAX_WINDOW_DAYS = 120
 
 HEALTH_LABELS = {
     "healthy": "Working",
     "regressed": "Stopped finding jobs",
     "silent": "Forwarding, never finds jobs",
-    "quiet": "Not browsed lately",
+    "quiet": "Not browsed enough to say",
 }
 
 
-def harvest_health(db, days: int = 14) -> list[dict]:
+def harvest_health(db, days: int = _MAX_WINDOW_DAYS) -> list[dict]:
     """
     Per site: is the harvest still reading this one?
 
@@ -270,42 +285,60 @@ def harvest_health(db, days: int = 14) -> list[dict]:
     A zero is not itself the signal: browsing a feed forwards plenty of
     responses that legitimately contain no jobs, so `found == 0` is a normal
     outcome many times a day. The signal is the *change* — a site that was
-    yielding in the first half of the window and yields nothing in the second,
-    with enough traffic in the second half for that to mean something.
+    yielding, still has traffic, and now yields nothing.
 
-    Hence the split window rather than a threshold. It is the difference
-    between "LinkedIn changed something" and "you did not open LinkedIn."
+    So each site is judged against its own last `_RECENT_PAYLOADS` responses
+    rather than against a stretch of calendar. That is what makes the panel
+    useful on the day it is deployed instead of a week later, and it is why a
+    site nobody opened this week is not reported as broken.
     """
     from sqlalchemy import case, func
 
     from app.models.agent_event import AgentEvent
 
-    days = max(2, days)
-    since = _window_start(days)
-    midpoint = _window_start(days // 2)
-
     found = func.coalesce(AgentEvent.summary["found"].astext.cast(Integer), 0)
     inserted = func.coalesce(AgentEvent.summary["inserted"].astext.cast(Integer), 0)
     merged = func.coalesce(AgentEvent.summary["merged"].astext.cast(Integer), 0)
-    is_recent = AgentEvent.created_at >= midpoint
 
-    rows = (
+    # Newest first, per host. Rank 1..25 is "lately"; 26..50 is what it is
+    # being compared against.
+    rank = func.row_number().over(
+        partition_by=AgentEvent.host,
+        order_by=AgentEvent.created_at.desc(),
+    ).label("nth")
+
+    numbered = (
         db.query(
-            AgentEvent.host,
-            func.count(AgentEvent.id),
-            func.sum(case((is_recent, 1), else_=0)),
-            func.sum(case((is_recent, found), else_=0)),
-            func.sum(case((is_recent, inserted), else_=0)),
-            func.sum(case((is_recent, merged), else_=0)),
-            func.sum(case((is_recent, 0), else_=found)),
-            func.max(case((found > 0, AgentEvent.created_at))),
+            AgentEvent.host.label("host"),
+            AgentEvent.created_at.label("created_at"),
+            found.label("found"),
+            inserted.label("inserted"),
+            merged.label("merged"),
+            rank,
         )
         .filter(
-            AgentEvent.created_at >= since,
+            AgentEvent.created_at >= _window_start(days),
             AgentEvent.kind == "harvest",
             AgentEvent.host.isnot(None),
         )
-        .group_by(AgentEvent.host)
+        .subquery()
+    )
+
+    is_recent = numbered.c.nth <= _RECENT_PAYLOADS
+    rows = (
+        db.query(
+            numbered.c.host,
+            func.count().label("payloads"),
+            func.sum(case((is_recent, 1), else_=0)),
+            func.sum(case((is_recent, numbered.c.found), else_=0)),
+            func.sum(case((is_recent, numbered.c.inserted), else_=0)),
+            func.sum(case((is_recent, numbered.c.merged), else_=0)),
+            func.sum(case((is_recent, 0), else_=numbered.c.found)),
+            func.max(case((numbered.c.found > 0, numbered.c.created_at))),
+        )
+        # Two windows' worth. Anything older is history, not a comparison.
+        .filter(numbered.c.nth <= _RECENT_PAYLOADS * 2)
+        .group_by(numbered.c.host)
         .all()
     )
 
@@ -338,7 +371,7 @@ def harvest_health(db, days: int = 14) -> list[dict]:
             "merged": int(recent_merged or 0),
             "earlier_found": earlier_found,
             "last_found_at": last_found_at,
-            "days": days,
+            "window": _RECENT_PAYLOADS,
         })
 
     # Anything wrong first, then by how much the site is contributing. The

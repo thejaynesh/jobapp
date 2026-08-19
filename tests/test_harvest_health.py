@@ -12,6 +12,12 @@ of responses that legitimately contain no jobs, so `found == 0` happens many
 times a day on a perfectly healthy site. So these tests are mostly about *not*
 crying wolf: the alarm fires on a site that used to yield and has enough recent
 traffic to judge, and stays quiet for every other shape of zero.
+
+The comparison is counted, not dated — each site against its own last N
+forwarded payloads. A calendar split said nothing until a week of history
+existed and then called a site you used heavily on Monday "not browsed lately".
+Several tests below pin that: history from a fortnight ago still counts as the
+site's current state if nothing has happened since.
 """
 
 import uuid
@@ -42,9 +48,9 @@ def many(db, host, count, *, found=0, days_ago=1):
         event(db, host, found=found, days_ago=days_ago)
 
 
-def verdicts(db, days=14):
+def verdicts(db, **kwargs):
     return {row["host"]: row["verdict"] for row in
-            agent_events.harvest_health(db, days=days)}
+            agent_events.harvest_health(db, **kwargs)}
 
 
 class TestAWorkingSite:
@@ -100,19 +106,20 @@ class TestTheAlarm:
 
 
 class TestItDoesNotCryWolf:
-    def test_a_site_you_stopped_browsing_is_quiet_not_broken(self, db):
-        # No traffic is not a failure. This is the single most likely false
-        # positive: you had a busy week and did not open Glassdoor.
+    def test_a_site_you_stopped_browsing_still_reads_as_working(self, db):
+        # The single most likely false positive under a calendar split: you had
+        # a busy fortnight and did not open Glassdoor. Nothing about that says
+        # the reader broke — the last thing known about the site is that it
+        # worked, and that is what it should say.
         many(db, "www.glassdoor.com", 10, found=5, days_ago=12)
         db.commit()
 
-        assert verdicts(db)["www.glassdoor.com"] == "quiet"
+        assert verdicts(db)["www.glassdoor.com"] == "healthy"
 
     def test_a_couple_of_stray_page_loads_are_not_enough_to_judge(self, db):
         # Below the traffic floor, "found nothing" is as likely to mean you
         # opened the homepage as that the reader broke.
-        many(db, "www.dice.com", 20, found=8, days_ago=12)
-        many(db, "www.dice.com", 3, found=0, days_ago=2)
+        many(db, "www.dice.com", 4, found=0, days_ago=2)
         db.commit()
 
         assert verdicts(db)["www.dice.com"] == "quiet"
@@ -127,11 +134,70 @@ class TestItDoesNotCryWolf:
 
         assert agent_events.harvest_health(db) == []
 
-    def test_events_older_than_the_window_are_ignored(self, db):
-        many(db, "www.linkedin.com", 30, found=5, days_ago=90)
+    def test_events_older_than_the_outer_bound_are_ignored(self, db):
+        many(db, "www.linkedin.com", 30, found=5, days_ago=200)
         db.commit()
 
-        assert agent_events.harvest_health(db, days=14) == []
+        assert agent_events.harvest_health(db) == []
+
+
+class TestItJudgesByPayloadsNotByCalendar:
+    """
+    Each site against its own last N responses, not against a stretch of days.
+
+    A calendar split could say nothing at all until a week of history existed,
+    which made the panel useless on the day it shipped — and then it called a
+    site used heavily on Monday and not since "not browsed lately".
+    """
+
+    def test_one_afternoon_of_browsing_is_a_complete_verdict(self, db):
+        # The point of the change: no waiting for a baseline to accumulate.
+        # Everything here happened within a few hours today.
+        many(db, "www.linkedin.com", 20, found=6, days_ago=0)
+        many(db, "www.linkedin.com", 30, found=0, days_ago=0)
+        db.commit()
+
+        assert verdicts(db)["www.linkedin.com"] == "regressed"
+
+    def test_a_fortnight_old_baseline_still_counts_as_the_before(self, db):
+        # Nothing has happened on this site since, so its last known state is
+        # its current state however long ago that was.
+        many(db, "otta.com", 20, found=4, days_ago=40)
+        many(db, "otta.com", 30, found=0, days_ago=1)
+        db.commit()
+
+        assert verdicts(db)["otta.com"] == "regressed"
+
+    def test_a_site_is_judged_on_its_own_traffic_not_the_busiest_one(self, db):
+        # A site opened twice a month must not be declared broken for being
+        # quieter than LinkedIn.
+        many(db, "www.linkedin.com", 60, found=3, days_ago=1)
+        many(db, "wellfound.com", 6, found=2, days_ago=30)
+        db.commit()
+
+        assert verdicts(db)["wellfound.com"] == "healthy"
+
+    def test_only_the_recent_window_decides_healthy(self, db):
+        # Enough recent zeros to push every yielding payload out of the recent
+        # window: the old jobs are the comparison, not the verdict.
+        many(db, "www.indeed.com", 10, found=7, days_ago=3)
+        many(db, "www.indeed.com", 25, found=0, days_ago=1)
+        db.commit()
+
+        row = agent_events.harvest_health(db)[0]
+        assert row["verdict"] == "regressed"
+        assert row["found"] == 0
+        assert row["earlier_found"] == 70
+
+    def test_history_beyond_two_windows_is_not_compared_against(self, db):
+        # Fifty payloads back is history, not a before-and-after.
+        many(db, "monster.com", 40, found=9, days_ago=30)
+        many(db, "monster.com", 50, found=0, days_ago=1)
+        db.commit()
+
+        row = agent_events.harvest_health(db)[0]
+        assert row["verdict"] == "silent"
+        assert row["earlier_found"] == 0
 
 
 class TestOrdering:

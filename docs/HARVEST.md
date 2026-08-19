@@ -82,19 +82,34 @@ once. The reader keeps running, keeps forwarding, and finds nothing.
 
 A zero on its own is not the signal — browsing a feed forwards plenty of
 responses that legitimately contain no jobs, so "found 0" happens many times a
-day. The signal is the change. `agent_events.harvest_health` splits its window
-in half and compares: a site that was yielding in the first half, has enough
-traffic in the second half to judge, and found nothing there is reported as
-**Stopped finding jobs** on `/runs`.
+day. The signal is the change: a site that was yielding, still has traffic, and
+now yields nothing.
+
+`agent_events.harvest_health` finds that by comparing each site's **last 25
+forwarded payloads against the 25 before them**. Counted, not dated — and that
+matters:
+
+- **It works the day you turn it on.** A calendar comparison ("this week versus
+  last week") can say nothing until a week of history exists. Thirty job pages
+  in one afternoon is already a complete before-and-after.
+- **A site you browse rarely is not called broken for being quiet.** Each site
+  is measured against its own traffic, so opening Wellfound twice a month is
+  judged on those visits rather than against LinkedIn's volume.
+- **A gap in your browsing is not a regression.** If you did not open Glassdoor
+  for a fortnight, its last known state is still its current state, and the
+  panel says *Working* rather than raising an alarm about your holiday.
+
+A site needs 15 recent payloads before anything is claimed at all; below that
+the panel says so instead of guessing.
 
 The verdicts:
 
 | Verdict | Means |
 | --- | --- |
-| **Working** | Jobs found recently. Nothing to do. |
-| **Stopped finding jobs** | It used to yield and now does not, with enough traffic to be sure. The site probably renamed its fields. |
+| **Working** | Jobs came out of its recent responses. Nothing to do. |
+| **Stopped finding jobs** | Its last 25 responses carried nothing job-shaped, and the 25 before them did. The site probably renamed its fields. |
 | **Forwarding, never finds jobs** | Responses are arriving but nothing job-shaped has ever come out. Either its payloads use names the reader does not know, or you only opened listing pages. |
-| **Not browsed lately** | Too little traffic to say anything. Usually means you have not opened the site. |
+| **Not browsed enough to say** | Fewer than 15 recent responses. Usually means you have barely opened the site. |
 
 ### Fixing a site that regressed
 

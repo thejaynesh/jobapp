@@ -72,14 +72,13 @@
         {# The one row that is a call to action rather than a statistic. #}
         <tr>
           <td colspan="3" class="pb-2 text-[11px] text-red-600 leading-relaxed">
-            {{ "{:,}".format(row.recent_payloads) }} responses forwarded since
-            {% if row.last_found_at %}
-            the last job was read on {{ row.last_found_at | when("%b %d") }},
-            {% else %}
-            the window opened,
-            {% endif %}
-            and none of them were job-shaped. The site most likely renamed the
-            fields the reader matches on — see docs/HARVEST.md.
+            Its last {{ "{:,}".format(row.recent_payloads) }} responses carried
+            nothing job-shaped, after {{ "{:,}".format(row.earlier_found) }}
+            job{{ '' if row.earlier_found == 1 else 's' }} read from the batch
+            before{% if row.last_found_at %} (the last on
+            {{ row.last_found_at | when("%b %d") }}){% endif %}. The site most
+            likely renamed the fields the reader matches on — see
+            docs/HARVEST.md.
           </td>
         </tr>
         {% elif row.verdict == 'silent' %}
