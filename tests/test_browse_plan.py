@@ -66,7 +66,9 @@ def linkedin_urls(urls):
 
 class TestWhichSearchesItWalks:
     def test_one_per_role_and_location(self, db):
-        urls = linkedin_urls(browse_plan.search_urls(PROFILE))
+        # Depth pinned: this is about the role x location cross, and letting
+        # the page count in would make it a test of two things at once.
+        urls = linkedin_urls(browse_plan.search_urls(PROFILE, depth=1))
         assert len(urls) == 4
         assert all(url.startswith("https://www.linkedin.com/jobs/search/") for url in urls)
 
@@ -90,8 +92,88 @@ class TestWhichSearchesItWalks:
 
     def test_a_profile_with_no_locations_still_searches(self, db):
         assert len(linkedin_urls(browse_plan.search_urls(
-            {"target_roles": ["Backend Engineer"]}
+            {"target_roles": ["Backend Engineer"]}, depth=1
         ))) == 1
+
+
+class TestItWalksMoreThanTheFirstPage:
+    """
+    A search page is about twenty-five cards. Stopping there is what made a
+    "crawl" look like it was discovering nothing — the whole difference between
+    a peek and a sweep is depth, and depth costs only more queued visits.
+    """
+
+    def test_a_search_becomes_several_result_pages(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_PAGES", 4)
+        urls = linkedin_urls(browse_plan.search_urls(
+            {"target_roles": ["Backend Engineer"], "target_locations": ["London"]}
+        ))
+        assert len(urls) == 4
+
+    def test_the_pages_step_by_the_boards_own_size(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_PAGES", 4)
+        urls = linkedin_urls(browse_plan.search_urls(
+            {"target_roles": ["Backend Engineer"], "target_locations": ["London"]}
+        ))
+        assert "start=25" in urls[1]
+        assert "start=50" in urls[2]
+        assert "start=75" in urls[3]
+
+    def test_the_first_page_carries_no_page_parameter(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_PAGES", 3)
+        first = linkedin_urls(browse_plan.search_urls(
+            {"target_roles": ["Backend Engineer"], "target_locations": ["London"]}
+        ))[0]
+        assert "start=" not in first
+
+    def test_an_ordinal_board_starts_its_second_page_at_two(self, db):
+        # Boards count two ways — an offset in results, or an ordinal page.
+        # Assuming the first turns page two of an ordinal board back into page
+        # one, so every search fetches the first page twice and never reaches
+        # the fourth.
+        google = browse_plan.BOARDS_BY_KEY["google"]
+        pages = google.pages("https://x/jobs?q=a", 4)
+
+        assert "page=2" in pages[1]
+        assert "page=3" in pages[2]
+        assert "page=1" not in "".join(pages)
+
+    def test_a_board_with_no_paging_scheme_stays_one_page(self, db):
+        board = browse_plan.Board("x", "x.com", "X", search="https://x.com/?q={q}&l={loc}")
+        assert board.pages("https://x.com/?q=a&l=b", 5) == ["https://x.com/?q=a&l=b"]
+
+    def test_depth_of_one_is_the_page_itself(self, db):
+        board = browse_plan.BOARDS_BY_KEY["linkedin"]
+        assert board.pages("https://x/?q=a", 1) == ["https://x/?q=a"]
+
+    def test_the_run_cap_still_holds(self, db, monkeypatch):
+        # Depth multiplies the URL count, so the ceiling on a run matters more
+        # than it did — this must not become a way to queue six hundred visits.
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_PAGES", 10)
+        monkeypatch.setattr(settings, "BROWSE_MAX_QUEUED", 15)
+
+        assert browse_plan.crawl_searches(db, PROFILE)["queued"] == 15
+
+
+class TestCompanyCareersBoards:
+    def test_amazon_and_google_are_crawled(self, db):
+        urls = browse_plan.search_urls(PROFILE)
+        assert any("amazon.jobs" in url for url in urls)
+        assert any("google.com/about/careers" in url for url in urls)
+
+    def test_the_role_reaches_their_search_box(self, db):
+        urls = browse_plan.search_urls(
+            {"target_roles": ["Backend Engineer"], "target_locations": ["London"]}
+        )
+        amazon = next(url for url in urls if "amazon.jobs" in url)
+        assert "base_query=Backend+Engineer" in amazon
+
+    def test_google_is_scoped_to_the_careers_path(self, db):
+        # "Read everything you do on Google" is not the permission this needs,
+        # and would be the most alarming line in the install prompt.
+        source = open("extension/sites.js").read()
+        assert "https://www.google.com/about/careers/*" in source
+        assert '"https://www.google.com/*"' not in source
 
 
 class TestBoardsWhoseSearchIsNotAUrl:
@@ -137,9 +219,12 @@ class TestBoardsWhoseSearchIsNotAUrl:
         import re
 
         source = open("extension/sites.js").read()
+        # Any match pattern, not only the bare `host/*` shape: a site scoped to
+        # a path — Google Careers is — is still a site the extension may read,
+        # and reading only the bare form would report it as uncovered.
         allowed = {
             re.sub(r"^\*\.", "", host)
-            for host in re.findall(r'"https://([^/"]+)/\*"', source)
+            for host in re.findall(r'"https://([^/"]+)/', source)
         }
         for board in browse_plan.BOARDS:
             assert any(
@@ -446,7 +531,8 @@ class TestTheButtons:
         client.post("/runs/agent/browse", data={"plan": "searches"})
 
         urls = queued(db)
-        assert len(linkedin_urls(urls)) == 4
+        # Four searches, each walked several pages deep.
+        assert len(linkedin_urls(urls)) > 4
         assert any("jobright.ai" in url for url in urls)
 
     def test_a_single_board_can_be_queued_from_the_panel(self, client, db):

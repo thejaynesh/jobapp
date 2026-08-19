@@ -132,4 +132,20 @@ export const HARVEST_SITES = [
     storageKey: "harvestHiringCafe",
     matches: ["https://hiring.cafe/*"],
   },
+  {
+    id: "amazon",
+    label: "Amazon Jobs",
+    storageKey: "harvestAmazon",
+    matches: ["https://*.amazon.jobs/*", "https://amazon.jobs/*"],
+    note: "Its own board with no public API, like LinkedIn.",
+  },
+  {
+    id: "google",
+    label: "Google Careers",
+    storageKey: "harvestGoogle",
+    // Scoped to the careers path rather than google.com: "read everything you
+    // do on Google" is not the permission this needs, and asking for it would
+    // be the single most alarming line in the install prompt.
+    matches: ["https://www.google.com/about/careers/*"],
+  },
 ];

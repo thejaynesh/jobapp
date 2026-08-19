@@ -69,6 +69,8 @@ HARVEST_SOURCES = {
     "jobright.ai": "jobright_harvest",
     "joinhandshake.com": "handshake_harvest",
     "hiring.cafe": "hiringcafe_harvest",
+    "amazon.jobs": "amazon_harvest",
+    "google.com": "google_harvest",
 }
 
 

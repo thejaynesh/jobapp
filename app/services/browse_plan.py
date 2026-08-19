@@ -71,18 +71,49 @@ class Board:
     error pages very politely. So those boards get their entry pages, which
     load real listings, and anything more specific is a URL the user pastes in
     from a search they ran themselves.
+
+    `page_param` and `page_size` say how the board paginates. Without them a
+    search is one page — which for LinkedIn is twenty-five cards, and is why
+    the crawl looked like it was not discovering anything. Depth is what turns
+    a search into a sweep, and it costs nothing but more queued pages.
     """
 
-    def __init__(self, key, host, label, search=None, entries=()):
+    def __init__(self, key, host, label, search=None, entries=(),
+                 page_param=None, page_size=25, page_base=0):
         self.key = key
         self.host = host
         self.label = label
         self.search = search
         self.entries = tuple(entries)
+        self.page_param = page_param
+        self.page_size = max(1, page_size)
+        # What the parameter reads on the first page. Boards count two
+        # different ways — an offset in results (`start=0, 25, 50`) or an
+        # ordinal page (`page=1, 2, 3`) — and assuming the first turns the
+        # second page of an ordinal board back into the first, so every search
+        # would fetch page one twice and never reach page four.
+        self.page_base = page_base
+
+    def pages(self, url: str, depth: int) -> list[str]:
+        """
+        `url` plus however many further result pages this board offers.
+
+        The first page is the URL as given, so a board with no pagination
+        scheme is not a special case anywhere else.
+        """
+        if not self.page_param or depth <= 1:
+            return [url]
+        joiner = "&" if "?" in url else "?"
+        return [url] + [
+            f"{url}{joiner}{self.page_param}={self.page_base + n * self.page_size}"
+            for n in range(1, depth)
+        ]
 
 
 BOARDS = (
-    Board("linkedin", "linkedin.com", "LinkedIn", search=JOB_SEARCH),
+    # 25 per page is what LinkedIn's own paging uses; `start` is its parameter.
+    Board("linkedin", "linkedin.com", "LinkedIn", search=JOB_SEARCH,
+          page_param="start", page_size=25),
     Board(
         "jobright", "jobright.ai", "JobRight",
         # Its recommendations are the board: the whole product is a ranked list
@@ -99,6 +130,31 @@ BOARDS = (
     Board(
         "handshake", "joinhandshake.com", "Handshake",
         entries=("https://app.joinhandshake.com/stu/postings",),
+    ),
+    # Company careers sites. Worth crawling for the same reason LinkedIn is —
+    # they are their own board with no public API — and worth nothing at all
+    # for a company on Greenhouse, Lever or Ashby, because there is already a
+    # source adapter reading that company's API directly and faster.
+    #
+    # These two search URLs are public and stable in the sense that they are
+    # what the site's own search box produces, but neither is documented, and
+    # they are a step less certain than LinkedIn's. If one stops returning
+    # anything the Harvest by site panel reports it as "Forwarding, never finds
+    # jobs" rather than failing silently.
+    Board(
+        "amazon", "amazon.jobs", "Amazon Jobs",
+        search="https://www.amazon.jobs/en/search?base_query={q}&loc_query={loc}",
+        page_param="offset", page_size=10,
+    ),
+    Board(
+        "google", "google.com", "Google Careers",
+        search=(
+            "https://www.google.com/about/careers/applications/jobs/results"
+            "?q={q}&location={loc}"
+        ),
+        # Ordinal pages rather than an offset: page 1 is the first, so the
+        # second is 2.
+        page_param="page", page_size=1, page_base=1,
     ),
 )
 
@@ -126,7 +182,11 @@ def _retry_days() -> int:
 # What to open
 # ---------------------------------------------------------------------------
 
-def search_urls(profile: dict | None, boards=None) -> list[str]:
+def _depth() -> int:
+    return max(1, int(getattr(settings, "BROWSE_SEARCH_PAGES", 5)))
+
+
+def search_urls(profile: dict | None, boards=None, depth: int | None = None) -> list[str]:
     """
     Where to start looking, per board.
 
@@ -151,6 +211,7 @@ def search_urls(profile: dict | None, boards=None) -> list[str]:
     # runs, and the site defaults it to the account's own region.
     locations = locations[:4] or [""]
 
+    pages = _depth() if depth is None else max(1, depth)
     urls: list[str] = []
     for board in (boards if boards is not None else BOARDS):
         if board.search:
@@ -161,9 +222,13 @@ def search_urls(profile: dict | None, boards=None) -> list[str]:
                 continue
             for role in roles[:6]:
                 for location in locations:
-                    urls.append(
-                        board.search.format(q=quote_plus(role), loc=quote_plus(location))
+                    first = board.search.format(
+                        q=quote_plus(role), loc=quote_plus(location),
                     )
+                    # Every result page, not just the first. One page is
+                    # twenty-five cards, which is what made a "crawl" look like
+                    # it was finding nothing.
+                    urls.extend(board.pages(first, pages))
         else:
             urls.extend(board.entries)
     return urls

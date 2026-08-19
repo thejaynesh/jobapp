@@ -205,12 +205,26 @@ async function visitInTab(url, settleMs) {
       try {
         const [injected] = await chrome.scripting.executeScript({
           target: { tabId },
-          func: () => {
+          func: async () => {
             // Step down the page rather than jumping to the bottom: a lazy
             // list loads a batch per screen, and one jump asks for one batch.
+            //
+            // Driven by whether the page is still growing rather than by a
+            // fixed number of steps. A search page keeps appending as you go,
+            // so a fixed six screens stopped partway down a list that had more
+            // to give — and on a short page it scrolled past the end for
+            // nothing. Pausing between steps is the point: the fetch the
+            // scroll triggers has to come back before the next one is worth
+            // asking for, and that fetch is the whole reason to scroll.
             const step = Math.round(window.innerHeight * 0.9);
-            for (let y = step; y <= step * 6; y += step) {
-              window.scrollTo(0, y);
+            let previousHeight = 0;
+            for (let n = 0; n < 25; n += 1) {
+              window.scrollTo(0, step * (n + 1));
+              await new Promise((r) => setTimeout(r, 400));
+              const height = document.body ? document.body.scrollHeight : 0;
+              const atBottom = window.scrollY + window.innerHeight >= height - step;
+              if (atBottom && height === previousHeight) break;
+              previousHeight = height;
             }
             const text = (document.body ? document.body.innerText : "").slice(0, 4000);
             return {

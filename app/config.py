@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     BROWSE_GAP_SECONDS: int = 20
     # Don't re-open a page browsed within this many days.
     BROWSE_RETRY_DAYS: int = 30
+    # Result pages to walk per search. One page is about twenty-five cards, so
+    # a crawl that stops there discovers almost nothing — depth is what makes
+    # it a sweep rather than a peek. Each page is a queued visit like any
+    # other, so this multiplies the run length: five pages of six roles across
+    # two locations is sixty visits, which is one full run.
+    BROWSE_SEARCH_PAGES: int = 5
     # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
     # On by default. Set false ONLY while the deployment is still on plain
     # http:// — with it on, the browser accepts the cookie at login and then
