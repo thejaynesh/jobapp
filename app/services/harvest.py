@@ -66,6 +66,9 @@ HARVEST_SOURCES = {
     "monster.com": "monster_harvest",
     "otta.com": "otta_harvest",
     "welcometothejungle.com": "otta_harvest",
+    "jobright.ai": "jobright_harvest",
+    "joinhandshake.com": "handshake_harvest",
+    "hiring.cafe": "hiringcafe_harvest",
 }
 
 

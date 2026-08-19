@@ -308,18 +308,52 @@
             <button hx-post="/runs/agent/browse"
                     hx-vals='{"plan": "postings"}'
                     hx-target="#system-panel" hx-swap="outerHTML"
-                    title="Open the stored LinkedIn jobs that have no real description"
+                    title="Open the stored jobs that have no real description"
                     class="flex-1 text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
               Fill in descriptions
             </button>
             <button hx-post="/runs/agent/browse"
                     hx-vals='{"plan": "searches"}'
                     hx-target="#system-panel" hx-swap="outerHTML"
-                    title="Walk LinkedIn job searches built from your target roles"
+                    title="Walk every board — searches from your target roles, and each board's own feed"
                     class="flex-1 text-xs border border-gray-300 text-gray-600 rounded px-2 py-1 hover:bg-gray-50">
-              Crawl searches
+              Crawl boards
             </button>
           </div>
+
+          {% if browse.boards %}
+          <div class="flex flex-wrap gap-1 mt-1">
+            {% for board in browse.boards %}
+            <button hx-post="/runs/agent/browse"
+                    hx-vals='{"plan": "searches", "board": "{{ board.key }}"}'
+                    hx-target="#system-panel" hx-swap="outerHTML"
+                    title="{% if board.searchable %}Searches built from your target roles{% else %}This board's own feed — its search is not a URL anyone else can build{% endif %}"
+                    class="text-[11px] border border-gray-200 text-gray-500 rounded px-1.5 py-0.5 hover:bg-gray-50">
+              {{ board.label }}
+            </button>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          {# The escape hatch, and the honest answer for a board whose search is
+             rendered from an internal API: a search you ran and copied beats
+             any URL this could guess at. #}
+          <details class="mt-2">
+            <summary class="text-[11px] text-gray-500 cursor-pointer hover:text-blue-600">
+              Or paste your own URLs
+            </summary>
+            <form hx-post="/runs/agent/browse"
+                  hx-target="#system-panel" hx-swap="outerHTML" class="mt-1">
+              <input type="hidden" name="plan" value="urls">
+              <textarea name="urls" rows="3"
+                        placeholder="https://jobright.ai/jobs/search?...&#10;one per line"
+                        class="w-full text-[11px] border border-gray-300 rounded px-2 py-1 font-mono"></textarea>
+              <button type="submit"
+                      class="mt-1 w-full text-xs border border-gray-300 text-gray-600 rounded px-2 py-1 hover:bg-gray-50">
+                Queue these
+              </button>
+            </form>
+          </details>
         </div>
         {% endif %}
 

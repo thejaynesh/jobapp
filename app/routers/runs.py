@@ -268,6 +268,7 @@ def queue_ping(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/agent/browse", response_class=HTMLResponse)
 def queue_browsing(request: Request, plan: str = Form("postings"),
+                   board: str = Form(""), urls: str = Form(""),
                    db: Session = Depends(get_db)):
     """
     Queue pages for the extension to open on its own.
@@ -277,11 +278,21 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
     by attendance: nothing is harvested from a page nobody opened. This queues
     the opening.
 
-    Two plans, because they do different jobs. `searches` walks job searches
-    built from the profile and finds postings that are not stored at all;
-    `postings` opens the LinkedIn jobs already stored with no real description,
-    which is where most of the value is — a harvested search card has a title
-    and an id and usually no body, and the guest API cannot fix that.
+    Three plans, because they do different jobs.
+
+    `postings` opens the jobs already stored with no real description, which is
+    where most of the value is — a harvested search card has a title and an id
+    and usually no body, and for a login-only board there is no API that could
+    fix it.
+
+    `searches` starts from each board: a search per role for the sites whose
+    search is a URL, and the board's own recommendations feed for the ones
+    whose search is rendered from an internal API.
+
+    `urls` takes whatever the user pasted. That is the honest answer for a
+    board whose query parameters are nobody's business but its own — a search
+    they ran themselves and copied out of the address bar beats any URL this
+    could construct.
 
     The queue is deliberately slow to drain. See `browse_plan` for why the pace
     is a setting rather than a client decision.
@@ -290,9 +301,13 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
     from app.services import browse_plan
 
     try:
-        if plan == "searches":
+        if plan == "urls":
+            outcome = browse_plan.crawl_urls(db, urls)
+        elif plan == "searches":
             profile = db.query(Profile).first()
-            outcome = browse_plan.crawl_searches(db, (profile.data if profile else None))
+            outcome = browse_plan.crawl_searches(
+                db, (profile.data if profile else None), board=board,
+            )
         else:
             outcome = browse_plan.crawl_postings(db)
         logger.info(

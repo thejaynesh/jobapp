@@ -110,4 +110,26 @@ export const HARVEST_SITES = [
     storageKey: "harvestOtta",
     matches: ["https://otta.com/*", "https://*.welcometothejungle.com/*"],
   },
+  {
+    id: "jobright",
+    label: "JobRight",
+    storageKey: "harvestJobRight",
+    matches: ["https://*.jobright.ai/*", "https://jobright.ai/*"],
+    note:
+      "Its board is behind a login and has no public API, so browsing is the " +
+      "only way its listings are seen at all.",
+  },
+  {
+    id: "handshake",
+    label: "Handshake",
+    storageKey: "harvestHandshake",
+    matches: ["https://*.joinhandshake.com/*"],
+    note: "Also login-only.",
+  },
+  {
+    id: "hiringcafe",
+    label: "Hiring Cafe",
+    storageKey: "harvestHiringCafe",
+    matches: ["https://hiring.cafe/*"],
+  },
 ];

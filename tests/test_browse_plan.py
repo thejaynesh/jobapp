@@ -60,15 +60,21 @@ def queued(db):
     ]
 
 
+def linkedin_urls(urls):
+    return [url for url in urls if "linkedin.com" in url]
+
+
 class TestWhichSearchesItWalks:
     def test_one_per_role_and_location(self, db):
-        urls = browse_plan.search_urls(PROFILE)
+        urls = linkedin_urls(browse_plan.search_urls(PROFILE))
         assert len(urls) == 4
         assert all(url.startswith("https://www.linkedin.com/jobs/search/") for url in urls)
 
     def test_the_role_and_location_are_encoded(self, db):
-        urls = browse_plan.search_urls({"target_roles": ["Site Reliability Engineer"],
-                                        "target_locations": ["New York, NY"]})
+        urls = linkedin_urls(browse_plan.search_urls(
+            {"target_roles": ["Site Reliability Engineer"],
+             "target_locations": ["New York, NY"]}
+        ))
         assert "keywords=Site+Reliability+Engineer" in urls[0]
         assert "location=New+York%2C+NY" in urls[0]
 
@@ -76,15 +82,104 @@ class TestWhichSearchesItWalks:
         # Without this the budget goes on re-reading postings from months ago
         # that are already stored, which is the expensive way to harvest
         # nothing.
-        assert "f_TPR=r604800" in browse_plan.search_urls(PROFILE)[0]
+        assert "f_TPR=r604800" in linkedin_urls(browse_plan.search_urls(PROFILE))[0]
 
-    def test_no_target_roles_means_no_searches(self, db):
-        assert browse_plan.search_urls({"target_locations": ["London"]}) == []
-        assert browse_plan.search_urls(None) == []
+    def test_no_target_roles_means_no_searches_on_a_search_board(self, db):
+        assert linkedin_urls(browse_plan.search_urls({"target_locations": ["London"]})) == []
+        assert linkedin_urls(browse_plan.search_urls(None)) == []
 
     def test_a_profile_with_no_locations_still_searches(self, db):
-        urls = browse_plan.search_urls({"target_roles": ["Backend Engineer"]})
-        assert len(urls) == 1
+        assert len(linkedin_urls(browse_plan.search_urls(
+            {"target_roles": ["Backend Engineer"]}
+        ))) == 1
+
+
+class TestBoardsWhoseSearchIsNotAUrl:
+    """
+    JobRight and its peers render results from an internal API. Their query
+    parameters are nobody's business but that app's, so guessing at one
+    produces a crawl that opens error pages very politely. They get their own
+    entry pages instead, and the paste box covers the rest.
+    """
+
+    def test_jobright_is_walked_by_its_own_feed(self, db):
+        urls = browse_plan.search_urls(PROFILE)
+        assert any("jobright.ai/jobs/recommend" in url for url in urls)
+
+    def test_its_pages_are_queued_even_with_no_target_roles(self, db):
+        # A recommendations feed is already filtered to the account browsing
+        # it, so it needs no query at all — and going quiet because the profile
+        # has no roles would be wrong.
+        urls = browse_plan.search_urls({})
+        assert any("jobright.ai" in url for url in urls)
+
+    def test_no_url_is_invented_for_it(self, db):
+        # The failure this guards against: a plausible-looking search URL with
+        # made-up parameters, which 404s politely sixty times.
+        for url in browse_plan.search_urls(PROFILE):
+            if "jobright.ai" in url:
+                assert "keywords=" not in url and "?q=" not in url
+
+    def test_one_board_can_be_crawled_on_its_own(self, db):
+        outcome = browse_plan.crawl_searches(db, PROFILE, board="jobright")
+        assert outcome["queued"] == 2
+        assert all("jobright.ai" in url for url in queued(db))
+
+    def test_an_unknown_board_name_falls_back_to_all_of_them(self, db):
+        urls = browse_plan.search_urls(PROFILE)
+        outcome = browse_plan.crawl_searches(db, PROFILE, board="nonsense")
+        assert outcome["candidates"] == len(urls)
+
+    def test_every_board_is_one_the_extension_may_read(self, db):
+        # A board queued here but not in the extension's site list is a crawl
+        # that opens pages with no interceptor on them: real traffic through a
+        # logged-in session, harvesting nothing.
+        import re
+
+        source = open("extension/sites.js").read()
+        allowed = {
+            re.sub(r"^\*\.", "", host)
+            for host in re.findall(r'"https://([^/"]+)/\*"', source)
+        }
+        for board in browse_plan.BOARDS:
+            assert any(
+                board.host == host or board.host.endswith(f".{host}")
+                or host.endswith(f".{board.host}")
+                for host in allowed
+            ), f"{board.host} is crawled but not harvested"
+
+
+class TestPastedUrls:
+    def test_it_queues_what_was_pasted(self, db):
+        outcome = browse_plan.crawl_urls(db, """
+            https://jobright.ai/jobs/search?x=1
+            https://hiring.cafe/?q=backend
+        """)
+        assert outcome["queued"] == 2
+
+    def test_it_accepts_a_comma_separated_list_too(self, db):
+        assert browse_plan.crawl_urls(
+            db, "https://a.example/1, https://b.example/2"
+        )["queued"] == 2
+
+    def test_it_ignores_anything_that_is_not_a_link(self, db):
+        outcome = browse_plan.crawl_urls(db, "notes to self\nhttps://a.example/1\n\n")
+        assert outcome["queued"] == 1
+
+    def test_duplicates_are_collapsed(self, db):
+        outcome = browse_plan.crawl_urls(
+            db, "https://a.example/1\nhttps://a.example/1"
+        )
+        assert outcome["queued"] == 1
+
+    def test_pasting_nothing_queues_nothing(self, db):
+        assert browse_plan.crawl_urls(db, "")["queued"] == 0
+        assert browse_plan.crawl_urls(db, "   \n  ")["queued"] == 0
+
+    def test_a_pasted_run_is_capped_like_any_other(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_MAX_QUEUED", 2)
+        pasted = "\n".join(f"https://a.example/{n}" for n in range(10))
+        assert browse_plan.crawl_urls(db, pasted)["queued"] == 2
 
 
 class TestWhichPostingsItOpens:
@@ -105,12 +200,32 @@ class TestWhichPostingsItOpens:
                  closed_at=datetime.now(timezone.utc), closed_note="404")
         assert browse_plan.posting_urls(db) == []
 
-    def test_jobs_from_other_sources_are_not_opened(self, db):
-        # Opening greenhouse.io in a LinkedIn crawl would be both useless and
-        # a URL built out of somebody else's id.
+    def test_jobs_on_a_board_nobody_can_browse_are_not_opened(self, db):
+        # Greenhouse has a public API that already returns the description, so
+        # spending a paced browser visit on one buys nothing.
         make_job(db, source="greenhouse", url="https://boards.greenhouse.io/a/jobs/1",
                  source_job_id="55", description="thin")
         assert browse_plan.posting_urls(db) == []
+
+    def test_a_thin_job_on_another_browsable_board_is_opened(self, db):
+        # Selected by the job's own URL rather than by source name: a posting
+        # is browsable if a browser can reach it, which is a fact about the
+        # link and not about which adapter found it.
+        make_job(db, source="jobright_harvest", source_job_id="abc123",
+                 url="https://jobright.ai/jobs/info/xyz789", description="thin")
+        assert browse_plan.posting_urls(db) == [
+            "https://jobright.ai/jobs/info/xyz789"
+        ]
+
+    def test_another_board_keeps_its_own_url_shape(self, db):
+        # Only LinkedIn's is rebuilt from an id. Nothing here should need to
+        # know how any other site composes a link.
+        make_job(db, source="jobright_harvest", source_job_id="4012345678",
+                 url="https://jobright.ai/jobs/info/xyz789?ref=feed",
+                 description="thin")
+        assert browse_plan.posting_urls(db) == [
+            "https://jobright.ai/jobs/info/xyz789"
+        ]
 
     def test_harvested_jobs_count_too(self, db):
         make_job(db, source="linkedin_harvest", source_job_id="777888999",
@@ -310,7 +425,7 @@ class TestTheButtons:
         body = client.get("/runs").text
         assert "/runs/agent/browse" in body
         assert "Fill in descriptions" in body
-        assert "Crawl searches" in body
+        assert "Crawl boards" in body
 
     def test_the_panel_says_it_is_slow_on_purpose(self, client, db):
         # A user who does not know the pacing is deliberate will read a slow
@@ -323,14 +438,37 @@ class TestTheButtons:
 
         assert queued(db) == ["https://www.linkedin.com/jobs/view/4012345678/"]
 
-    def test_pressing_crawl_searches_queues_searches(self, client, db):
+    def test_pressing_crawl_boards_queues_every_board(self, client, db):
         from app.models.profile import Profile
 
         db.add(Profile(data=PROFILE))
         db.commit()
         client.post("/runs/agent/browse", data={"plan": "searches"})
 
-        assert len(queued(db)) == 4
+        urls = queued(db)
+        assert len(linkedin_urls(urls)) == 4
+        assert any("jobright.ai" in url for url in urls)
+
+    def test_a_single_board_can_be_queued_from_the_panel(self, client, db):
+        client.post("/runs/agent/browse",
+                    data={"plan": "searches", "board": "jobright"})
+        assert all("jobright.ai" in url for url in queued(db))
+
+    def test_the_panel_offers_a_button_per_board(self, client, db):
+        body = client.get("/runs").text
+        assert "JobRight" in body
+        assert '"board": "jobright"' in body
+
+    def test_pasted_urls_can_be_queued_from_the_panel(self, client, db):
+        client.post("/runs/agent/browse",
+                    data={"plan": "urls",
+                          "urls": "https://jobright.ai/jobs/search?keyword=backend"})
+        assert queued(db) == ["https://jobright.ai/jobs/search?keyword=backend"]
+
+    def test_the_panel_offers_the_paste_box(self, client, db):
+        body = client.get("/runs").text
+        assert 'name="urls"' in body
+        assert "paste your own urls" in body.lower()
 
     def test_a_failure_does_not_take_the_page_down(self, client, db, monkeypatch):
         from app.services import browse_plan as module

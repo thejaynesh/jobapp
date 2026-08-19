@@ -75,6 +75,62 @@ nobody wrote a parser for — which is why adding one is a single line.
 
 That is the whole procedure. There is no parser to write.
 
+## Having the extension open the pages for you
+
+Harvesting was never limited by what it could read — it reads a site's own API
+responses. It was limited by *attendance*: nothing is harvested from a page
+nobody opened.
+
+The **Browse for me** controls on `/runs` queue the opening. The extension
+opens each URL in a hidden window, lets it finish loading, scrolls a few
+screens, and closes it. The interceptor runs on that tab exactly as it does on
+one you opened yourself.
+
+- **Fill in descriptions** opens stored jobs that have a thin description and a
+  URL on a browsable board. This is where most of the value is: a harvested
+  search card has a title and an id and usually no body.
+- **Crawl boards** starts from each board — a search per target role for sites
+  whose search is a URL, and the board's own feed for sites whose search is
+  rendered from an internal API.
+- **Paste your own URLs** takes anything you copied out of the address bar.
+
+### Why some boards get a feed instead of a search
+
+`BOARDS` in `app/services/browse_plan.py` gives each site either a `search`
+template or a list of `entries`.
+
+LinkedIn gets a template: its search URL is public, stable, and unchanged for a
+decade. JobRight, Hiring Cafe and Handshake get entry pages, because their
+results are rendered from internal APIs whose query parameters are private and
+subject to change without notice. Guessing at those produces a crawl that opens
+error pages very politely, sixty times, through your logged-in session.
+
+For those boards, run the search yourself, copy the URL, and paste it in. That
+URL is correct by construction, which no guess can be.
+
+### Pacing
+
+This drives a real browser through a logged-in session, and volume plus rhythm
+is what anti-automation systems measure. The cost of getting it wrong is the
+account, not the run — so the defaults are deliberately slow:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `BROWSE_MAX_QUEUED` | 60 | Pages per triggered run |
+| `BROWSE_GAP_SECONDS` | 20 | Minimum wait between one page closing and the next opening |
+| `BROWSE_SETTLE_SECONDS` | 6 | How long a page stays open after `load` |
+| `BROWSE_RETRY_DAYS` | 30 | Don't reopen a page browsed this recently |
+
+The settle matters more than it looks: LinkedIn fetches the posting body
+*after* `load` fires, so a tab closed promptly harvests nothing at all.
+
+A run of 60 takes roughly half an hour. That is the feature. If you raise these
+numbers, raise them a little.
+
+The extension must have **"Open blocked pages in a hidden window"** ticked —
+that toggle is what governs opening windows at all, so browsing is not claimed
+without it.
+
 ## When a site stops working
 
 The one failure mode this design still has: a site renames *every* field at

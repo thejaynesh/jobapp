@@ -55,8 +55,58 @@ JOB_VIEW = "https://www.linkedin.com/jobs/view/{job_id}/"
 # enrichment uses to decide a job still needs its text.
 THIN_DESCRIPTION_CHARS = 600
 
-# Sources whose postings live on linkedin.com and can therefore be opened.
-_LINKEDIN_SOURCES = ("linkedin", "linkedin_harvest")
+
+class Board:
+    """
+    One site a crawl can walk.
+
+    `search` is a URL template taking `{q}` and `{loc}`, for boards whose
+    search really is expressible as a URL. `entries` are fixed pages to open
+    instead — a board's own recommendations or "new this week" list.
+
+    Both exist because boards differ in a way worth being honest about. A
+    LinkedIn search URL is public, stable and documented by a decade of use. A
+    login-only app like JobRight renders its results from an API and its query
+    parameters are internal — guessing at them produces a crawl that opens
+    error pages very politely. So those boards get their entry pages, which
+    load real listings, and anything more specific is a URL the user pastes in
+    from a search they ran themselves.
+    """
+
+    def __init__(self, key, host, label, search=None, entries=()):
+        self.key = key
+        self.host = host
+        self.label = label
+        self.search = search
+        self.entries = tuple(entries)
+
+
+BOARDS = (
+    Board("linkedin", "linkedin.com", "LinkedIn", search=JOB_SEARCH),
+    Board(
+        "jobright", "jobright.ai", "JobRight",
+        # Its recommendations are the board: the whole product is a ranked list
+        # per account, so opening it is the equivalent of running a search.
+        entries=(
+            "https://jobright.ai/jobs/recommend",
+            "https://jobright.ai/jobs/search",
+        ),
+    ),
+    Board(
+        "hiringcafe", "hiring.cafe", "Hiring Cafe",
+        entries=("https://hiring.cafe/",),
+    ),
+    Board(
+        "handshake", "joinhandshake.com", "Handshake",
+        entries=("https://app.joinhandshake.com/stu/postings",),
+    ),
+)
+
+BOARDS_BY_KEY = {board.key: board for board in BOARDS}
+
+# Sources whose postings live on a board a crawl can open. Keyed by host so a
+# job's own URL decides, rather than a list of source names that drifts.
+_BROWSABLE_HOSTS = tuple(board.host for board in BOARDS)
 
 
 def enabled() -> bool:
@@ -76,46 +126,79 @@ def _retry_days() -> int:
 # What to open
 # ---------------------------------------------------------------------------
 
-def search_urls(profile: dict | None) -> list[str]:
+def search_urls(profile: dict | None, boards=None) -> list[str]:
     """
-    One LinkedIn job search per target role, per location the user cares about.
+    Where to start looking, per board.
 
-    Built from the profile rather than typed in, so a crawl covers the same
-    ground the fetch cycle does. Roles are crossed with locations because
-    LinkedIn scopes a search to one place at a time and "remote" is a location
-    like any other to it.
+    For a board with a search template that means one search per target role
+    per location — built from the profile rather than typed in, so a crawl
+    covers the same ground the fetch cycle does, and crossed because these
+    sites scope a search to one place at a time ("remote" being a location like
+    any other to them).
+
+    For a board without one it means its entry pages, which is not a lesser
+    answer: a recommendations feed is that product's search, already filtered
+    to the account browsing it.
     """
     profile = profile or {}
     roles = [str(r).strip() for r in (profile.get("target_roles") or []) if str(r).strip()]
-    if not roles:
-        return []
-
     locations = [
         str(loc).strip()
         for loc in (profile.get("target_locations") or profile.get("locations") or [])
         if str(loc).strip()
     ]
     # Somewhere rather than nowhere: with no stated location a search still
-    # runs, and LinkedIn defaults it to the account's own region.
+    # runs, and the site defaults it to the account's own region.
     locations = locations[:4] or [""]
 
-    urls = []
-    for role in roles[:6]:
-        for location in locations:
-            urls.append(
-                JOB_SEARCH.format(q=quote_plus(role), loc=quote_plus(location))
-            )
+    urls: list[str] = []
+    for board in (boards if boards is not None else BOARDS):
+        if board.search:
+            if not roles:
+                # Nothing to search for. Its entry pages, if it had any, would
+                # still be worth opening — but a search board with no query is
+                # just the homepage.
+                continue
+            for role in roles[:6]:
+                for location in locations:
+                    urls.append(
+                        board.search.format(q=quote_plus(role), loc=quote_plus(location))
+                    )
+        else:
+            urls.extend(board.entries)
     return urls
+
+
+def _host_of(url: str | None) -> str:
+    try:
+        return (urlparse(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def board_for(url: str | None) -> "Board | None":
+    """Which board a stored URL belongs to, if any."""
+    host = _host_of(url)
+    if not host:
+        return None
+    for board in BOARDS:
+        if host == board.host or host.endswith(f".{board.host}"):
+            return board
+    return None
 
 
 def posting_urls(db, limit: int | None = None) -> list[str]:
     """
-    LinkedIn postings we hold but have no real description for.
+    Postings we hold, on a board we can open, with no real description.
 
     This is the half that pays. A harvested search card carries a title and an
     id and usually no body at all, so these jobs are scored on a fragment — and
-    the guest API cannot fix it, which is the whole reason the browser tier
-    exists.
+    for a login-only board there is no API that could fix it, which is the
+    whole reason the browser tier exists.
+
+    Selected by the job's own URL rather than by a list of source names: a
+    posting is browsable if it lives somewhere a browser can reach it, and that
+    is a fact about the link, not about which adapter happened to find it.
 
     Newest first: a posting from this week is still open, and one from March
     probably is not.
@@ -124,10 +207,13 @@ def posting_urls(db, limit: int | None = None) -> list[str]:
 
     from app.models.job import Job
 
+    host_clause = or_(*[
+        Job.url.ilike(f"%{board.host}%") for board in BOARDS
+    ])
     rows = (
         db.query(Job.source_job_id, Job.url)
         .filter(
-            Job.source.in_(_LINKEDIN_SOURCES),
+            host_clause,
             Job.closed_at.is_(None),
             or_(
                 Job.description.is_(None),
@@ -135,7 +221,7 @@ def posting_urls(db, limit: int | None = None) -> list[str]:
             ),
         )
         .order_by(Job.fetched_at.desc())
-        .limit(_limit(limit) * 3)
+        .limit(_limit(limit) * 4)
         .all()
     )
 
@@ -152,24 +238,25 @@ def posting_urls(db, limit: int | None = None) -> list[str]:
 
 def _posting_url(source_job_id: str | None, url: str | None) -> str:
     """
-    The canonical `/jobs/view/<id>/` URL for one stored job.
+    The URL to open for one stored job.
 
-    Rebuilt from the id where there is one rather than reusing the stored URL:
-    a harvested link often carries tracking parameters, and two of them for the
-    same posting would be two tasks opening the same page.
+    LinkedIn's is rebuilt from the posting id where there is one, because a
+    harvested LinkedIn link is thick with tracking parameters and two of them
+    for the same posting would be two tasks opening one page. Every other board
+    keeps its own URL with the query string dropped, which achieves the same
+    thing without needing to know how that site builds a link.
     """
+    board = board_for(url)
+    if board is None:
+        return ""
+
     job_id = str(source_job_id or "").strip()
-    if job_id.isdigit():
+    if board.key == "linkedin" and job_id.isdigit():
         return JOB_VIEW.format(job_id=job_id)
 
     url = str(url or "").strip()
     if not url:
         return ""
-    host = (urlparse(url).hostname or "").lower()
-    if not (host == "linkedin.com" or host.endswith(".linkedin.com")):
-        return ""
-    # A stored LinkedIn URL with no id we could parse. Keep it, minus the
-    # query string, which is where the tracking lives.
     return url.split("?", 1)[0]
 
 
@@ -243,13 +330,54 @@ def enqueue(db, urls: list[str], limit: int | None = None,
     return queued
 
 
-def crawl_searches(db, profile: dict | None, limit: int | None = None) -> dict:
-    """Queue the searches. Finds postings that are not stored at all."""
-    urls = search_urls(profile)
+def crawl_searches(db, profile: dict | None, limit: int | None = None,
+                   board: str = "") -> dict:
+    """
+    Queue the searches. Finds postings that are not stored at all.
+
+    `board` narrows it to one site. Worth having because the boards differ in
+    how much they cost: LinkedIn is a dozen searches built from the profile,
+    JobRight is two pages, and wanting only the second is a normal thing to
+    want.
+    """
+    chosen = [BOARDS_BY_KEY[board]] if board in BOARDS_BY_KEY else None
+    urls = search_urls(profile, boards=chosen)
     return {
         "kind": "searches",
+        "board": board or "all",
         "candidates": len(urls),
         "queued": enqueue(db, urls, limit=limit, purpose="search"),
+    }
+
+
+def crawl_urls(db, raw: str, limit: int | None = None) -> dict:
+    """
+    Queue whatever the user pasted in.
+
+    The escape hatch, and not an afterthought. A board's own search is often
+    not expressible as a URL anyone else can construct — it is rendered from an
+    internal API with parameters that are nobody's business but that app's — so
+    guessing at one produces a crawl that opens error pages very politely. A
+    search the user ran themselves and copied out of the address bar is exactly
+    right, and needs no guessing at all.
+
+    Only http(s), and deduplicated: a pasted list is usually half copy-paste.
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+    for line in str(raw or "").replace(",", "\n").split("\n"):
+        candidate = line.strip()
+        if not candidate.lower().startswith(("http://", "https://")):
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        urls.append(candidate)
+
+    return {
+        "kind": "pasted",
+        "candidates": len(urls),
+        "queued": enqueue(db, urls, limit=limit, purpose="pasted"),
     }
 
 
@@ -280,6 +408,11 @@ def status(db) -> dict:
     return {
         "enabled": enabled(),
         "waiting": waiting,
+        "boards": [
+            {"key": board.key, "label": board.label,
+             "searchable": bool(board.search)}
+            for board in BOARDS
+        ],
         "gap_seconds": gap,
         "max_per_run": int(getattr(settings, "BROWSE_MAX_QUEUED", 60)),
         # Stated because "60 pages" means nothing without it, and because the
