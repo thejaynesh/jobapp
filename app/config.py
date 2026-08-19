@@ -44,6 +44,29 @@ class Settings(BaseSettings):
     # Per-cycle ceiling on aggregator links handed to the browser to resolve.
     # The server tries first and gets most of them; this is the remainder.
     AGENT_LINK_RESOLVE_MAX_QUEUED: int = 100
+
+    # --- Driven browsing ---------------------------------------------------
+    # Opening pages in a hidden window so the harvest reads them, instead of
+    # waiting for the user to visit each one by hand.
+    #
+    # Every number here is deliberately conservative, and the reason is not
+    # server load. This drives a real browser through a logged-in session, and
+    # volume plus rhythm is exactly what a site's anti-automation systems look
+    # at. A crawl that takes an evening and looks like reading is the point;
+    # one that takes four minutes and looks like a script is the failure mode,
+    # and the cost of getting it wrong is the account rather than the run.
+    BROWSE_ENABLED: bool = True
+    # Pages per triggered run. Roughly an hour of browsing at the pace below.
+    BROWSE_MAX_QUEUED: int = 60
+    # Seconds to leave a page open after it finishes loading. LinkedIn fetches
+    # the posting body after `load` fires, so closing the tab promptly is how
+    # you crawl sixty pages and harvest nothing.
+    BROWSE_SETTLE_SECONDS: int = 6
+    # Minimum gap between one page closing and the next opening, in seconds.
+    # The single most important number here.
+    BROWSE_GAP_SECONDS: int = 20
+    # Don't re-open a page browsed within this many days.
+    BROWSE_RETRY_DAYS: int = 30
     # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
     # On by default. Set false ONLY while the deployment is still on plain
     # http:// — with it on, the browser accepts the cookie at login and then

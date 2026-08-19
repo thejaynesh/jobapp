@@ -349,12 +349,49 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     db.commit()
 
 
+def _ingest_browse_page(db, task: BrowserTask) -> None:
+    """
+    Record that a page was visited. The jobs came in by another door.
+
+    There is nothing to store from the result itself: the interceptor read the
+    page's own API responses while it was open and posted them to `/harvest`,
+    which saved whatever was in them long before this ran. What is worth
+    keeping is whether the visit was real — a login wall renders instead of the
+    posting, so the harvest finds nothing and that looks exactly like a reader
+    whose field names moved. Distinguishing the two is the entire value here.
+    """
+    from app.services import agent_events
+
+    result = task.result or {}
+    payload = task.payload or {}
+    signed_in = result.get("signed_in", True)
+
+    agent_events.record(
+        db, "browse", url=result.get("final_url") or payload.get("url"),
+        agent_id=task.agent_id or "", ok=bool(signed_in),
+        summary={
+            "purpose": payload.get("purpose") or "harvest",
+            "signed_in": bool(signed_in),
+            "title": str(result.get("title") or "")[:200],
+        },
+    )
+    db.commit()
+
+    if not signed_in:
+        logger.warning(
+            "agent_work: %s rendered a sign-in wall rather than the posting — "
+            "the browsing session is logged out",
+            payload.get("url"),
+        )
+
+
 # Result handlers by task kind. A kind with no entry is simply stored — `ping`
 # has nothing to ingest, and a task whose only job was to run is complete when
 # its result is recorded.
 RESULT_HANDLERS = {
     "resolve_link": _ingest_resolve_link,
     "fetch_json": _ingest_fetch_json,
+    "browse_page": _ingest_browse_page,
 }
 
 

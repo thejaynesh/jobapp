@@ -46,11 +46,18 @@ from app.database import Base
 #                   the result is for, so one kind serves every blocked source.
 #   resolve_link  — follow an aggregator redirect to the real apply URL.
 #   harvest_jobs  — hand back job JSON the content script intercepted.
+#   browse_page   — open a URL in a hidden window, let it finish loading, and
+#                   close it. Returns almost nothing on purpose: the point is
+#                   not the response, it is that the page ran and made its own
+#                   API calls, which the harvest interceptor reads on the way
+#                   past. This is what turns "jobs from pages you happened to
+#                   visit" into "jobs from pages nobody had to visit".
 #
 # `harvest_jobs` is named but unused: harvesting is a push from the content
 # script rather than work anyone queues, and the name is kept so a future
 # pull-based variant has somewhere to live.
-TASK_KINDS = ("ping", "fetch_page", "fetch_json", "resolve_link", "harvest_jobs")
+TASK_KINDS = ("ping", "fetch_page", "fetch_json", "resolve_link", "harvest_jobs",
+              "browse_page")
 
 # queued  — waiting for an agent
 # leased  — an agent holds it, with a deadline

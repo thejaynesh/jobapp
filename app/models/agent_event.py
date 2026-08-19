@@ -22,6 +22,10 @@ KINDS = (
     "task_done",        # a browser task came back
     "task_failed",
     "harvest",          # job JSON the browser saw, offered unasked
+    "browse",           # a page opened because the server queued it, not the
+                        # user. `ok` false means it rendered a sign-in wall,
+                        # which is the one failure a harvest cannot report:
+                        # finding nothing looks the same either way.
     "overlay_open",     # the panel was opened on a posting
     "autofill",         # Fill this form
     "attach_resume",

@@ -285,6 +285,44 @@
           Queue a test ping
         </button>
 
+        {# Have the extension open pages itself. The harvest was never limited
+           by what it could read — only by nobody having opened the page. #}
+        {% set browse = system.agent.browse %}
+        {% if browse and browse.enabled %}
+        <div class="mt-3 pt-3 border-t border-gray-100">
+          <p class="text-[11px] font-medium text-gray-600 mb-1">Browse for me</p>
+          {% if browse.waiting %}
+          <p class="text-[11px] text-gray-500 mb-2">
+            <span class="font-medium text-gray-700">{{ "{:,}".format(browse.waiting) }}</span>
+            page{{ '' if browse.waiting == 1 else 's' }} queued
+            {% if browse.eta_minutes %}&middot; about {{ browse.eta_minutes }} min to work through{% endif %}.
+          </p>
+          {% else %}
+          <p class="text-[11px] text-gray-500 mb-2">
+            Opens pages in a hidden window so the harvest reads them. Up to
+            {{ browse.max_per_run }} per run, {{ browse.gap_seconds }}s apart —
+            slow on purpose, because this drives your logged-in session.
+          </p>
+          {% endif %}
+          <div class="flex gap-1">
+            <button hx-post="/runs/agent/browse"
+                    hx-vals='{"plan": "postings"}'
+                    hx-target="#system-panel" hx-swap="outerHTML"
+                    title="Open the stored LinkedIn jobs that have no real description"
+                    class="flex-1 text-xs border border-blue-600 text-blue-600 rounded px-2 py-1 hover:bg-blue-50">
+              Fill in descriptions
+            </button>
+            <button hx-post="/runs/agent/browse"
+                    hx-vals='{"plan": "searches"}'
+                    hx-target="#system-panel" hx-swap="outerHTML"
+                    title="Walk LinkedIn job searches built from your target roles"
+                    class="flex-1 text-xs border border-gray-300 text-gray-600 rounded px-2 py-1 hover:bg-gray-50">
+              Crawl searches
+            </button>
+          </div>
+        </div>
+        {% endif %}
+
         {% if system.agent.recent %}
         <table class="w-full text-[11px] mt-3">
           <tbody>

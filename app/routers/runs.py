@@ -204,11 +204,14 @@ def _system_context(db: Session) -> dict:
         logger.warning("runs: provider check state unavailable: %s", exc)
 
     try:
+        from app.services import browse_plan
+
         context["agent"] = {
             "queue": browser_tasks.queue_stats(db),
             "recent": browser_tasks.recent(db, 8),
             "last_agent": browser_tasks.last_agent(db),
             "configured": bool((settings.AGENT_TOKEN or "").strip()),
+            "browse": browse_plan.status(db),
         }
     except Exception as exc:
         logger.warning("runs: agent status unavailable: %s", exc)
@@ -258,6 +261,46 @@ def queue_ping(request: Request, db: Session = Depends(get_db)):
         browser_tasks.enqueue(db, "ping", {"from": "runs page"})
     except Exception as exc:
         logger.error("runs: could not queue ping: %s", exc)
+    return templates.TemplateResponse(
+        "runs/_system.html", {"request": request, "system": _system_context(db)}
+    )
+
+
+@router.post("/agent/browse", response_class=HTMLResponse)
+def queue_browsing(request: Request, plan: str = Form("postings"),
+                   db: Session = Depends(get_db)):
+    """
+    Queue pages for the extension to open on its own.
+
+    The harvest was never limited by what it could read — it reads LinkedIn's
+    own API responses and gets more than the guest API returns. It was limited
+    by attendance: nothing is harvested from a page nobody opened. This queues
+    the opening.
+
+    Two plans, because they do different jobs. `searches` walks job searches
+    built from the profile and finds postings that are not stored at all;
+    `postings` opens the LinkedIn jobs already stored with no real description,
+    which is where most of the value is — a harvested search card has a title
+    and an id and usually no body, and the guest API cannot fix that.
+
+    The queue is deliberately slow to drain. See `browse_plan` for why the pace
+    is a setting rather than a client decision.
+    """
+    from app.models.profile import Profile
+    from app.services import browse_plan
+
+    try:
+        if plan == "searches":
+            profile = db.query(Profile).first()
+            outcome = browse_plan.crawl_searches(db, (profile.data if profile else None))
+        else:
+            outcome = browse_plan.crawl_postings(db)
+        logger.info(
+            "runs: queued %d page(s) to browse (%s of %d candidates)",
+            outcome["queued"], outcome["kind"], outcome["candidates"],
+        )
+    except Exception as exc:
+        logger.error("runs: could not queue browsing: %s", exc)
     return templates.TemplateResponse(
         "runs/_system.html", {"request": request, "system": _system_context(db)}
     )

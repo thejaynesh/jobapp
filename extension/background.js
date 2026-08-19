@@ -158,6 +158,86 @@ function waitForLoad(tabId, timeoutMs) {
   });
 }
 
+function clampSeconds(value, fallback, low, high) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return fallback;
+  return Math.max(low, Math.min(high, Math.round(seconds)));
+}
+
+/**
+ * Open a page and leave it open long enough to be read.
+ *
+ * Separate from `openInTab` because it wants the opposite things. That one
+ * escalates a failed fetch and cares only where the URL landed, so it settles
+ * briefly and returns the markup. This one does not want the markup at all —
+ * the interceptor is already reading the page's API responses — it wants the
+ * page to have time to *make* those requests, and on a job board the ones
+ * carrying the posting body come after `load`.
+ *
+ * The scroll is part of that. A search page renders the first screen of cards
+ * and fetches the rest when you move, so a tab that opens and sits still
+ * harvests a fraction of what the page would have shown a reader.
+ */
+async function visitInTab(url, settleMs) {
+  return withTabLock(async () => {
+    let win;
+    try {
+      win = await chrome.windows.create({ url, focused: false, state: "minimized" });
+    } catch (error) {
+      throw new Error(`could not open a window: ${error.message}`);
+    }
+
+    const tabId = win.tabs && win.tabs[0] && win.tabs[0].id;
+    if (!tabId) {
+      await chrome.windows.remove(win.id).catch(() => {});
+      throw new Error("the window opened without a tab.");
+    }
+
+    try {
+      await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS);
+      // Half the settle before scrolling, half after: the first lets the
+      // posting body land, the second lets whatever the scroll asked for come
+      // back before the tab is taken away.
+      await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+
+      let signed_in = true;
+      let title = "";
+      try {
+        const [injected] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            // Step down the page rather than jumping to the bottom: a lazy
+            // list loads a batch per screen, and one jump asks for one batch.
+            const step = Math.round(window.innerHeight * 0.9);
+            for (let y = step; y <= step * 6; y += step) {
+              window.scrollTo(0, y);
+            }
+            const text = (document.body ? document.body.innerText : "").slice(0, 4000);
+            return {
+              title: document.title || "",
+              // A login wall renders instead of the posting, so the harvest
+              // finds nothing and looks identical to a reader that broke.
+              wall: /sign in|join now to see|log in to continue/i.test(text),
+            };
+          },
+        });
+        title = (injected && injected.result && injected.result.title) || "";
+        signed_in = !(injected && injected.result && injected.result.wall);
+      } catch (_) {
+        // Injection refused. The visit still happened, which is the part that
+        // matters — the interceptor runs whether or not this could look.
+      }
+
+      await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      return { final_url: (tab && tab.url) || url, signed_in, title };
+    } finally {
+      await chrome.windows.remove(win.id).catch(() => {});
+    }
+  });
+}
+
 async function openInTab(url) {
   return withTabLock(async () => {
     let win;
@@ -320,6 +400,52 @@ const HANDLERS = {
    * link, it often names the company's Greenhouse or Lever board, which the
    * server mines separately.
    */
+  /**
+   * Open a page, let it run, close it. The harvest does the rest.
+   *
+   * Nothing useful comes back through this handler and that is the design.
+   * The interceptor is registered on the site by match pattern, so it runs on
+   * this tab exactly as it does on one you opened yourself — the page asks its
+   * own API for the posting, the interceptor reads the answer on the way past,
+   * and the jobs arrive at /api/agent/harvest under their own steam. All this
+   * has to do is make the visit happen.
+   *
+   * Which is why the settle is long and the gap after it is longer. LinkedIn
+   * fires the request carrying the posting body *after* `load`, so a tab closed
+   * promptly harvests nothing at all — and a browser stepping through sixty
+   * pages back to back is the shape of traffic that gets a logged-in session
+   * challenged. The server sets both numbers so the pace is one decision in one
+   * place, and this only clamps them against a client that would otherwise be
+   * told to hammer.
+   */
+  async browse_page(payload) {
+    const url = payload && payload.url;
+    if (!url) throw new Error("browse_page needs a url.");
+    if (!(await tabsAllowed())) {
+      throw new Error(
+        "Opening pages in a hidden window is turned off in the extension's options.",
+      );
+    }
+
+    const settleMs = clampSeconds(payload.settle_seconds, 6, 1, 60) * 1000;
+    const gapMs = clampSeconds(payload.gap_seconds, 20, 5, 300) * 1000;
+
+    const visited = await visitInTab(url, settleMs);
+    // Held inside the tab lock's queue by awaiting here: the next browse task
+    // cannot open its window until this pause is over, which is what makes the
+    // gap a real rhythm rather than a number in a payload.
+    await new Promise((resolve) => setTimeout(resolve, gapMs));
+
+    return {
+      final_url: visited.final_url,
+      // Whether the visit looked like a real page rather than a login wall or
+      // a challenge. The server cannot tell from a harvest that found nothing.
+      signed_in: visited.signed_in,
+      title: visited.title,
+      settled_ms: settleMs,
+    };
+  },
+
   async resolve_link(payload) {
     const url = payload && payload.url;
     if (!url) throw new Error("resolve_link needs a url.");
@@ -423,6 +549,11 @@ async function canReachTheWeb() {
 async function supportedKinds() {
   const kinds = ["ping"];
   if (await canReachTheWeb()) kinds.push("resolve_link", "fetch_json");
+  // Browsing needs a window rather than a host permission — opening a tab is
+  // not reading a page, and the reading is the interceptor's, under the
+  // permission its own checkbox already asked for. So the toggle that governs
+  // opening windows at all is the one that decides this.
+  if (await tabsAllowed()) kinds.push("browse_page");
   return kinds;
 }
 
