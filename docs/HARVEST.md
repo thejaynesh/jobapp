@@ -108,6 +108,41 @@ error pages very politely, sixty times, through your logged-in session.
 For those boards, run the search yourself, copy the URL, and paste it in. That
 URL is correct by construction, which no guess can be.
 
+### Boards that send cards, not postings
+
+Some boards' search responses carry no description at all — not a short one, not
+a snippet. The card is a card. Greenhouse's aggregate board
+(`my.greenhouse.io`) is the clearest case: every row has a title, a company, a
+location, a pay band and a URL, and no body text anywhere in the payload.
+
+**This is not a scroll problem and more browsing does not fix it.** Scrolling
+further gets more cards.
+
+What fixes it is the second step, which runs on the server: the card names the
+employer's own board URL, and if that URL belongs to an ATS we can read
+(`job-boards.greenhouse.io/<slug>/jobs/<id>` does), enrichment fetches the full
+description from that ATS's public API. One free request, no browser, no tab.
+
+So a harvested Greenhouse job arrives empty and fills in on the next enrichment
+pass. That is the design, not a fault — the browser is there for the pages a
+server cannot reach, and Greenhouse's own API is not one of them.
+
+Two details make it work, both in `_normalize`:
+
+- `publicUrl` counts as a job URL. It is the *only* URL on these rows, and
+  `_normalize` drops any job it cannot address — so before it was an alias, the
+  entire board harvested as zero jobs, which is indistinguishable from an idle
+  browser.
+- `viewJobPath` (`/jobs/<slug>/<id>`) is turned into a canonical Greenhouse URL
+  and stored as the apply URL. This matters when `publicUrl` points at the
+  employer's own careers page instead — `ifit.com/careers?gh_jid=123` names the
+  job but not the company. Deriving the slug buys two things: a description by
+  API rather than a scrape, and the slug itself, which is that company's entire
+  board on every future fetch cycle.
+
+That last point is the one worth remembering. A harvested posting is one job,
+once. A slug found on this board is a permanent new source.
+
 ### Pacing
 
 This drives a real browser through a logged-in session, and volume plus rhythm

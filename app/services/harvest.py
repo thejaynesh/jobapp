@@ -111,7 +111,10 @@ _COMPANY_KEYS = (
     "hiringOrganization", "employer",
 )
 _LOCATION_KEYS = (
-    "formattedLocation", "locationName", "location", "secondarySubtitle",
+    # `locations` is an array of strings; `_text` takes the first, which is the
+    # primary posting location. Greenhouse's job-seeker board uses it.
+    "formattedLocation", "locationName", "location", "locations",
+    "secondarySubtitle",
     "secondaryDescription",
     "formattedLocationFull", "jobLocationCity", "locationsText",  # Indeed
     "locationName", "locationString",                             # Glassdoor
@@ -125,6 +128,14 @@ _DESCRIPTION_KEYS = (
 _URL_KEYS = (
     "jobPostingUrl", "applyUrl", "companyApplyUrl", "url", "link",
     "jobUrl", "viewJobLink", "externalPath",      # Indeed / Workday
+    # Greenhouse's aggregate board. Worth more than the average alias: it holds
+    # the *employer's own* board URL — job-boards.greenhouse.io/<slug>/jobs/<id>
+    # — which is both what a person should apply through and the slug the
+    # fetcher needs to read that whole company by API afterwards.
+    #
+    # Its absence was not a missing nicety. `_normalize` requires a URL, so
+    # every job on that board was read, found to have none, and dropped.
+    "publicUrl",
 )
 _ID_KEYS = (
     "jobPostingId", "entityUrn", "trackingUrn", "referenceId", "id",
@@ -135,6 +146,10 @@ _ID_KEYS = (
 _REMOTE_KEYS = (
     "workplaceType", "workRemoteAllowed", "workplaceTypes",
     "remoteWorkModelType", "isRemote", "remoteType",
+    # Greenhouse's board: "remote" | "hybrid" | "in_person". Reading it matters
+    # because remote is a filter the search itself was set to, so a job that
+    # came back remote and got stored as on-site contradicts the query.
+    "workType",
 )
 # Voyager sends pay the guest API never does, in a nested object whose exact
 # path moves around. Read shape-first like everything else here: find the
@@ -230,6 +245,74 @@ def _number(value) -> float | None:
     return parsed if parsed > 0 else None
 
 
+# "$190,978 - $231,050", "$85,000 - $100,000", "£60k – £75k". A range written
+# for a person to read, which is how Greenhouse's board states pay — there are
+# no min/max keys to find, so `_salary` alone came back empty on every row.
+_PAY_RANGE_RE = re.compile(
+    r"([$£€]?)\s*([\d,]+(?:\.\d+)?)\s*(k?)"
+    # A dash, or the word "to" — an alternation rather than a character class,
+    # so "to" has to be the word and not any letter out of t/o.
+    r"(?:\s*[-–—]\s*|\s+to\s+)"
+    r"[$£€]?\s*([\d,]+(?:\.\d+)?)\s*(k?)",
+    re.I,
+)
+_PAY_SINGLE_RE = re.compile(r"([$£€])\s*([\d,]+(?:\.\d+)?)\s*(k?)", re.I)
+_CURRENCY_BY_SYMBOL = {"$": "USD", "£": "GBP", "€": "EUR"}
+
+
+def _amount(digits: str, suffix: str) -> float | None:
+    try:
+        value = float(digits.replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    if suffix.lower() == "k":
+        value *= 1000
+    return value if value > 0 else None
+
+
+def _salary_from_text(text: str) -> dict:
+    """Pay out of a human-readable range, or {} if there is none in there."""
+    if not text:
+        return {}
+    match = _PAY_RANGE_RE.search(text)
+    if match:
+        symbol, low_digits, low_k, high_digits, high_k = match.groups()
+        # A currency symbol or a `k` has to be present, or a range of anything
+        # reads as money: "2 to 5 years experience" parses perfectly well as
+        # 2–5, and a band of 2 sitting in the salary columns is worse than an
+        # empty one — a filter would act on it.
+        if not symbol and not (low_k or high_k):
+            return {}
+        low = _amount(low_digits, low_k)
+        high = _amount(high_digits, high_k)
+        if low is None and high is None:
+            return {}
+        if low is not None and high is not None and high < low:
+            low, high = high, low
+        return {
+            "salary_min": low if low is not None else high,
+            "salary_max": high,
+            "salary_currency": _CURRENCY_BY_SYMBOL.get(symbol or "", None),
+        }
+
+    single = _PAY_SINGLE_RE.search(text)
+    if single:
+        symbol, digits, suffix = single.groups()
+        value = _amount(digits, suffix)
+        if value is not None:
+            # A lone figure is the floor, not a ceiling — the same reading
+            # `_salary` gives one, so a filter on the top of the band does not
+            # silently exclude it.
+            return {"salary_min": value, "salary_max": None,
+                    "salary_currency": _CURRENCY_BY_SYMBOL.get(symbol or "", None)}
+    return {}
+
+
+# Keys whose value is a pay range written as prose rather than as numbers.
+_PAY_TEXT_KEYS = ("payRanges", "payRange", "salaryRange", "compensationRange",
+                  "salaryText", "payText")
+
+
 def _salary(node: dict) -> dict:
     """
     Pay, from wherever in this node's subtree it happens to live.
@@ -258,6 +341,12 @@ def _salary(node: dict) -> dict:
                 "salary_max": high,
                 "salary_currency": (currency or "").upper()[:8] or None,
             }
+
+    # No min/max anywhere. Some boards only ever state pay as prose.
+    for key in _PAY_TEXT_KEYS:
+        found = _salary_from_text(_text(node.get(key)))
+        if found:
+            return found
     return {}
 
 
@@ -316,6 +405,34 @@ def _looks_like_job(node: dict) -> bool:
     return bool(_job_id(node) or _first(node, _URL_KEYS))
 
 
+# Greenhouse's board links each card twice: `publicUrl` goes wherever the
+# employer chose to host the posting, and `viewJobPath` is always
+# /jobs/<slug>/<id> on Greenhouse's own domain.
+_GREENHOUSE_VIEW_PATH = re.compile(r"^/jobs/([A-Za-z0-9_.-]+)/(\d+)/?$")
+
+
+def _greenhouse_board_url(node: dict) -> str:
+    """
+    The canonical Greenhouse URL for a card, when the card names its slug.
+
+    Worth deriving because `publicUrl` is often the employer's own careers page
+    — `ifit.com/careers?gh_jid=123` — which names the job but not the company
+    slug. Two things are lost with it:
+
+      * The description. A greenhouse.io/<slug>/jobs/<id> address is one free
+        API call away from the full text; a bespoke careers page is a scrape
+        that may or may not work.
+      * The slug, which is that company's entire board on every future fetch
+        cycle. That compounding is most of why this board is worth harvesting
+        at all, and throwing it away over a URL shape would be a poor trade.
+    """
+    match = _GREENHOUSE_VIEW_PATH.match(_text(node.get("viewJobPath")))
+    if not match:
+        return ""
+    slug, job_id = match.groups()
+    return f"https://job-boards.greenhouse.io/{slug}/jobs/{job_id}"
+
+
 def _normalize(node: dict, source: str = HARVEST_SOURCE) -> dict | None:
     title = _first(node, _TITLE_KEYS)
     company = _first(node, _COMPANY_KEYS)
@@ -332,10 +449,15 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE) -> dict | None:
     if not url:
         return None
 
+    board_url = _greenhouse_board_url(node)
     return {
         "source": source,
         "source_job_id": job_id or None,
         "url": url,
+        # Left out rather than set to the listing URL when there is nothing
+        # better: `_target_url` prefers apply_url, and pointing it back at the
+        # same address would only make enrichment look like it had a choice.
+        **({"apply_url": board_url} if board_url and board_url != url else {}),
         "title": title,
         "company": company,
         "location": _first(node, _LOCATION_KEYS),
@@ -398,6 +520,22 @@ def _apply_salary(job, data: dict) -> None:
     job.salary_currency = data.get("salary_currency")
 
 
+def _apply_apply_url(job, data: dict) -> None:
+    """
+    Fill in an apply URL a harvested card named, if the job has none.
+
+    Only fills a blank. A resolved apply URL is the end of a redirect chain we
+    followed once and would rather not follow again, and a hand-entered one is
+    the user's. Neither is improved by a card's guess at the same thing.
+    """
+    from app.services.job_edits import is_manual
+
+    found = (data.get("apply_url") or "").strip()
+    if not found or job.apply_url or is_manual(job, "apply_url"):
+        return
+    job.apply_url = found
+
+
 def save_harvested_jobs(db, jobs: list[dict]) -> dict:
     """
     Store harvested jobs through the same dedupe rules as fetched ones.
@@ -438,6 +576,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                 )
                 if existing is not None:
                     _apply_salary(existing, data)
+                    _apply_apply_url(existing, data)
                     # The harvested copy usually carries a fuller description than the
                     # guest API managed, which is the main reason this path exists.
                     if url in existing.source_urls or (
@@ -479,6 +618,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     location=location,
                     is_remote=bool(data.get("is_remote")),
                     url=url,
+                    apply_url=data.get("apply_url") or None,
                     description=description or None,
                     experience_level="mid",
                     status=JobStatus.new,

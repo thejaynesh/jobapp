@@ -712,3 +712,101 @@ class TestRescoringAfterGrowth:
     def test_title_rejects_are_not_enrichment_targets(self, db):
         job = self._filtered(db, "title_mismatch")
         assert job.id not in {j.id for j in enrichment.select_targets(db, {}, limit=50)}
+
+
+class TestTheGreenhouseBoardHarvestHandoff:
+    """
+    The two-step that makes Greenhouse's aggregate board worth harvesting.
+
+    my.greenhouse.io lists every job posted through Greenhouse, needs a login,
+    and sends *no description* — the search response is cards only. That is not
+    a scroll failure and not something more browsing fixes. What each card does
+    carry is `publicUrl`, the employer's own Greenhouse board URL, and that is
+    an address the ATS shortcut can read in full for free.
+
+    So: the browser gets the listing, the server gets the text. These tests
+    hold that seam together, because a break in it is silent — jobs keep
+    arriving, they just arrive empty forever.
+    """
+
+    def test_the_new_board_domain_is_recognised_as_an_ats(self):
+        # `job-boards.greenhouse.io` is the current domain and the one
+        # `publicUrl` uses; the older `boards.greenhouse.io` is what the
+        # fetcher's own discovery produces. Both have to match or half the
+        # harvest falls through to a page scrape.
+        assert enrichment.looks_like_ats(
+            "https://job-boards.greenhouse.io/corporatecareers/jobs/4956068101")
+        assert enrichment.looks_like_ats(
+            "https://boards.greenhouse.io/corporatecareers/jobs/4956068101")
+
+    def test_a_harvested_card_url_yields_the_full_description(self):
+        url = "https://job-boards.greenhouse.io/corporatecareers/jobs/4956068101"
+        client = _client({
+            "https://boards-api.greenhouse.io/v1/boards/corporatecareers/jobs/4956068101":
+                _resp({
+                    "content": "&lt;p&gt;" + LONG + "&lt;/p&gt;",
+                    "first_published": "2026-08-19T12:00:00Z",
+                    "location": {"name": "San Francisco, CA"},
+                }),
+        })
+        found = enrichment.enrich_one(client, url)
+        assert found.method == "ats_api"
+        assert LONG.strip() in found.description
+
+    def test_a_board_the_api_does_not_serve_falls_through_to_the_page(self):
+        """
+        Not every board on the new domain is published through boards-api. The
+        fallback matters more here than elsewhere: without it a 404 on one
+        company's board would strand every job we harvested from it.
+        """
+        import httpx
+
+        api = ("https://boards-api.greenhouse.io/v1/boards/unlisted"
+               "/jobs/1234567890")
+        url = "https://job-boards.greenhouse.io/unlisted/jobs/1234567890"
+        client = _client({api: httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=MagicMock(status_code=404))})
+        page = (
+            '<html><body><script type="application/ld+json">'
+            '{"@type":"JobPosting","description":"<p>' + LONG + '</p>"}'
+            "</script></body></html>"
+        )
+        with patch.object(enrichment, "_fetch_page", return_value=page):
+            found = enrichment.enrich_one(client, url)
+        assert found.method == "json_ld"
+        assert LONG.strip() in found.description
+
+    def test_a_card_with_no_description_is_still_worth_enriching(self, db):
+        """
+        The whole handoff depends on these rows being picked up. A harvested
+        Greenhouse card has an empty description, which is precisely the state
+        `select_targets` exists to find — if it were skipped, the browser would
+        keep filling the table with jobs nothing ever reads.
+        """
+        job = _job(
+            source="greenhouse_harvest",
+            title="Senior Software Engineer, Platform",
+            company="Corporate Careers",
+            url="https://job-boards.greenhouse.io/corporatecareers/jobs/4956068101",
+            source_urls=["https://job-boards.greenhouse.io/corporatecareers/jobs/4956068101"],
+            description=None,
+        )
+        db.add(job)
+        db.commit()
+
+        targets = enrichment.select_targets(db, profile_data={}, limit=10)
+        assert job.id in [t.id for t in targets]
+
+    def test_the_ats_route_is_chosen_over_opening_a_tab(self, db):
+        """
+        A description that a free API call can fetch should never cost a browser
+        page. Greenhouse board URLs are server work, even though the listing
+        they came from was browser-only.
+        """
+        job = _job(
+            source="greenhouse_harvest",
+            url="https://job-boards.greenhouse.io/corporatecareers/jobs/4956068101",
+            source_urls=["https://job-boards.greenhouse.io/corporatecareers/jobs/4956068101"],
+            description=None,
+        )
+        assert enrichment.looks_like_ats(enrichment._target_url(job))
