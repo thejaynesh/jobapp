@@ -88,13 +88,18 @@ class Board:
 
     def __init__(self, key, host, label, search=None, entries=(),
                  page_param=None, page_size=25, page_base=0,
-                 feed_setting=None):
+                 feed_setting=None, scroll_passes=None):
         self.key = key
         self.host = host
         self.label = label
         self.search = search
         self.entries = tuple(entries)
         self.feed_setting = feed_setting
+        # How hard to scroll one of this board's pages. For a board that pages
+        # by URL a few screens is plenty — the depth comes from queueing the
+        # next page. For one that scrolls infinitely there *is* no next page,
+        # so this loop is the pagination and the number has to be much larger.
+        self.scroll_passes = scroll_passes
         self.page_param = page_param
         self.page_size = max(1, page_size)
         # What the parameter reads on the first page. Boards count two
@@ -172,6 +177,11 @@ BOARDS = (
     Board(
         "greenhouse", "my.greenhouse.io", "Greenhouse (all companies)",
         feed_setting="BROWSE_GREENHOUSE_FEED",
+        # Infinite scroll, no page-two URL to queue. Every batch this pulls in
+        # is another API response the interceptor reads, and on this board each
+        # one carries company slugs — so scrolling deep here buys permanent
+        # sources rather than just more rows.
+        scroll_passes=200,
     ),
     Board(
         "handshake", "joinhandshake.com", "Handshake",
@@ -378,6 +388,20 @@ def _posting_url(source_job_id: str | None, url: str | None) -> str:
 # Queueing it
 # ---------------------------------------------------------------------------
 
+def _scroll_passes(url: str) -> int:
+    """
+    How hard to scroll this URL's page.
+
+    A board that pages by URL wants a few screens — its depth comes from the
+    next page being queued. A board that scrolls infinitely has no next page,
+    so the scroll *is* the pagination and the number has to be much larger.
+    """
+    board = board_for(url)
+    if board is not None and board.scroll_passes:
+        return int(board.scroll_passes)
+    return max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
+
+
 def _already_queued(db, urls: list[str]) -> set[str]:
     """
     URLs with a browse task in flight, or one raised recently.
@@ -435,6 +459,11 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 # so the pace is one decision made in one place.
                 "settle_seconds": int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6)),
                 "gap_seconds": int(getattr(settings, "BROWSE_GAP_SECONDS", 20)),
+                # Read back off the URL rather than passed down from the
+                # caller: `enqueue` takes a flat list, and a board that needs
+                # two hundred scrolls should get them whether its URLs came
+                # from a crawl, a re-visit, or the paste box.
+                "scroll_passes": _scroll_passes(url),
             },
         )
         queued += 1

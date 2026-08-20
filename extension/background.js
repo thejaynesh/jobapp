@@ -178,7 +178,14 @@ function clampSeconds(value, fallback, low, high) {
  * and fetches the rest when you move, so a tab that opens and sits still
  * harvests a fraction of what the page would have shown a reader.
  */
-async function visitInTab(url, settleMs) {
+// The ceiling on one page's scrolling, whatever it was asked for. An MV3
+// service worker is terminated when it looks idle, and an injected script that
+// runs for minutes is exactly what that looks like from outside — so the
+// budget stays well inside it, and a board with more to give simply gets
+// visited again rather than held open.
+const SCROLL_BUDGET_MS = 75000;
+
+async function visitInTab(url, settleMs, passes) {
   return withTabLock(async () => {
     let win;
     try {
@@ -202,41 +209,71 @@ async function visitInTab(url, settleMs) {
 
       let signed_in = true;
       let title = "";
+      // How far down the list the scroll actually got. On an infinitely
+      // scrolling board this is the only measure of whether the visit went
+      // deep or gave up on the first stall.
+      let scrolled = 0;
       try {
         const [injected] = await chrome.scripting.executeScript({
           target: { tabId },
-          func: async () => {
+          args: [passes, SCROLL_BUDGET_MS],
+          func: async (maxPasses, budgetMs) => {
             // Step down the page rather than jumping to the bottom: a lazy
             // list loads a batch per screen, and one jump asks for one batch.
             //
-            // Driven by whether the page is still growing rather than by a
-            // fixed number of steps. A search page keeps appending as you go,
-            // so a fixed six screens stopped partway down a list that had more
-            // to give — and on a short page it scrolled past the end for
-            // nothing. Pausing between steps is the point: the fetch the
-            // scroll triggers has to come back before the next one is worth
-            // asking for, and that fetch is the whole reason to scroll.
+            // For an infinitely scrolling board this loop *is* the pagination.
+            // There is no page-two URL to queue, so the only way to reach the
+            // hundredth result is to keep asking — and each batch it pulls in
+            // is another API response the interceptor reads on the way past.
+            //
+            // Waiting for the page to actually grow, rather than for a fixed
+            // interval, is what makes deep scrolling work. A fixed pause is
+            // either longer than the fetch needs (wasting most of the budget)
+            // or shorter (scrolling past content that has not arrived, which
+            // reads as "the page stopped growing" and ends the loop early).
             const step = Math.round(window.innerHeight * 0.9);
-            let previousHeight = 0;
-            for (let n = 0; n < 25; n += 1) {
-              window.scrollTo(0, step * (n + 1));
-              await new Promise((r) => setTimeout(r, 400));
-              const height = document.body ? document.body.scrollHeight : 0;
-              const atBottom = window.scrollY + window.innerHeight >= height - step;
-              if (atBottom && height === previousHeight) break;
-              previousHeight = height;
+            const deadline = Date.now() + budgetMs;
+            const height = () => (document.body ? document.body.scrollHeight : 0);
+
+            let previous = height();
+            let stalls = 0;
+
+            for (let n = 0; n < maxPasses && Date.now() < deadline; n += 1) {
+              window.scrollTo(0, height());
+
+              // Up to a second and a half for the next batch to land, checked
+              // often so a fast board is not held up by a slow board's budget.
+              let grew = false;
+              for (let waited = 0; waited < 1500; waited += 150) {
+                await new Promise((r) => setTimeout(r, 150));
+                if (height() > previous) { grew = true; break; }
+              }
+
+              if (grew) {
+                previous = height();
+                stalls = 0;
+                continue;
+              }
+              // Two stalls rather than one: these lists routinely pause on a
+              // slow request and then carry on, and giving up on the first
+              // quiet moment is how a deep scroll turns into a shallow one.
+              stalls += 1;
+              if (stalls >= 2) break;
             }
+
             const text = (document.body ? document.body.innerText : "").slice(0, 4000);
             return {
               title: document.title || "",
               // A login wall renders instead of the posting, so the harvest
               // finds nothing and looks identical to a reader that broke.
               wall: /sign in|join now to see|log in to continue/i.test(text),
+              scrolled: previous,
             };
           },
         });
         title = (injected && injected.result && injected.result.title) || "";
         signed_in = !(injected && injected.result && injected.result.wall);
+        scrolled = (injected && injected.result && injected.result.scrolled) || 0;
       } catch (_) {
         // Injection refused. The visit still happened, which is the part that
         // matters — the interceptor runs whether or not this could look.
@@ -245,7 +282,7 @@ async function visitInTab(url, settleMs) {
       await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
 
       const tab = await chrome.tabs.get(tabId).catch(() => null);
-      return { final_url: (tab && tab.url) || url, signed_in, title };
+      return { final_url: (tab && tab.url) || url, signed_in, title, scrolled };
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
     }
@@ -443,8 +480,12 @@ const HANDLERS = {
 
     const settleMs = clampSeconds(payload.settle_seconds, 6, 1, 60) * 1000;
     const gapMs = clampSeconds(payload.gap_seconds, 20, 5, 300) * 1000;
+    // How far to scroll. On a board that paginates by URL this is a handful of
+    // screens; on one that scrolls infinitely it is the pagination, so the
+    // server asks for a lot more and the budget above decides when to stop.
+    const passes = clampSeconds(payload.scroll_passes, 25, 1, 400);
 
-    const visited = await visitInTab(url, settleMs);
+    const visited = await visitInTab(url, settleMs, passes);
     // Held inside the tab lock's queue by awaiting here: the next browse task
     // cannot open its window until this pause is over, which is what makes the
     // gap a real rhythm rather than a number in a payload.
@@ -452,6 +493,7 @@ const HANDLERS = {
 
     return {
       final_url: visited.final_url,
+      scrolled_px: visited.scrolled,
       // Whether the visit looked like a real page rather than a login wall or
       // a challenge. The server cannot tell from a harvest that found nothing.
       signed_in: visited.signed_in,

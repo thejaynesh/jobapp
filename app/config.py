@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     # other, so this multiplies the run length: five pages of six roles across
     # two locations is sixty visits, which is one full run.
     BROWSE_SEARCH_PAGES: int = 5
+    # Screens to scroll on a page whose board has no opinion. Boards that
+    # scroll infinitely override this upwards — for them the scroll is the
+    # pagination, so it is the only thing that decides how deep a visit gets.
+    # The extension caps the total time either way, so a large number here
+    # means "keep going until the list stops giving", not "hold the tab open".
+    BROWSE_SCROLL_PASSES: int = 25
     # Greenhouse's job-seeker board — every company on the platform rather than
     # one. Login-only, so only the browser can reach it.
     #

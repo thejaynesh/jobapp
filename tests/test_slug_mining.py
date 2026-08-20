@@ -194,6 +194,42 @@ class TestTheGreenhouseAggregateBoard:
 
         assert not any("my.greenhouse.io" in url for url in urls)
 
+    def test_it_is_scrolled_far_harder_than_a_paged_board(self, db):
+        # It scrolls infinitely: there is no page-two URL to queue, so this
+        # loop is the pagination. A board that pages by URL needs a few
+        # screens; this one needs to keep asking.
+        from app.services.browse_plan import _scroll_passes
+
+        deep = _scroll_passes("https://my.greenhouse.io/jobs/search?query=x")
+        shallow = _scroll_passes("https://www.linkedin.com/jobs/search/?keywords=x")
+
+        assert deep >= 100
+        assert deep > shallow
+
+    def test_the_depth_travels_on_the_task(self, db, monkeypatch):
+        monkeypatch.setattr(
+            settings, "BROWSE_GREENHOUSE_FEED",
+            "https://my.greenhouse.io/jobs/search?query={q}",
+        )
+        browse_plan.crawl_searches(db, {"target_roles": ["SRE"]}, board="greenhouse")
+
+        from app.models.browser_task import BrowserTask
+
+        task = db.query(BrowserTask).filter(
+            BrowserTask.payload["url"].astext.contains("my.greenhouse.io")
+        ).first()
+        assert task.payload["scroll_passes"] >= 100
+
+    def test_a_pasted_greenhouse_url_is_scrolled_just_as_deep(self, db):
+        # Read off the URL rather than passed down by the caller, so a board
+        # that needs deep scrolling gets it however the URL arrived.
+        from app.models.browser_task import BrowserTask
+
+        browse_plan.crawl_urls(db, "https://my.greenhouse.io/jobs/search?query=sre")
+        task = db.query(BrowserTask).one()
+
+        assert task.payload["scroll_passes"] >= 100
+
     def test_the_extension_is_allowed_to_read_it(self, db):
         # Crawling a page the interceptor is not registered on is real traffic
         # through a logged-in session that harvests nothing.
