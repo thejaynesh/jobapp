@@ -13,6 +13,7 @@ celery_app = Celery(
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
         "app.tasks.match_eval", "app.tasks.backup", "app.tasks.archive",
+        "app.tasks.browse",
     ],
 )
 
@@ -127,6 +128,16 @@ celery_app.conf.beat_schedule = {
     "archive-old-jobs": {
         "task": "app.tasks.archive.archive_old_jobs",
         "schedule": celery_schedule(settings.ARCHIVE_INTERVAL_HOURS * 3600),
+    },
+    # Keeps the browser's queue from running dry. A backstop rather than a
+    # fetch cycle: the queue drains at a person's pace, so this tops up only
+    # when it is nearly empty and does nothing at all the rest of the time —
+    # which is why it can run every half hour and stay cheap. It also declines
+    # to queue anything when no agent has polled lately, because work queued
+    # for a shut laptop expires unread and hides the real backlog behind it.
+    "top-up-browsing": {
+        "task": "app.tasks.browse.top_up_browsing",
+        "schedule": celery_schedule(settings.BROWSE_TOPUP_INTERVAL_MINUTES * 60),
     },
     "poll-mailbox": {
         "task": "app.tasks.outreach.poll_mailbox",

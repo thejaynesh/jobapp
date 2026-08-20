@@ -534,6 +534,81 @@ def crawl_postings(db, limit: int | None = None) -> dict:
     }
 
 
+def agent_seen_recently(db, hours: int | None = None) -> bool:
+    """
+    Whether a browser has asked for work lately.
+
+    The one precondition worth checking before a *scheduled* crawl, and not
+    before a triggered one. A button press is a person saying "do this now",
+    and their laptop is by definition awake. A timer firing at four in the
+    morning has no such evidence, and queueing sixty pages for an agent that
+    has not polled since Tuesday just fills the queue with work that expires
+    unread — which then hides the real backlog behind it.
+    """
+    from app.models.browser_task import BrowserTask
+    from app.services import browser_tasks
+
+    window = timedelta(hours=hours if hours is not None
+                       else int(getattr(settings, "BROWSE_AGENT_STALE_HOURS", 24)))
+    cutoff = datetime.now(timezone.utc) - window
+
+    seen = browser_tasks.last_agent(db)
+    if seen and seen.get("at"):
+        try:
+            polled = datetime.fromisoformat(str(seen["at"]).replace("Z", "+00:00"))
+            if polled.tzinfo is None:
+                polled = polled.replace(tzinfo=timezone.utc)
+            if polled >= cutoff:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    # A lease is proof too, and survives a profile blob that was never written.
+    return bool(
+        db.query(BrowserTask)
+        .filter(BrowserTask.leased_at.isnot(None), BrowserTask.leased_at >= cutoff)
+        .first()
+    )
+
+
+def scheduled_crawl(db, profile: dict | None) -> dict:
+    """
+    The crawl on a timer rather than a button.
+
+    Three guards, each answering a way this could quietly go wrong:
+
+    *Nobody home.* Queueing for an agent that has not polled in a day fills the
+    queue with tasks that expire unread and buries whatever is behind them.
+
+    *Still working.* The queue drains at a human pace — a page every twenty
+    seconds — so a run queued every few hours would outrun the browser by an
+    order of magnitude. Topping up only when the queue is nearly empty keeps
+    the schedule honest about being a backstop rather than a firehose.
+
+    *Descriptions before discovery.* A posting already stored with no
+    description is worth more than a posting nobody has seen: it has been
+    scored on a fragment, and the fragment is why. So the backlog is served
+    first and searching only happens once it is drained.
+    """
+    if not enabled():
+        return {"queued": 0, "skipped": "disabled"}
+
+    if not agent_seen_recently(db):
+        logger.info("browse_plan: no agent has polled lately; queueing nothing")
+        return {"queued": 0, "skipped": "no agent"}
+
+    waiting = status(db)["waiting"]
+    floor = max(0, int(getattr(settings, "BROWSE_TOPUP_BELOW", 10)))
+    if waiting > floor:
+        return {"queued": 0, "skipped": "queue still draining", "waiting": waiting}
+
+    outcome = crawl_postings(db)
+    if outcome["queued"]:
+        return {**outcome, "skipped": None}
+
+    return {**crawl_searches(db, profile), "skipped": None}
+
+
 def status(db) -> dict:
     """What the panel shows: how much is waiting, and how long it will take."""
     from app.models.browser_task import BrowserTask

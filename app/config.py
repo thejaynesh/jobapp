@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     # The extension caps the total time either way, so a large number here
     # means "keep going until the list stops giving", not "hold the tab open".
     BROWSE_SCROLL_PASSES: int = 25
+    # How often to check whether the browser has run out of work. Frequent is
+    # fine: it does nothing unless the queue is nearly empty, so the interval
+    # decides responsiveness rather than volume.
+    BROWSE_TOPUP_INTERVAL_MINUTES: int = 30
+    # Top up only when fewer than this many pages are still waiting. The queue
+    # drains at one page every twenty seconds, so refilling a queue that is
+    # still working would outrun the browser by an order of magnitude.
+    BROWSE_TOPUP_BELOW: int = 10
+    # An agent that has not polled in this long is treated as gone. Queueing
+    # for a shut laptop fills the queue with tasks that expire unread, and
+    # buries whatever real backlog is behind them.
+    BROWSE_AGENT_STALE_HOURS: int = 24
     # Greenhouse's job-seeker board — every company on the platform rather than
     # one. Login-only, so only the browser can reach it.
     #
