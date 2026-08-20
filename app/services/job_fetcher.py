@@ -1046,7 +1046,18 @@ def fetch_and_save_jobs(
     for key in _FETCH_CYCLE_KEYS:
         if key in updated_data:
             merged_data[key] = updated_data[key]
-    profile.data = merged_data
+    # Held back rather than assigned here, and this is not tidiness.
+    #
+    # Assigning it now marks the row dirty, and the job loop below opens a
+    # savepoint per job — `begin_nested()` flushes first, so the UPDATE lands
+    # immediately and takes an exclusive lock on the profile row. That lock is
+    # then held until the commit *after* every job is inserted, which on a full
+    # cycle is minutes.
+    #
+    # Everything else that touches this blob queues behind it, and the agent
+    # poll writes it every minute. Twenty-two lease requests were found stacked
+    # on that lock, none completing, the browser agent dead the whole time. The
+    # write happens just before the commit now, so the lock lasts milliseconds.
     counts["links"] = resolve_stats.as_dict() if resolve_stats else {}
     counts["boards"] = board_stats
 
@@ -1174,6 +1185,22 @@ def fetch_and_save_jobs(
 
         except Exception as exc:
             logger.error("job_fetcher: error processing job: %s", exc)
+
+    # Now, with the job loop finished and the commit one line away. Re-read
+    # first: this cycle has been running for minutes and the agent poll, the
+    # mailbox poller and a settings save all write this same blob — the copy
+    # taken above is stale, and writing it wholesale would revert them.
+    try:
+        db.refresh(profile)
+        fresh = copy.deepcopy(profile.data or {})
+        for key in _FETCH_CYCLE_KEYS:
+            if key in merged_data:
+                fresh[key] = merged_data[key]
+        profile.data = fresh
+    except Exception as exc:
+        # The jobs are what this cycle is for. Losing the cycle's own bookkeeping
+        # is a bad trade against losing the batch.
+        logger.error("job_fetcher: could not merge cycle state into profile: %s", exc)
 
     try:
         db.commit()

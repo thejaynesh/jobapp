@@ -323,8 +323,32 @@ def record_agent_seen(db, agent_id: str, kinds: list[str] | None) -> None:
     offer a kind never claims that work, and the tasks sit queued forever
     looking like a server-side problem. Writing down what it offered turns that
     into something visible on a page.
+
+    Never waits for the row
+    -----------------------
+    This writes the profile blob, which is the hottest row in the schema — the
+    fetch cycle, the mailbox poller and a settings save all update it. Without
+    a timeout, a poll that arrives while something else holds that row waits
+    indefinitely, and Postgres queues the next poll behind it: one lease
+    request per minute, none of them completing, each abandoned by the client
+    after forty seconds. Twenty-two of them stacked up in the wild before
+    anybody noticed, and the whole browser agent was dead the entire time —
+    because the *diagnostic* was blocking the work it was meant to describe.
+
+    So the wait is bounded and losing is fine. A missing timestamp costs a line
+    on a status panel. A blocked lease costs every browser task there is.
     """
+    from sqlalchemy import text
+
     from app.models.profile import Profile
+
+    try:
+        # Half a second: long enough to win an uncontended row, far too short to
+        # queue behind a fetch cycle. `SET LOCAL` expires with the transaction,
+        # so this cannot leak onto a pooled connection's next borrower.
+        db.execute(text("SET LOCAL lock_timeout = '500ms'"))
+    except Exception as exc:
+        logger.debug("browser_tasks: could not set a lock timeout: %s", exc)
 
     profile = db.query(Profile).first()
     if profile is None:
@@ -353,7 +377,19 @@ def record_agent_seen(db, agent_id: str, kinds: list[str] | None) -> None:
     data["agents"] = agents
     data["agent"] = seen
     profile.data = data
-    db.commit()
+
+    try:
+        db.commit()
+    except Exception as exc:
+        # Rolled back here rather than left to the caller. The lease that
+        # called this goes on to query the queue on the same session, and a
+        # session left in a failed transaction turns "we could not write a
+        # timestamp" into "this agent gets no work".
+        db.rollback()
+        logger.info(
+            "browser_tasks: skipped recording presence for %s — the profile row "
+            "was busy (%s)", name, str(exc).splitlines()[0][:120],
+        )
 
 
 def last_agent(db) -> dict | None:
