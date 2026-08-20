@@ -105,6 +105,88 @@ class TestAskedForBeatsScheduled:
                 > browse_plan.PRIORITY_SWEEP)
 
 
+class TestAskingAgainMeansAgain:
+    """
+    The cooloff is for the unattended pass, not for a button.
+
+    `BROWSE_RETRY_DAYS` stops a nightly sweep re-reading the same hundred pages
+    forever instead of reaching the ones behind them. Applied to a request it
+    is simply wrong — pressing "crawl this board" an hour after the last crawl
+    means do it again — and it turned the button into one that queued nothing,
+    said nothing, and looked broken.
+    """
+
+    def test_a_board_crawled_an_hour_ago_can_be_crawled_again(self, db):
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+        for task in db.query(BrowserTask).all():
+            task.status = "done"
+        db.commit()
+        before = db.query(BrowserTask).count()
+
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+        assert db.query(BrowserTask).count() > before
+
+    def test_the_scheduled_sweep_still_respects_the_cooloff(self, db):
+        # Otherwise the timer re-reads the same pages every half hour and never
+        # reaches the backlog behind them.
+        agent_polled(db)
+        thin_job(db, 1)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
+        for task in db.query(BrowserTask).all():
+            task.status = "done"
+        db.commit()
+
+        assert browse_plan.crawl_postings(
+            db, priority=browse_plan.PRIORITY_SWEEP)["queued"] == 0
+
+    def test_a_page_still_in_flight_is_never_doubled(self, db):
+        # The half of the rule that applies to everyone: nothing is gained by
+        # opening one page twice at once.
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+        before = db.query(BrowserTask).count()
+
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+        assert db.query(BrowserTask).count() == before
+
+    def test_the_panel_says_when_everything_is_already_queued(self, client, db,
+                                                              monkeypatch):
+        # Zero has three meanings and the user cannot guess which, so a silent
+        # button reads as a broken one. The route reads the profile from the
+        # database, so a row has to exist for there to be anything to search.
+        from app.models.profile import Profile
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        db.add(Profile(data=PROFILE))
+        db.commit()
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+
+        body = client.post("/runs/agent/browse",
+                           data={"plan": "searches", "board": "greenhouse"}).text
+        assert "already" in body
+
+    def test_the_panel_says_what_it_queued(self, client, db, monkeypatch):
+        from app.models.profile import Profile
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        db.add(Profile(data=PROFILE))
+        db.commit()
+
+        body = client.post("/runs/agent/browse",
+                           data={"plan": "searches", "board": "greenhouse"}).text
+        assert "Queued" in body
+
+    def test_it_says_so_when_there_is_nothing_to_search_for(self, client, db,
+                                                            monkeypatch):
+        # A board whose URL carries a keyword has nothing to crawl when the
+        # profile names no roles — a real state, and one that used to look
+        # identical to a broken button.
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+
+        body = client.post("/runs/agent/browse",
+                           data={"plan": "searches", "board": "greenhouse"}).text
+        assert "Nothing to crawl" in body
+
+
 class TestClearingTheQueue:
     def test_queued_pages_can_be_dropped(self, db):
         for n in range(5):

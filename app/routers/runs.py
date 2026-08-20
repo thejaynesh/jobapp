@@ -367,10 +367,26 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
             "runs: queued %d page(s) to browse (%s of %d candidates)",
             outcome["queued"], outcome["kind"], outcome["candidates"],
         )
+        # Said out loud, because a button that queues nothing and reports
+        # nothing is indistinguishable from a broken one — which is exactly how
+        # it was read. Zero has three different meanings and the user cannot
+        # guess which.
+        if outcome["queued"]:
+            flash = f"Queued {outcome['queued']} page(s) to open next."
+        elif not outcome["candidates"]:
+            flash = "Nothing to crawl — no URLs for that plan."
+        else:
+            flash = (
+                f"All {outcome['candidates']} page(s) for that plan are already "
+                "waiting in the queue."
+            )
     except Exception as exc:
         logger.error("runs: could not queue browsing: %s", exc)
+        flash = f"Could not queue that: {exc}"
     return templates.TemplateResponse(
-        "runs/_system.html", {"request": request, "system": _system_context(db)}
+        "runs/_system.html",
+        {"request": request, "system": _system_context(db),
+         "browse_flash": flash},
     )
 
 

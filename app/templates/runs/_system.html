@@ -5,6 +5,16 @@
    place while a queued task is in flight, rather than reloading the page. #}
 <div id="system-panel"
      class="bg-white border border-gray-200 rounded-lg p-4 mb-8 shadow-sm">
+  {# What the last button press actually did. At the top rather than beside the
+     button, because the answer must not be nested inside the conditionals that
+     decide whether the agent section renders at all — a message about a click
+     that only appears when the panel is otherwise healthy is the case where it
+     is least useful. #}
+  {% if browse_flash %}
+  <p class="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-3 py-2 mb-3">
+    {{ browse_flash }}
+  </p>
+  {% endif %}
   <div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
     <h2 class="text-base font-semibold text-gray-800">System</h2>
     <p class="text-xs text-gray-400">

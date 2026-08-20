@@ -413,27 +413,42 @@ def _scroll_passes(url: str) -> int:
     return max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
 
 
-def _already_queued(db, urls: list[str]) -> set[str]:
+def _already_queued(db, urls: list[str],
+                    respect_cooloff: bool = True) -> set[str]:
     """
-    URLs with a browse task in flight, or one raised recently.
+    URLs not worth queueing again right now.
 
-    Both halves matter. In flight stops a second trigger doubling the queue;
-    recently stops a nightly run re-reading the same hundred postings forever
-    instead of reaching the ones behind them.
+    Two different reasons to skip one, and they do not apply to the same
+    callers.
+
+    *In flight* — queued or leased — always skips. A second trigger should not
+    double the queue, and nothing is gained by opening one page twice at once.
+
+    *Visited recently* skips only an unattended run. The cooloff exists so a
+    nightly sweep does not re-read the same hundred pages forever instead of
+    reaching the ones behind them. Applied to a button press it is simply
+    wrong: pressing "crawl this board" an hour after the last crawl means *do
+    it again*, and a thirty-day cooloff turned that into a button that queued
+    nothing, said nothing, and looked broken.
     """
     from app.models.browser_task import BrowserTask
 
     if not urls:
         return set()
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_retry_days())
+    in_flight = BrowserTask.status.in_(("queued", "leased"))
+    if respect_cooloff:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_retry_days())
+        recency = in_flight | (BrowserTask.created_at >= cutoff)
+    else:
+        recency = in_flight
+
     rows = (
         db.query(BrowserTask.payload["url"].astext)
         .filter(
             BrowserTask.kind == "browse_page",
             BrowserTask.payload["url"].astext.in_(urls),
-            (BrowserTask.status.in_(("queued", "leased")))
-            | (BrowserTask.created_at >= cutoff),
+            recency,
         )
         .all()
     )
@@ -455,7 +470,12 @@ def enqueue(db, urls: list[str], limit: int | None = None,
         return 0
 
     budget = _limit(limit)
-    skip = _already_queued(db, urls)
+    # A request the user is watching ignores the cooloff; the scheduled sweep
+    # keeps it. Derived from priority rather than passed separately, because
+    # "somebody is waiting on this" and "they want it now" are the same fact.
+    skip = _already_queued(
+        db, urls, respect_cooloff=priority < PRIORITY_REQUESTED,
+    )
     queued = 0
 
     for url in urls:

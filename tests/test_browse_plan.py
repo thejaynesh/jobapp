@@ -388,28 +388,32 @@ class TestRestraint:
 
         assert len(queued(db)) == 1
 
-    def test_a_page_browsed_recently_is_not_reopened(self, db):
+    def test_a_page_browsed_recently_is_not_reopened_by_the_sweep(self, db):
         # Otherwise a nightly run re-reads the same hundred postings forever
         # and never reaches the ones behind them.
+        #
+        # Only the sweep: a button press means "do it again", and applying this
+        # cooloff to one turned it into a control that queued nothing and said
+        # nothing. See `test_browse_priority`.
         make_job(db, source_job_id="4012345678", description="thin")
-        browse_plan.crawl_postings(db)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
         task = db.query(BrowserTask).one()
         task.status = "done"
         db.commit()
 
-        browse_plan.crawl_postings(db)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
         assert len(queued(db)) == 1
 
     def test_it_tries_again_after_the_cooloff(self, db, monkeypatch):
         monkeypatch.setattr(settings, "BROWSE_RETRY_DAYS", 30)
         make_job(db, source_job_id="4012345678", description="thin")
-        browse_plan.crawl_postings(db)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
         task = db.query(BrowserTask).one()
         task.status = "done"
         task.created_at = datetime.now(timezone.utc) - timedelta(days=60)
         db.commit()
 
-        browse_plan.crawl_postings(db)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
         assert len(queued(db)) == 2
 
     def test_it_can_be_turned_off(self, db, monkeypatch):
