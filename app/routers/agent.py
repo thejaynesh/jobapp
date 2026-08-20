@@ -153,16 +153,37 @@ async def lease(request: Request, db: Session = Depends(get_db)):
 
 
 def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "") -> dict:
-    from app.services import agent_events
+    from app.services import agent_events, harvest_recipes, harvest_samples
     from app.services.harvest import extract_jobs, save_harvested_jobs, source_for_url
 
     # The page it came off decides the source name. The extractor is
     # shape-based and host-agnostic, so without this every site's yield would
     # be filed under LinkedIn and none of them could be judged separately.
     source = source_for_url(source_url)
-    jobs = extract_jobs(payload, source=source)
+    host = agent_events.host_of(source_url) or ""
+
+    # A learned recipe first, the generic walker as the fallback — never the
+    # other way round. The walker is the thing that works everywhere, so a
+    # recipe may add a way to read a site and must not be able to remove one.
+    read_by = "walker"
+    jobs = []
+    recipe = harvest_recipes.active_for(db, host)
+    if recipe:
+        jobs = harvest_recipes.apply_recipe(payload, recipe, source)
+        if jobs:
+            read_by = "recipe"
+    if not jobs:
+        jobs = extract_jobs(payload, source=source)
+
     if not jobs:
         counts = {"found": 0, "inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
+        # Keep the payload. Until now it was discarded here, which left
+        # "forwarding, never finds jobs" a verdict with no evidence attached
+        # and no way to act on it short of opening DevTools by hand.
+        harvest_samples.record(
+            db, host, payload, source_url=source_url, found=0,
+            note="recipe found nothing" if recipe else "no recipe",
+        )
     else:
         counts = {"found": len(jobs), "source": source, **save_harvested_jobs(db, jobs)}
 
@@ -171,7 +192,7 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "") -> 
     # "the extension is not running" looked identical.
     agent_events.record(
         db, "harvest", url=source_url, agent_id=agent_id,
-        ok=True, summary={"source": source, **counts},
+        ok=True, summary={"source": source, "read_by": read_by, **counts},
     )
     db.commit()
     return counts

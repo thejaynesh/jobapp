@@ -11,3 +11,4 @@ from app.models.browser_task import BrowserTask
 from app.models.agent_event import AgentEvent
 from app.models.interview_report import InterviewReport
 from app.models.llm_call import LLMCall
+from app.models.harvest_recipe import HarvestRecipe, HarvestSample

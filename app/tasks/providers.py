@@ -49,17 +49,26 @@ def prune_agent_history() -> dict:
     capped by row count. `browser_tasks` rows carry the page the browser
     brought back, which is the large part, and nothing has ever pruned them —
     capped by age.
+
+    Harvest samples are capped by age too, but for a different reason: they are
+    responses to a logged-in session, kept only long enough to write a reader
+    from. Expiring them is the point rather than housekeeping.
     """
     from app.services.agent_events import prune as prune_events
     from app.services.browser_tasks import prune as prune_tasks
+    from app.services.harvest_samples import prune as prune_samples
 
     db = SessionLocal()
     try:
-        return {"events": prune_events(db), "tasks": prune_tasks(db)}
+        return {
+            "events": prune_events(db),
+            "tasks": prune_tasks(db),
+            "samples": prune_samples(db),
+        }
     except Exception as exc:
         db.rollback()
         logger.error("prune_agent_history failed: %s", exc)
-        return {"events": 0, "tasks": 0, "error": str(exc)}
+        return {"events": 0, "tasks": 0, "samples": 0, "error": str(exc)}
     finally:
         db.close()
 

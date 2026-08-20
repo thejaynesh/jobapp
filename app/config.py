@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     # for a shut laptop fills the queue with tasks that expire unread, and
     # buries whatever real backlog is behind them.
     BROWSE_AGENT_STALE_HOURS: int = 24
+
+    # --- Learned harvest recipes -------------------------------------------
+    # When the generic reader makes nothing of a payload, keep a trimmed copy so
+    # a recipe can be written from it. These are responses to a logged-in
+    # session and can carry names and account ids, so they are capped per host
+    # and expired rather than accumulated — a diagnostic, not an archive.
+    HARVEST_SAMPLES_ENABLED: bool = True
+    HARVEST_SAMPLES_PER_HOST: int = 5
+    HARVEST_SAMPLE_TTL_DAYS: int = 30
     # Greenhouse's job-seeker board — every company on the platform rather than
     # one. Login-only, so only the browser can reach it.
     #

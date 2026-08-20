@@ -204,7 +204,7 @@ def _system_context(db: Session) -> dict:
         logger.warning("runs: provider check state unavailable: %s", exc)
 
     try:
-        from app.services import browse_plan
+        from app.services import browse_plan, harvest_recipes, harvest_samples
 
         context["agent"] = {
             "queue": browser_tasks.queue_stats(db),
@@ -212,6 +212,10 @@ def _system_context(db: Session) -> dict:
             "last_agent": browser_tasks.last_agent(db),
             "configured": bool((settings.AGENT_TOKEN or "").strip()),
             "browse": browse_plan.status(db),
+            # Hosts sending payloads nobody can read yet, and what has been
+            # learned about them.
+            "unread": harvest_samples.hosts(db),
+            "recipes": harvest_recipes.listing(db, limit=10),
         }
     except Exception as exc:
         logger.warning("runs: agent status unavailable: %s", exc)
@@ -261,6 +265,44 @@ def queue_ping(request: Request, db: Session = Depends(get_db)):
         browser_tasks.enqueue(db, "ping", {"from": "runs page"})
     except Exception as exc:
         logger.error("runs: could not queue ping: %s", exc)
+    return templates.TemplateResponse(
+        "runs/_system.html", {"request": request, "system": _system_context(db)}
+    )
+
+
+@router.post("/agent/learn", response_class=HTMLResponse)
+def learn_harvest_recipe(request: Request, host: str = Form(...),
+                         db: Session = Depends(get_db)):
+    """
+    Work out how to read a host whose payloads the generic reader cannot.
+
+    The reader takes any object with a title, a company and an identifier,
+    which covers most boards untold. It cannot handle a payload that names its
+    fields unusually, and it cannot follow a reference — so a normalized
+    response, where the job points at a company stored elsewhere, comes out
+    with `urn:...` where the employer should be. That one is the dangerous
+    case: every check passes and the row is wrong.
+
+    The proposal is validated against the stored samples before it is allowed
+    to run, and the generic reader stays as the fallback either way.
+    """
+    from app.config import settings as cfg
+    from app.models.profile import Profile
+    from app.services import harvest_recipes
+    from app.services.tunables import value as tunable
+
+    profile = db.query(Profile).first()
+    profile_data = (profile.data if profile else None) or {}
+
+    try:
+        outcome = harvest_recipes.learn(
+            db, host.strip(),
+            cfg.NVIDIA_NIM_API_KEY, cfg.NVIDIA_NIM_BASE_URL,
+            tunable(profile_data, "nvidia_nim_model"),
+        )
+        logger.info("runs: learned a recipe for %s — %s", host, outcome["reason"])
+    except Exception as exc:
+        logger.error("runs: could not learn a recipe for %s: %s", host, exc)
     return templates.TemplateResponse(
         "runs/_system.html", {"request": request, "system": _system_context(db)}
     )
