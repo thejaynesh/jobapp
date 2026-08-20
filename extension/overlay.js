@@ -127,15 +127,46 @@
     parent.append(span);
   }
 
+  /**
+   * Whether this script can still reach the extension it came from.
+   *
+   * Reloading an extension does not remove the content scripts it already
+   * injected: they stay in every open tab, running, with the connection back
+   * to the extension severed. `chrome.runtime.id` is `undefined` from that
+   * moment, and any `sendMessage` throws "Extension context invalidated".
+   *
+   * That throw is synchronous, which is what makes it worth its own check.
+   * `chrome.runtime.lastError` only ever reports a *delivered* call that found
+   * no receiver — here the call never leaves, so the callback is not run and
+   * the error escapes past every handler written around the reply.
+   */
+  function connected() {
+    try {
+      return Boolean(chrome.runtime && chrome.runtime.id);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  const RELOADED = "The extension was reloaded — refresh this page to use the panel.";
+
   async function ask(path, body) {
+    if (!connected()) return { error: RELOADED };
     return await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: "overlay-api", path, body }, (reply) => {
-        if (chrome.runtime.lastError) {
-          resolve({ error: chrome.runtime.lastError.message });
-          return;
-        }
-        resolve(reply || { error: "No response from the extension." });
-      });
+      try {
+        chrome.runtime.sendMessage({ type: "overlay-api", path, body }, (reply) => {
+          if (chrome.runtime.lastError) {
+            resolve({ error: chrome.runtime.lastError.message });
+            return;
+          }
+          resolve(reply || { error: "No response from the extension." });
+        });
+      } catch (_) {
+        // Invalidated between the check above and the call. Resolving keeps
+        // this a message in the panel rather than a promise that never
+        // settles, which is what the caller is awaiting.
+        resolve({ error: RELOADED });
+      }
     });
   }
 
@@ -148,6 +179,7 @@
    * a fill that recognised nothing was previously invisible from both ends.
    */
   function note(kind, summary, ok = true) {
+    if (!connected()) return;
     try {
       chrome.runtime.sendMessage({ type: "overlay-event", kind, ok, summary });
     } catch (_) {

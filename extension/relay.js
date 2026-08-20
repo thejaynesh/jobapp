@@ -15,20 +15,56 @@
 
 const CHANNEL = "jobapp-harvest";
 
-window.addEventListener("message", (event) => {
+/**
+ * Whether this script can still reach the extension it came from.
+ *
+ * Reloading an extension leaves its already-injected content scripts running
+ * in every open tab with the connection severed. `chrome.runtime.id` becomes
+ * `undefined` at that moment and `sendMessage` throws synchronously, so
+ * `lastError` — which only reports a delivered call that found no receiver —
+ * never gets a chance to say anything.
+ *
+ * It matters more here than anywhere else in the extension: this fires once
+ * per intercepted response, so an orphaned relay throws continuously for as
+ * long as the tab stays open, on a site the user is actively browsing.
+ */
+function connected() {
+  try {
+    return Boolean(chrome.runtime && chrome.runtime.id);
+  } catch (_) {
+    return false;
+  }
+}
+
+function onMessage(event) {
   // Only messages this page sent to itself. Without this, a cross-origin frame
   // could feed the pipeline.
   if (event.source !== window) return;
   const data = event.data;
   if (!data || data.channel !== CHANNEL || data.payload === undefined) return;
 
-  chrome.runtime.sendMessage(
-    { type: "harvest", payload: data.payload, sourceUrl: data.sourceUrl },
-    () => {
-      // The service worker may be asleep or mid-restart. Losing one payload is
-      // not worth surfacing — the next page view offers more, and there is
-      // nothing the user could do about it anyway.
-      void chrome.runtime.lastError;
-    },
-  );
-});
+  // Orphaned by a reload. Stop listening rather than fail per response: this
+  // tab's harvest is over until the page is refreshed, and the interceptor
+  // will keep offering payloads for as long as it is open.
+  if (!connected()) {
+    window.removeEventListener("message", onMessage);
+    return;
+  }
+
+  try {
+    chrome.runtime.sendMessage(
+      { type: "harvest", payload: data.payload, sourceUrl: data.sourceUrl },
+      () => {
+        // The service worker may be asleep or mid-restart. Losing one payload
+        // is not worth surfacing — the next page view offers more, and there
+        // is nothing the user could do about it anyway.
+        void chrome.runtime.lastError;
+      },
+    );
+  } catch (_) {
+    // Invalidated between the check and the call.
+    window.removeEventListener("message", onMessage);
+  }
+}
+
+window.addEventListener("message", onMessage);
