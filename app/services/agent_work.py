@@ -378,6 +378,14 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
             # the page or gave up on the first stall — and the scroll is the
             # pagination there, so a small number means a shallow crawl.
             "scrolled_px": int(result.get("scrolled_px") or 0),
+            # How many times new content actually arrived. The honest measure
+            # of whether the scroll worked: pixels can move on a page that
+            # loads nothing, and on an infinite-scroll board one batch means
+            # the crawl saw the first screen and stopped.
+            "batches": int(result.get("batches") or 0),
+            # Which element got scrolled, so a wrong guess about where the
+            # list lives is diagnosable instead of invisible.
+            "scroll_target": str(result.get("scroll_target") or "")[:80],
         },
     )
     db.commit()

@@ -213,52 +213,89 @@ async function visitInTab(url, settleMs, passes) {
       // scrolling board this is the only measure of whether the visit went
       // deep or gave up on the first stall.
       let scrolled = 0;
+      // How many times new content arrived, and which element was scrolled.
+      // The batch count is the honest measure of whether the scroll worked;
+      // pixels can move on a page that loads nothing.
+      let batches = 0;
+      let scrollTargetSeen = "";
       try {
         const [injected] = await chrome.scripting.executeScript({
           target: { tabId },
           args: [passes, SCROLL_BUDGET_MS],
           func: async (maxPasses, budgetMs) => {
-            // Step down the page rather than jumping to the bottom: a lazy
-            // list loads a batch per screen, and one jump asks for one batch.
-            //
             // For an infinitely scrolling board this loop *is* the pagination.
             // There is no page-two URL to queue, so the only way to reach the
             // hundredth result is to keep asking — and each batch it pulls in
             // is another API response the interceptor reads on the way past.
             //
-            // Waiting for the page to actually grow, rather than for a fixed
-            // interval, is what makes deep scrolling work. A fixed pause is
-            // either longer than the fetch needs (wasting most of the budget)
-            // or shorter (scrolling past content that has not arrived, which
-            // reads as "the page stopped growing" and ends the loop early).
-            const step = Math.round(window.innerHeight * 0.9);
-            const deadline = Date.now() + budgetMs;
-            const height = () => (document.body ? document.body.scrollHeight : 0);
+            // Two things here were wrong in the first version, and both made a
+            // deep crawl come back with one batch and close in three seconds.
 
-            let previous = height();
+            // 1. It scrolled the *window*. These apps routinely put results in
+            //    an inner overflow container inside a fixed-height layout, and
+            //    then the window has nothing to scroll: scrollTo does nothing,
+            //    no fetch is triggered, and the loop concludes the list ended.
+            //    So find the element that actually scrolls, and re-find it each
+            //    pass because the layout moves as content arrives.
+            function scrollTarget() {
+              const doc = document.scrollingElement || document.documentElement;
+              if (doc && doc.scrollHeight > doc.clientHeight + 200) return doc;
+              let best = doc;
+              let bestArea = 0;
+              for (const el of document.querySelectorAll("div,main,section,ul,ol")) {
+                if (el.scrollHeight <= el.clientHeight + 200) continue;
+                const style = getComputedStyle(el);
+                if (!/(auto|scroll)/.test(style.overflowY)) continue;
+                const area = el.clientHeight * el.clientWidth;
+                if (area > bestArea) { bestArea = area; best = el; }
+              }
+              return best;
+            }
+
+            // 2. It measured progress by document height. A virtualized list
+            //    recycles its rows, so the height never changes however much
+            //    you load — which reads as "stopped growing" on the first pass.
+            //    Counting nodes and links catches a batch rendering whether or
+            //    not the page got taller.
+            const signal = () =>
+              document.getElementsByTagName("*").length +
+              document.querySelectorAll("a[href]").length;
+
+            const deadline = Date.now() + budgetMs;
+            let previous = signal();
+            let reached = 0;
+            let batches = 0;
             let stalls = 0;
+            let target = scrollTarget();
 
             for (let n = 0; n < maxPasses && Date.now() < deadline; n += 1) {
-              window.scrollTo(0, height());
+              target = scrollTarget();
+              try {
+                target.scrollTop = target.scrollHeight;
+              } catch (_) { /* not scrollable after all */ }
+              // The window too, in case the container guess was wrong.
+              window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
+              reached = Math.max(reached, target.scrollTop || window.scrollY || 0);
 
-              // Up to a second and a half for the next batch to land, checked
-              // often so a fast board is not held up by a slow board's budget.
+              // Two seconds for the batch to land, checked often so a fast
+              // board is not held to a slow board's pace.
               let grew = false;
-              for (let waited = 0; waited < 1500; waited += 150) {
-                await new Promise((r) => setTimeout(r, 150));
-                if (height() > previous) { grew = true; break; }
+              for (let waited = 0; waited < 2000; waited += 200) {
+                await new Promise((r) => setTimeout(r, 200));
+                if (signal() > previous) { grew = true; break; }
               }
 
               if (grew) {
-                previous = height();
+                previous = signal();
+                batches += 1;
                 stalls = 0;
                 continue;
               }
-              // Two stalls rather than one: these lists routinely pause on a
-              // slow request and then carry on, and giving up on the first
-              // quiet moment is how a deep scroll turns into a shallow one.
+              // Three stalls rather than one: these lists pause on a slow
+              // request and then carry on, and giving up on the first quiet
+              // moment is how a deep scroll turns into a shallow one.
               stalls += 1;
-              if (stalls >= 2) break;
+              if (stalls >= 3) break;
             }
 
             const text = (document.body ? document.body.innerText : "").slice(0, 4000);
@@ -267,13 +304,23 @@ async function visitInTab(url, settleMs, passes) {
               // A login wall renders instead of the posting, so the harvest
               // finds nothing and looks identical to a reader that broke.
               wall: /sign in|join now to see|log in to continue/i.test(text),
-              scrolled: previous,
+              scrolled: reached,
+              // How many times new content actually arrived. This is the
+              // number that says whether the scroll worked: a deep crawl that
+              // reports one batch did not scroll, whatever the pixels say.
+              batches: batches,
+              // Which element was scrolled, so a wrong guess is diagnosable
+              // rather than invisible.
+              target: (target && target.tagName ? target.tagName : "?") +
+                      "." + String((target && target.className) || "").slice(0, 40),
             };
           },
         });
         title = (injected && injected.result && injected.result.title) || "";
         signed_in = !(injected && injected.result && injected.result.wall);
         scrolled = (injected && injected.result && injected.result.scrolled) || 0;
+        batches = (injected && injected.result && injected.result.batches) || 0;
+        scrollTargetSeen = (injected && injected.result && injected.result.target) || "";
       } catch (_) {
         // Injection refused. The visit still happened, which is the part that
         // matters — the interceptor runs whether or not this could look.
@@ -282,7 +329,11 @@ async function visitInTab(url, settleMs, passes) {
       await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
 
       const tab = await chrome.tabs.get(tabId).catch(() => null);
-      return { final_url: (tab && tab.url) || url, signed_in, title, scrolled };
+      return {
+        final_url: (tab && tab.url) || url,
+        signed_in, title, scrolled, batches,
+        scroll_target: scrollTargetSeen,
+      };
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
     }
@@ -494,6 +545,8 @@ const HANDLERS = {
     return {
       final_url: visited.final_url,
       scrolled_px: visited.scrolled,
+      batches: visited.batches,
+      scroll_target: visited.scroll_target,
       // Whether the visit looked like a real page rather than a login wall or
       // a challenge. The server cannot tell from a harvest that found nothing.
       signed_in: visited.signed_in,

@@ -391,10 +391,21 @@
                   {{ visit.host }}
                   {% if visit.purpose %}<span class="text-gray-400">{{ visit.purpose }}</span>{% endif %}
                 </td>
-                <td class="py-0.5 text-right text-gray-400 whitespace-nowrap">
-                  {# The measure of whether an infinite-scroll board was walked
-                     or gave up on the first stall. #}
-                  {% if visit.scrolled_px %}{{ "{:,}".format(visit.scrolled_px) }}px{% endif %}
+                <td class="py-0.5 text-right whitespace-nowrap"
+                    title="{{ visit.scroll_target }}">
+                  {# Batches, not pixels. Pixels move on a page that loads
+                     nothing; a batch means content actually arrived. On an
+                     infinite-scroll board one batch is a crawl that saw the
+                     first screen and stopped. #}
+                  {% if visit.batches %}
+                  <span class="{% if visit.batches > 1 %}text-gray-500{% else %}text-amber-600{% endif %}">
+                    {{ visit.batches }} batch{{ '' if visit.batches == 1 else 'es' }}
+                  </span>
+                  {% elif visit.scrolled_px %}
+                  <span class="text-amber-600" title="Scrolled but nothing new loaded">
+                    no batches
+                  </span>
+                  {% endif %}
                 </td>
                 <td class="py-0.5 pl-2 text-right whitespace-nowrap">
                   {% if visit.ok %}

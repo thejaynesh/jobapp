@@ -707,6 +707,8 @@ def recent_visits(db, limit: int = 12) -> list[dict]:
             # stall — the only thing that says an infinite-scroll board was
             # actually walked.
             "scrolled_px": (row.summary or {}).get("scrolled_px") or 0,
+            "batches": (row.summary or {}).get("batches") or 0,
+            "scroll_target": (row.summary or {}).get("scroll_target") or "",
         }
         for row in rows
     ]
