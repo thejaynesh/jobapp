@@ -419,13 +419,18 @@ class TestRestraint:
         assert browse_plan.crawl_postings(db)["queued"] == 0
         assert queued(db) == []
 
-    def test_browsing_never_jumps_the_queue(self, db):
-        # Link resolution and enrichment fetches answer a question something is
-        # waiting on. This is a background sweep.
+    def test_only_the_unattended_sweep_goes_to_the_back(self, db):
+        # This replaces a test that asserted browsing *never* jumps the queue,
+        # on the grounds that link resolution and enrichment answer a question
+        # something is waiting on while a crawl is a background sweep. Half
+        # right: it is true of the scheduled pass and false of a button press,
+        # and treating them the same put an explicit request behind hundreds of
+        # background pages at twenty seconds each.
         make_job(db, description="thin")
-        browse_plan.crawl_postings(db)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
 
-        assert db.query(BrowserTask).one().priority == 0
+        assert db.query(BrowserTask).one().priority == browse_plan.PRIORITY_SWEEP
+        assert browse_plan.PRIORITY_SWEEP < browse_plan.PRIORITY_ENRICHMENT
 
 
 class TestStatus:
