@@ -373,6 +373,11 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
             "purpose": payload.get("purpose") or "harvest",
             "signed_in": bool(signed_in),
             "title": str(result.get("title") or "")[:200],
+            # How far down the list the scroll got. On a board that scrolls
+            # infinitely this is the only measure of whether the visit walked
+            # the page or gave up on the first stall — and the scroll is the
+            # pagination there, so a small number means a shallow crawl.
+            "scrolled_px": int(result.get("scrolled_px") or 0),
         },
     )
     db.commit()

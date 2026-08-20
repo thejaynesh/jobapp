@@ -388,6 +388,17 @@ def _posting_url(source_job_id: str | None, url: str | None) -> str:
 # Queueing it
 # ---------------------------------------------------------------------------
 
+# Where a browse task sits in the queue. One scheme in one place, because the
+# numbers only mean anything relative to each other — and they were not: a
+# crawl the user asked for went in at 0 while enrichment's own browser work
+# went in at 2, so an explicit request queued behind up to five hundred
+# background pages at twenty seconds each. Pressing a button and seeing
+# nothing happen for three hours is indistinguishable from a broken feature.
+PRIORITY_REQUESTED = 9   # a person pressed a button and is watching
+PRIORITY_ENRICHMENT = 2  # a job is waiting on this description (set elsewhere)
+PRIORITY_SWEEP = 0       # the scheduled top-up, worth doing eventually
+
+
 def _scroll_passes(url: str) -> int:
     """
     How hard to scroll this URL's page.
@@ -430,13 +441,15 @@ def _already_queued(db, urls: list[str]) -> set[str]:
 
 
 def enqueue(db, urls: list[str], limit: int | None = None,
-            purpose: str = "harvest") -> int:
+            purpose: str = "harvest",
+            priority: int = PRIORITY_SWEEP) -> int:
     """
-    Turn URLs into browse tasks. Returns how many were queued.
+    Turn browse URLs into tasks. Returns how many were queued.
 
-    `priority` is left at zero so this never jumps ahead of link resolution or
-    an enrichment fetch: those answer a question something is waiting on, and
-    this is a background sweep that is worth doing eventually.
+    `priority` is the caller saying whether anyone is waiting. A scheduled
+    sweep is worth doing eventually and belongs behind everything; a crawl
+    somebody just asked for belongs in front, because the queue is never empty
+    and "eventually" in a full queue is hours.
     """
     if not enabled() or not urls:
         return 0
@@ -465,6 +478,7 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 # from a crawl, a re-visit, or the paste box.
                 "scroll_passes": _scroll_passes(url),
             },
+            priority=priority,
         )
         queued += 1
 
@@ -474,7 +488,7 @@ def enqueue(db, urls: list[str], limit: int | None = None,
 
 
 def crawl_searches(db, profile: dict | None, limit: int | None = None,
-                   board: str = "") -> dict:
+                   board: str = "", priority: int = PRIORITY_REQUESTED) -> dict:
     """
     Queue the searches. Finds postings that are not stored at all.
 
@@ -489,11 +503,13 @@ def crawl_searches(db, profile: dict | None, limit: int | None = None,
         "kind": "searches",
         "board": board or "all",
         "candidates": len(urls),
-        "queued": enqueue(db, urls, limit=limit, purpose="search"),
+        "queued": enqueue(db, urls, limit=limit, purpose="search",
+                          priority=priority),
     }
 
 
-def crawl_urls(db, raw: str, limit: int | None = None) -> dict:
+def crawl_urls(db, raw: str, limit: int | None = None,
+               priority: int = PRIORITY_REQUESTED) -> dict:
     """
     Queue whatever the user pasted in.
 
@@ -520,17 +536,20 @@ def crawl_urls(db, raw: str, limit: int | None = None) -> dict:
     return {
         "kind": "pasted",
         "candidates": len(urls),
-        "queued": enqueue(db, urls, limit=limit, purpose="pasted"),
+        "queued": enqueue(db, urls, limit=limit, purpose="pasted",
+                          priority=priority),
     }
 
 
-def crawl_postings(db, limit: int | None = None) -> dict:
+def crawl_postings(db, limit: int | None = None,
+                   priority: int = PRIORITY_REQUESTED) -> dict:
     """Queue the postings we hold but have no description for."""
     urls = posting_urls(db, limit=limit)
     return {
         "kind": "postings",
         "candidates": len(urls),
-        "queued": enqueue(db, urls, limit=limit, purpose="posting"),
+        "queued": enqueue(db, urls, limit=limit, purpose="posting",
+                          priority=priority),
     }
 
 
@@ -602,11 +621,75 @@ def scheduled_crawl(db, profile: dict | None) -> dict:
     if waiting > floor:
         return {"queued": 0, "skipped": "queue still draining", "waiting": waiting}
 
-    outcome = crawl_postings(db)
+    # Behind everything, including a crawl the user asked for an hour ago. A
+    # timer has nobody waiting on it.
+    outcome = crawl_postings(db, priority=PRIORITY_SWEEP)
     if outcome["queued"]:
         return {**outcome, "skipped": None}
 
-    return {**crawl_searches(db, profile), "skipped": None}
+    return {**crawl_searches(db, profile, priority=PRIORITY_SWEEP),
+            "skipped": None}
+
+
+def drop_queued(db, purpose: str = "") -> int:
+    """
+    Throw away browse work that has not started. Returns how many went.
+
+    Worth having because the queue is a plan, not a promise. Sixty postings
+    queued this morning are sixty pages of a backlog that may no longer be what
+    you want the browser spending its evening on, and until now the only way to
+    change your mind was to wait it out — at twenty seconds a page.
+
+    Leased tasks are left alone: something is mid-visit, and cancelling the row
+    would not close the window.
+    """
+    from app.models.browser_task import BrowserTask
+
+    query = db.query(BrowserTask).filter(
+        BrowserTask.kind == "browse_page", BrowserTask.status == "queued",
+    )
+    if purpose:
+        query = query.filter(BrowserTask.payload["purpose"].astext == purpose)
+
+    dropped = query.delete(synchronize_session=False)
+    db.commit()
+    if dropped:
+        logger.info("browse_plan: dropped %d queued page(s)", dropped)
+    return dropped
+
+
+def recent_visits(db, limit: int = 12) -> list[dict]:
+    """
+    Pages the browser has actually opened, newest first.
+
+    The gap this closes: a crawl was queued, drained and finished with nothing
+    to show for it but a number on a panel. "Did my Greenhouse crawl run?" had
+    no answer — not because the information was missing, but because nothing
+    displayed it.
+    """
+    from app.models.agent_event import AgentEvent
+
+    rows = (
+        db.query(AgentEvent)
+        .filter(AgentEvent.kind == "browse")
+        .order_by(AgentEvent.created_at.desc())
+        .limit(max(1, limit))
+        .all()
+    )
+    return [
+        {
+            "host": row.host or "unknown",
+            "at": row.created_at,
+            "ok": bool(row.ok),
+            "purpose": (row.summary or {}).get("purpose") or "",
+            "title": (row.summary or {}).get("title") or "",
+            # The measure of whether a visit went deep or gave up on the first
+            # stall — the only thing that says an infinite-scroll board was
+            # actually walked.
+            "scrolled_px": (row.summary or {}).get("scrolled_px") or 0,
+        }
+        for row in rows
+    ]
 
 
 def status(db) -> dict:

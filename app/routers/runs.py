@@ -212,6 +212,10 @@ def _system_context(db: Session) -> dict:
             "last_agent": browser_tasks.last_agent(db),
             "configured": bool((settings.AGENT_TOKEN or "").strip()),
             "browse": browse_plan.status(db),
+            # What the browser has actually opened. Without this a crawl was
+            # queued, drained and finished with nothing to show for it, and
+            # "did it run?" had no answer.
+            "visits": browse_plan.recent_visits(db, limit=10),
             # Hosts sending payloads nobody can read yet, and what has been
             # learned about them.
             "unread": harvest_samples.hosts(db),
@@ -343,6 +347,13 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
     from app.services import browse_plan
 
     try:
+        if plan == "clear":
+            dropped = browse_plan.drop_queued(db)
+            logger.info("runs: dropped %d queued page(s) by hand", dropped)
+            return templates.TemplateResponse(
+                "runs/_system.html",
+                {"request": request, "system": _system_context(db)},
+            )
         if plan == "urls":
             outcome = browse_plan.crawl_urls(db, urls)
         elif plan == "searches":

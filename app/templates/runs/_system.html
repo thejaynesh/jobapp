@@ -296,6 +296,16 @@
             <span class="font-medium text-gray-700">{{ "{:,}".format(browse.waiting) }}</span>
             page{{ '' if browse.waiting == 1 else 's' }} queued
             {% if browse.eta_minutes %}&middot; about {{ browse.eta_minutes }} min to work through{% endif %}.
+            {# A queue is a plan, not a promise. Sixty pages queued this morning
+               may not be what the browser should spend its evening on, and
+               waiting it out costs twenty seconds a page. #}
+            <button hx-post="/runs/agent/browse"
+                    hx-vals='{"plan": "clear"}'
+                    hx-target="#system-panel" hx-swap="outerHTML"
+                    hx-confirm="Drop the pages that haven't started yet?"
+                    class="text-gray-400 hover:text-red-600 underline ml-1">
+              clear
+            </button>
           </p>
           {% else %}
           <p class="text-[11px] text-gray-500 mb-2">
@@ -354,6 +364,44 @@
               </button>
             </form>
           </details>
+        </div>
+        {% endif %}
+
+        {# Pages the browser actually opened. Without this a crawl was queued,
+           drained and finished with nothing to show but a number, and "did my
+           Greenhouse crawl run?" had no answer anywhere. #}
+        {% if system.agent.visits %}
+        <div class="mt-3 pt-3 border-t border-gray-100">
+          <p class="text-[11px] font-medium text-gray-600 mb-1">Pages opened</p>
+          <table class="w-full text-[11px]">
+            <tbody>
+              {% for visit in system.agent.visits %}
+              <tr class="border-t border-gray-100">
+                <td class="py-0.5 text-gray-600 truncate">
+                  {{ visit.host }}
+                  {% if visit.purpose %}<span class="text-gray-400">{{ visit.purpose }}</span>{% endif %}
+                </td>
+                <td class="py-0.5 text-right text-gray-400 whitespace-nowrap">
+                  {# The measure of whether an infinite-scroll board was walked
+                     or gave up on the first stall. #}
+                  {% if visit.scrolled_px %}{{ "{:,}".format(visit.scrolled_px) }}px{% endif %}
+                </td>
+                <td class="py-0.5 pl-2 text-right whitespace-nowrap">
+                  {% if visit.ok %}
+                  <span class="text-green-600">opened</span>
+                  {% else %}
+                  <span class="text-red-600" title="The page rendered a sign-in wall rather than the listing">
+                    signed out
+                  </span>
+                  {% endif %}
+                </td>
+                <td class="py-0.5 pl-2 text-right text-gray-400 whitespace-nowrap">
+                  {{ visit.at | when("%H:%M") }}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
         {% endif %}
 
