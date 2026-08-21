@@ -160,3 +160,47 @@ export const HARVEST_SITES = [
     matches: ["https://www.google.com/about/careers/*"],
   },
 ];
+
+/**
+ * Whether a Chrome match pattern covers a URL.
+ *
+ * Only the shapes this file actually uses: an exact host, a `*.` host
+ * wildcard, and a trailing path wildcard. Chrome applies the real patterns to
+ * content scripts and permissions; this is for deciding, in our own code,
+ * which site a URL belongs to.
+ */
+function patternMatches(pattern, url) {
+  const parts = /^(\*|https?):\/\/([^/]+)(\/.*)$/.exec(pattern);
+  if (!parts) return false;
+  const [, scheme, hostPart, pathPart] = parts;
+
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (scheme !== "*" && parsed.protocol !== `${scheme}:`) return false;
+
+  if (hostPart.startsWith("*.")) {
+    const base = hostPart.slice(2);
+    // Chrome's `*.example.com` covers the bare domain too.
+    if (parsed.hostname !== base && !parsed.hostname.endsWith(`.${base}`)) {
+      return false;
+    }
+  } else if (parsed.hostname !== hostPart) {
+    return false;
+  }
+
+  const prefix = pathPart.endsWith("*") ? pathPart.slice(0, -1) : pathPart;
+  return parsed.pathname.startsWith(prefix);
+}
+
+/** The site a URL belongs to, or null if it is not one we know. */
+export function siteForUrl(url) {
+  return (
+    HARVEST_SITES.find((site) =>
+      site.matches.some((pattern) => patternMatches(pattern, url)),
+    ) || null
+  );
+}

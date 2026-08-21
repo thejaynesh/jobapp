@@ -347,6 +347,11 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
     from app.services import browse_plan
 
     try:
+        # Any browse button is a good moment to clear out pages for a host
+        # paused since they were queued, so setting the variable is the only
+        # step the pause needs.
+        browse_plan.drop_paused(db)
+
         if plan == "clear":
             dropped = browse_plan.drop_queued(db)
             logger.info("runs: dropped %d queued page(s) by hand", dropped)
@@ -371,10 +376,21 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
         # nothing is indistinguishable from a broken one — which is exactly how
         # it was read. Zero has three different meanings and the user cannot
         # guess which.
+        paused = browse_plan.paused_hosts()
         if outcome["queued"]:
             flash = f"Queued {outcome['queued']} page(s) to open next."
         elif not outcome["candidates"]:
             flash = "Nothing to crawl — no URLs for that plan."
+        elif paused:
+            # A paused host is the one reason for a zero that looks identical to
+            # a broken button but isn't, so it gets named. Without this the
+            # message claimed the pages were "already waiting", which would be
+            # a flat lie about work that will never run.
+            flash = (
+                f"Queued nothing — {outcome['candidates']} page(s) for that "
+                f"plan are either already waiting or on a paused host "
+                f"({', '.join(paused)})."
+            )
         else:
             flash = (
                 f"All {outcome['candidates']} page(s) for that plan are already "

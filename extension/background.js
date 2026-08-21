@@ -23,7 +23,7 @@
 
 // The sites harvesting can read. Shared with the options page rather than
 // written out in both — see sites.js for how to add one.
-import { HARVEST_SITES } from "./sites.js";
+import { HARVEST_SITES, siteForUrl } from "./sites.js";
 
 const ALARM_NAME = "jobapp-poll";
 const DEFAULTS = {
@@ -527,6 +527,25 @@ const HANDLERS = {
       throw new Error(
         "Opening pages in a hidden window is turned off in the extension's options.",
       );
+    }
+
+    // Unticking a site is meant to mean "leave this site alone", and until now
+    // it only stopped the *reading*: the pages kept being opened and simply
+    // harvested nothing. That is the worst of both — same traffic through the
+    // same logged-in session, no data for it — and it matters most in exactly
+    // the case the checkbox exists for, which is a site that has warned you
+    // about the volume.
+    const site = siteForUrl(url);
+    if (site) {
+      const stored = await chrome.storage.local.get({
+        [site.storageKey]: false,
+      });
+      if (!stored[site.storageKey]) {
+        throw new Error(
+          `${site.label} is turned off in the extension's options, so this ` +
+            `page was not opened.`,
+        );
+      }
     }
 
     const settleMs = clampSeconds(payload.settle_seconds, 6, 1, 60) * 1000;

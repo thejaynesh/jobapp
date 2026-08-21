@@ -234,6 +234,40 @@ def _retry_days() -> int:
     return max(1, int(getattr(settings, "BROWSE_RETRY_DAYS", 30)))
 
 
+def paused_hosts() -> tuple[str, ...]:
+    """
+    Hosts nothing may be queued for, from `BROWSE_PAUSED_HOSTS`.
+
+    This exists because of a real warning from LinkedIn: driven browsing opens
+    up to `BROWSE_MAX_QUEUED` pages a run through a logged-in session, on a
+    schedule, and that is a volume of access no person produces. When a site
+    says it has noticed, the answer needed is "stop touching that one, keep the
+    rest" — and it is needed in the next minute, not the next deploy.
+
+    Deliberately a host list rather than a board list. A board key only covers
+    pages a crawl planned; enrichment queues postings by URL, and the point of
+    a pause is that *nothing* goes there.
+    """
+    raw = str(getattr(settings, "BROWSE_PAUSED_HOSTS", "") or "")
+    hosts = []
+    for part in raw.replace("\n", ",").split(","):
+        host = part.strip().lower().lstrip(".")
+        if host:
+            hosts.append(host)
+    return tuple(hosts)
+
+
+def is_paused(url: str | None) -> bool:
+    """Whether this URL is on a host that has been paused."""
+    host = _host_of(url)
+    if not host:
+        return False
+    return any(
+        host == paused or host.endswith(f".{paused}")
+        for paused in paused_hosts()
+    )
+
+
 # ---------------------------------------------------------------------------
 # What to open
 # ---------------------------------------------------------------------------
@@ -483,6 +517,12 @@ def enqueue(db, urls: list[str], limit: int | None = None,
             break
         if url in skip:
             continue
+        # Checked here rather than in each planner because this is the one
+        # place every browse task is born — a crawl, a re-visit, a pasted URL
+        # and an enrichment top-up all arrive through it. A pause enforced
+        # anywhere else is a pause with a way around it.
+        if is_paused(url):
+            continue
         browser_tasks.enqueue(
             db, "browse_page",
             {
@@ -636,6 +676,11 @@ def scheduled_crawl(db, profile: dict | None) -> dict:
         logger.info("browse_plan: no agent has polled lately; queueing nothing")
         return {"queued": 0, "skipped": "no agent"}
 
+    # Before counting the queue, not after: pages for a host paused since they
+    # were queued are not work, and leaving them in the count would hold the
+    # top-up off on the strength of a backlog that must never run.
+    drop_paused(db)
+
     waiting = status(db)["waiting"]
     floor = max(0, int(getattr(settings, "BROWSE_TOPUP_BELOW", 10)))
     if waiting > floor:
@@ -675,6 +720,45 @@ def drop_queued(db, purpose: str = "") -> int:
     db.commit()
     if dropped:
         logger.info("browse_plan: dropped %d queued page(s)", dropped)
+    return dropped
+
+
+def drop_paused(db) -> int:
+    """
+    Throw away queued pages for hosts that are now paused. Returns how many.
+
+    Pausing a host stops new work being queued, but the queue is a plan made
+    earlier — and after a site has warned you, sixty of its pages already
+    waiting is the whole problem, not a detail. Runs on startup and whenever
+    the pause list is read on the panel, so setting the variable is the only
+    step.
+
+    Leased rows are left alone for the same reason `drop_queued` leaves them:
+    something is mid-visit and deleting the row would not close the window.
+    """
+    from app.models.browser_task import BrowserTask
+
+    hosts = paused_hosts()
+    if not hosts:
+        return 0
+
+    rows = (
+        db.query(BrowserTask)
+        .filter(BrowserTask.kind == "browse_page",
+                BrowserTask.status == "queued")
+        .all()
+    )
+    dropped = 0
+    for row in rows:
+        if is_paused((row.payload or {}).get("url")):
+            db.delete(row)
+            dropped += 1
+    if dropped:
+        db.commit()
+        logger.info(
+            "browse_plan: dropped %d queued page(s) for paused host(s) %s",
+            dropped, ", ".join(hosts),
+        )
     return dropped
 
 
@@ -728,12 +812,18 @@ def status(db) -> dict:
     )
     gap = int(getattr(settings, "BROWSE_GAP_SECONDS", 20))
     settle = int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6))
+    paused = paused_hosts()
     return {
         "enabled": enabled(),
         "waiting": waiting,
+        "paused": list(paused),
         "boards": [
             {"key": board.key, "label": board.label,
-             "searchable": bool(board.search)}
+             "searchable": bool(board.search),
+             # Shown struck through rather than hidden. A board that vanished
+             # from the panel reads as a bug; one labelled paused reads as a
+             # decision, which it was.
+             "paused": is_paused(f"https://{board.host}/")}
             for board in BOARDS
         ],
         "gap_seconds": gap,

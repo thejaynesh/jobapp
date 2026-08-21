@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     # one that takes four minutes and looks like a script is the failure mode,
     # and the cost of getting it wrong is the account rather than the run.
     BROWSE_ENABLED: bool = True
+    # Hosts the browser must not open, comma-separated. The switch to reach for
+    # when a site says it has noticed the traffic: it stops new pages being
+    # queued, drops the ones already waiting, and leaves every other board
+    # running. Subdomains are covered, so `linkedin.com` is enough.
+    #
+    # Harvesting is unaffected and that separation is the point — reading job
+    # data out of pages you open yourself makes no extra requests and is not
+    # what gets an account flagged. Opening sixty pages a run through a
+    # logged-in session is.
+    BROWSE_PAUSED_HOSTS: str = ""
     # Pages per triggered run. Roughly an hour of browsing at the pace below.
     BROWSE_MAX_QUEUED: int = 60
     # Seconds to leave a page open after it finishes loading. LinkedIn fetches

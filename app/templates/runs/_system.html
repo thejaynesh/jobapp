@@ -341,9 +341,26 @@
             </button>
           </div>
 
+          {% if browse.paused %}
+          {# Named, not hidden. A board that silently stopped being crawled is
+             the same symptom as a broken crawler, and after a site has warned
+             you about the traffic the one thing worth being sure of is that
+             the pause is really on. #}
+          <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 mt-1">
+            Paused: {{ browse.paused|join(', ') }}. No pages are opened there.
+            Harvesting still reads them on tabs you open yourself.
+          </p>
+          {% endif %}
+
           {% if browse.boards %}
           <div class="flex flex-wrap gap-1 mt-1">
             {% for board in browse.boards %}
+            {% if board.paused %}
+            <span title="Paused in BROWSE_PAUSED_HOSTS — nothing is queued for this board"
+                  class="text-[11px] border border-amber-200 bg-amber-50 text-amber-700 rounded px-1.5 py-0.5 line-through decoration-amber-400">
+              {{ board.label }}
+            </span>
+            {% else %}
             <button hx-post="/runs/agent/browse"
                     hx-vals='{"plan": "searches", "board": "{{ board.key }}"}'
                     hx-target="#system-panel" hx-swap="outerHTML"
@@ -351,6 +368,7 @@
                     class="text-[11px] border border-gray-200 text-gray-500 rounded px-1.5 py-0.5 hover:bg-gray-50">
               {{ board.label }}
             </button>
+            {% endif %}
             {% endfor %}
           </div>
           {% endif %}

@@ -166,6 +166,67 @@ The extension must have **"Open blocked pages in a hidden window"** ticked —
 that toggle is what governs opening windows at all, so browsing is not claimed
 without it.
 
+## When a site says it has noticed you
+
+You may get a mail or an interstitial like this one, which is real and worth
+taking at face value:
+
+> We noticed some unusual activity on your account. Over time, our systems have
+> shown your account has accessed a high volume of LinkedIn profile data. This
+> often happens because of a third-party tool or browser extension...
+
+That is an accurate description of driven browsing, and the cost of ignoring it
+is the account rather than the run.
+
+**Pause that host and leave the rest running.** Set `BROWSE_PAUSED_HOSTS` and
+restart:
+
+```
+BROWSE_PAUSED_HOSTS=linkedin.com
+```
+
+Subdomains are covered, so `linkedin.com` is enough for `uk.linkedin.com`.
+Several hosts are comma-separated. This stops new pages being queued, drops the
+ones already waiting, and shows the board struck through on `/runs` so the
+pause is visible rather than looking like a crawler that broke.
+
+If you need to stop it in the next thirty seconds and have no shell, untick
+**"Open blocked pages in a hidden window"** in the extension's options. That
+stops every site rather than one, which is the right trade in a hurry.
+
+### Harvesting is not the thing that got flagged
+
+Worth separating, because the safe half of this feature is easy to throw away
+along with the risky half:
+
+| | What it does | Risk |
+| --- | --- | --- |
+| **Harvesting** | Reads job data out of the responses pages already received, on tabs you opened yourself | Makes no extra requests. There is no traffic to notice. |
+| **Driven browsing** | Opens pages on its own — up to `BROWSE_MAX_QUEUED` a run, on a schedule, through your logged-in session | This is the volume a site measures. |
+
+So a paused host is still harvested when you browse it yourself. Only the
+opening stops. `BROWSE_PAUSED_HOSTS` does not touch `HARVEST_SOURCES` and the
+per-site checkboxes do not touch each other.
+
+### Turning a site's own checkbox off
+
+Unticking a site in the extension's options does both halves for that site: it
+revokes the host permission and unregisters the reader, *and* the extension now
+refuses to open pages there even if the server queues some.
+
+That second half was missing until this warning arrived. Unticking a site
+stopped the reading and left the opening running — the same traffic through the
+same session with nothing to show for it, which is the worst of both and was
+worst in exactly the case the checkbox exists for.
+
+### If you turn it back on
+
+Come back gently. `BROWSE_SEARCH_PAGES` and `BROWSE_MAX_QUEUED` multiply — five
+pages across six roles and two locations is sixty visits, which is a full run
+every time the schedule fires. Halving both, or dropping the host from the
+scheduled sweep and only crawling it by hand, is a smaller footprint than the
+defaults.
+
 ## When a site stops working
 
 The one failure mode this design still has: a site renames *every* field at

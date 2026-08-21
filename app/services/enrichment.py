@@ -896,7 +896,8 @@ def enrich_jobs(
         stats.via[found.method] = stats.via.get(found.method, 0) + 1
 
     if queue_browser and for_browser:
-        stats.queued_browser = queue_for_browser(db, for_browser)
+        queued_jobs, paused_jobs = plan_browser_queue(db, for_browser)
+        stats.queued_browser = len(queued_jobs)
         # Stamped for exactly the reason the server-tier jobs above are, and
         # missing here until it produced sixteen passes a minute that each
         # queued the same two hundred URLs. Handing a job to the browser *is*
@@ -907,7 +908,16 @@ def enrich_jobs(
         # Only the ones actually queued. A job skipped because the browser
         # queue was full has not been attempted, and marking it would put it to
         # sleep for a week over a moment of congestion.
-        for job in for_browser[:stats.queued_browser]:
+        for job in queued_jobs:
+            job.enrichment_attempted_at = attempted_at
+        # A paused host is the other case, and it needs the stamp for the same
+        # reason with the opposite cause: congestion clears in an hour, a pause
+        # is a decision. These jobs are browser-only and their host is off, so
+        # nothing in this pass or the next fifty can improve them — and left
+        # unstamped they would sit at the head of the ordering and starve the
+        # hosts that *are* running, which is the whole failure this stamp
+        # exists to prevent.
+        for job in paused_jobs:
             job.enrichment_attempted_at = attempted_at
 
     try:
@@ -963,9 +973,16 @@ def _outstanding_browser_work(db) -> set[str]:
     return {row[0] for row in rows if row[0]}
 
 
-def queue_for_browser(db, jobs: list[Job]) -> int:
+def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     """
     Hand the walled-off hosts to the extension.
+
+    Returns `(queued, paused)` — the jobs actually put on the queue, and the
+    ones skipped because their host is paused. Two lists rather than a count
+    because the caller has to stamp exactly the jobs it queued: it used to
+    stamp `for_browser[:count]`, which assumed the queued jobs were a prefix of
+    the list. Any skip in the middle broke that, stamping a job that was never
+    queued and leaving a queued one to be picked again next pass.
 
     LinkedIn answers this server with a challenge and a real browser with the
     page; the difference is the residential IP and the user's own session,
@@ -978,7 +995,26 @@ def queue_for_browser(db, jobs: list[Job]) -> int:
     arrive sooner. It only builds a backlog large enough that most of it
     expires unread, and hides the real work behind ten thousand duplicates.
     """
-    from app.services import browser_tasks
+    from app.services import browse_plan, browser_tasks
+
+    # Separated before the room check, so a paused host is reported as paused
+    # even when the queue is full. Otherwise the two reasons for a zero are
+    # indistinguishable, and only one of them is temporary.
+    paused: list[Job] = []
+    candidates: list[Job] = []
+    for job in jobs:
+        # This path does not go through `browse_plan.enqueue`, so the pause has
+        # to be honoured here too — and this is the louder of the two. A crawl
+        # queues sixty pages; the description backlog is tens of thousands of
+        # postings on one host, which is the volume a site notices.
+        #
+        # Both kinds, not just `browse_page`: resolving a link is a request to
+        # the same host from the same session, and a pause that let those
+        # through would be a pause in name only.
+        if browse_plan.is_paused(_target_url(job)):
+            paused.append(job)
+        else:
+            candidates.append(job)
 
     outstanding = _outstanding_browser_work(db)
     room = max(0, int(getattr(settings, "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
@@ -988,11 +1024,11 @@ def queue_for_browser(db, jobs: list[Job]) -> int:
             "enrichment: browser queue already holds %d task(s); queueing none",
             len(outstanding),
         )
-        return 0
+        return [], paused
 
-    queued = 0
-    for job in jobs:
-        if queued >= room:
+    queued: list[Job] = []
+    for job in candidates:
+        if len(queued) >= room:
             break
         url = _target_url(job)
         if not url or url in outstanding:
@@ -1010,12 +1046,23 @@ def queue_for_browser(db, jobs: list[Job]) -> int:
                 ttl_hours=48,
             )
             outstanding.add(url)
-            queued += 1
+            queued.append(job)
         except Exception as exc:
             logger.warning("enrichment: could not queue %s: %s", url, exc)
     if queued:
-        logger.info("enrichment: queued %d job(s) for browser enrichment", queued)
-    return queued
+        logger.info(
+            "enrichment: queued %d job(s) for browser enrichment", len(queued),
+        )
+    if paused:
+        logger.info(
+            "enrichment: %d job(s) skipped — their host is paused", len(paused),
+        )
+    return queued, paused
+
+
+def queue_for_browser(db, jobs: list[Job]) -> int:
+    """How many of these jobs went onto the browser queue."""
+    return len(plan_browser_queue(db, jobs)[0])
 
 
 def run(
