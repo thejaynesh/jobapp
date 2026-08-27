@@ -23,6 +23,7 @@ def list_calls(
     stage: str = "",
     status: str = "",
     application_id: str = "",
+    sort: str = "newest",
     limit: int = PAGE_SIZE,
     db: Session = Depends(get_db),
 ):
@@ -54,7 +55,12 @@ def list_calls(
         except ValueError:
             pass
 
-    calls = query.order_by(LLMCall.created_at.desc()).limit(limit).all()
+    if sort == "oldest":
+        calls = query.order_by(LLMCall.created_at.asc()).limit(limit).all()
+    elif sort == "slowest":
+        calls = query.order_by(LLMCall.duration_ms.desc().nullslast()).limit(limit).all()
+    else:
+        calls = query.order_by(LLMCall.created_at.desc()).limit(limit).all()
 
     stages = [
         {"name": row[0], "count": row[1]}
@@ -76,7 +82,7 @@ def list_calls(
         "llm/index.html",
         {"request": request, "calls": calls, "stages": stages, "totals": totals,
          "active_stage": stage, "active_status": status,
-         "application_id": application_id, "limit": limit},
+         "application_id": application_id, "sort": sort, "limit": limit},
     )
 
 

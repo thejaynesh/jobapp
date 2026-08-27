@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Activity log — JobApp{% endblock %}
+{% block content %}
+<div class="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+  <h1 class="text-2xl font-bold text-gray-800">Activity log</h1>
+  <div class="flex items-center gap-3">
+    <div class="flex gap-2 text-xs">
+      <span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-red-50 text-red-700 font-medium">
+        {{ stats.errors }} error{{ '' if stats.errors == 1 else 's' }}
+      </span>
+      <span class="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 text-amber-700 font-medium">
+        {{ stats.warnings }} warning{{ '' if stats.warnings == 1 else 's' }}
+      </span>
+      <span class="text-gray-400 py-1">last hour</span>
+    </div>
+  </div>
+</div>
+<p class="text-sm text-gray-400 mb-6">
+  Recent system events captured from the running process. Clears on restart.
+  Warnings and errors are always captured; info-level events from key
+  subsystems (fetching, matching, generation) are included too.
+</p>
+
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <form method="get" action="/activity" class="flex flex-wrap gap-2 items-center">
+    <select name="severity"
+            class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not severity_filter %}selected{% endif %}>All levels</option>
+      <option value="info" {% if severity_filter == "info" %}selected{% endif %}>Info+</option>
+      <option value="warning" {% if severity_filter == "warning" %}selected{% endif %}>Warnings+</option>
+      <option value="error" {% if severity_filter == "error" %}selected{% endif %}>Errors only</option>
+    </select>
+
+    <select name="category"
+            class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not category_filter %}selected{% endif %}>All categories</option>
+      {% for cat in categories %}
+      <option value="{{ cat }}" {% if category_filter == cat %}selected{% endif %}>{{ cat | title }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="limit"
+            class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="50" {% if limit == 50 %}selected{% endif %}>50 events</option>
+      <option value="100" {% if limit == 100 %}selected{% endif %}>100 events</option>
+      <option value="200" {% if limit == 200 %}selected{% endif %}>200 events</option>
+    </select>
+
+    <button type="submit"
+            class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">
+      Filter
+    </button>
+
+    {% if severity_filter or category_filter %}
+    <a href="/activity" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
+    {% endif %}
+
+    <button hx-post="/activity/clear"
+            hx-target="#event-feed"
+            hx-swap="innerHTML"
+            hx-confirm="Clear the in-memory event log?"
+            class="ml-auto text-xs text-gray-400 hover:text-red-600 underline">
+      Clear log
+    </button>
+  </form>
+</div>
+
+<div id="event-feed"
+     hx-get="/activity/feed?severity={{ severity_filter }}&category={{ category_filter }}"
+     hx-trigger="every 10s"
+     hx-swap="innerHTML">
+  {% include "activity/partials/feed.html" %}
+</div>
+{% endblock %}

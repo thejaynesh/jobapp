@@ -1,17 +1,80 @@
 {% extends "base.html" %}
 {% block title %}Error {{ status_code }} — JobApp{% endblock %}
 {% block content %}
-<div class="max-w-xl mx-auto mt-16 text-center">
-  <div class="text-5xl font-bold text-gray-300 mb-4">{{ status_code }}</div>
-  <h1 class="text-xl font-semibold text-gray-800 mb-2">{{ title }}</h1>
-  <p class="text-gray-500 mb-6">{{ detail }}</p>
-  {% if traceback %}
-  <details class="text-left bg-gray-100 rounded p-4 mb-6">
-    <summary class="text-xs text-gray-500 cursor-pointer mb-2">Technical details</summary>
-    <pre class="text-xs text-red-700 overflow-auto whitespace-pre-wrap">{{ traceback }}</pre>
-  </details>
-  {% endif %}
-  <a href="javascript:history.back()" class="text-blue-600 hover:underline text-sm mr-4">Go back</a>
-  <a href="/" class="text-blue-600 hover:underline text-sm">Home</a>
+<div class="max-w-2xl mx-auto mt-12">
+  <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+    <div class="px-6 py-8 text-center border-b
+      {% if status_code >= 500 %}bg-red-50 border-red-100
+      {% elif status_code >= 400 %}bg-amber-50 border-amber-100
+      {% else %}bg-blue-50 border-blue-100{% endif %}">
+      <div class="text-6xl font-bold mb-3
+        {% if status_code >= 500 %}text-red-200
+        {% elif status_code >= 400 %}text-amber-200
+        {% else %}text-blue-200{% endif %}">
+        {{ status_code }}
+      </div>
+      <h1 class="text-xl font-semibold text-gray-800 mb-2">{{ title }}</h1>
+      <p class="text-gray-600">{{ detail }}</p>
+    </div>
+
+    <div class="px-6 py-4">
+      {% if status_code == 404 %}
+      <p class="text-sm text-gray-500 mb-4">
+        The page you're looking for doesn't exist. It may have been moved or the URL might be wrong.
+      </p>
+      {% elif status_code == 422 %}
+      <p class="text-sm text-gray-500 mb-4">
+        The request contained invalid data. Check the form values and try again.
+      </p>
+      {% elif status_code >= 500 %}
+      <p class="text-sm text-gray-500 mb-4">
+        Something went wrong on the server. This has been logged and will show up in the
+        <a href="/activity" class="text-blue-600 hover:underline">activity log</a>.
+      </p>
+      {% endif %}
+
+      {% if traceback %}
+      <details class="bg-gray-50 border border-gray-200 rounded-lg mb-4">
+        <summary class="px-4 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-700 font-medium">
+          Technical details (click to expand)
+        </summary>
+        <pre class="px-4 py-3 text-xs text-red-700 overflow-auto whitespace-pre-wrap border-t border-gray-200 max-h-64 custom-scroll">{{ traceback }}</pre>
+      </details>
+      {% endif %}
+
+      <div class="flex flex-wrap gap-3 pt-2">
+        <a href="javascript:history.back()"
+           class="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 hover:underline">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+          </svg>
+          Go back
+        </a>
+        <a href="/"
+           class="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 hover:underline">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+          </svg>
+          Home
+        </a>
+        <a href="/activity"
+           class="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-blue-600 hover:underline">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+          </svg>
+          Activity log
+        </a>
+        {% if status_code >= 500 %}
+        <a href="/runs"
+           class="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-blue-600 hover:underline">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          System status
+        </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}

@@ -19,125 +19,149 @@
 </p>
 {% endif %}
 
-<form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm space-y-3">
+{% set has_active_filters = status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter %}
+{% set has_advanced_filters = source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter %}
+<form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg shadow-sm mb-6">
   <input type="hidden" name="page" value="0">
 
-  <!-- Row 1: search (full width on mobile), then status + source -->
-  <div class="flex flex-wrap gap-2">
-    <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
-      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-0 w-full focus:outline-none focus:ring-2 focus:ring-blue-500">
+  <div class="px-4 pt-4 pb-3">
+    <div class="flex flex-wrap gap-2 items-center">
+      <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
+        class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-[200px] focus:outline-none focus:ring-2 focus:ring-blue-500">
 
-    <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
-      <option value="new" {% if status_filter == "new" %}selected{% endif %}>Awaiting match</option>
-      <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
-      <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
-      <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
-    </select>
+      <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
+        <option value="new" {% if status_filter == "new" %}selected{% endif %}>Awaiting match</option>
+        <option value="matched" {% if status_filter == "matched" %}selected{% endif %}>Matched</option>
+        <option value="filtered_out" {% if status_filter == "filtered_out" %}selected{% endif %}>Filtered out</option>
+        <option value="docs_generated" {% if status_filter == "docs_generated" %}selected{% endif %}>Docs generated</option>
+      </select>
 
-    <select name="source" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="" {% if not source_filter %}selected{% endif %}>All sources</option>
-      {% for s in sources %}
-        <option value="{{ s }}" {% if source_filter == s %}selected{% endif %}>{{ s | title }}</option>
-      {% endfor %}
-    </select>
+      <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="score_desc" {% if sort == "score_desc" %}selected{% endif %}>Score: high &rarr; low</option>
+        <option value="score_asc" {% if sort == "score_asc" %}selected{% endif %}>Score: low &rarr; high</option>
+        <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>
+        <option value="posted_asc" {% if sort == "posted_asc" %}selected{% endif %}>Oldest posted</option>
+        <option value="company_asc" {% if sort == "company_asc" %}selected{% endif %}>Company A &rarr; Z</option>
+        <option value="favourited_desc" {% if sort == "favourited_desc" %}selected{% endif %}>Recently starred</option>
+      </select>
 
-    <select name="exp_level" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="" {% if not exp_level_filter %}selected{% endif %}>All levels</option>
-      {% for lvl in exp_levels %}
-        <option value="{{ lvl }}" {% if exp_level_filter == lvl %}selected{% endif %}>{{ lvl | title }}</option>
-      {% endfor %}
-    </select>
+      <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
-    <select name="filter_reason" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            title="Why a job was filtered out">
-      <option value="" {% if not filter_reason_filter %}selected{% endif %}>Any filter reason</option>
-      {% for reason, count in filter_reason_counts %}
-        <option value="{{ reason }}" {% if filter_reason_filter == reason %}selected{% endif %}>
-          {{ filter_reason_labels.get(reason, reason) }} ({{ count }})
-        </option>
-      {% endfor %}
-    </select>
+      {% if has_active_filters %}
+      <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear all</a>
+      {% endif %}
 
-    {# A job with no posting date skips the fetcher's age check, so some of
-       these are long-closed listings passing as fresh. #}
-    <select name="dated" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            title="Jobs whose source never reported when they were posted aren't age-checked">
-      <option value="" {% if not dated_filter %}selected{% endif %}>Any posting date</option>
-      <option value="1" {% if dated_filter == "1" %}selected{% endif %}>Has a posting date</option>
-      <option value="0" {% if dated_filter == "0" %}selected{% endif %}>
-        No posting date ({{ undated_count }})
-      </option>
-    </select>
+      <button type="button" data-collapse="advanced-filters"
+              class="flex items-center gap-1 text-xs text-gray-500 hover:text-blue-600 ml-auto">
+        <svg class="w-4 h-4 collapse-icon" style="transform: rotate(180deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+        </svg>
+        More filters
+        {% if has_advanced_filters %}
+        <span class="text-[10px] text-blue-600 font-medium">({{ [source_filter, region_filter, location_filter, remote_filter, min_score_filter, min_salary_filter, exp_level_filter, filter_reason_filter, dated_filter] | select | list | length }} active)</span>
+        {% endif %}
+      </button>
+    </div>
+
+    {% if has_active_filters %}
+    <div class="flex flex-wrap gap-1.5 mt-2">
+      {% if q %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">search: {{ q }}</span>{% endif %}
+      {% if status_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ status_filter | replace("_", " ") }}</span>{% endif %}
+      {% if source_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ source_filter }}</span>{% endif %}
+      {% if region_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ region_filter }}</span>{% endif %}
+      {% if location_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ location_filter }}</span>{% endif %}
+      {% if remote_filter == "1" %}<span class="text-xs px-2 py-0.5 rounded bg-green-50 text-green-700">Remote</span>{% endif %}
+      {% if min_score_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">score &ge; {{ min_score_filter }}</span>{% endif %}
+      {% if min_salary_filter %}<span class="text-xs px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">salary &ge; ${{ "{:,.0f}".format(min_salary_filter|int) }}</span>{% endif %}
+      {% if exp_level_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ exp_level_filter }}</span>{% endif %}
+      {% if filter_reason_filter %}<span class="text-xs px-2 py-0.5 rounded bg-amber-50 text-amber-700">{{ filter_reason_labels.get(filter_reason_filter, filter_reason_filter) }}</span>{% endif %}
+      {% if dated_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{% if dated_filter == "1" %}has date{% else %}no date{% endif %}</span>{% endif %}
+    </div>
+    {% endif %}
   </div>
 
-  <!-- Row 2: region + location + min score + remote + sort + buttons -->
-  <div class="flex flex-wrap gap-2 items-center">
-    <select name="region" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="" {% if not region_filter %}selected{% endif %}>Any region</option>
-      {% for key, label in region_options %}
-        <option value="{{ key }}" {% if region_filter == key %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
+  <div id="advanced-filters" class="border-t border-gray-100 px-4 py-3 bg-gray-50/50 rounded-b-lg space-y-3"
+       {% if has_advanced_filters %}data-force-open="true"{% endif %}>
+    <div class="flex flex-wrap gap-2">
+      <select name="source" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not source_filter %}selected{% endif %}>All sources</option>
+        {% for s in sources %}
+          <option value="{{ s }}" {% if source_filter == s %}selected{% endif %}>{{ s | title }}</option>
+        {% endfor %}
+      </select>
 
-    <input type="text" name="location" value="{{ location_filter }}" placeholder="City/state (e.g. San Jose)..."
-      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <select name="exp_level" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not exp_level_filter %}selected{% endif %}>All levels</option>
+        {% for lvl in exp_levels %}
+          <option value="{{ lvl }}" {% if exp_level_filter == lvl %}selected{% endif %}>{{ lvl | title }}</option>
+        {% endfor %}
+      </select>
 
-    <select name="min_score" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="" {% if not min_score_filter %}selected{% endif %}>Any score</option>
-      <option value="60" {% if min_score_filter == "60" %}selected{% endif %}>Score ≥ 60</option>
-      <option value="70" {% if min_score_filter == "70" %}selected{% endif %}>Score ≥ 70</option>
-      <option value="80" {% if min_score_filter == "80" %}selected{% endif %}>Score ≥ 80</option>
-      <option value="90" {% if min_score_filter == "90" %}selected{% endif %}>Score ≥ 90</option>
-    </select>
+      <select name="filter_reason" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="Why a job was filtered out">
+        <option value="" {% if not filter_reason_filter %}selected{% endif %}>Any filter reason</option>
+        {% for reason, count in filter_reason_counts %}
+          <option value="{{ reason }}" {% if filter_reason_filter == reason %}selected{% endif %}>
+            {{ filter_reason_labels.get(reason, reason) }} ({{ count }})
+          </option>
+        {% endfor %}
+      </select>
 
-    {# Matches against the TOP of a stated band, so "$120k–$180k" clears a
-       $150k floor. Only postings that state pay can match at all, which is a
-       minority — hence the count beside it, so an empty list reads as "few
-       postings state pay" rather than as a broken filter. #}
-    <select name="min_salary" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            title="{{ priced_count }} jobs state any pay at all">
-      <option value="" {% if not min_salary_filter %}selected{% endif %}>
-        Any salary{% if priced_count %} ({{ "{:,}".format(priced_count) }} priced){% endif %}
-      </option>
-      <option value="80000" {% if min_salary_filter == "80000" %}selected{% endif %}>Pays ≥ $80k</option>
-      <option value="100000" {% if min_salary_filter == "100000" %}selected{% endif %}>Pays ≥ $100k</option>
-      <option value="120000" {% if min_salary_filter == "120000" %}selected{% endif %}>Pays ≥ $120k</option>
-      <option value="150000" {% if min_salary_filter == "150000" %}selected{% endif %}>Pays ≥ $150k</option>
-      <option value="180000" {% if min_salary_filter == "180000" %}selected{% endif %}>Pays ≥ $180k</option>
-    </select>
+      <select name="dated" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="Jobs whose source never reported when they were posted aren't age-checked">
+        <option value="" {% if not dated_filter %}selected{% endif %}>Any posting date</option>
+        <option value="1" {% if dated_filter == "1" %}selected{% endif %}>Has a posting date</option>
+        <option value="0" {% if dated_filter == "0" %}selected{% endif %}>
+          No posting date ({{ undated_count }})
+        </option>
+      </select>
+    </div>
 
-    <label class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none">
-      <input type="checkbox" name="remote" value="1" {% if remote_filter == "1" %}checked{% endif %}
-        class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-      Remote only
-    </label>
+    <div class="flex flex-wrap gap-2 items-center">
+      <select name="region" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not region_filter %}selected{% endif %}>Any region</option>
+        {% for key, label in region_options %}
+          <option value="{{ key }}" {% if region_filter == key %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
 
-    <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="score_desc" {% if sort == "score_desc" %}selected{% endif %}>Score: high → low</option>
-      <option value="score_asc" {% if sort == "score_asc" %}selected{% endif %}>Score: low → high</option>
-      <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>
-      <option value="posted_asc" {% if sort == "posted_asc" %}selected{% endif %}>Oldest posted</option>
-      <option value="company_asc" {% if sort == "company_asc" %}selected{% endif %}>Company A → Z</option>
-      {% if favourite_filter == "1" %}
-      <option value="favourited_desc" {% if sort == "favourited_desc" %}selected{% endif %}>Recently starred</option>
-      {% endif %}
-    </select>
+      <input type="text" name="location" value="{{ location_filter }}" placeholder="City/state (e.g. San Jose)..."
+        class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-blue-500">
 
-    {# Carried through the form so filtering inside the shortlist keeps you in
-       it, rather than silently dropping you back into every job. #}
-    <label class="flex items-center gap-1.5 text-sm text-gray-600 whitespace-nowrap"
-           title="Only jobs you starred">
-      <input type="checkbox" name="favourite" value="1" class="rounded border-gray-300"
-        {% if favourite_filter == "1" %}checked{% endif %}>
-      &#9733; Favourites{% if favourite_count %} ({{ favourite_count }}){% endif %}
-    </label>
+      <select name="min_score" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not min_score_filter %}selected{% endif %}>Any score</option>
+        <option value="60" {% if min_score_filter == "60" %}selected{% endif %}>Score &ge; 60</option>
+        <option value="70" {% if min_score_filter == "70" %}selected{% endif %}>Score &ge; 70</option>
+        <option value="80" {% if min_score_filter == "80" %}selected{% endif %}>Score &ge; 80</option>
+        <option value="90" {% if min_score_filter == "90" %}selected{% endif %}>Score &ge; 90</option>
+      </select>
 
-    <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
+      <select name="min_salary" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="{{ priced_count }} jobs state any pay at all">
+        <option value="" {% if not min_salary_filter %}selected{% endif %}>
+          Any salary{% if priced_count %} ({{ "{:,}".format(priced_count) }} priced){% endif %}
+        </option>
+        <option value="80000" {% if min_salary_filter == "80000" %}selected{% endif %}>Pays &ge; $80k</option>
+        <option value="100000" {% if min_salary_filter == "100000" %}selected{% endif %}>Pays &ge; $100k</option>
+        <option value="120000" {% if min_salary_filter == "120000" %}selected{% endif %}>Pays &ge; $120k</option>
+        <option value="150000" {% if min_salary_filter == "150000" %}selected{% endif %}>Pays &ge; $150k</option>
+        <option value="180000" {% if min_salary_filter == "180000" %}selected{% endif %}>Pays &ge; $180k</option>
+      </select>
 
-    {% if status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or favourite_filter %}
-    <a href="/jobs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear</a>
-    {% endif %}
+      <label class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none whitespace-nowrap">
+        <input type="checkbox" name="remote" value="1" {% if remote_filter == "1" %}checked{% endif %}
+          class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Remote only
+      </label>
+
+      <label class="flex items-center gap-1.5 text-sm text-gray-600 whitespace-nowrap"
+             title="Only jobs you starred">
+        <input type="checkbox" name="favourite" value="1" class="rounded border-gray-300"
+          {% if favourite_filter == "1" %}checked{% endif %}>
+        &#9733; Favourites{% if favourite_count %} ({{ favourite_count }}){% endif %}
+      </label>
+    </div>
   </div>
 </form>
 

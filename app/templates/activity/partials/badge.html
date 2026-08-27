@@ -1,0 +1,11 @@
+<span id="activity-badge">
+  {% if stats.errors > 0 %}
+  <span class="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-white bg-red-500 rounded-full">
+    {{ stats.errors if stats.errors < 100 else '!' }}
+  </span>
+  {% elif stats.warnings > 0 %}
+  <span class="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold text-white bg-amber-500 rounded-full">
+    {{ stats.warnings if stats.warnings < 100 else '!' }}
+  </span>
+  {% endif %}
+</span>

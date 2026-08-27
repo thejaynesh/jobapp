@@ -19,3 +19,53 @@ textarea.latex-editor {
     font-family: 'Courier New', monospace;
     font-size: 0.85rem;
 }
+
+/* Toast slide animations */
+@keyframes slide-in {
+    from { transform: translateX(100%); opacity: 0; }
+    to   { transform: translateX(0); opacity: 1; }
+}
+@keyframes slide-out {
+    from { transform: translateX(0); opacity: 1; }
+    to   { transform: translateX(100%); opacity: 0; }
+}
+.animate-slide-in { animation: slide-in 0.3s ease-out; }
+.animate-slide-out { animation: slide-out 0.3s ease-in forwards; }
+
+/* Collapse icon rotation */
+.collapse-icon {
+    transition: transform 0.2s ease;
+}
+
+/* Health status pulse for critical items */
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+.pulse-dot {
+    animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Smooth panel transitions for HTMX swaps */
+.htmx-swapping { opacity: 0.5; transition: opacity 0.15s ease; }
+.htmx-settling { opacity: 1; transition: opacity 0.15s ease; }
+
+/* Scrollbar styling for filter sections and log views */
+.custom-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
+.custom-scroll::-webkit-scrollbar-track { background: transparent; }
+.custom-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+.custom-scroll::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* Better focus states */
+select:focus, input:focus, textarea:focus, button:focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: 1px;
+}
+
+/* Sticky table headers */
+thead.sticky-header th {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: inherit;
+}

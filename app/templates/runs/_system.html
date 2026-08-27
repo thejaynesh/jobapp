@@ -16,18 +16,12 @@
   </p>
   {% endif %}
   <div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
-    <h2 class="text-base font-semibold text-gray-800">System</h2>
+    <h2 class="text-base font-semibold text-gray-800">Subsystems</h2>
     <p class="text-xs text-gray-400">
       The parts that run without a page of their own. A zero here is worth
       reading twice — it means either nothing to do, or something broken.
     </p>
   </div>
-
-  {% if system.errors %}
-  <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mb-4">
-    {% for err in system.errors %}<div>{{ err }}</div>{% endfor %}
-  </div>
-  {% endif %}
 
   {% if system.pool %}
   {# Connections in use. Exhaustion takes every page down at once with a

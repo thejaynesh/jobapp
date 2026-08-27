@@ -11,44 +11,57 @@
   </p>
 </div>
 
-{# The counts that are worth acting on. "Empty" is the important one: a call
-   that succeeded and returned nothing looks like success everywhere else in
-   the app, and is the exact shape of a blank generated document. #}
-<div class="flex flex-wrap gap-2 mb-4 text-xs">
-  <a href="/llm"
-     class="px-2 py-1 rounded border {{ 'border-blue-600 text-blue-700 bg-blue-50' if not active_status else 'border-gray-200 text-gray-600 hover:bg-gray-50' }}">
-    All {{ totals.all }}
-  </a>
-  <a href="/llm?status=failed{% if active_stage %}&stage={{ active_stage }}{% endif %}"
-     class="px-2 py-1 rounded border {{ 'border-amber-600 text-amber-700 bg-amber-50' if active_status == 'failed' else 'border-gray-200 text-gray-600 hover:bg-gray-50' }}">
-    Failed {{ totals.failed }}
-  </a>
-  <a href="/llm?status=empty{% if active_stage %}&stage={{ active_stage }}{% endif %}"
-     class="px-2 py-1 rounded border {{ 'border-amber-600 text-amber-700 bg-amber-50' if active_status == 'empty' else 'border-gray-200 text-gray-600 hover:bg-gray-50' }}">
-    Returned nothing {{ totals.empty }}
-  </a>
-</div>
+{% set has_filters = active_stage or active_status %}
+<form method="get" action="/llm" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-4">
+  <div class="flex flex-wrap gap-2 items-center">
+    <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not active_status %}selected{% endif %}>All statuses ({{ totals.all }})</option>
+      <option value="ok" {% if active_status == "ok" %}selected{% endif %}>OK</option>
+      <option value="failed" {% if active_status == "failed" %}selected{% endif %}>Failed ({{ totals.failed }})</option>
+      <option value="empty" {% if active_status == "empty" %}selected{% endif %}>Returned nothing ({{ totals.empty }})</option>
+    </select>
 
-{% if stages %}
-<div class="flex flex-wrap gap-1.5 mb-4 text-[11px]">
-  <a href="/llm{% if active_status %}?status={{ active_status }}{% endif %}"
-     class="px-1.5 py-0.5 rounded {{ 'bg-gray-800 text-white' if not active_stage else 'bg-gray-100 text-gray-600 hover:bg-gray-200' }}">
-    every stage
-  </a>
-  {% for entry in stages %}
-  <a href="/llm?stage={{ entry.name }}{% if active_status %}&status={{ active_status }}{% endif %}"
-     class="px-1.5 py-0.5 rounded font-mono {{ 'bg-gray-800 text-white' if active_stage == entry.name else 'bg-gray-100 text-gray-600 hover:bg-gray-200' }}">
-    {{ entry.name }} <span class="opacity-60">{{ entry.count }}</span>
-  </a>
-  {% endfor %}
-</div>
-{% endif %}
+    <select name="stage" class="border border-gray-300 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not active_stage %}selected{% endif %}>All stages</option>
+      {% for entry in stages %}
+      <option value="{{ entry.name }}" {% if active_stage == entry.name %}selected{% endif %}>{{ entry.name }} ({{ entry.count }})</option>
+      {% endfor %}
+    </select>
+
+    <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="newest" {% if sort == "newest" %}selected{% endif %}>Newest first</option>
+      <option value="oldest" {% if sort == "oldest" %}selected{% endif %}>Oldest first</option>
+      <option value="slowest" {% if sort == "slowest" %}selected{% endif %}>Slowest first</option>
+    </select>
+
+    <select name="limit" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="40" {% if limit == 40 %}selected{% endif %}>40 calls</option>
+      <option value="80" {% if limit == 80 %}selected{% endif %}>80 calls</option>
+      <option value="120" {% if limit == 120 %}selected{% endif %}>120 calls</option>
+      <option value="200" {% if limit == 200 %}selected{% endif %}>200 calls</option>
+    </select>
+
+    <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
+
+    {% if has_filters %}
+    <a href="/llm" class="text-sm text-gray-500 hover:text-red-500 underline">Clear filters</a>
+    {% endif %}
+  </div>
+
+  {% if has_filters %}
+  <div class="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-gray-100">
+    <span class="text-xs text-gray-400">Active filters:</span>
+    {% if active_status %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ active_status }}</span>{% endif %}
+    {% if active_stage %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-mono">{{ active_stage }}</span>{% endif %}
+  </div>
+  {% endif %}
+</form>
 
 {% if not calls %}
 <div class="bg-white border border-gray-200 rounded-lg p-6 text-center">
   <p class="text-sm text-gray-500">
-    {% if active_stage or active_status %}
-      Nothing matches that filter.
+    {% if has_filters %}
+      No calls match those filters.
       <a href="/llm" class="text-blue-600 hover:underline">Show everything</a>.
     {% else %}
       No calls recorded yet. Every match, resume, cover letter and outreach draft
@@ -85,8 +98,6 @@
           {% if not call.ok %}
           <span class="text-amber-700">{{ (call.error or 'failed')[:80] }}</span>
           {% elif not (call.response or '').strip() %}
-          {# Succeeded and said nothing. For a reasoning model that usually
-             means the token ceiling ran out mid-thought. #}
           <span class="text-amber-700">
             returned nothing{% if call.reasoning %} (but did reason){% endif %}
           </span>
@@ -105,7 +116,7 @@
 
 {% if calls | length >= limit %}
 <div class="mt-3 text-center">
-  <a href="/llm?limit={{ limit + 40 }}{% if active_stage %}&stage={{ active_stage }}{% endif %}{% if active_status %}&status={{ active_status }}{% endif %}"
+  <a href="/llm?limit={{ limit + 40 }}{% if active_stage %}&stage={{ active_stage }}{% endif %}{% if active_status %}&status={{ active_status }}{% endif %}{% if sort != 'newest' %}&sort={{ sort }}{% endif %}"
      class="text-xs text-blue-600 hover:underline">Show more</a>
 </div>
 {% endif %}

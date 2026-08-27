@@ -1,25 +1,91 @@
 {% extends "base.html" %}
 {% block title %}Applications — JobApp{% endblock %}
 {% block content %}
-<div class="flex justify-between items-center mb-6">
+<div class="flex flex-wrap justify-between items-baseline gap-2 mb-4">
   <h1 class="text-2xl font-bold text-gray-800">Applications</h1>
-  <span class="text-sm text-gray-500">{{ apps|length }} total</span>
+  <div class="flex items-center gap-3">
+    {% if apps %}
+    <div class="flex gap-2 text-xs">
+      {% set ns = namespace(applied=0, interviewing=0, offered=0, rejected=0) %}
+      {% for app in apps %}
+        {% if app.status.value == 'applied' %}{% set ns.applied = ns.applied + 1 %}
+        {% elif app.status.value == 'interviewing' %}{% set ns.interviewing = ns.interviewing + 1 %}
+        {% elif app.status.value == 'offered' %}{% set ns.offered = ns.offered + 1 %}
+        {% elif app.status.value == 'rejected' %}{% set ns.rejected = ns.rejected + 1 %}
+        {% endif %}
+      {% endfor %}
+      <span class="px-2 py-0.5 rounded bg-gray-100 text-gray-600">{{ apps|length }} shown</span>
+      {% if ns.applied %}<span class="px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ ns.applied }} applied</span>{% endif %}
+      {% if ns.interviewing %}<span class="px-2 py-0.5 rounded bg-amber-50 text-amber-700">{{ ns.interviewing }} interviewing</span>{% endif %}
+      {% if ns.offered %}<span class="px-2 py-0.5 rounded bg-green-50 text-green-700">{{ ns.offered }} offered</span>{% endif %}
+      {% if ns.rejected %}<span class="px-2 py-0.5 rounded bg-red-50 text-red-600">{{ ns.rejected }} rejected</span>{% endif %}
+    </div>
+    {% else %}
+    <span class="text-sm text-gray-500">0 applications</span>
+    {% endif %}
+  </div>
 </div>
+
+<form method="get" action="/apps" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-6">
+  <div class="flex flex-wrap gap-2 items-center">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
+      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-[180px] focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+    <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
+      {% for s in ['not_applied', 'applied', 'interviewing', 'offered', 'rejected', 'withdrawn'] %}
+      <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s | replace("_", " ") | title }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="newest" {% if sort == "newest" %}selected{% endif %}>Newest first</option>
+      <option value="oldest" {% if sort == "oldest" %}selected{% endif %}>Oldest first</option>
+      <option value="company" {% if sort == "company" %}selected{% endif %}>Company A-Z</option>
+      <option value="score" {% if sort == "score" %}selected{% endif %}>Score: high to low</option>
+    </select>
+
+    <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
+
+    {% if status_filter or q %}
+    <a href="/apps" class="text-sm text-gray-500 hover:text-red-500 underline">Clear filters</a>
+    {% endif %}
+  </div>
+
+  {% if status_filter or q %}
+  <div class="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-gray-100">
+    <span class="text-xs text-gray-400">Showing {{ filtered_count }} of {{ total_count }}:</span>
+    {% if q %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">search: {{ q }}</span>{% endif %}
+    {% if status_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ status_filter | replace("_", " ") | title }}</span>{% endif %}
+  </div>
+  {% endif %}
+</form>
 
 {% if apps %}
 <div class="space-y-3">
   {% for app in apps %}
-  <div id="app-card-{{ app.id }}" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-    <div class="flex justify-between items-start gap-2">
-      <div class="min-w-0">
+  <div id="app-card-{{ app.id }}" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm hover:border-gray-300 transition-colors">
+    <div class="flex justify-between items-start gap-3">
+      <div class="min-w-0 flex-1">
         <a href="/apps/{{ app.id }}" class="text-blue-600 font-medium hover:underline block break-words leading-snug">
           {{ app.job.title }}
         </a>
-        <p class="text-sm text-gray-500 mt-0.5 break-words">{{ app.job.company }}</p>
+        <p class="text-sm text-gray-500 mt-0.5 break-words">
+          {{ app.job.company }}
+          {% if app.job.location %}
+          <span class="text-gray-400">&bull; {{ app.job.location }}</span>
+          {% endif %}
+          {% if app.job.is_remote %}<span class="ml-1 bg-green-100 text-green-700 text-xs px-1.5 py-0.5 rounded">Remote</span>{% endif %}
+        </p>
       </div>
-      <span class="text-xs text-gray-400 shrink-0 mt-0.5">
-        {% if app.documents %}{{ app.documents | length }} doc(s){% endif %}
-      </span>
+      <div class="text-right shrink-0">
+        {% if app.job.effective_score is not none %}
+        <span class="text-lg font-bold {% if app.job.effective_score >= 75 %}text-green-600{% elif app.job.effective_score >= 50 %}text-yellow-600{% else %}text-red-500{% endif %}">
+          {{ app.job.effective_score }}
+        </span>
+        <p class="text-[10px] text-gray-400">score</p>
+        {% endif %}
+      </div>
     </div>
     <div class="flex flex-wrap items-center gap-2 mt-3">
       <select
@@ -35,16 +101,35 @@
         {% endfor %}
       </select>
       {% if app.applied_at %}
-      <span class="text-xs text-gray-400">{{ app.applied_at | when("%b %d") }}</span>
+      <span class="text-xs text-gray-400">Applied {{ app.applied_at | when("%b %d") }}</span>
       {% endif %}
+      {% if app.documents %}
+      <span class="text-xs text-gray-400">
+        {{ app.documents | length }} doc{{ '' if app.documents | length == 1 else 's' }}
+      </span>
+      {% endif %}
+      <a href="/apps/{{ app.id }}" class="text-xs text-blue-600 hover:underline ml-auto">View details &rarr;</a>
     </div>
   </div>
   {% endfor %}
 </div>
 {% else %}
-<div class="text-center py-16 text-gray-400">
-  <p class="text-lg">No applications yet.</p>
-  <p class="text-sm mt-1">Applications appear here once jobs are matched and docs are generated.</p>
+<div class="bg-white border border-gray-200 rounded-lg p-12 text-center shadow-sm">
+  {% if status_filter or q %}
+  <p class="text-lg text-gray-400">No applications match those filters.</p>
+  <p class="text-sm text-gray-400 mt-1">{{ total_count }} application{{ '' if total_count == 1 else 's' }} exist but are hidden by the current filter.</p>
+  <a href="/apps" class="inline-block mt-3 text-sm text-blue-600 hover:underline">Clear filters and show all</a>
+  {% else %}
+  <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+  </svg>
+  <p class="text-lg text-gray-400">No applications yet.</p>
+  <p class="text-sm text-gray-400 mt-1">Applications appear here once jobs are matched and docs are generated.</p>
+  <div class="flex justify-center gap-4 mt-4">
+    <a href="/jobs" class="text-sm text-blue-600 hover:underline">Browse jobs</a>
+    <a href="/runs" class="text-sm text-blue-600 hover:underline">Check system status</a>
+  </div>
+  {% endif %}
 </div>
 {% endif %}
 {% endblock %}
