@@ -69,6 +69,9 @@ HARVEST_SOURCES = {
     "jobright.ai": "jobright_harvest",
     "joinhandshake.com": "handshake_harvest",
     "hiring.cafe": "hiringcafe_harvest",
+    # Where hiring.cafe redirects to, and therefore the host every payload
+    # from it actually arrives under.
+    "hiringcafe.com": "hiringcafe_harvest",
     "amazon.jobs": "amazon_harvest",
     "google.com": "google_harvest",
     "my.greenhouse.io": "greenhouse_harvest",

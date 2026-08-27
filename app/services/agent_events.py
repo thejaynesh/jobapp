@@ -204,10 +204,12 @@ def summary(db, days: int = 7) -> dict:
         "by_kind": by_kind,
         "failing_hosts": [{"host": host, "count": int(count)} for host, count in failing],
         "harvest": harvest_yield(db, days=days),
-        # Not bounded by this panel's window: this one judges each site against
-        # its own last N payloads rather than against a stretch of calendar, so
-        # narrowing it to a week would only throw away the comparison.
-        "harvest_health": harvest_health(db),
+        # The payload comparison is not bounded by this panel's window — it
+        # judges each site against its own last N payloads rather than against
+        # a stretch of calendar, and narrowing that to a week would throw the
+        # comparison away. The page count is bounded, because it is a plain
+        # count shown next to other plain counts over this window.
+        "harvest_health": harvest_health(db, pages_days=days),
         "recent": recent(db, limit=12),
     }
 
@@ -272,7 +274,8 @@ HEALTH_LABELS = {
 }
 
 
-def harvest_health(db, days: int = _MAX_WINDOW_DAYS) -> list[dict]:
+def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
+                   pages_days: int | None = None) -> list[dict]:
     """
     Per site: is the harvest still reading this one?
 
@@ -332,10 +335,18 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS) -> list[dict]:
     # missing from the panel and indistinguishable from a site nobody opened.
     # That is the exact question "did the JobRight crawl get anything?" asks,
     # and the panel's answer was to omit the site entirely.
+    # Counted over the *panel's* window rather than this function's.
+    #
+    # The two are deliberately different. Payloads are judged against each
+    # site's last N responses rather than a stretch of calendar, so that
+    # window is long. Pages opened is a plain count, and it sits directly under
+    # a heading that says "the last 7 days" and beside a table that totals the
+    # same events — so counting it over four months made LinkedIn read as 3,435
+    # visits in a week next to a browse total of 854.
     browsed = dict(
         db.query(AgentEvent.host, func.count())
         .filter(
-            AgentEvent.created_at >= _window_start(days),
+            AgentEvent.created_at >= _window_start(pages_days or days),
             AgentEvent.kind == "browse",
             AgentEvent.host.isnot(None),
         )

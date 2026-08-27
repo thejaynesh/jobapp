@@ -130,7 +130,16 @@ export const HARVEST_SITES = [
     id: "hiringcafe",
     label: "Hiring Cafe",
     storageKey: "harvestHiringCafe",
-    matches: ["https://hiring.cafe/*"],
+    // Both spellings. `hiring.cafe` is the address you type and the one the
+    // crawl queues; it redirects to `hiringcafe.com`, which is the page that
+    // actually loads — so matching only the first registered the reader on a
+    // URL that never renders. The board opened, scrolled, and forwarded
+    // nothing, for exactly as long as nobody looked.
+    matches: [
+      "https://hiring.cafe/*",
+      "https://hiringcafe.com/*",
+      "https://*.hiringcafe.com/*",
+    ],
   },
   {
     id: "greenhouse",

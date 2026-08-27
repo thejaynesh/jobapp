@@ -397,3 +397,54 @@ class TestASiteThatWasOpenedAndSentNothing:
         # on anything real.
         assert "opened here and no job data" in page
         assert "unticked in the extension" in page
+
+
+class TestTheNumbersAgreeWithTheHeadingAboveThem:
+    """
+    The page count sits under a heading that says "the last 7 days" and beside
+    a table totalling the same events. It was counted over four months, so
+    LinkedIn read as 3,435 visits in a week next to a browse total of 854.
+
+    The two windows are still different on purpose — payloads are judged
+    against each site's last N responses rather than a stretch of calendar, and
+    narrowing that to a week throws the comparison away. Only the plain count
+    is bounded, because only the plain count is shown next to other plain
+    counts.
+    """
+
+    def browsed(self, db, host, times=1, days_ago=0):
+        from datetime import timedelta
+
+        from app.models.agent_event import AgentEvent
+
+        for _ in range(times):
+            row = AgentEvent(kind="browse", host=host, ok=True, summary={})
+            db.add(row)
+            db.flush()
+            if days_ago:
+                row.created_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        db.commit()
+
+    def rows(self, db, **kwargs):
+        from app.services import agent_events
+
+        return {r["host"]: r for r in agent_events.harvest_health(db, **kwargs)}
+
+    def test_pages_outside_the_panel_window_are_not_counted(self, db):
+        self.browsed(db, "www.linkedin.com", times=4)
+        self.browsed(db, "www.linkedin.com", times=30, days_ago=40)
+        assert self.rows(db, pages_days=7)["www.linkedin.com"]["pages"] == 4
+
+    def test_the_summary_passes_its_own_window_through(self, db):
+        from app.services import agent_events
+
+        self.browsed(db, "www.linkedin.com", times=3)
+        self.browsed(db, "www.linkedin.com", times=50, days_ago=40)
+        health = {r["host"]: r
+                  for r in agent_events.summary(db, days=7)["harvest_health"]}
+        assert health["www.linkedin.com"]["pages"] == 3
+
+    def test_a_site_only_browsed_long_ago_drops_off(self, db):
+        # It is not recent activity, so it is not a recent problem either.
+        self.browsed(db, "www.dice.com", times=20, days_ago=40)
+        assert "www.dice.com" not in self.rows(db, pages_days=7)

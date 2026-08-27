@@ -88,7 +88,8 @@ class Board:
 
     def __init__(self, key, host, label, search=None, entries=(),
                  page_param=None, page_size=25, page_base=0,
-                 feed_setting=None, scroll_passes=None, click_pages=None):
+                 feed_setting=None, scroll_passes=None, click_pages=None,
+                 alt_hosts=()):
         self.key = key
         self.host = host
         self.label = label
@@ -108,6 +109,11 @@ class Board:
         # every visit harvested the first page and nothing else, while
         # reporting a perfectly healthy scroll.
         self.click_pages = click_pages
+        # Other hosts that are this same board. A board whose entry URL
+        # redirects lands on a different host, and `board_for` on the final URL
+        # then finds nothing — so the board's own depth and pacing stop
+        # applying at exactly the moment the page is real.
+        self.alt_hosts = tuple(alt_hosts)
         self.page_param = page_param
         self.page_size = max(1, page_size)
         # What the parameter reads on the first page. Boards count two
@@ -173,6 +179,11 @@ BOARDS = (
     Board(
         "hiringcafe", "hiring.cafe", "Hiring Cafe",
         entries=("https://hiring.cafe/",),
+        # The address redirects: you queue hiring.cafe and the page that loads
+        # is hiringcafe.com. Without naming both, everything keyed on the host
+        # — the reader's registration, the source name, this board's own depth
+        # — applied to the URL we asked for and not the one that rendered.
+        alt_hosts=("hiringcafe.com",),
         # Numbered buttons at the bottom, and one URL for all of them. Neither
         # of the other two mechanisms reaches page two: there is no parameter
         # to append, and scrolling stops at the bottom of page one. The click
@@ -242,7 +253,9 @@ BOARDS_BY_KEY = {board.key: board for board in BOARDS}
 
 # Sources whose postings live on a board a crawl can open. Keyed by host so a
 # job's own URL decides, rather than a list of source names that drifts.
-_BROWSABLE_HOSTS = tuple(board.host for board in BOARDS)
+_BROWSABLE_HOSTS = tuple(
+    host for board in BOARDS for host in (board.host, *board.alt_hosts)
+)
 
 
 def enabled() -> bool:
@@ -493,8 +506,9 @@ def board_for(url: str | None) -> "Board | None":
     if not host:
         return None
     for board in BOARDS:
-        if host == board.host or host.endswith(f".{board.host}"):
-            return board
+        for candidate in (board.host, *board.alt_hosts):
+            if host == candidate or host.endswith(f".{candidate}"):
+                return board
     return None
 
 

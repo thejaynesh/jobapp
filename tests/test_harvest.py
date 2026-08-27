@@ -754,3 +754,42 @@ class TestPayWrittenAsProse:
         assert found["salary_min"] == 100000.0
         assert found["salary_max"] == 120000.0
         assert found["salary_currency"] == "USD"
+
+
+class TestABoardThatRedirectsToAnotherHost:
+    """
+    Hiring Cafe is queued as `hiring.cafe` and the page that actually loads is
+    `hiringcafe.com`. Everything keyed on the host — the reader's registration,
+    the source name, the board's own depth — applied to the URL we asked for
+    and not the one that rendered, so the board opened, scrolled, and forwarded
+    nothing for as long as nobody looked at it.
+    """
+
+    def test_both_spellings_are_the_same_source(self):
+        assert harvest.source_for_url("https://hiring.cafe/") == "hiringcafe_harvest"
+        assert harvest.source_for_url(
+            "https://hiringcafe.com/jobs") == "hiringcafe_harvest"
+
+    def test_the_redirect_target_is_not_filed_under_linkedin(self):
+        # The fallback is LinkedIn's bucket, which is exactly where an
+        # unrecognised host's yield goes to become uncountable.
+        assert harvest.source_for_url("https://hiringcafe.com/x") != \
+            harvest.HARVEST_SOURCE
+
+    def test_the_board_recognises_the_host_it_lands_on(self):
+        from app.services.browse_plan import board_for
+
+        assert board_for("https://hiring.cafe/").key == "hiringcafe"
+        assert board_for("https://hiringcafe.com/jobs").key == "hiringcafe"
+
+    def test_the_boards_depth_survives_the_redirect(self):
+        # `_max_pages` on the landing URL has to give the same answer as on the
+        # queued one, or the click-through stops the moment the page is real.
+        from app.services.browse_plan import _max_pages
+
+        assert _max_pages("https://hiringcafe.com/") == _max_pages("https://hiring.cafe/")
+
+    def test_an_unrelated_host_is_still_unrelated(self):
+        from app.services.browse_plan import board_for
+
+        assert board_for("https://hiringcafe.example.org/") is None
