@@ -949,3 +949,40 @@ class TestAPaginatedBoardThatOnlyReachedPageOne:
     def test_an_old_extension_reporting_nothing_is_not_an_error(self, db):
         self.finished(db, "https://hiring.cafe/")
         assert self.latest(db).summary["pages_done"] == 0
+
+
+class TestHandshakePagesByUrl:
+    """
+    Its own URL gave the scheme away: `/job-search?page=1&per_page=25`. The
+    board had been added pointing at `/stu/postings` with no pagination at all,
+    so it opened one page of somebody's saved postings and stopped.
+
+    The `page_size`/`page_base` split is what stops the obvious mistake here.
+    `per_page=25` is tempting to read as the step, but `page` is an ordinal —
+    stepping by 25 would ask for page 26 next and skip the twenty-four in
+    between, while looking exactly like working pagination.
+    """
+
+    def test_it_walks_ordinal_pages(self, db):
+        board = browse_plan.BOARDS_BY_KEY["handshake"]
+        pages = board.pages(board.entries[0], 4)
+        assert pages[1].endswith("page=2")
+        assert pages[2].endswith("page=3")
+        assert pages[3].endswith("page=4")
+
+    def test_the_first_page_carries_no_page_parameter(self, db):
+        # Carrying `page=1` in the entry would put two of them in every later
+        # URL, and which one a board honours is anyone's guess.
+        board = browse_plan.BOARDS_BY_KEY["handshake"]
+        assert "page=" not in board.entries[0].split("per_page=")[0]
+
+    def test_it_asks_the_search_rather_than_the_saved_list(self, db):
+        board = browse_plan.BOARDS_BY_KEY["handshake"]
+        assert "/job-search" in board.entries[0]
+
+    def test_a_crawl_queues_more_than_one_page(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_PAGES", 3)
+        browse_plan.crawl_searches(db, PROFILE, board="handshake")
+        urls = [u for u in queued_urls(db) if "joinhandshake" in u]
+        assert len(urls) >= 3

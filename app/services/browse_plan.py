@@ -220,7 +220,18 @@ BOARDS = (
     ),
     Board(
         "handshake", "joinhandshake.com", "Handshake",
-        entries=("https://app.joinhandshake.com/stu/postings",),
+        # `/job-search` rather than `/stu/postings`: the second is the page the
+        # board was added with and the first is where its search actually
+        # lives, which its own URL gave away — `?page=1&per_page=25`.
+        entries=("https://app.joinhandshake.com/job-search?per_page=25",),
+        # An ordinal page number, so the step is 1 and the first page is 1.
+        # Sized 25 would ask for `page=26` next, which is the mistake the
+        # `page_base`/`page_size` split exists to make hard to write.
+        #
+        # The entry URL deliberately omits `page=1`: the first page is the URL
+        # as given, and carrying the parameter there would put two of them in
+        # every later URL.
+        page_param="page", page_size=1, page_base=1,
     ),
     # Company careers sites. Worth crawling for the same reason LinkedIn is —
     # they are their own board with no public API — and worth nothing at all

@@ -132,8 +132,8 @@
 
   // --- fetch -------------------------------------------------------------
   const nativeFetch = window.fetch;
-  window.fetch = async function (...args) {
-    const response = await nativeFetch.apply(this, args);
+
+  function inspect(response) {
     try {
       const type = response.headers.get("content-type") || "";
       if (type.includes("json")) {
@@ -147,6 +147,29 @@
       }
     } catch (_) {
       /* never let instrumentation break the page's own request */
+    }
+  }
+
+  // Returns the native promise rather than awaiting it.
+  //
+  // An `async` wrapper made every fetch on the page pass through a frame of
+  // ours, so a request the *page* made and the page's own CSP refused — an ad
+  // tag, an analytics beacon — surfaced with `interceptor.js` in its stack.
+  // Nothing was broken by that, but it is misleading to read, and a site
+  // running Bugsnag or Datadog would have posted our filename to its own error
+  // tracker for a failure that had nothing to do with us.
+  //
+  // Handing back the promise the native call produced avoids the extra frame
+  // and the extra microtask. The inspection rides alongside on a derived
+  // promise with its own rejection handler, so a refused request stays
+  // entirely the page's business and cannot become an unhandled rejection of
+  // ours.
+  window.fetch = function (...args) {
+    const response = nativeFetch.apply(this, args);
+    try {
+      response.then(inspect, () => {});
+    } catch (_) {
+      /* not a promise; hand back whatever it was untouched */
     }
     return response;
   };
