@@ -1,281 +1,487 @@
 {% extends "base.html" %}
 {% block title %}Settings — JobApp{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-bold text-gray-800 mb-6">Settings</h1>
+<div class="flex flex-wrap justify-between items-center gap-2 mb-5">
+  <h1 class="text-2xl font-bold text-gray-800">Settings</h1>
+</div>
 
 {% if saved %}
-<div class="bg-green-50 border border-green-200 text-green-700 rounded px-4 py-3 mb-5 text-sm">
+<div class="bg-green-50 border border-green-200 text-green-700 rounded-lg px-4 py-3 mb-5 text-sm flex items-center gap-2">
+  <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+  </svg>
   Settings saved.
 </div>
 {% endif %}
 
-{# Rendered from the TUNABLES declaration rather than hand-written, so a field
-   can't exist here without a consumer reading it — which is how the previous
-   three came to be saved somewhere nothing looked. #}
-<form method="post" action="/settings" class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl">
-  {% for group, items in tunable_groups %}
-  <div class="{% if not loop.first %}mt-8 pt-6 border-t border-gray-100{% endif %}">
-    <h2 class="text-sm font-semibold text-gray-800 mb-4">{{ group }}</h2>
-    <div class="space-y-5">
-      {% for item in items %}
-      <div>
-        <div class="flex items-baseline gap-2">
-          <label class="block text-sm font-medium text-gray-700">
-            {{ item.spec.label }}
-          </label>
-          {% if item.overridden %}
-          <span class="text-[10px] text-blue-600" title="Differs from the environment default">
-            changed from {{ item.default }}
-          </span>
-          {% endif %}
-          {% if item.spec.restart_required %}
-          <span class="text-[10px] text-amber-600"
-                title="Read once when the worker starts">
-            needs a restart
-          </span>
-          {% endif %}
-        </div>
+{# ── Summary cards ─────────────────────────────────────────────── #}
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+  <div class="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
+    <p class="text-[11px] uppercase tracking-wide text-gray-400">LLM providers</p>
+    <p class="text-xl font-bold text-gray-800">{{ summary.llm_count }} <span class="text-sm font-normal text-gray-400">/ 4</span></p>
+  </div>
+  <div class="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
+    <p class="text-[11px] uppercase tracking-wide text-gray-400">Job sources</p>
+    <p class="text-xl font-bold text-gray-800">{{ summary.source_count }} <span class="text-sm font-normal text-gray-400">active</span></p>
+  </div>
+  <div class="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
+    <p class="text-[11px] uppercase tracking-wide text-gray-400">Outreach</p>
+    <p class="text-xl font-bold text-gray-800">{{ summary.outreach_count }} <span class="text-sm font-normal text-gray-400">/ 4</span></p>
+  </div>
+  <div class="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
+    <p class="text-[11px] uppercase tracking-wide text-gray-400">Features</p>
+    <p class="text-xl font-bold text-gray-800">{{ summary.flags_enabled }} <span class="text-sm font-normal text-gray-400">/ {{ summary.flags_total }}</span></p>
+  </div>
+</div>
 
-        {% if item.spec.kind == "bool" %}
-        <label class="flex items-center gap-2 mt-1 text-sm text-gray-600">
-          <input type="checkbox" name="{{ item.spec.key }}" value="1"
-                 class="rounded border-gray-300"
-                 {% if item.value %}checked{% endif %}>
-          Enabled
-        </label>
-        {% elif item.spec.kind == "choice" %}
-        <select name="{{ item.spec.key }}"
-                class="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-          {% for choice in item.spec.choices %}
-          <option value="{{ choice }}" {% if item.value == choice %}selected{% endif %}>{{ choice }}</option>
+{# ── Tunables form ─────────────────────────────────────────────── #}
+<div class="mb-6">
+  <button type="button" data-collapse="tunables-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" style="transform: rotate(180deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    Tunables
+    <span class="text-xs font-normal text-gray-400">{{ summary.tunable_count }} settings you can change from here</span>
+  </button>
+
+  <div id="tunables-section" data-force-open="true">
+    <form method="post" action="/settings" class="bg-white border border-gray-200 rounded-lg shadow-sm mt-2">
+      {% for group, items in tunable_groups %}
+      <div class="{% if not loop.first %}border-t border-gray-100{% endif %} px-5 py-4">
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">{{ group }}</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-5">
+          {% for item in items %}
+          <div>
+            <div class="flex items-baseline gap-2 flex-wrap">
+              <label class="text-sm font-medium text-gray-700">{{ item.spec.label }}</label>
+              {% if item.spec.restart_required %}
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-200">restart</span>
+              {% endif %}
+              {% if item.overridden %}
+              <button type="button" onclick="resetTunable('{{ item.spec.key }}')"
+                      class="text-[10px] text-blue-600 hover:text-blue-800 underline"
+                      title="Reset to default: {{ item.default }}">reset</button>
+              {% endif %}
+            </div>
+
+            {% if item.spec.kind == "bool" %}
+            <label class="flex items-center gap-2 mt-1.5 text-sm text-gray-600">
+              <input type="checkbox" name="{{ item.spec.key }}" value="1"
+                     data-default="{{ item.default }}" data-kind="bool"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                     {% if item.value %}checked{% endif %}>
+              Enabled
+            </label>
+            {% elif item.spec.kind == "choice" %}
+            <select name="{{ item.spec.key }}" data-default="{{ item.default }}" data-kind="choice"
+                    class="mt-1.5 w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              {% for choice in item.spec.choices %}
+              <option value="{{ choice }}" {% if item.value == choice %}selected{% endif %}>{{ choice }}</option>
+              {% endfor %}
+            </select>
+            {% else %}
+            <input type="number" name="{{ item.spec.key }}" value="{{ item.value }}"
+                   data-default="{{ item.default }}" data-kind="{{ item.spec.kind }}"
+                   {% if item.spec.minimum is not none %}min="{{ item.spec.minimum }}"{% endif %}
+                   {% if item.spec.maximum is not none %}max="{{ item.spec.maximum }}"{% endif %}
+                   {% if item.spec.kind == "float" %}step="0.1"{% endif %}
+                   class="mt-1.5 w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            {% endif %}
+
+            <div class="flex items-baseline gap-2 mt-1">
+              <p class="text-xs text-gray-400 flex-1">{{ item.spec.help }}</p>
+              <span class="text-[10px] text-gray-300 font-mono whitespace-nowrap" title="Environment variable">{{ item.spec.env }}</span>
+            </div>
+          </div>
           {% endfor %}
-        </select>
-        {% else %}
-        <input type="number" name="{{ item.spec.key }}" value="{{ item.value }}"
-               {% if item.spec.minimum is not none %}min="{{ item.spec.minimum }}"{% endif %}
-               {% if item.spec.maximum is not none %}max="{{ item.spec.maximum }}"{% endif %}
-               {% if item.spec.kind == "float" %}step="0.1"{% endif %}
-               class="mt-1 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-        {% endif %}
+        </div>
+      </div>
+      {% endfor %}
 
-        <p class="text-xs text-gray-400 mt-1">{{ item.spec.help }}</p>
+      <div class="px-5 py-4 border-t border-gray-100 bg-gray-50/50 rounded-b-lg flex items-center gap-3">
+        <button type="submit" class="bg-blue-600 text-white px-5 py-1.5 rounded text-sm hover:bg-blue-700">
+          Save settings
+        </button>
+        <button type="button" onclick="resetAllTunables()" class="text-sm text-gray-500 hover:text-red-500 underline">
+          Reset all to defaults
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{# ── Integrations status ──────────────────────────────────────── #}
+<div class="mb-6">
+  <button type="button" data-collapse="integrations-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" style="transform: rotate(180deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    Integrations
+    <span class="text-xs font-normal text-gray-400">API keys and external services</span>
+  </button>
+
+  <div id="integrations-section" data-force-open="true" class="mt-2 space-y-4">
+    {% for section_key, section_label in [("llm", "LLM Providers"), ("sources", "Job Sources"), ("outreach", "Outreach")] %}
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">{{ section_label }}</p>
+      <div class="flex flex-wrap gap-2">
+        {% for item in integrations[section_key] %}
+        <div class="flex items-center gap-1.5 text-sm px-2.5 py-1.5 rounded-md border
+                    {% if item.ok %}border-green-200 bg-green-50 text-green-700
+                    {% else %}border-gray-200 bg-gray-50 text-gray-400{% endif %}">
+          {% if item.ok %}
+          <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+          </svg>
+          {% else %}
+          <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
+          </svg>
+          {% endif %}
+          <span>{{ item.label }}</span>
+          {% if item.get("builtin") %}<span class="text-[10px] opacity-60">(built-in)</span>{% endif %}
+          {% if item.get("detail") and item.ok %}<span class="text-[10px] opacity-60">{{ item.detail }}</span>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+    <p class="text-xs text-gray-400 px-1">
+      Integrations are configured via environment variables. Set the relevant API key or credentials and restart to connect a service.
+    </p>
+  </div>
+</div>
+
+{# ── Feature flags ─────────────────────────────────────────────── #}
+<div class="mb-6">
+  <button type="button" data-collapse="flags-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    Feature flags
+    <span class="text-xs font-normal text-gray-400">{{ summary.flags_enabled }} of {{ summary.flags_total }} enabled (env-only)</span>
+  </button>
+
+  <div id="flags-section" class="mt-2">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+      {% for group_name, flags in feature_flags %}
+      <div class="{% if not loop.first %}border-t border-gray-100{% endif %} px-4 py-3">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{{ group_name }}</p>
+        <div class="flex flex-wrap gap-x-4 gap-y-1">
+          {% for label, enabled, env_name in flags %}
+          <span class="inline-flex items-center gap-1.5 text-sm py-0.5 min-w-[140px]"
+                title="{{ env_name }}">
+            {% if enabled %}
+            <span class="w-2 h-2 rounded-full bg-green-500 shrink-0"></span>
+            <span class="text-gray-700">{{ label }}</span>
+            {% else %}
+            <span class="w-2 h-2 rounded-full bg-gray-300 shrink-0"></span>
+            <span class="text-gray-400">{{ label }}</span>
+            {% endif %}
+          </span>
+          {% endfor %}
+        </div>
       </div>
       {% endfor %}
     </div>
+    <p class="text-xs text-gray-400 mt-1 px-1">
+      Feature flags are set via environment variables. Hover a flag to see its variable name.
+    </p>
   </div>
-  {% endfor %}
+</div>
 
-  <button type="submit" class="mt-8 bg-blue-600 text-white px-6 py-2 rounded text-sm hover:bg-blue-700">
-    Save settings
+{# ── System info ───────────────────────────────────────────────── #}
+<div class="mb-6">
+  <button type="button" data-collapse="sysinfo-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    System info
   </button>
-</form>
 
+  <div id="sysinfo-section" class="mt-2">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 text-sm">
+        {% for label, value in [
+          ("Timezone", system_info.timezone),
+          ("Match primary", system_info.match_primary),
+          ("API fetch", system_info.fetch_api_hours ~ "h"),
+          ("Board fetch", system_info.fetch_boards_hours ~ "h"),
+          ("Browser fetch", system_info.fetch_browser_hours ~ "h"),
+          ("Match interval", system_info.match_interval_min ~ "m"),
+          ("Enrich interval", system_info.enrich_interval_min ~ "m"),
+          ("Deep-match band", system_info.deep_band),
+          ("Max paid calls/cycle", system_info.max_paid_calls),
+          ("Auth", "on" if system_info.auth_enabled else "off"),
+          ("Debug", "on" if system_info.debug else "off"),
+        ] %}
+        <div>
+          <p class="text-[11px] text-gray-400 uppercase tracking-wide">{{ label }}</p>
+          <p class="text-gray-700 font-medium">{{ value }}</p>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Source health ─────────────────────────────────────────────── #}
 {% if last_fetch %}
-<div class="mt-10">
-  <h2 class="text-lg font-semibold text-gray-800 mb-1">Last fetch — source health</h2>
-  <p class="text-xs text-gray-400 mb-4">
-    Run at {{ last_fetch.at }} &bull; {{ last_fetch.fetched }} total jobs fetched
-    &bull; <a href="/runs" class="text-blue-600 hover:text-blue-800 underline">see all runs</a>
-  </p>
-  <div class="overflow-x-auto">
-    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
-      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-        <tr>
-          <th class="text-left px-4 py-2">Source</th>
-          <th class="text-left px-4 py-2">Status</th>
-          <th class="text-right px-4 py-2">Jobs</th>
-          <th class="text-left px-4 py-2">Errors</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-100 bg-white">
-        {% for src, info in last_fetch.sources.items() %}
-        <tr>
-          <td class="px-4 py-2 font-medium text-gray-700">{{ src }}</td>
-          <td class="px-4 py-2">
-            {% if not info.enabled %}
-              <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">Disabled</span>
-            {% elif info.count > 0 and info.errors %}
-              <span class="text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Partial</span>
-            {% elif info.count > 0 %}
-              <span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">OK</span>
-            {% elif info.errors %}
-              <span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600">Failed</span>
-            {% else %}
-              {# Reached the source fine, it just had nothing to give. #}
-              <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-500"
-                    title="Source responded but returned no matching jobs">No results</span>
-            {% endif %}
-          </td>
-          <td class="px-4 py-2 text-right text-gray-600">
-            {% if info.enabled %}{{ info.count }}{% else %}—{% endif %}
-          </td>
-          <td class="px-4 py-2 text-xs text-red-500 max-w-xs truncate">
-            {% if info.errors %}
-              {% for err in info.errors %}
-                <div class="truncate" title="{{ err }}">{{ err }}</div>
-              {% endfor %}
-            {% else %}
-              <span class="text-gray-300">—</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+<div class="mb-6">
+  <button type="button" data-collapse="source-health-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" style="transform: rotate(180deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    Source health
+    <span class="text-xs font-normal text-gray-400">
+      {{ last_fetch.fetched }} jobs at {{ last_fetch.at }}
+      &bull; <a href="/runs" class="text-blue-600 hover:text-blue-800 underline">runs</a>
+    </span>
+  </button>
 
-  {% if last_fetch.backfill %}
-  <p class="text-xs text-gray-400 mt-3">
-    One-time backfill: scanned {{ last_fetch.backfill.jobs_scanned }} stored jobs,
-    recovered {{ last_fetch.backfill.boards_found }} company boards
-    {%- if last_fetch.backfill.boards_sniffed %},
-    {{ last_fetch.backfill.boards_sniffed }} more from careers sites{% endif %}
-    {%- if last_fetch.backfill.jobs_given_apply_url %},
-    added direct apply links to {{ last_fetch.backfill.jobs_given_apply_url }} jobs{% endif %}.
-  </p>
-  {% endif %}
-  {% if last_fetch.links %}
-  <p class="text-xs text-gray-400 mt-3">
-    Apply links: {{ last_fetch.links.resolved }} of {{ last_fetch.links.attempted }}
-    aggregator redirects followed through to the employer
-    {%- if last_fetch.links.failed %}, {{ last_fetch.links.failed }} failed{% endif %}
-    {%- if last_fetch.links.skipped_budget %},
-    {{ last_fetch.links.skipped_budget }} deferred to the next cycle{% endif %}.
-  </p>
-  {% endif %}
+  <div id="source-health-section" data-force-open="true" class="mt-2">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+            <tr>
+              <th class="text-left px-4 py-2">Source</th>
+              <th class="text-left px-4 py-2">Status</th>
+              <th class="text-right px-4 py-2">Jobs</th>
+              <th class="text-left px-4 py-2">Errors</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            {% for src, info in last_fetch.sources.items() %}
+            <tr>
+              <td class="px-4 py-2 font-medium text-gray-700">{{ src }}</td>
+              <td class="px-4 py-2">
+                {% if not info.enabled %}
+                  <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">Disabled</span>
+                {% elif info.count > 0 and info.errors %}
+                  <span class="text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Partial</span>
+                {% elif info.count > 0 %}
+                  <span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">OK</span>
+                {% elif info.errors %}
+                  <span class="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600">Failed</span>
+                {% else %}
+                  <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-500"
+                        title="Source responded but returned no matching jobs">No results</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-2 text-right text-gray-600">
+                {% if info.enabled %}{{ info.count }}{% else %}&mdash;{% endif %}
+              </td>
+              <td class="px-4 py-2 text-xs text-red-500 max-w-xs truncate">
+                {% if info.errors %}
+                  {% for err in info.errors %}
+                    <div class="truncate" title="{{ err }}">{{ err }}</div>
+                  {% endfor %}
+                {% else %}
+                  <span class="text-gray-300">&mdash;</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {% if last_fetch.backfill %}
+    <p class="text-xs text-gray-400 mt-2 px-1">
+      One-time backfill: scanned {{ last_fetch.backfill.jobs_scanned }} stored jobs,
+      recovered {{ last_fetch.backfill.boards_found }} company boards
+      {%- if last_fetch.backfill.boards_sniffed %},
+      {{ last_fetch.backfill.boards_sniffed }} more from careers sites{% endif %}
+      {%- if last_fetch.backfill.jobs_given_apply_url %},
+      added direct apply links to {{ last_fetch.backfill.jobs_given_apply_url }} jobs{% endif %}.
+    </p>
+    {% endif %}
+    {% if last_fetch.links %}
+    <p class="text-xs text-gray-400 mt-2 px-1">
+      Apply links: {{ last_fetch.links.resolved }} of {{ last_fetch.links.attempted }}
+      aggregator redirects followed through to the employer
+      {%- if last_fetch.links.failed %}, {{ last_fetch.links.failed }} failed{% endif %}
+      {%- if last_fetch.links.skipped_budget %},
+      {{ last_fetch.links.skipped_budget }} deferred to the next cycle{% endif %}.
+    </p>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<div class="mb-6 text-sm text-gray-400 bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+  No fetch data yet — run a job fetch to see source health here.
 </div>
 {% endif %}
 
+{# ── ATS boards ────────────────────────────────────────────────── #}
 {% if board_registry %}
-<div class="mt-10">
-  <h2 class="text-lg font-semibold text-gray-800 mb-1">Company ATS boards</h2>
-  <p class="text-xs text-gray-400 mb-4">
-    Boards learned from job links, resolved apply URLs and sniffed careers pages.
-    A discovered slug is a guess until its ATS confirms it, so new ones are
-    probed before they are ever polled — that is what keeps a slug scraped off
-    an aggregator's own page from spending the budget real companies compete
-    for. Each cycle then polls the highest-yielding ones; boards that stay
-    silent are retired automatically.
-  </p>
-  <div class="overflow-x-auto">
-    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
-      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-        <tr>
-          <th class="text-left px-4 py-2">ATS</th>
-          <th class="text-right px-4 py-2">Active</th>
-          <th class="text-right px-4 py-2" title="Discovered, waiting for a probe to confirm the slug is real">Unproven</th>
-          <th class="text-right px-4 py-2" title="Probed, and the ATS has no such board">Not a board</th>
-          <th class="text-right px-4 py-2">Not working</th>
-          <th class="text-right px-4 py-2">Known</th>
-          <th class="text-right px-4 py-2">Jobs sourced</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-100 bg-white">
-        {% for ats, info in board_registry.items() %}
-        <tr>
-          <td class="px-4 py-2 font-medium text-gray-700">{{ ats }}</td>
-          <td class="px-4 py-2 text-right text-gray-600">{{ info.active }}</td>
-          <td class="px-4 py-2 text-right {% if info.pending %}text-amber-600{% else %}text-gray-300{% endif %}">
-            {{ info.pending }}
-          </td>
-          <td class="px-4 py-2 text-right {% if info.rejected %}text-gray-500{% else %}text-gray-300{% endif %}">
-            {{ info.rejected }}
-          </td>
-          <td class="px-4 py-2 text-right {% if info.retired %}text-red-500{% else %}text-gray-300{% endif %}">
-            {{ info.retired }}
-          </td>
-          <td class="px-4 py-2 text-right text-gray-400">{{ info.total }}</td>
-          <td class="px-4 py-2 text-right text-gray-600">{{ info.jobs }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<div class="mb-6">
+  <button type="button" data-collapse="boards-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    ATS boards
+    <span class="text-xs font-normal text-gray-400">{{ board_registry | length }} ATS platforms tracked</span>
+  </button>
+
+  <div id="boards-section" class="mt-2 space-y-4">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+      <p class="text-xs text-gray-400 px-4 pt-3 pb-1">
+        Boards learned from job links, resolved apply URLs and sniffed careers pages.
+      </p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+            <tr>
+              <th class="text-left px-4 py-2">ATS</th>
+              <th class="text-right px-4 py-2">Active</th>
+              <th class="text-right px-4 py-2" title="Discovered, waiting for a probe">Unproven</th>
+              <th class="text-right px-4 py-2" title="Probed, and the ATS has no such board">Not a board</th>
+              <th class="text-right px-4 py-2">Not working</th>
+              <th class="text-right px-4 py-2">Known</th>
+              <th class="text-right px-4 py-2">Jobs sourced</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            {% for ats, info in board_registry.items() %}
+            <tr>
+              <td class="px-4 py-2 font-medium text-gray-700">{{ ats }}</td>
+              <td class="px-4 py-2 text-right text-gray-600">{{ info.active }}</td>
+              <td class="px-4 py-2 text-right {% if info.pending %}text-amber-600{% else %}text-gray-300{% endif %}">{{ info.pending }}</td>
+              <td class="px-4 py-2 text-right {% if info.rejected %}text-gray-500{% else %}text-gray-300{% endif %}">{{ info.rejected }}</td>
+              <td class="px-4 py-2 text-right {% if info.retired %}text-red-500{% else %}text-gray-300{% endif %}">{{ info.retired }}</td>
+              <td class="px-4 py-2 text-right text-gray-400">{{ info.total }}</td>
+              <td class="px-4 py-2 text-right text-gray-600">{{ info.jobs }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {# ── Retired boards ──────────────────────────────────────── #}
+    {% if retired_boards %}
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="px-4 pt-3 pb-1 flex items-baseline gap-2">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Boards not working</p>
+        <span class="text-xs text-gray-400">{{ retired_boards | length }}</span>
+      </div>
+      <p class="text-xs text-gray-400 px-4 pb-2">
+        Returned no jobs for enough cycles. Retry puts one back into rotation.
+      </p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+            <tr>
+              <th class="text-left px-4 py-2">ATS</th>
+              <th class="text-left px-4 py-2">Slug</th>
+              <th class="text-left px-4 py-2">Company</th>
+              <th class="text-left px-4 py-2">Found via</th>
+              <th class="text-right px-4 py-2">Jobs ever</th>
+              <th class="text-right px-4 py-2">Empty cycles</th>
+              <th class="text-left px-4 py-2">Last checked</th>
+              <th class="px-4 py-2"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            {% for board in retired_boards %}
+            <tr id="board-{{ board.id }}">
+              <td class="px-4 py-2 text-gray-500">{{ board.ats }}</td>
+              <td class="px-4 py-2 font-mono text-xs text-gray-700">{{ board.slug }}</td>
+              <td class="px-4 py-2 text-gray-600">{{ board.company or "&mdash;" }}</td>
+              <td class="px-4 py-2 text-xs text-gray-400">{{ board.origin }}</td>
+              <td class="px-4 py-2 text-right text-gray-500">{{ board.total_job_count }}</td>
+              <td class="px-4 py-2 text-right text-red-500">{{ board.consecutive_empty }}</td>
+              <td class="px-4 py-2 text-xs text-gray-400">
+                {% if board.last_fetched_at %}{{ board.last_fetched_at | when("%b %d, %Y") }}{% else %}never{% endif %}
+              </td>
+              <td class="px-4 py-2 text-right">
+                <button hx-post="/settings/boards/{{ board.id }}/reactivate"
+                        hx-target="#board-{{ board.id }}" hx-swap="outerHTML"
+                        class="text-xs text-blue-600 hover:text-blue-800 underline">Retry</button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 {% endif %}
 
-{% if retired_boards %}
-<div class="mt-10">
-  <h2 class="text-lg font-semibold text-gray-800 mb-1">Boards not working</h2>
-  <p class="text-xs text-gray-400 mb-4">
-    These returned no jobs for enough cycles running that we stopped polling them.
-    Usually the company stopped hiring or renamed its board — a wrong slug behaves
-    exactly the same way. Retry puts one back into rotation.
-  </p>
-  <div class="overflow-x-auto">
-    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
-      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-        <tr>
-          <th class="text-left px-4 py-2">ATS</th>
-          <th class="text-left px-4 py-2">Slug</th>
-          <th class="text-left px-4 py-2">Company</th>
-          <th class="text-left px-4 py-2">Found via</th>
-          <th class="text-right px-4 py-2">Jobs ever</th>
-          <th class="text-right px-4 py-2">Empty cycles</th>
-          <th class="text-left px-4 py-2">Last checked</th>
-          <th class="px-4 py-2"></th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-100 bg-white">
-        {% for board in retired_boards %}
-        <tr id="board-{{ board.id }}">
-          <td class="px-4 py-2 text-gray-500">{{ board.ats }}</td>
-          <td class="px-4 py-2 font-mono text-xs text-gray-700">{{ board.slug }}</td>
-          <td class="px-4 py-2 text-gray-600">{{ board.company or "—" }}</td>
-          <td class="px-4 py-2 text-xs text-gray-400">{{ board.origin }}</td>
-          <td class="px-4 py-2 text-right text-gray-500">{{ board.total_job_count }}</td>
-          <td class="px-4 py-2 text-right text-red-500">{{ board.consecutive_empty }}</td>
-          <td class="px-4 py-2 text-xs text-gray-400">
-            {% if board.last_fetched_at %}{{ board.last_fetched_at | when("%b %d, %Y") }}{% else %}never{% endif %}
-          </td>
-          <td class="px-4 py-2 text-right">
-            <button
-              hx-post="/settings/boards/{{ board.id }}/reactivate"
-              hx-target="#board-{{ board.id }}"
-              hx-swap="outerHTML"
-              class="text-xs text-blue-600 hover:text-blue-800 underline">
-              Retry
-            </button>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-{% endif %}
-
+{# ── Configured slug problems ──────────────────────────────────── #}
 {% if slug_report %}
-<div class="mt-10">
-  <h2 class="text-lg font-semibold text-gray-800 mb-1">Configured slug problems</h2>
-  <p class="text-xs text-gray-400 mb-4">
-    Slugs you set in the environment that don't match a real board. Invalid ones
-    contribute nothing until corrected.
-  </p>
-  <div class="space-y-2 text-sm">
-    {% for ats, info in slug_report.items() %}
-    {% if info is mapping %}
-    {% if info.invalid %}
-    <p class="text-red-600">
-      <span class="font-medium">{{ ats }}</span> — no working board for:
-      <span class="font-mono text-xs">{{ info.invalid | join(", ") }}</span>
-    </p>
-    {% endif %}
-    {% if info.fixed %}
-    <p class="text-gray-500">
-      <span class="font-medium">{{ ats }}</span> — auto-corrected:
-      {% for original, fixed in info.fixed.items() %}
-      <span class="font-mono text-xs">{{ original }} → {{ fixed }}</span>{% if not loop.last %}, {% endif %}
-      {% endfor %}
-    </p>
-    {% endif %}
-    {% endif %}
-    {% endfor %}
+<div class="mb-6">
+  <button type="button" data-collapse="slugs-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" style="transform: rotate(180deg)" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    Slug problems
+    <span class="text-xs font-normal text-amber-600">needs attention</span>
+  </button>
+
+  <div id="slugs-section" data-force-open="true" class="mt-2">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm p-4">
+      <p class="text-xs text-gray-400 mb-3">
+        Slugs you set in the environment that don't match a real board.
+      </p>
+      <div class="space-y-2 text-sm">
+        {% for ats, info in slug_report.items() %}
+        {% if info is mapping %}
+        {% if info.invalid %}
+        <p class="text-red-600">
+          <span class="font-medium">{{ ats }}</span> — no working board for:
+          <span class="font-mono text-xs">{{ info.invalid | join(", ") }}</span>
+        </p>
+        {% endif %}
+        {% if info.fixed %}
+        <p class="text-gray-500">
+          <span class="font-medium">{{ ats }}</span> — auto-corrected:
+          {% for original, fixed in info.fixed.items() %}
+          <span class="font-mono text-xs">{{ original }} &rarr; {{ fixed }}</span>{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </p>
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+      </div>
+    </div>
   </div>
 </div>
 {% endif %}
 
-{% if not last_fetch %}
-<div class="mt-10 text-sm text-gray-400">No fetch data yet — run a job fetch to see source health here.</div>
-{% endif %}
+<script>
+function resetTunable(key) {
+  var input = document.querySelector('[name="' + key + '"]');
+  if (!input) return;
+  var def = input.dataset.default;
+  if (input.dataset.kind === 'bool') {
+    input.checked = (def === 'True' || def === '1' || def === 'true');
+  } else {
+    input.value = def;
+  }
+}
+
+function resetAllTunables() {
+  document.querySelectorAll('[data-default]').forEach(function(input) {
+    if (input.dataset.kind === 'bool') {
+      var def = input.dataset.default;
+      input.checked = (def === 'True' || def === '1' || def === 'true');
+    } else {
+      input.value = input.dataset.default;
+    }
+  });
+}
+</script>
 {% endblock %}
