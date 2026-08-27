@@ -11,41 +11,97 @@
 
 import { HARVEST_SITES } from "./sites.js";
 
-/**
- * Draw one checkbox per harvest site.
- *
- * Rendered rather than written into options.html because the list is shared
- * with background.js: a site added there but forgotten here was a site that
- * registered and permissioned correctly and had no way to be turned on.
- */
+// ── Collapsible sections ──────────────────────────────────────────
+document.querySelectorAll(".section-head").forEach((btn) => {
+  const sectionId = btn.dataset.section;
+  if (!sectionId) return;
+  const section = document.getElementById(sectionId);
+  if (!section) return;
+
+  // Restore from localStorage
+  try {
+    const saved = localStorage.getItem("ext-sec-" + sectionId);
+    if (saved === "collapsed") {
+      section.classList.add("collapsed");
+      const arrow = btn.querySelector(".arrow");
+      if (arrow) arrow.classList.remove("open");
+    }
+  } catch (_) {}
+
+  btn.addEventListener("click", () => {
+    const isCollapsed = section.classList.toggle("collapsed");
+    const arrow = btn.querySelector(".arrow");
+    if (arrow) arrow.classList.toggle("open", !isCollapsed);
+    try { localStorage.setItem("ext-sec-" + sectionId, isCollapsed ? "collapsed" : "open"); } catch (_) {}
+  });
+});
+
+// ── Harvest site grid ─────────────────────────────────────────────
 function renderHarvestSites() {
   const container = document.getElementById("harvest-sites");
   if (!container) return;
   for (const site of HARVEST_SITES) {
-    const row = document.createElement("div");
-    row.className = "row";
+    const item = document.createElement("label");
+    item.className = "harvest-item";
+    item.htmlFor = site.storageKey;
 
     const box = document.createElement("input");
     box.type = "checkbox";
     box.id = site.storageKey;
 
-    const label = document.createElement("label");
-    label.htmlFor = site.storageKey;
-    label.textContent = `Harvest jobs from ${site.label}`;
-
-    row.append(box, label);
-    container.append(row);
-
+    const text = document.createElement("label");
+    text.htmlFor = site.storageKey;
+    text.textContent = site.label;
     if (site.note) {
-      const hint = document.createElement("div");
-      hint.className = "hint";
-      hint.textContent = site.note;
-      container.append(hint);
+      const dot = document.createElement("span");
+      dot.className = "note-dot";
+      dot.title = site.note;
+      text.append(dot);
     }
+
+    item.append(box, text);
+    container.append(item);
   }
 }
 
 renderHarvestSites();
+
+function updateHarvestBadge() {
+  const total = HARVEST_SITES.length;
+  const checked = HARVEST_SITES.filter((s) => {
+    const box = harvestBox(s);
+    return box && box.checked;
+  }).length;
+  const badge = document.getElementById("harvest-badge");
+  if (badge) {
+    badge.textContent = `${checked} / ${total}`;
+    badge.className = checked > 0 ? "badge active" : "badge";
+  }
+  const count = document.getElementById("harvest-count");
+  if (count) {
+    count.textContent = checked === total ? "all selected" : `${checked} of ${total}`;
+  }
+}
+
+// Select all / deselect all
+document.getElementById("harvest-select-all")?.addEventListener("click", () => {
+  HARVEST_SITES.forEach((site) => {
+    const box = harvestBox(site);
+    if (box) box.checked = true;
+  });
+  updateHarvestBadge();
+});
+
+document.getElementById("harvest-deselect-all")?.addEventListener("click", () => {
+  HARVEST_SITES.forEach((site) => {
+    const box = harvestBox(site);
+    if (box) box.checked = false;
+  });
+  updateHarvestBadge();
+});
+
+// Update badge when individual checkboxes change
+document.getElementById("harvest-sites")?.addEventListener("change", updateHarvestBadge);
 
 /** The checkbox for one site. Its id is the storage key, so there is one name. */
 function harvestBox(site) {
@@ -153,6 +209,7 @@ async function load() {
     : "never";
   els.error.textContent = stored.status.lastError || "none";
   renderEvents(stored.events || []);
+  updateHarvestBadge();
 }
 
 
@@ -165,6 +222,10 @@ async function load() {
 function renderEvents(events) {
   if (!els.events) return;
   els.events.replaceChildren();
+
+  const badge = document.getElementById("events-badge");
+  if (badge) badge.textContent = String(events.length);
+
   if (!events.length) {
     const row = els.events.insertRow();
     const cell = row.insertCell();

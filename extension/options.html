@@ -4,155 +4,306 @@
   <meta charset="utf-8">
   <title>JobApp Agent</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light;
+      --blue: #2563eb;
+      --blue-hover: #1d4ed8;
+      --green-bg: #dcfce7; --green-text: #14532d;
+      --red-bg: #fee2e2; --red-text: #7f1d1d;
+      --gray-50: #f9fafb; --gray-100: #f3f4f6; --gray-200: #e5e7eb;
+      --gray-300: #d1d5db; --gray-400: #9ca3af; --gray-500: #6b7280;
+      --gray-600: #4b5563; --gray-700: #374151; --gray-800: #1f2937;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
     body {
-      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-      margin: 0; padding: 20px; min-width: 380px; max-width: 560px;
+      font: 13px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+      margin: 0; padding: 0; min-width: 400px; max-width: 580px;
+      color: var(--gray-700); background: var(--gray-50);
     }
-    h1 { font-size: 17px; margin: 0 0 4px; }
-    .sub { color: #666; margin: 0 0 20px; font-size: 13px; }
-    label { display: block; font-weight: 600; margin: 14px 0 4px; }
+
+    /* ── Header ────────────────────────── */
+    .header {
+      background: #fff; border-bottom: 1px solid var(--gray-200);
+      padding: 16px 20px;
+    }
+    .header h1 { font-size: 16px; margin: 0; color: var(--gray-800); }
+    .header .sub { color: var(--gray-500); margin: 2px 0 0; font-size: 12px; }
+
+    /* ── Sections ──────────────────────── */
+    .body { padding: 12px 16px 20px; }
+    .section {
+      background: #fff; border: 1px solid var(--gray-200);
+      border-radius: var(--radius); margin-bottom: 12px;
+      overflow: hidden;
+    }
+    .section-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; cursor: pointer; user-select: none;
+      background: #fff; border: none; width: 100%; text-align: left;
+      font: inherit; color: var(--gray-800); font-weight: 600; font-size: 13px;
+    }
+    .section-head:hover { background: var(--gray-50); }
+    .section-head .arrow {
+      width: 16px; height: 16px; transition: transform .15s;
+      color: var(--gray-400); flex-shrink: 0;
+    }
+    .section-head .arrow.open { transform: rotate(180deg); }
+    .section-head .badge {
+      font-size: 10px; font-weight: 600; padding: 1px 6px;
+      border-radius: 10px; background: var(--gray-100); color: var(--gray-500);
+      margin-left: auto;
+    }
+    .section-head .badge.active { background: #dbeafe; color: var(--blue); }
+    .section-body { padding: 0 14px 14px; }
+    .section.collapsed .section-body { display: none; }
+    .section.collapsed .arrow { transform: rotate(0deg) !important; }
+
+    /* ── Form elements ─────────────────── */
+    label.field { display: block; font-weight: 600; margin: 12px 0 3px; font-size: 12px; color: var(--gray-600); text-transform: uppercase; letter-spacing: .03em; }
     input[type="text"], input[type="password"] {
-      width: 100%; padding: 7px 9px; box-sizing: border-box;
-      border: 1px solid #bbb; border-radius: 5px; font: inherit;
+      width: 100%; padding: 8px 10px;
+      border: 1px solid var(--gray-300); border-radius: 6px; font: inherit;
+      font-size: 13px; transition: border-color .15s;
     }
-    .hint { color: #666; font-size: 12px; margin-top: 3px; }
-    .row { display: flex; align-items: center; gap: 8px; margin: 18px 0; }
-    .row label { margin: 0; font-weight: 600; }
+    input[type="text"]:focus, input[type="password"]:focus {
+      outline: none; border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(37,99,235,.1);
+    }
+    .hint { color: var(--gray-500); font-size: 11px; margin-top: 3px; line-height: 1.4; }
+
+    .toggle-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 0; border-bottom: 1px solid var(--gray-100);
+    }
+    .toggle-row:last-child { border-bottom: none; }
+    .toggle-row input[type="checkbox"] {
+      width: 16px; height: 16px; accent-color: var(--blue); flex-shrink: 0;
+      cursor: pointer;
+    }
+    .toggle-row label { margin: 0; font-weight: 500; font-size: 13px; cursor: pointer; color: var(--gray-700); }
+    .toggle-row .toggle-hint { color: var(--gray-500); font-size: 11px; margin-left: auto; white-space: nowrap; }
+
+    /* ── Harvest grid ──────────────────── */
+    .harvest-controls {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 10px; padding-bottom: 8px;
+      border-bottom: 1px solid var(--gray-100);
+    }
+    .harvest-controls span { font-size: 11px; color: var(--gray-500); }
+    .harvest-controls button {
+      font-size: 11px; padding: 3px 10px; border-radius: 4px;
+      border: 1px solid var(--gray-300); background: #fff;
+      color: var(--gray-600); cursor: pointer;
+    }
+    .harvest-controls button:hover { background: var(--gray-50); border-color: var(--gray-400); }
+    .harvest-grid {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 1px; background: var(--gray-100); border-radius: 6px;
+      overflow: hidden; border: 1px solid var(--gray-200);
+    }
+    .harvest-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; background: #fff; cursor: pointer;
+      transition: background .1s;
+    }
+    .harvest-item:hover { background: var(--gray-50); }
+    .harvest-item input { width: 15px; height: 15px; accent-color: var(--blue); cursor: pointer; flex-shrink: 0; }
+    .harvest-item label { margin: 0; font-size: 12px; font-weight: 500; cursor: pointer; color: var(--gray-700); }
+    .harvest-item .has-note { position: relative; }
+    .harvest-item .note-dot {
+      display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+      background: var(--gray-400); margin-left: 4px; vertical-align: middle;
+    }
+    .harvest-note {
+      grid-column: 1 / -1; padding: 6px 10px; background: var(--gray-50);
+      font-size: 11px; color: var(--gray-500); line-height: 1.4;
+      border-top: 1px solid var(--gray-200);
+    }
+
+    /* ── Buttons ────────────────────────── */
+    .actions { display: flex; gap: 8px; margin-top: 14px; }
     button {
-      padding: 7px 14px; border-radius: 5px; border: 1px solid #bbb;
-      background: #f6f6f6; font: inherit; cursor: pointer;
+      padding: 8px 16px; border-radius: 6px; border: 1px solid var(--gray-300);
+      background: #fff; font: inherit; cursor: pointer; font-size: 13px;
+      transition: all .15s;
     }
-    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-    button:disabled { opacity: .55; cursor: default; }
-    .actions { display: flex; gap: 8px; margin-top: 18px; }
-    #message { margin-top: 14px; padding: 9px 11px; border-radius: 5px; display: none; }
-    #message.ok { display: block; background: #dcfce7; color: #14532d; }
-    #message.err { display: block; background: #fee2e2; color: #7f1d1d; }
-    #status { margin-top: 20px; border-top: 1px solid #e5e5e5; padding-top: 14px; font-size: 13px; }
-    #status dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; }
-    #status dt { color: #666; }
-    #status dd { margin: 0; font-variant-numeric: tabular-nums; }
-    #events-panel { margin-top: 16px; font-size: 12px; }
-    #events-panel summary { cursor: pointer; color: #666; }
-    #events { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    #events td { padding: 2px 6px 2px 0; vertical-align: top; border-top: 1px solid #eee; }
-    #events td.when { color: #999; white-space: nowrap; }
-    #events td.host { color: #999; word-break: break-all; }
-    #events tr.failed td.kind { color: #b91c1c; }
+    button:hover { background: var(--gray-50); }
+    button:disabled { opacity: .5; cursor: default; }
+    button.primary {
+      background: var(--blue); border-color: var(--blue); color: #fff;
+      font-weight: 600;
+    }
+    button.primary:hover { background: var(--blue-hover); }
+
+    /* ── Message banner ────────────────── */
+    #message {
+      margin-top: 12px; padding: 10px 12px; border-radius: 6px;
+      display: none; font-size: 12px; font-weight: 500;
+    }
+    #message.ok { display: block; background: var(--green-bg); color: var(--green-text); }
+    #message.err { display: block; background: var(--red-bg); color: var(--red-text); }
+
+    /* ── Status panel ──────────────────── */
+    #status dl {
+      display: grid; grid-template-columns: auto 1fr;
+      gap: 4px 14px; margin: 0; font-size: 12px;
+    }
+    #status dt { color: var(--gray-500); font-weight: 500; }
+    #status dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--gray-700); }
+
+    /* ── Events table ──────────────────── */
+    #events { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11px; }
+    #events td { padding: 4px 6px 4px 0; vertical-align: top; border-top: 1px solid var(--gray-100); }
+    #events td.when { color: var(--gray-400); white-space: nowrap; }
+    #events td.host { color: var(--gray-500); word-break: break-all; }
+    #events tr.failed td.kind { color: #b91c1c; font-weight: 500; }
   </style>
 </head>
 <body>
-  <h1>JobApp Agent</h1>
-  <p class="sub">Runs browser work for your server using this browser's own sessions.</p>
-
-  <label for="serverUrl">Server URL</label>
-  <input type="text" id="serverUrl" placeholder="https://your-domain.example" autocomplete="off" spellcheck="false">
-  <div class="hint">The address you open the app at, including https://</div>
-
-  <label for="token">Agent token</label>
-  <input type="password" id="token" placeholder="AGENT_TOKEN" autocomplete="off" spellcheck="false">
-  <div class="hint">The <code>AGENT_TOKEN</code> value from your server's .env — not your login password.</div>
-
-  <div class="row">
-    <input type="checkbox" id="enabled">
-    <label for="enabled">Poll for work</label>
+  <div class="header">
+    <h1>JobApp Agent</h1>
+    <p class="sub">Runs browser work for your server using this browser's own sessions.</p>
   </div>
 
-  <div class="row">
-    <input type="checkbox" id="resolveLinks">
-    <label for="resolveLinks">Resolve job links</label>
-  </div>
-  <div class="hint">
-    Lets this extension open aggregator redirect pages (Adzuna, Jooble, Indeed)
-    to find the employer's real apply link — the step your server gets blocked
-    on. Requires permission to read any site, requested when you tick it, and
-    revocable here at any time. Requests are sent without cookies.
+  <div class="body">
+
+    <!-- ── Connection ──────────────────── -->
+    <div class="section" id="sec-connection">
+      <button class="section-head" data-section="sec-connection">
+        <svg class="arrow open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+        Connection
+      </button>
+      <div class="section-body">
+        <label class="field" for="serverUrl">Server URL</label>
+        <input type="text" id="serverUrl" placeholder="https://your-domain.example" autocomplete="off" spellcheck="false">
+        <div class="hint">The address you open the app at, including https://</div>
+
+        <label class="field" for="token">Agent token</label>
+        <input type="password" id="token" placeholder="AGENT_TOKEN" autocomplete="off" spellcheck="false">
+        <div class="hint">The <code>AGENT_TOKEN</code> value from your server's .env</div>
+      </div>
+    </div>
+
+    <!-- ── Agent behavior ─────────────── -->
+    <div class="section" id="sec-behavior">
+      <button class="section-head" data-section="sec-behavior">
+        <svg class="arrow open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+        Agent behavior
+      </button>
+      <div class="section-body">
+        <div class="toggle-row">
+          <input type="checkbox" id="enabled">
+          <label for="enabled">Poll for work</label>
+        </div>
+        <div class="toggle-row">
+          <input type="checkbox" id="resolveLinks">
+          <label for="resolveLinks">Resolve job links</label>
+          <span class="toggle-hint">needs all-sites permission</span>
+        </div>
+        <div class="hint" style="margin-bottom:6px">
+          Opens aggregator redirect pages (Adzuna, Jooble, Indeed)
+          to find the employer's real apply link. Requests are sent without cookies.
+        </div>
+        <div class="toggle-row">
+          <input type="checkbox" id="useTabs">
+          <label for="useTabs">Hidden window for blocked pages</label>
+        </div>
+        <div class="hint" style="margin-bottom:6px">
+          Reopens blocked pages as a real page load in a minimized window. One at a time.
+        </div>
+        <div class="toggle-row">
+          <input type="checkbox" id="solveChecks">
+          <label for="solveChecks">Show "confirm you're human" checks</label>
+        </div>
+        <div class="hint">
+          Raises the window and waits up to 90 seconds for you to solve it.
+          Nothing is clicked for you.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Harvest sites ──────────────── -->
+    <div class="section" id="sec-harvest">
+      <button class="section-head" data-section="sec-harvest">
+        <svg class="arrow open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+        Harvest sites
+        <span class="badge" id="harvest-badge">0 / 0</span>
+      </button>
+      <div class="section-body">
+        <div class="hint" style="margin-bottom:10px">
+          While you browse a job site, harvesting reads the data the page already received
+          and sends it to your server. Each site is a separate permission.
+        </div>
+        <div class="harvest-controls">
+          <button type="button" id="harvest-select-all">Select all</button>
+          <button type="button" id="harvest-deselect-all">Deselect all</button>
+          <span id="harvest-count"></span>
+        </div>
+        <div id="harvest-sites" class="harvest-grid"></div>
+      </div>
+    </div>
+
+    <!-- ── Overlay ─────────────────────── -->
+    <div class="section" id="sec-overlay">
+      <button class="section-head" data-section="sec-overlay">
+        <svg class="arrow open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+        Overlay
+      </button>
+      <div class="section-body">
+        <div class="toggle-row">
+          <input type="checkbox" id="overlay">
+          <label for="overlay">Show overlay on job pages</label>
+        </div>
+        <div class="hint">
+          Adds a panel to LinkedIn and ATS boards showing match score, application
+          status, sponsorship info, and a save button.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Actions ─────────────────────── -->
+    <div class="actions">
+      <button id="save" class="primary">Save</button>
+      <button id="test">Test connection</button>
+    </div>
+
+    <div id="message"></div>
+
+    <!-- ── Status ──────────────────────── -->
+    <div class="section" id="sec-status" style="margin-top:12px">
+      <button class="section-head" data-section="sec-status">
+        <svg class="arrow open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+        Status
+      </button>
+      <div class="section-body" id="status">
+        <dl>
+          <dt>Agent ID</dt><dd id="s-agent">&mdash;</dd>
+          <dt>Last poll</dt><dd id="s-poll">never</dd>
+          <dt>Last error</dt><dd id="s-error">none</dd>
+          <dt>Runs</dt><dd id="s-kinds">&mdash;</dd>
+          <dt>Last harvest</dt><dd id="s-harvest">never</dd>
+        </dl>
+      </div>
+    </div>
+
+    <!-- ── Recent activity ─────────────── -->
+    <div class="section" id="sec-events">
+      <button class="section-head" data-section="sec-events">
+        <svg class="arrow open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+        Recent activity
+        <span class="badge" id="events-badge">0</span>
+      </button>
+      <div class="section-body">
+        <div class="hint" style="margin-bottom:6px">
+          What this browser has done. Also sent to your server's Runs page.
+        </div>
+        <table id="events"><tbody></tbody></table>
+      </div>
+    </div>
+
   </div>
 
-  <div class="row">
-    <input type="checkbox" id="useTabs">
-    <label for="useTabs">Open blocked pages in a hidden window</label>
-  </div>
-  <div class="hint">
-    When a site refuses a background request — Jooble and Indeed both do — this
-    reopens it as a real page load in a minimized window, reads where it landed,
-    and closes it. One at a time. Untick to let those tasks simply fail instead.
-  </div>
-
-  <div class="row">
-    <input type="checkbox" id="solveChecks">
-    <label for="solveChecks">Show me "confirm you're human" checks</label>
-  </div>
-  <div class="hint">
-    Some sites put a check in front of the page — Jooble does it on its apply
-    redirects. The window was opening minimized and closing a few seconds
-    later, so the check appeared and vanished with nobody able to click it.
-    With this on, the window is raised and waits up to 90 seconds for you, then
-    carries on where it left off. Passing one usually lasts a while, so the
-    click buys more than the page it was spent on.
-    <br><br>
-    Nothing is clicked for you. If nobody answers, that site is not asked again
-    until the extension restarts, and your server is told to leave it alone for
-    a day rather than retrying it all evening.
-  </div>
-
-  <div class="hint">
-    While you browse a job site normally, harvesting reads the job data the page
-    already received and sends it to your server — full descriptions and salary
-    bands the public APIs never return, at no extra requests. Each site below is
-    a separate permission, asked for when you tick it and given back when you
-    untick it: "read every job board you visit" is a different thing to agree to
-    than "read LinkedIn", so they are not bundled. Nothing is sent from any site
-    you have not ticked.
-  </div>
-
-  <!-- Filled in by options.js from the shared list in sites.js, so adding a
-       site is one edit rather than three that have to agree. -->
-  <div id="harvest-sites"></div>
-
-  <div class="row">
-    <input type="checkbox" id="overlay">
-    <label for="overlay">Show the overlay on job pages</label>
-  </div>
-  <div class="hint">
-    Adds a small panel to LinkedIn and the ATS boards (Greenhouse, Lever, Ashby,
-    Workday, Workable, SmartRecruiters, Recruitee) showing this job's match
-    score, whether you already applied, and what the posting said about
-    sponsorship — plus a button to save it and write documents.
-  </div>
-
-  <div class="actions">
-    <button id="save" class="primary">Save</button>
-    <button id="test">Test connection</button>
-  </div>
-
-  <div id="message"></div>
-
-  <div id="status">
-    <dl>
-      <dt>Agent ID</dt><dd id="s-agent">—</dd>
-      <dt>Last poll</dt><dd id="s-poll">never</dd>
-      <dt>Last error</dt><dd id="s-error">none</dd>
-      <dt>Runs</dt><dd id="s-kinds">—</dd>
-      <dt>Last harvest</dt><dd id="s-harvest">never</dd>
-    </dl>
-  </div>
-
-  <!-- The last 50 things the extension did, kept here as well as on the
-       server. Two copies because this one works when the server is the thing
-       that is broken — which is exactly when somebody opens this page. -->
-  <details id="events-panel">
-    <summary>Recent activity</summary>
-    <p class="hint">
-      What this browser has done. Also sent to your server, where it is counted
-      over weeks on the <em>Browser agent</em> panel of the Runs page.
-    </p>
-    <table id="events"><tbody></tbody></table>
-  </details>
-
-  <!-- A module so it can import the shared site list. Modules are deferred, so
-       the DOM is complete by the time the checkboxes are drawn. -->
   <script type="module" src="options.js"></script>
 </body>
 </html>
