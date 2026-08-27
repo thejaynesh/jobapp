@@ -267,6 +267,7 @@ HEALTH_LABELS = {
     "healthy": "Working",
     "regressed": "Stopped finding jobs",
     "silent": "Forwarding, never finds jobs",
+    "unread": "Pages opened, nothing forwarded",
     "quiet": "Not browsed enough to say",
 }
 
@@ -324,6 +325,24 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS) -> list[dict]:
         .subquery()
     )
 
+    # Pages opened per host, from the other kind of event.
+    #
+    # Without this a site that was browsed and forwarded *nothing* has no row
+    # at all — the query below reads harvest events, and it has none — so it is
+    # missing from the panel and indistinguishable from a site nobody opened.
+    # That is the exact question "did the JobRight crawl get anything?" asks,
+    # and the panel's answer was to omit the site entirely.
+    browsed = dict(
+        db.query(AgentEvent.host, func.count())
+        .filter(
+            AgentEvent.created_at >= _window_start(days),
+            AgentEvent.kind == "browse",
+            AgentEvent.host.isnot(None),
+        )
+        .group_by(AgentEvent.host)
+        .all()
+    )
+
     is_recent = numbered.c.nth <= _RECENT_PAYLOADS
     rows = (
         db.query(
@@ -360,26 +379,52 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS) -> list[dict]:
         else:
             verdict = "silent"
 
-        out.append({
-            "host": host,
-            "verdict": verdict,
-            "label": HEALTH_LABELS[verdict],
-            "payloads": int(payloads or 0),
-            "recent_payloads": recent_payloads,
-            "found": recent_found,
-            "inserted": int(recent_inserted or 0),
-            "merged": int(recent_merged or 0),
-            "earlier_found": earlier_found,
-            "last_found_at": last_found_at,
-            "window": _RECENT_PAYLOADS,
-        })
+        out.append(_site_row(host, verdict, payloads, recent_payloads,
+                             recent_found, recent_inserted, recent_merged,
+                             earlier_found, last_found_at,
+                             browsed.pop(host, 0)))
+
+    # Sites that were opened and sent nothing back. Everything above came from
+    # a harvest event, so these have no row there — and being absent reads as
+    # "not tried", which is the opposite of what happened.
+    #
+    # A different problem from `silent`, and a different fix. Silent means the
+    # payloads arrive and the reader makes nothing of them, which wants a
+    # recipe. This means no payload arrived at all: the interceptor is not
+    # registered on that site (its checkbox is off), or the page fetches its
+    # jobs from a URL that does not match what the interceptor forwards.
+    for host, pages in browsed.items():
+        out.append(_site_row(host, "unread", 0, 0, 0, 0, 0, 0, None, pages))
 
     # Anything wrong first, then by how much the site is contributing. The
     # panel is read to find a problem, and a regression buried under four
     # working sites is a regression nobody sees.
-    order = {"regressed": 0, "silent": 1, "healthy": 2, "quiet": 3}
+    order = {"regressed": 0, "unread": 1, "silent": 2, "healthy": 3, "quiet": 4}
     out.sort(key=lambda row: (order[row["verdict"]], -row["found"]))
     return out
+
+
+def _site_row(host, verdict, payloads, recent_payloads, found, inserted,
+              merged, earlier_found, last_found_at, pages) -> dict:
+    """One site's line on the panel."""
+    return {
+        "host": host,
+        "verdict": verdict,
+        "label": HEALTH_LABELS[verdict],
+        "payloads": int(payloads or 0),
+        "recent_payloads": int(recent_payloads or 0),
+        "found": int(found or 0),
+        "inserted": int(inserted or 0),
+        "merged": int(merged or 0),
+        "earlier_found": int(earlier_found or 0),
+        "last_found_at": last_found_at,
+        # Pages the browser opened here. The denominator the panel was missing:
+        # "found 0" means something quite different after sixty visits than
+        # after none, and the number was recorded all along in the other event
+        # kind without ever being shown next to it.
+        "pages": int(pages or 0),
+        "window": _RECENT_PAYLOADS,
+    }
 
 
 def recent(db, limit: int = 12) -> list:

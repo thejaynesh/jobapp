@@ -294,3 +294,106 @@ class TestTheSiteList:
         assert 'id="harvest-sites"' in html
         assert 'id="harvestIndeed"' not in html
         assert 'type="module"' in html
+
+
+class TestASiteThatWasOpenedAndSentNothing:
+    """
+    The question the panel could not answer: "did the JobRight crawl get
+    anything?"
+
+    Its answer was to omit the site. Every row came from a harvest event, and a
+    site that was browsed but forwarded no payloads has none — so it vanished,
+    which reads as "never tried" and is the opposite of what happened.
+
+    It is also a different fault from `silent`, with a different fix. Silent
+    means payloads arrive and the reader makes nothing of them, which wants a
+    recipe. This means no payload arrived: the site is unticked in the
+    extension, so the reader is not registered on it, or its pages fetch jobs
+    from a URL the interceptor does not forward.
+    """
+
+    def browsed(self, db, host, times=1):
+        from app.models.agent_event import AgentEvent
+
+        for _ in range(times):
+            db.add(AgentEvent(kind="browse", host=host, ok=True,
+                              summary={"purpose": "harvest"}))
+        db.commit()
+
+    def harvested(self, db, host, found=3, times=1):
+        from app.models.agent_event import AgentEvent
+
+        for _ in range(times):
+            db.add(AgentEvent(
+                kind="harvest", host=host, ok=True,
+                summary={"found": found, "inserted": found, "merged": 0},
+            ))
+        db.commit()
+
+    def rows(self, db):
+        from app.services import agent_events
+
+        return {r["host"]: r for r in agent_events.harvest_health(db)}
+
+    def test_it_appears_instead_of_vanishing(self, db):
+        self.browsed(db, "jobright.ai", times=12)
+        assert "jobright.ai" in self.rows(db)
+
+    def test_it_says_the_pages_were_opened(self, db):
+        self.browsed(db, "jobright.ai", times=12)
+        row = self.rows(db)["jobright.ai"]
+        assert row["pages"] == 12
+        assert row["found"] == 0
+
+    def test_its_verdict_is_its_own(self, db):
+        # Not "silent", which would send the reader off to write a recipe for
+        # payloads that never arrived.
+        self.browsed(db, "hiring.cafe", times=12)
+        assert self.rows(db)["hiring.cafe"]["verdict"] == "unread"
+
+    def test_a_working_site_keeps_its_page_count(self, db):
+        # The denominator, on every row rather than only the broken ones:
+        # "0 found" after sixty visits is a different statement from "0 found"
+        # after none, and the number was recorded all along without ever being
+        # shown beside it.
+        self.browsed(db, "my.greenhouse.io", times=5)
+        self.harvested(db, "my.greenhouse.io", found=4, times=30)
+        row = self.rows(db)["my.greenhouse.io"]
+        assert row["verdict"] == "healthy"
+        assert row["pages"] == 5
+
+    def test_a_site_that_forwards_but_finds_nothing_is_still_silent(self, db):
+        # The distinction this rests on. Payloads arriving and being unreadable
+        # is the recipe case, and must not be relabelled.
+        self.browsed(db, "otta.com", times=3)
+        self.harvested(db, "otta.com", found=0, times=30)
+        assert self.rows(db)["otta.com"]["verdict"] == "silent"
+
+    def test_a_site_nobody_touched_is_absent(self, db):
+        # Absent still means untried, which is why the browsed case had to stop
+        # using it.
+        self.browsed(db, "jobright.ai", times=12)
+        assert "dice.com" not in self.rows(db)
+
+    def test_it_is_ranked_above_the_working_sites(self, db):
+        from app.services import agent_events
+
+        self.browsed(db, "my.greenhouse.io", times=5)
+        self.harvested(db, "my.greenhouse.io", found=4, times=30)
+        self.browsed(db, "jobright.ai", times=12)
+
+        order = [r["host"] for r in agent_events.harvest_health(db)]
+        assert order.index("jobright.ai") < order.index("my.greenhouse.io")
+
+    def test_the_page_says_what_to_do_about_it(self, db, client, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        self.browsed(db, "jobright.ai", times=12)
+        page = client.get("/runs").text
+        assert "jobright.ai" in page
+        # Matched within one line: the sentence wraps in the template, so a
+        # phrase spanning the break would fail on the indentation rather than
+        # on anything real.
+        assert "opened here and no job data" in page
+        assert "unticked in the extension" in page

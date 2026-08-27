@@ -1,5 +1,8 @@
+import os
+
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
@@ -7,9 +10,68 @@ from app.database import Base
 from app.config import settings
 import app.models  # noqa: F401 — registers all models with Base.metadata before create_all
 
-TEST_DB_URL = settings.TEST_DATABASE_URL or settings.DATABASE_URL.replace(
+_BASE_DB_URL = settings.TEST_DATABASE_URL or settings.DATABASE_URL.replace(
     "/jobapp", "/jobapp_test"
 )
+
+# One database per xdist worker.
+#
+# The suite takes about fifteen minutes on one core, which is long enough that
+# it stops being run — and a check that is skipped protects nothing. `-n auto`
+# cuts it to roughly a quarter of that, but only if the workers stop sharing a
+# schema: `setup_test_db` runs per worker, so with one database the second
+# worker's `create_all` races the first's and the first worker to finish drops
+# the tables out from under everyone still running.
+#
+# So each worker gets its own database, created here if it is not there yet.
+# Serial runs are untouched — no worker id means the original name.
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "")
+
+
+def _worker_db_url(base: str, worker: str) -> str:
+    if not worker:
+        return base
+    url = make_url(base)
+    return str(url.set(database=f"{url.database}_{worker}"))
+
+
+TEST_DB_URL = _worker_db_url(_BASE_DB_URL, _WORKER)
+
+
+def _ensure_database(url: str) -> None:
+    """
+    Create this worker's database if it does not exist.
+
+    Connects to `postgres` rather than the target, because you cannot create a
+    database from inside itself. Tolerant of the race between workers starting
+    at the same moment: two of them can both see it missing, and the loser of
+    `CREATE DATABASE` gets an error that means the database is now there, which
+    is what it wanted.
+    """
+    target = make_url(url)
+    if target.get_backend_name() != "postgresql":
+        return
+
+    admin = create_engine(
+        str(target.set(database="postgres")), isolation_level="AUTOCOMMIT",
+    )
+    try:
+        with admin.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": target.database},
+            ).scalar()
+            if not exists:
+                try:
+                    conn.execute(text(f'CREATE DATABASE "{target.database}"'))
+                except Exception:
+                    pass  # another worker won the race; that is a success here
+    finally:
+        admin.dispose()
+
+
+if _WORKER:
+    _ensure_database(TEST_DB_URL)
 
 test_engine = create_engine(TEST_DB_URL, pool_pre_ping=True)
 TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)

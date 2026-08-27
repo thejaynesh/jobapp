@@ -55,6 +55,10 @@
         <tr class="border-t border-gray-100">
           <td class="py-1 text-gray-600">{{ row.host }}</td>
           <td class="py-1 text-right text-gray-500 whitespace-nowrap">
+            {# Pages first: "0 found" says something different after sixty
+               visits than after none, and without the denominator the two read
+               the same. #}
+            {% if row.pages %}{{ "{:,}".format(row.pages) }} opened &middot;{% endif %}
             {{ "{:,}".format(row.found) }} found &middot;
             {{ "{:,}".format(row.inserted) }} new
           </td>
@@ -63,11 +67,24 @@
               {% if row.verdict == 'healthy' %}bg-green-50 text-green-700
               {% elif row.verdict == 'regressed' %}bg-red-50 text-red-700
               {% elif row.verdict == 'silent' %}bg-amber-50 text-amber-700
+              {% elif row.verdict == 'unread' %}bg-orange-50 text-orange-700
               {% else %}bg-gray-50 text-gray-500{% endif %}">
               {{ row.label }}
             </span>
           </td>
         </tr>
+        {% if row.verdict == 'unread' %}
+        {# The other call to action, and the more common one to hit first: the
+           pages were opened and the reader was not there to see them. #}
+        <tr>
+          <td colspan="3" class="pb-2 text-[11px] text-orange-700 leading-relaxed">
+            {{ "{:,}".format(row.pages) }} page(s) opened here and no job data
+            came back at all. Either this site is unticked in the extension's
+            options — so the reader is not registered on it — or its pages
+            fetch jobs from a URL the interceptor does not forward.
+          </td>
+        </tr>
+        {% endif %}
         {% if row.verdict == 'regressed' %}
         {# The one row that is a call to action rather than a statistic. #}
         <tr>

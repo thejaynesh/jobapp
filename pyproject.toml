@@ -29,6 +29,9 @@ dev = [
     "pytest==8.3.4",
     "pytest-asyncio==0.24.0",
     "pytest-cov==6.0.0",
+    # Runs the suite across cores. Not optional despite being a speed tool:
+    # `addopts` below asks for it on every run.
+    "pytest-xdist==3.8.0",
 ]
 
 # Without this, `pip install -e .` fails outside Docker: setuptools' flat-layout
@@ -41,3 +44,14 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Run across cores by default. The suite took about fifteen minutes serially,
+# which is long enough that it stops being run before a change — and a check
+# that gets skipped protects nothing. Four workers bring it under four.
+#
+# Safe because each worker gets its own database; see tests/conftest.py, where
+# the worker id is appended to the test database name. Without that the workers
+# share a schema, and the first to finish drops the tables out from under the
+# rest.
+#
+# Override with `-n0` when a failure needs a clean, ordered read.
+addopts = "-n auto"
