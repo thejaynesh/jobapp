@@ -438,14 +438,6 @@ const CHALLENGE_POLL_MS = 1000;
  */
 const challengeGaveUp = new Set();
 
-function hostOf(url) {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch (_) {
-    return "";
-  }
-}
-
 /**
  * Whether the tab is currently showing an anti-bot interstitial.
  *
@@ -500,7 +492,11 @@ function challengeWaitMs() {
  * empty page.
  */
 async function waitForHuman(win, tabId, url) {
-  const host = hostOf(url);
+  // `hostOf` answers null for anything it cannot parse. Falling back to the
+  // URL keeps the give-up set keyed on *something* — one entry per URL rather
+  // than per host, which errs towards asking again rather than towards a
+  // silent `null` bucket that would mute every unparseable page at once.
+  const host = hostOf(url) || url;
   if (!(await challengesAreMine())) return "skipped";
   if (challengeGaveUp.has(host)) return "skipped";
 
