@@ -189,11 +189,19 @@
       });
       document.addEventListener("DOMContentLoaded", function() {
         document.querySelectorAll("[data-collapse]").forEach(function(btn) {
+          var target = document.getElementById(btn.dataset.collapse);
+          if (!target) return;
+          var forced = target.dataset.forceOpen === "true";
+          if (forced) {
+            target.classList.remove("hidden");
+            var icon = btn.querySelector(".collapse-icon");
+            if (icon) icon.style.transform = "rotate(180deg)";
+            return;
+          }
           try {
             var state = localStorage.getItem("collapse-" + btn.dataset.collapse);
             if (state === "closed") {
-              var target = document.getElementById(btn.dataset.collapse);
-              if (target) target.classList.add("hidden");
+              target.classList.add("hidden");
               var icon = btn.querySelector(".collapse-icon");
               if (icon) icon.style.transform = "";
             }

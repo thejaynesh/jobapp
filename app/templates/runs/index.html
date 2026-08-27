@@ -83,12 +83,50 @@
 
 {% include "runs/partials/agent.html" %}
 
-{% if not runs %}
+{% if not runs and not run_status_filter and not run_group_filter %}
 <div class="text-sm text-gray-400">
   No runs recorded yet. History starts with the next fetch cycle.
 </div>
 {% else %}
 
+<form method="get" action="/runs" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-4">
+  <div class="flex flex-wrap gap-2 items-center">
+    <span class="text-sm text-gray-600 font-medium">Run history</span>
+
+    <select name="run_status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not run_status_filter %}selected{% endif %}>All statuses</option>
+      <option value="ok" {% if run_status_filter == "ok" %}selected{% endif %}>OK</option>
+      <option value="partial" {% if run_status_filter == "partial" %}selected{% endif %}>Partial</option>
+      <option value="failed" {% if run_status_filter == "failed" %}selected{% endif %}>Failed</option>
+    </select>
+
+    <select name="run_group" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not run_group_filter %}selected{% endif %}>All groups</option>
+      {% for g in run_groups %}
+      <option value="{{ g }}" {% if run_group_filter == g %}selected{% endif %}>{{ g }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="limit" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="15" {% if limit == 15 %}selected{% endif %}>Last 15 runs</option>
+      <option value="30" {% if limit == 30 %}selected{% endif %}>Last 30 runs</option>
+      <option value="50" {% if limit == 50 %}selected{% endif %}>Last 50 runs</option>
+      <option value="100" {% if limit == 100 %}selected{% endif %}>Last 100 runs</option>
+    </select>
+
+    <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
+
+    {% if run_status_filter or run_group_filter or limit != 15 %}
+    <a href="/runs" class="text-sm text-gray-500 hover:text-red-500 underline">Clear filters</a>
+    {% endif %}
+
+    {% if run_status_filter or run_group_filter %}
+    <span class="text-xs text-gray-400 ml-auto">Showing {{ runs | length }} of {{ all_run_count }} loaded runs</span>
+    {% endif %}
+  </div>
+</form>
+
+{% if runs %}
 <div class="overflow-x-auto mb-10">
   <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
     <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
@@ -288,6 +326,15 @@
       {% endfor %}
     </tbody>
   </table>
+</div>
+{% endif %}
+
+{% else %}
+<div class="bg-white border border-gray-200 rounded-lg p-6 text-center mb-8">
+  <p class="text-sm text-gray-500">
+    No runs match those filters.
+    <a href="/runs" class="text-blue-600 hover:underline">Clear filters</a>.
+  </p>
 </div>
 {% endif %}
 

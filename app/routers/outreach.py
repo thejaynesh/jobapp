@@ -115,7 +115,8 @@ def _panel_for_contact(request: Request, db: Session, contact: Contact, notice: 
 # ---------------------------------------------------------------------------
 
 @router.get("/outreach", response_class=HTMLResponse)
-def outreach_home(request: Request, db: Session = Depends(get_db)):
+def outreach_home(request: Request, q: str = "", channel: str = "",
+                  db: Session = Depends(get_db)):
     """
     Everything in flight, in the order it needs attention.
 
@@ -132,6 +133,19 @@ def outreach_home(request: Request, db: Session = Depends(get_db)):
         .limit(400)
         .all()
     )
+
+    if q:
+        q_lower = q.lower()
+        messages = [
+            m for m in messages
+            if q_lower in (m.contact.display_name or "").lower()
+            or q_lower in (m.contact.company or "").lower()
+            or q_lower in (m.body or "").lower()
+            or q_lower in (m.subject or "").lower()
+        ]
+    if channel:
+        messages = [m for m in messages if m.channel == channel]
+
     by_status: dict[str, list] = {status: [] for status in MESSAGE_STATUSES}
     for message in messages:
         by_status.setdefault(message.status, []).append(message)
@@ -143,6 +157,13 @@ def outreach_home(request: Request, db: Session = Depends(get_db)):
         .limit(50)
         .all()
     )
+    if q:
+        q_lower = q.lower()
+        contactless = [
+            c for c in contactless
+            if q_lower in (c.display_name or "").lower()
+            or q_lower in (c.company or "").lower()
+        ]
 
     return templates.TemplateResponse(
         "outreach/index.html",
@@ -159,6 +180,8 @@ def outreach_home(request: Request, db: Session = Depends(get_db)):
             "channels": MESSAGE_CHANNELS,
             "kinds": MESSAGE_KINDS,
             "tones": list(TONES),
+            "q": q,
+            "channel_filter": channel,
         },
     )
 

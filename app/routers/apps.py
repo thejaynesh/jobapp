@@ -19,11 +19,53 @@ templates = build_templates()
 
 
 @router.get("", response_class=HTMLResponse)
-def get_apps(request: Request, db: Session = Depends(get_db)):
-    apps = db.query(Application).order_by(Application.created_at.desc()).all()
+def get_apps(
+    request: Request,
+    status: str = "",
+    q: str = "",
+    sort: str = "newest",
+    db: Session = Depends(get_db),
+):
+    from sqlalchemy import func as sa_func, or_
+    from app.models.job import Job
+
+    query = db.query(Application).join(Application.job)
+    total_count = query.count()
+
+    if status:
+        try:
+            query = query.filter(Application.status == ApplicationStatus(status))
+        except ValueError:
+            pass
+    if q:
+        pattern = f"%{q}%"
+        query = query.filter(
+            or_(Job.title.ilike(pattern), Job.company.ilike(pattern))
+        )
+
+    filtered_count = query.count()
+
+    _EFFECTIVE_SCORE = sa_func.coalesce(Job.llm_score_deep, Job.llm_score)
+    sort_map = {
+        "newest": Application.created_at.desc(),
+        "oldest": Application.created_at.asc(),
+        "company": Job.company.asc(),
+        "score": _EFFECTIVE_SCORE.desc().nullslast(),
+    }
+    order = sort_map.get(sort, sort_map["newest"])
+    apps = query.order_by(order).all()
+
     return templates.TemplateResponse(
         "apps/index.html",
-        {"request": request, "apps": apps},
+        {
+            "request": request,
+            "apps": apps,
+            "total_count": total_count,
+            "filtered_count": filtered_count,
+            "status_filter": status,
+            "q": q,
+            "sort": sort,
+        },
     )
 
 

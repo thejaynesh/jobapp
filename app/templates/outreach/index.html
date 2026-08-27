@@ -7,7 +7,7 @@
   <span class="text-sm text-gray-500">{{ stats.contacts }} contact(s)</span>
 </div>
 
-<div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
+<div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
   {% for label, value, colour in [
       ('Drafts', stats.drafts, 'text-gray-800'),
       ('Sent', stats.sent, 'text-blue-600'),
@@ -20,6 +20,35 @@
   </div>
   {% endfor %}
 </div>
+
+{% set has_filters = q or channel_filter %}
+<form method="get" action="/outreach" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-6">
+  <div class="flex flex-wrap gap-2 items-center">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search name, company, or message..."
+      class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-[180px] focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+    <select name="channel" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="" {% if not channel_filter %}selected{% endif %}>All channels</option>
+      {% for ch in channels %}
+      <option value="{{ ch }}" {% if channel_filter == ch %}selected{% endif %}>{{ ch | replace("_", " ") | title }}</option>
+      {% endfor %}
+    </select>
+
+    <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
+
+    {% if has_filters %}
+    <a href="/outreach" class="text-sm text-gray-500 hover:text-red-500 underline">Clear filters</a>
+    {% endif %}
+  </div>
+
+  {% if has_filters %}
+  <div class="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-gray-100">
+    <span class="text-xs text-gray-400">Active filters:</span>
+    {% if q %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">search: {{ q }}</span>{% endif %}
+    {% if channel_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ channel_filter | replace("_", " ") | title }}</span>{% endif %}
+  </div>
+  {% endif %}
+</form>
 
 {% if send_blocked %}
 <p class="text-xs text-gray-500 bg-gray-100 border border-gray-200 rounded px-3 py-2 mb-6">

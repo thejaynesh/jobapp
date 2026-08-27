@@ -56,6 +56,7 @@ TRIGGERABLE_SOURCES = [
 
 @router.get("", response_class=HTMLResponse)
 def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
+             run_status: str = "", run_group: str = "",
              db: Session = Depends(get_db)):
     """Fetch-cycle history: what each run did, and what each source contributed."""
     from app.services.fetch_history import recent_runs, source_totals
@@ -67,6 +68,13 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
     except Exception as exc:
         logger.warning("runs: history unavailable: %s", exc)
         runs, totals = [], []
+
+    all_runs = runs
+    if run_status:
+        runs = [r for r in runs if r.status == run_status]
+    if run_group:
+        runs = [r for r in runs if r.group == run_group]
+    run_groups = sorted({r.group for r in all_runs if r.group})
 
     boards = []
     try:
@@ -88,6 +96,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
         {
             "request": request,
             "runs": runs,
+            "all_run_count": len(all_runs),
             "source_totals": totals,
             "rollup_window": ROLLUP_WINDOW,
             "top_boards": boards,
@@ -96,6 +105,10 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "source_groups": _source_group_labels(),
             "triggered": None,
             "system": _system_context(db),
+            "run_status_filter": run_status,
+            "run_group_filter": run_group,
+            "run_groups": run_groups,
+            "limit": limit,
             **_agent_context(db),
             **_enrichment_context(db),
             **{k: v for k, v in _compare_context(request, db).items()
