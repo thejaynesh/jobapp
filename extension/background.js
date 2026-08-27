@@ -190,7 +190,8 @@ function clampSeconds(value, fallback, low, high) {
 // visited again rather than held open.
 const SCROLL_BUDGET_MS = 75000;
 
-async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
+async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
+                          clickSelector) {
   return withTabLock(async () => {
     let win;
     try {
@@ -249,11 +250,14 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
       // was not found, which is the only way to tell that apart from a board
       // that genuinely has a single page.
       let pages_done = 1;
+      // What the page offered by way of pagination, gathered only when the
+      // visit got nowhere. The server turns this into a crawl recipe.
+      let navigation = null;
       try {
         const [injected] = await chrome.scripting.executeScript({
           target: { tabId },
-          args: [passes, SCROLL_BUDGET_MS, pauseMs, maxPages],
-          func: async (maxPasses, budgetMs, pauseMs, maxPages) => {
+          args: [passes, SCROLL_BUDGET_MS, pauseMs, maxPages, clickSelector],
+          func: async (maxPasses, budgetMs, pauseMs, maxPages, learnedSelector) => {
             // For an infinitely scrolling board this loop *is* the pagination.
             // There is no page-two URL to queue, so the only way to reach the
             // hundredth result is to keep asking — and each batch it pulls in
@@ -331,6 +335,20 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
             // whereas an element whose text merely contains "next page" is
             // usually a container holding one.
             const nextControl = () => {
+              // A selector the server learned for this board wins, because it
+              // was written against this page rather than against boards in
+              // general. Everything below it is the guess that applies when
+              // nothing has been learned.
+              if (learnedSelector) {
+                try {
+                  const taught = document.querySelector(learnedSelector);
+                  if (taught) return taught;
+                } catch (_) {
+                  // Not a selector this browser accepts. Fall through rather
+                  // than fail the visit — the heuristics still work.
+                }
+              }
+
               const rel = document.querySelector("a[rel='next'], link[rel='next']");
               if (rel && rel.tagName === "A") return rel;
 
@@ -452,9 +470,79 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
               await scrollThisPage();
             }
 
+            // What this page offers by way of navigation, gathered only when
+            // the visit did not get anywhere. The server sends it to a model
+            // to work out how this board paginates, so it describes the
+            // controls rather than copying the document: a bounded list of
+            // things that might be a "next" button, and what scrolling did.
+            const describeNavigation = () => {
+              const controls = [];
+              const seen = new Set();
+              for (const el of document.querySelectorAll(
+                "a, button, [role='button'], [aria-label]",
+              )) {
+                if (controls.length >= 40) break;
+                const label = (
+                  el.getAttribute("aria-label") ||
+                  el.getAttribute("title") ||
+                  el.textContent ||
+                  ""
+                ).trim().slice(0, 40);
+                // Only things short enough to be a control. A whole job card
+                // is an anchor too, and forty of those describe nothing.
+                if (!label || label.length > 24) continue;
+                // Numbers, next-ish words, arrows. The point is to give the
+                // model the pagination row, not the whole navigation bar.
+                if (!/^(\d{1,4}|next|prev|previous|older|newer|more|load more|show more|first|last|\u203a|\u00ab|\u00bb|\u2039|\u2192|\u2190|>|<|\.\.\.)$/i
+                      .test(label)) continue;
+                const key = label + "|" + el.tagName + "|" +
+                  String(el.className || "").slice(0, 40);
+                if (seen.has(key)) continue;
+                seen.add(key);
+                controls.push({
+                  tag: el.tagName.toLowerCase(),
+                  text: (el.textContent || "").trim().slice(0, 40),
+                  aria: (el.getAttribute("aria-label") || "").slice(0, 60),
+                  title: (el.getAttribute("title") || "").slice(0, 60),
+                  rel: (el.getAttribute("rel") || "").slice(0, 20),
+                  role: (el.getAttribute("role") || "").slice(0, 20),
+                  cls: String(el.className || "").slice(0, 80),
+                  id: (el.id || "").slice(0, 60),
+                  testid: (el.getAttribute("data-testid") || "").slice(0, 60),
+                  href: (el.getAttribute("href") || "").slice(0, 120),
+                  disabled: Boolean(el.disabled) ||
+                    el.getAttribute("aria-disabled") === "true",
+                });
+              }
+
+              const query = {};
+              try {
+                new URL(location.href).searchParams.forEach((value, key) => {
+                  query[key] = String(value).slice(0, 40);
+                });
+              } catch (_) { /* nothing to read */ }
+
+              const doc = document.scrollingElement || document.documentElement;
+              return {
+                controls,
+                query,
+                scroll: {
+                  passes,
+                  batches,
+                  doc_height: doc ? doc.scrollHeight : 0,
+                  client_height: doc ? doc.clientHeight : 0,
+                },
+              };
+            };
+
             const text = (document.body ? document.body.innerText : "").slice(0, 4000);
             return {
               title: document.title || "",
+              // Only when the visit was unproductive. A crawl that worked has
+              // nothing to teach, and sending this every time would be a
+              // description of somebody's page on every single visit.
+              navigation: (pagesSeen <= 1 && batches <= 1 && !rateLimited)
+                ? describeNavigation() : null,
               // A login wall renders instead of the posting, so the harvest
               // finds nothing and looks identical to a reader that broke.
               wall: /sign in|join now to see|log in to continue/i.test(text),
@@ -488,6 +576,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
           injected && injected.result && injected.result.rate_limited);
         passes_done = (injected && injected.result && injected.result.passes) || 0;
         pages_done = (injected && injected.result && injected.result.pages) || 0;
+        navigation = (injected && injected.result && injected.result.navigation) || null;
         scrollTargetSeen = (injected && injected.result && injected.result.target) || "";
       } catch (_) {
         // Injection refused. The visit still happened, which is the part that
@@ -501,7 +590,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
         final_url: (tab && tab.url) || url,
         signed_in, title, scrolled, batches,
         scroll_target: scrollTargetSeen,
-        rate_limited, passes_done, pages_done,
+        rate_limited, passes_done, pages_done, navigation,
         // "" when the page never asked. Reported rather than swallowed so the
         // server can tell a site that blocked us from one that had nothing on
         // it — before this they were the same empty result.
@@ -875,8 +964,13 @@ const HANDLERS = {
     // Result pages to click through. One unless the server says this board
     // paginates, so a scrolling board behaves exactly as it always has.
     const maxPages = clampSeconds(payload.max_pages, 1, 1, 50);
+    // A next-page selector the server learned for this board. Empty for a
+    // board nothing has been learned about, which is where the extension's own
+    // heuristics apply.
+    const clickSelector = String(payload.click_selector || "").slice(0, 200);
 
-    const visited = await visitInTab(url, settleMs, passes, pauseMs, maxPages);
+    const visited = await visitInTab(url, settleMs, passes, pauseMs, maxPages,
+                                     clickSelector);
     // Held inside the tab lock's queue by awaiting here: the next browse task
     // cannot open its window until this pause is over, which is what makes the
     // gap a real rhythm rather than a number in a payload.
@@ -909,6 +1003,10 @@ const HANDLERS = {
       // from a board that had nothing on it, needing a different fix, so it
       // is reported rather than folded into the other numbers.
       pages_done: visited.pages_done,
+      // Present only when the visit got nowhere: the controls this page
+      // offers, so the server can work out how the board paginates instead of
+      // waiting to be told.
+      navigation: visited.navigation,
     };
   },
 

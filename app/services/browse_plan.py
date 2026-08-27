@@ -424,7 +424,8 @@ def _depth() -> int:
     return max(1, int(getattr(settings, "BROWSE_SEARCH_PAGES", 5)))
 
 
-def search_urls(profile: dict | None, boards=None, depth: int | None = None) -> list[str]:
+def search_urls(profile: dict | None, boards=None, depth: int | None = None,
+                db=None) -> list[str]:
     """
     Where to start looking, per board.
 
@@ -456,7 +457,11 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None) -> 
         # Its fixed pages either way: a board can have both a keyword search
         # and a filter set that needs no keyword, and the second is not a
         # fallback for the first.
-        urls.extend(entries)
+        # Entry pages get depth too, when a recipe has taught us how. They
+        # never had a page parameter written for them, so before this they were
+        # one page each however much the board held.
+        for entry in entries:
+            urls.extend(_pages_for(db, board, entry, pages))
 
         if search:
             if not roles:
@@ -471,7 +476,7 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None) -> 
                     # Every result page, not just the first. One page is
                     # twenty-five cards, which is what made a "crawl" look like
                     # it was finding nothing.
-                    urls.extend(board.pages(first, pages))
+                    urls.extend(_pages_for(db, board, first, pages))
     return urls
 
 
@@ -594,11 +599,15 @@ def _scroll_passes(url: str, db=None) -> int:
     hundred; it reaches forty, a rate limit, and a rest. Backing off a little
     below the objection covers the same ground for free.
     """
-    board = board_for(url)
-    if board is not None and board.scroll_passes:
-        asked = int(board.scroll_passes)
+    learned = _learned(db, url)
+    if learned and learned.get("mode") == "scroll" and learned.get("scroll_passes"):
+        asked = max(1, min(400, int(learned["scroll_passes"])))
     else:
-        asked = max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
+        board = board_for(url)
+        if board is not None and board.scroll_passes:
+            asked = int(board.scroll_passes)
+        else:
+            asked = max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
 
     if db is None:
         return asked
@@ -611,7 +620,59 @@ def _scroll_passes(url: str, db=None) -> int:
     return max(1, min(asked, int(seen * 0.8)))
 
 
-def _max_pages(url: str) -> int:
+def _pages_for(db, board, url: str, depth: int) -> list[str]:
+    """
+    This URL plus the further result pages it offers.
+
+    A learned `url` recipe wins over the board's own parameter, and gives one
+    to a board that never had a parameter written for it — which is most of
+    them, since `entries`-only boards were added without any notion of depth.
+    """
+    learned = _learned(db, url)
+    if learned and learned.get("mode") == "url" and depth > 1:
+        param = str(learned.get("page_param") or "")
+        size = max(1, int(learned.get("page_size") or 25))
+        base = int(learned.get("page_base") or 0)
+        if param:
+            joiner = "&" if "?" in url else "?"
+            return [url] + [
+                f"{url}{joiner}{param}={base + n * size}"
+                for n in range(1, depth)
+            ]
+    if board is not None:
+        return board.pages(url, depth)
+    return [url]
+
+
+def _learned(db, url: str) -> dict | None:
+    """
+    This host's learned crawl recipe, if it has one.
+
+    Consulted ahead of the hand-written board on purpose. The board entry is a
+    guess made once by whoever added the site; the recipe was written against
+    evidence from the page as it is now, and withdraws itself when the visits
+    it produces stop getting anywhere. When they disagree the newer,
+    self-correcting one should win.
+    """
+    if db is None:
+        return None
+    try:
+        from app.services import crawl_recipes
+
+        # Inside a savepoint. On a deploy where the migration has not run the
+        # table is missing, and a failed statement aborts the whole enclosing
+        # transaction — so catching the error is not enough: everything the
+        # caller does afterwards fails too, with an error naming a query that
+        # had nothing to do with it. The savepoint contains the damage to the
+        # lookup that caused it.
+        with db.begin_nested():
+            return crawl_recipes.active_for(db, _host_of(url))
+    except Exception as exc:
+        logger.debug("browse_plan: no crawl recipe for %s: %s", url, exc)
+        return None
+
+
+def _max_pages(url: str, db=None) -> int:
     """
     Result pages to click through on this URL's board.
 
@@ -619,10 +680,33 @@ def _max_pages(url: str) -> int:
     untouched by any of this and the extension's behaviour there is exactly
     what it always was.
     """
+    learned = _learned(db, url)
+    if learned and learned.get("mode") == "click":
+        return max(1, min(30, int(learned.get("max_pages") or 10)))
+    if learned:
+        # A recipe that says this board scrolls, or pages by URL, is also
+        # saying it does not click — so it overrides a hand-written
+        # `click_pages` rather than being ignored next to it.
+        return 1
+
     board = board_for(url)
     if board is not None and board.click_pages:
         return max(1, int(board.click_pages))
     return 1
+
+
+def _click_selector(url: str, db=None) -> str:
+    """
+    The learned next-page control for this board, if one was learned.
+
+    Empty means the extension falls back to its own heuristics — `rel="next"`,
+    then a short label reading "Next" or an arrow — which is what every board
+    got before any of this and still gets when nothing has been learned.
+    """
+    learned = _learned(db, url)
+    if learned and learned.get("mode") == "click":
+        return str(learned.get("selector") or "")[:200]
+    return ""
 
 
 def _scroll_pause_seconds(url: str, db=None) -> int:
@@ -746,7 +830,10 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 # from a crawl, a re-visit, or the paste box.
                 "scroll_passes": _scroll_passes(url, db),
                 "scroll_pause_seconds": _scroll_pause_seconds(url, db),
-                "max_pages": _max_pages(url),
+                "max_pages": _max_pages(url, db),
+                # Empty unless a recipe named one. The extension keeps its own
+                # heuristics for everything else.
+                "click_selector": _click_selector(url, db),
             },
             priority=priority,
         )
@@ -768,7 +855,7 @@ def crawl_searches(db, profile: dict | None, limit: int | None = None,
     want.
     """
     chosen = [BOARDS_BY_KEY[board]] if board in BOARDS_BY_KEY else None
-    urls = search_urls(profile, boards=chosen)
+    urls = search_urls(profile, boards=chosen, db=db)
     return {
         "kind": "searches",
         "board": board or "all",

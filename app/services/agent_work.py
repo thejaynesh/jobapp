@@ -349,6 +349,48 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     db.commit()
 
 
+def _learn_to_crawl(db, url: str, result: dict, pages_done: int) -> None:
+    """
+    Keep what the page offered when a visit got nowhere, and grade the recipe.
+
+    Two halves of the same loop, and the second is the one that keeps this
+    honest. A recipe is written against a snapshot of the page, and a snapshot
+    cannot say whether clicking that control actually advances anything — only
+    a visit can. So every visit under an active recipe is graded, and one that
+    keeps landing on page one withdraws itself rather than quietly under-
+    crawling the board forever.
+
+    Never raises. This is a side effect of recording a visit, and a board whose
+    navigation we cannot describe should cost the description rather than the
+    record of the visit.
+    """
+    from app.services import crawl_recipes
+
+    from app.services.agent_events import host_of
+
+    host = (host_of(url) or "").lower()
+    if not host:
+        return
+
+    try:
+        with db.begin_nested():
+            if crawl_recipes.active_for(db, host):
+                crawl_recipes.note_outcome(db, host, pages_done)
+                return
+
+            navigation = result.get("navigation")
+            if isinstance(navigation, dict) and navigation.get("controls") is not None:
+                crawl_recipes.record(
+                    db, host, url, navigation,
+                    pages_reached=pages_done,
+                    batches=int((navigation.get("scroll") or {}).get("batches") or 0),
+                    note="visit did not get past the first screen",
+                )
+    except Exception as exc:
+        logger.debug("agent_work: could not record crawl evidence for %s: %s",
+                     host, exc)
+
+
 def _ingest_browse_page(db, task: BrowserTask) -> None:
     """
     Record that a page was visited. The jobs came in by another door.
@@ -419,7 +461,9 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
 
     from app.services import browse_plan
 
-    asked_pages = browse_plan._max_pages(payload.get("url") or "")
+    _learn_to_crawl(db, payload.get("url") or "", result, pages_done)
+
+    asked_pages = browse_plan._max_pages(payload.get("url") or "", db)
     if asked_pages > 1 and pages_done <= 1 and not rate_limited:
         logger.warning(
             "agent_work: %s was asked for %d pages and reached %d — the "

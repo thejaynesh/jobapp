@@ -217,7 +217,9 @@ def _system_context(db: Session) -> dict:
         logger.warning("runs: provider check state unavailable: %s", exc)
 
     try:
-        from app.services import browse_plan, harvest_recipes, harvest_samples
+        from app.services import (
+            browse_plan, crawl_recipes, harvest_recipes, harvest_samples,
+        )
 
         context["agent"] = {
             "queue": browser_tasks.queue_stats(db),
@@ -233,6 +235,10 @@ def _system_context(db: Session) -> dict:
             # learned about them.
             "unread": harvest_samples.hosts(db),
             "recipes": harvest_recipes.listing(db, limit=10),
+            # Boards a visit could not get past the first page of, and what
+            # has been worked out about how they paginate.
+            "uncrawlable": crawl_recipes.hosts_needing_a_recipe(db),
+            "crawl_recipes": crawl_recipes.listing(db, limit=10),
         }
     except Exception as exc:
         logger.warning("runs: agent status unavailable: %s", exc)
@@ -322,6 +328,56 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
         logger.error("runs: could not learn a recipe for %s: %s", host, exc)
     return templates.TemplateResponse(
         "runs/_system.html", {"request": request, "system": _system_context(db)}
+    )
+
+
+@router.post("/agent/learn-crawl", response_class=HTMLResponse)
+def learn_crawl_recipe(request: Request, host: str = Form(...),
+                       db: Session = Depends(get_db)):
+    """
+    Work out how a board shows its second page, instead of being told.
+
+    The sibling of `/agent/learn`. That one learns where the jobs are in a
+    payload; this learns the step before it — whether this board scrolls, pages
+    by URL, or needs a click, and which control does it.
+
+    The proposal is checked against what the page actually offered before it is
+    allowed to run, and a selector matching anything that reads like an action
+    rather than a page control is refused outright: a wrong click here happens
+    on a logged-in board, and "Withdraw application" is a button on some of
+    them. See `crawl_recipes.validate`.
+
+    Being wrong is still possible and is handled separately — a recipe whose
+    visits keep landing on page one retires itself, which puts the board back
+    on its hand-written setting.
+    """
+    from app.config import settings as cfg
+    from app.models.profile import Profile
+    from app.services import crawl_recipes
+    from app.services.tunables import value as tunable
+
+    profile = db.query(Profile).first()
+    profile_data = (profile.data if profile else None) or {}
+
+    flash = ""
+    try:
+        outcome = crawl_recipes.learn(
+            db, host.strip(),
+            cfg.NVIDIA_NIM_API_KEY, cfg.NVIDIA_NIM_BASE_URL,
+            tunable(profile_data, "nvidia_nim_model"),
+        )
+        flash = (
+            f"{host}: {outcome['reason']}" if outcome["ok"]
+            else f"{host}: not accepted — {outcome['reason']}"
+        )
+        logger.info("runs: crawl recipe for %s — %s", host, outcome["reason"])
+    except Exception as exc:
+        logger.error("runs: could not learn to crawl %s: %s", host, exc)
+        flash = f"Could not work that out: {exc}"
+    return templates.TemplateResponse(
+        "runs/_system.html",
+        {"request": request, "system": _system_context(db),
+         "browse_flash": flash},
     )
 
 

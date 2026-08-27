@@ -94,6 +94,57 @@ one you opened yourself.
   rendered from an internal API.
 - **Paste your own URLs** takes anything you copied out of the address bar.
 
+### Working out how a board paginates, instead of being told
+
+The table below is the hand-written version, and it only covers boards somebody
+classified. A board that changes its pagination, or one nobody has got to yet,
+quietly yields its first page forever — the visit succeeds, the scroll reports a
+sensible depth, rows arrive, and they are the same rows every time.
+
+So the same loop the harvest recipes use, one step earlier in the process:
+
+1. A visit that cannot get past the first screenful sends back a **description
+   of the page's navigation** — the candidate controls, what scrolling did, the
+   URL's own query parameters. Not the page: a bounded list of things that
+   might be a "next" button.
+2. `/runs` lists those boards under **"Boards we can't get past page one of"**
+   with a **Work it out** button.
+3. A model picks one of the three modes and supplies what it needs.
+4. **Validation refuses it** if it does not check out against that evidence.
+5. `browse_plan` uses the recipe in preference to the hand-written board.
+6. Every visit under it is graded, and a recipe that keeps landing on page one
+   **retires itself**.
+
+**Validation matters more here than for extraction, and the reason is worth
+stating.** A wrong extraction recipe stores a bad company name in a row you can
+fix. A wrong *click* presses a button on a logged-in job board under your
+account, and "Withdraw application" is a button on some of those pages. So:
+
+- the selector must match something the page actually offered;
+- everything it matches must read like a page control — a number, "Next", an
+  arrow;
+- if it matches anything reading like an action (delete, withdraw, apply,
+  submit, sign out…) the whole recipe is refused, even when it also matches a
+  legitimate control. A selector loose enough to catch both will eventually
+  catch the wrong one first;
+- a `url` recipe may only name a parameter **already present in the URL**.
+  Inventing `?page=2` on a board that pages by `start` produces a URL that
+  returns page one, five times, and reports five pages of depth;
+- anything out of bounds is **refused rather than trimmed**. Clamping a
+  nonsense proposal into range hides that it misread the page — the recipe goes
+  active, does nothing, and reads as the board having changed.
+
+**Step 6 is the one that catches a plausible-but-wrong answer.** A recipe is
+checked against a snapshot of the page, and a snapshot cannot tell you whether
+clicking that control actually advances anything. Only a visit can. Three
+visits that never get past page one and the recipe withdraws itself, which puts
+the board back on its hand-written setting and back on the panel's list to be
+taught again.
+
+Nothing is generated code. A recipe is a small piece of JSON our own code
+interprets, which is why it can be printed, checked against the sample it came
+from, and refused — none of which is true of a parser nobody wrote.
+
 ### How a board's depth is reached
 
 A board's second page comes from one of three places, and picking the wrong one
