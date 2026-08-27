@@ -23,10 +23,15 @@ def _settings_context(profile) -> dict:
     the previous hand-written trio of fields was written to a key nothing read,
     so all three did nothing at all.
     """
-    from app.services import tunables
+    from app.services import model_roles, tunables
 
     data = profile.data if profile else {}
     return {
+        # What each LLM role would actually use right now. "Auto" on its own
+        # answers nothing — the question the page is being asked is "which
+        # model is writing my covering letters", and until this existed there
+        # was no answer anywhere in the application.
+        "model_roles": model_roles.describe(data),
         "tunable_groups": [
             (group, [
                 {
@@ -34,6 +39,13 @@ def _settings_context(profile) -> dict:
                     "value": tunables.value(data, t.key),
                     "default": tunables.default(t),
                     "overridden": tunables.is_overridden(data, t.key),
+                    # Rebuilt per render for a dynamic tunable. A provider
+                    # whose key was added since the process started would
+                    # otherwise never appear in its own dropdown.
+                    "choices": (
+                        model_roles.choices(t.key.removeprefix("model_"))
+                        if t.dynamic else t.choices
+                    ),
                 }
                 for t in tunables.TUNABLES if t.group == group
             ])

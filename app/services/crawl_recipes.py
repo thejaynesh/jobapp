@@ -270,14 +270,20 @@ Controls found on the page:
 """
 
 
-def propose(sample, api_key: str, base_url: str, model: str) -> dict:
+def propose(sample, profile_data: dict | None = None) -> dict:
     """
     Ask a model how this board paginates. Returns `{recipe, error}`.
 
-    Never raises: this is a button, and a provider having a bad afternoon
-    should cost the proposal rather than the page.
+    Goes through the `learn` role rather than naming a provider, which is the
+    whole point of that indirection: this is a button somebody presses
+    occasionally, so it should take the free provider and leave the paid budget
+    to the scoring passes that run thousands of times. It was spending NIM
+    calls purely because that is what the code it grew out of happened to pass.
+
+    Never raises: a provider having a bad afternoon should cost the proposal
+    rather than the page.
     """
-    from app.services.matcher import chat_completion
+    from app.services import model_roles
 
     if sample is None:
         return {"recipe": None, "error": "No crawl samples stored for this host."}
@@ -296,8 +302,9 @@ def propose(sample, api_key: str, base_url: str, model: str) -> dict:
     )
 
     try:
-        raw = chat_completion(
-            prompt, api_key=api_key, base_url=base_url, model=model,
+        raw = model_roles.call(
+            profile_data, "learn",
+            [{"role": "user", "content": prompt}],
             max_tokens=700,
         )
     except Exception as exc:
@@ -463,20 +470,26 @@ def note_outcome(db, host: str, pages_reached: int) -> None:
     db.commit()
 
 
-def learn(db, host: str, api_key: str, base_url: str, model: str) -> dict:
+def learn(db, host: str, profile_data: dict | None = None) -> dict:
     """Propose, validate and store in one go. What the button calls."""
+    from app.services import model_roles
+
     sample = latest_sample(db, host)
     if sample is None:
         return {"ok": False,
                 "reason": "Nothing stored for that host yet — crawl it once "
                           "so the extension can describe the page."}
 
-    proposal = propose(sample, api_key, base_url, model)
+    proposal = propose(sample, profile_data)
     if proposal["error"]:
         return {"ok": False, "reason": proposal["error"]}
 
+    # Recorded so a recipe that turns out badly can be traced to the model that
+    # wrote it, which is the first thing you want to know.
+    provider = model_roles.resolve(profile_data, "learn")
     outcome = validate(sample.evidence or {}, proposal["recipe"])
-    row = save(db, host, proposal["recipe"], outcome, model=model)
+    row = save(db, host, proposal["recipe"], outcome,
+               model=provider.model if provider else "")
     return {
         "ok": outcome["ok"],
         "reason": outcome["reason"],

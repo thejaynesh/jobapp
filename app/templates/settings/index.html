@@ -47,6 +47,40 @@
 
   <div id="tunables-section" data-force-open="true">
     <form method="post" action="/settings" class="bg-white border border-gray-200 rounded-lg shadow-sm mt-2">
+      {# What each kind of LLM call actually resolves to. The dropdowns for
+         these live in the "Models" group below like any other setting; this
+         says what "Auto" currently means, which is the part a dropdown cannot
+         tell you. #}
+      {% if model_roles %}
+      <div class="px-5 py-4 border-b border-gray-100">
+        <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+          Which model does what
+        </h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3">
+          {% for role in model_roles %}
+          <div class="text-sm">
+            <div class="flex items-baseline gap-2 flex-wrap">
+              <span class="font-medium text-gray-700">{{ role.label }}</span>
+              {% if role.model %}
+              <span class="text-xs text-gray-500 tabular-nums">
+                {{ role.provider }} &middot; {{ role.model }}
+              </span>
+              {% else %}
+              <span class="text-xs text-amber-700">nothing configured</span>
+              {% endif %}
+              {% if role.setting == 'auto' %}
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">auto</span>
+              {% else %}
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">pinned</span>
+              {% endif %}
+            </div>
+            <p class="text-xs text-gray-500 leading-snug mt-0.5">{{ role.help }}</p>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
       {% for group, items in tunable_groups %}
       <div class="{% if not loop.first %}border-t border-gray-100{% endif %} px-5 py-4">
         <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">{{ group }}</h2>
@@ -76,7 +110,7 @@
             {% elif item.spec.kind == "choice" %}
             <select name="{{ item.spec.key }}" data-default="{{ item.default }}" data-kind="choice"
                     class="mt-1.5 w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              {% for choice in item.spec.choices %}
+              {% for choice in (item.choices or item.spec.choices) %}
               <option value="{{ choice }}" {% if item.value == choice %}selected{% endif %}>{{ choice }}</option>
               {% endfor %}
             </select>

@@ -314,15 +314,14 @@ def _clean(raw: str) -> str:
     return re.sub(r"\s*```$", "", text).strip()
 
 
-def propose(samples: list, host: str, api_key: str, base_url: str,
-            model: str) -> dict:
+def propose(samples: list, host: str, profile_data: dict | None = None) -> dict:
     """
     Ask a model how to read this host. Returns `{recipe, error}`.
 
     Never raises: this is a button, and a provider having a bad afternoon
     should cost the proposal rather than the page.
     """
-    from app.services.matcher import chat_completion
+    from app.services import model_roles
 
     payloads = [s.payload for s in (samples or [])][:3]
     if not payloads:
@@ -332,9 +331,9 @@ def propose(samples: list, host: str, api_key: str, base_url: str,
         rendered = "\n\n---\n\n".join(
             json.dumps(payload, indent=1)[:12000] for payload in payloads
         )
-        raw = chat_completion(
+        raw = model_roles.call(
+            profile_data, "learn",
             [{"role": "user", "content": _PROMPT.format(host=host, samples=rendered)}],
-            api_key, base_url, model,
             temperature=0.1,
             max_tokens=2000,
         )
@@ -433,20 +432,22 @@ def save(db, host: str, recipe: dict, outcome: dict, model: str = "") -> object:
     return row
 
 
-def learn(db, host: str, api_key: str, base_url: str, model: str) -> dict:
+def learn(db, host: str, profile_data: dict | None = None) -> dict:
     """Propose, validate and store in one go. What the button calls."""
-    from app.services import harvest_samples
+    from app.services import harvest_samples, model_roles
 
     samples = harvest_samples.for_host(db, host, limit=5)
     if not samples:
         return {"ok": False, "reason": "No samples stored for this host yet."}
 
-    proposal = propose(samples, host, api_key, base_url, model)
+    proposal = propose(samples, host, profile_data)
     if proposal["error"]:
         return {"ok": False, "reason": proposal["error"]}
 
+    provider = model_roles.resolve(profile_data, "learn")
     outcome = validate([s.payload for s in samples], proposal["recipe"])
-    row = save(db, host, proposal["recipe"], outcome, model=model)
+    row = save(db, host, proposal["recipe"], outcome,
+               model=provider.model if provider else "")
     return {
         "ok": outcome["ok"],
         "reason": outcome["reason"],

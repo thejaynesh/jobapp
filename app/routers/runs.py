@@ -318,11 +318,7 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
     profile_data = (profile.data if profile else None) or {}
 
     try:
-        outcome = harvest_recipes.learn(
-            db, host.strip(),
-            cfg.NVIDIA_NIM_API_KEY, cfg.NVIDIA_NIM_BASE_URL,
-            tunable(profile_data, "nvidia_nim_model"),
-        )
+        outcome = harvest_recipes.learn(db, host.strip(), profile_data)
         logger.info("runs: learned a recipe for %s — %s", host, outcome["reason"])
     except Exception as exc:
         logger.error("runs: could not learn a recipe for %s: %s", host, exc)
@@ -361,11 +357,7 @@ def learn_crawl_recipe(request: Request, host: str = Form(...),
 
     flash = ""
     try:
-        outcome = crawl_recipes.learn(
-            db, host.strip(),
-            cfg.NVIDIA_NIM_API_KEY, cfg.NVIDIA_NIM_BASE_URL,
-            tunable(profile_data, "nvidia_nim_model"),
-        )
+        outcome = crawl_recipes.learn(db, host.strip(), profile_data)
         flash = (
             f"{host}: {outcome['reason']}" if outcome["ok"]
             else f"{host}: not accepted — {outcome['reason']}"

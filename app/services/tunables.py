@@ -39,6 +39,12 @@ class Tunable:
     # Read once at process start, so a change needs a restart to bite. Said out
     # loud in the UI rather than left for the user to discover.
     restart_required: bool = False
+    # Choices that depend on runtime state rather than on this file. A model
+    # role's options come from which providers have keys, so the list built at
+    # import is a snapshot — validating against it would silently discard a
+    # pinned model whenever that snapshot and the present disagree, which is
+    # the one moment the setting most needs to survive.
+    dynamic: bool = False
     # An older key at the top level of the profile that's been the live value.
     # It wins on read until the next save writes both.
     legacy_key: str | None = None
@@ -137,6 +143,36 @@ TUNABLES: list[Tunable] = [
     ),
 ]
 
+def _model_role_tunables() -> list[Tunable]:
+    """
+    One selector per LLM role, generated from `model_roles`.
+
+    Generated rather than written out, because the list of roles belongs to
+    that module and two copies would drift — the symptom being a role the code
+    uses that the settings page cannot show, which is the state this replaced.
+    """
+    from app.services.model_roles import ROLES, choices, tunable_key
+
+    return [
+        Tunable(
+            key=tunable_key(role.key),
+            # No environment variable behind these. The default is "auto",
+            # which is a decision about how to decide rather than a value, and
+            # it lives in `model_roles.resolve` where the deciding happens.
+            env="",
+            kind="choice",
+            choices=choices(role.key),
+            dynamic=True,
+            label=role.label,
+            help=role.help,
+            group="Models",
+        )
+        for role in ROLES
+    ]
+
+
+TUNABLES.extend(_model_role_tunables())
+
 BY_KEY: dict[str, Tunable] = {t.key: t for t in TUNABLES}
 
 GROUPS: list[str] = list(dict.fromkeys(t.group for t in TUNABLES))
@@ -144,6 +180,11 @@ GROUPS: list[str] = list(dict.fromkeys(t.group for t in TUNABLES))
 
 def default(tunable: Tunable):
     """The environment value this falls back to."""
+    if not tunable.env:
+        # A model role. Its default is the first choice, which is "auto" —
+        # there is no environment variable holding it because the answer is
+        # computed rather than configured.
+        return tunable.choices[0] if tunable.choices else None
     return getattr(settings, tunable.env, None)
 
 
@@ -163,6 +204,12 @@ def coerce(tunable: Tunable, raw):
             return str(raw).strip().lower() in {"1", "true", "on", "yes"}
         if tunable.kind == "choice":
             text = str(raw).strip()
+            if tunable.dynamic:
+                # Anything non-empty. `model_roles.resolve` already falls back
+                # when a setting names a provider that is no longer configured,
+                # and losing the setting outright is worse than carrying one
+                # that is briefly stale.
+                return text or None
             return text if text in tunable.choices else None
         number = float(raw)
     except (TypeError, ValueError):
@@ -266,6 +313,12 @@ def effective_settings(profile_data: dict | None, base=None):
     base = base if base is not None else settings
     overrides = {}
     for tunable in TUNABLES:
+        if not tunable.env:
+            # A model role. There is no `settings.X` behind it to overlay —
+            # it is read through `model_roles`, not through `cfg`. Including it
+            # here wrote an override keyed on the empty string, which built an
+            # overlay for a profile that had overridden nothing.
+            continue
         resolved = value(profile_data, tunable.key)
         if resolved is not None and resolved != getattr(base, tunable.env, None):
             overrides[tunable.env] = resolved

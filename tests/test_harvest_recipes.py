@@ -309,8 +309,8 @@ class TestStoringWhatWasLearned:
             "roots": RECIPE["roots"], "fields": RECIPE["fields"],
             "join": RECIPE["join"], "note": "normalized payload",
         })
-        with patch("app.services.matcher.chat_completion", return_value=reply):
-            return harvest_recipes.learn(db, "x.test", "k", "https://x/v1", "m")
+        with patch("app.services.model_roles.call", return_value=reply):
+            return harvest_recipes.learn(db, "x.test")
 
     def test_a_validated_recipe_becomes_active(self, db):
         sample(db)
@@ -367,9 +367,9 @@ class TestStoringWhatWasLearned:
 
     def test_a_provider_outage_is_reported(self, db):
         sample(db)
-        with patch("app.services.matcher.chat_completion",
+        with patch("app.services.model_roles.call",
                    side_effect=RuntimeError("down")):
-            outcome = harvest_recipes.learn(db, "x.test", "k", "https://x/v1", "m")
+            outcome = harvest_recipes.learn(db, "x.test")
 
         assert outcome["ok"] is False
         assert "down" in outcome["reason"]
@@ -420,14 +420,14 @@ class TestThePanel:
         sample(db)
         reply = json.dumps({"roots": RECIPE["roots"], "fields": RECIPE["fields"],
                             "join": RECIPE["join"]})
-        with patch("app.services.matcher.chat_completion", return_value=reply):
+        with patch("app.services.model_roles.call", return_value=reply):
             client.post("/runs/agent/learn", data={"host": "x.test"})
 
         assert harvest_recipes.active_for(db, "x.test") is not None
 
     def test_a_failure_does_not_take_the_page_down(self, client, db):
         sample(db)
-        with patch("app.services.matcher.chat_completion",
+        with patch("app.services.model_roles.call",
                    side_effect=RuntimeError("boom")):
             assert client.post("/runs/agent/learn",
                                data={"host": "x.test"}).status_code == 200
