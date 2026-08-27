@@ -373,3 +373,188 @@ class TestHarvestingIsNotPaused:
         monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
         assert source_for_url(
             "https://www.linkedin.com/jobs/view/1/") == "linkedin_harvest"
+
+
+class TestASiteAskingForAHumanCheck:
+    """
+    Jooble puts a Cloudflare check in front of its `away` redirects — which is
+    exactly the URL link resolution has to open to find the employer's real
+    apply link.
+
+    The window was opened minimized and closed a few seconds later, so the
+    check appeared and vanished with nobody able to click it. Every visit
+    failed, and from the panel it looked identical to a page that simply had
+    nothing on it — which points at the reader, and the reader was fine.
+
+    Two halves. The extension raises the window and waits for the user, which
+    is the part that actually fixes it. This is the other half: once a host has
+    asked and nobody answered, stop queueing for it. Sixty pending Jooble
+    visits would otherwise be sixty raised windows at an empty chair, with
+    every working board stuck behind them.
+    """
+
+    def blocked_event(self, db, host, outcome="timeout", hours_ago=0):
+        from app.models.agent_event import AgentEvent
+
+        row = AgentEvent(
+            kind="browse", host=host, ok=False,
+            summary={"purpose": "enrich", "challenge": outcome},
+        )
+        db.add(row)
+        db.flush()
+        if hours_ago:
+            row.created_at = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        db.commit()
+        return row
+
+    def test_a_host_that_asked_and_got_no_answer_is_backed_off(self, db):
+        self.blocked_event(db, "jooble.org")
+        assert "jooble.org" in browse_plan.blocked_hosts(db)
+
+    def test_passing_the_check_is_not_held_against_the_host(self, db):
+        # Getting through is the outcome we want. Counting it as a failure
+        # would punish the click and stop the pages it just unlocked.
+        self.blocked_event(db, "jooble.org", outcome="passed")
+        assert browse_plan.blocked_hosts(db) == set()
+
+    def test_an_ordinary_visit_is_not_a_block(self, db):
+        from app.models.agent_event import AgentEvent
+
+        db.add(AgentEvent(kind="browse", host="jooble.org", ok=True,
+                          summary={"purpose": "harvest", "challenge": ""}))
+        db.commit()
+        assert browse_plan.blocked_hosts(db) == set()
+
+    def test_the_backoff_expires(self, db, monkeypatch):
+        # These checks are usually about the traffic pattern rather than the
+        # visitor, so a host that blocked us this morning is worth one attempt
+        # tomorrow. A permanent verdict from one bad evening would be wrong.
+        monkeypatch.setattr(settings, "BROWSE_CHALLENGE_BACKOFF_HOURS", 24)
+        self.blocked_event(db, "jooble.org", hours_ago=30)
+        assert browse_plan.blocked_hosts(db) == set()
+
+    def test_nothing_is_queued_for_a_blocked_host(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.blocked_event(db, "jooble.org")
+        queued = browse_plan.enqueue(
+            db, ["https://jooble.org/away/12345"],
+            priority=browse_plan.PRIORITY_SWEEP,
+        )
+        assert queued == 0
+
+    def test_a_crawl_you_asked_for_tries_anyway(self, db, monkeypatch):
+        """
+        The backoff's whole premise is that nobody is at the keyboard. Pressing
+        a button disproves that, so a request the user is watching ignores it —
+        the same reasoning that lets a requested crawl skip the re-visit
+        cooloff.
+        """
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.blocked_event(db, "jooble.org")
+        queued = browse_plan.enqueue(
+            db, ["https://jooble.org/away/12345"],
+            priority=browse_plan.PRIORITY_REQUESTED,
+        )
+        assert queued == 1
+
+    def test_enrichment_stops_queueing_for_it_too(self, db, monkeypatch):
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.blocked_event(db, "jooble.org")
+        job = thin_job(db, "https://jooble.org/away/999", source="jooble")
+        queued, deferred = enrichment.plan_browser_queue(db, [job])
+        assert queued == []
+        assert [j.id for j in deferred] == [job.id]
+
+    def test_a_blocked_job_does_not_jam_the_queue(self, db, monkeypatch):
+        # Same failure as a paused one: browser-only, unreachable, and left
+        # unstamped it sits at the head of a newest-first ordering forever.
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.blocked_event(db, "jooble.org")
+        job = thin_job(db, "https://jooble.org/away/998", source="jooble")
+        enrichment.enrich_jobs(db, [job])
+        db.refresh(job)
+        assert job.enrichment_attempted_at is not None
+
+    def test_a_subdomain_is_covered(self, db):
+        self.blocked_event(db, "jooble.org")
+        blocked = browse_plan.blocked_hosts(db)
+        assert browse_plan.is_blocked("uk.jooble.org", blocked)
+        assert not browse_plan.is_blocked("notjooble.org", blocked)
+
+    def test_the_panel_names_it(self, db):
+        self.blocked_event(db, "jooble.org")
+        assert browse_plan.status(db)["blocked"] == ["jooble.org"]
+
+    def test_the_panel_says_nothing_when_no_host_is_blocking(self, db):
+        assert browse_plan.status(db)["blocked"] == []
+
+
+class TestRecordingWhatTheBrowserSaw:
+    """
+    The extension reports how a check went. Getting this wrong in the obvious
+    direction — counting a blocked visit as a successful one — is what made the
+    harvest-health panel accuse a working reader of having broken.
+    """
+
+    def finished(self, db, challenge, url="https://jooble.org/away/1"):
+        from app.models.browser_task import BrowserTask
+        from app.services.agent_work import _ingest_browse_page
+
+        task = BrowserTask(
+            kind="browse_page", status="done", agent_id="a",
+            payload={"url": url, "purpose": "enrich"},
+            result={"final_url": url, "signed_in": True, "challenge": challenge},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(task)
+        db.commit()
+        _ingest_browse_page(db, task)
+        return task
+
+    def latest(self, db):
+        from app.models.agent_event import AgentEvent
+
+        return (
+            db.query(AgentEvent)
+            .filter(AgentEvent.kind == "browse")
+            .order_by(AgentEvent.created_at.desc())
+            .first()
+        )
+
+    def test_an_unanswered_check_is_not_a_successful_visit(self, db):
+        self.finished(db, "timeout")
+        assert self.latest(db).ok is False
+
+    def test_passing_the_check_is(self, db):
+        # The page was reached in the end, which is the thing `ok` means.
+        self.finished(db, "passed")
+        assert self.latest(db).ok is True
+
+    def test_a_page_that_never_asked_is_unaffected(self, db):
+        self.finished(db, "")
+        assert self.latest(db).ok is True
+
+    def test_the_outcome_is_kept_not_just_the_verdict(self, db):
+        # "nobody was there" and "the extension declined to ask again" lead to
+        # the same backoff but are different things to read on a panel.
+        self.finished(db, "skipped")
+        assert self.latest(db).summary["challenge"] == "skipped"
+
+    def test_an_old_extension_reporting_nothing_still_works(self, db):
+        from app.models.browser_task import BrowserTask
+        from app.services.agent_work import _ingest_browse_page
+
+        task = BrowserTask(
+            kind="browse_page", status="done", agent_id="a",
+            payload={"url": "https://jooble.org/away/2"},
+            result={"final_url": "https://jooble.org/away/2", "signed_in": True},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(task)
+        db.commit()
+        _ingest_browse_page(db, task)
+        assert self.latest(db).ok is True

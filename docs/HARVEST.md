@@ -166,6 +166,49 @@ The extension must have **"Open blocked pages in a hidden window"** ticked —
 that toggle is what governs opening windows at all, so browsing is not claimed
 without it.
 
+## When a site asks you to confirm you're human
+
+Some sites put a check in front of the page. Jooble does it on its `away`
+redirects, which is exactly the URL link resolution has to open to find the
+employer's real apply link.
+
+The window used to open minimized and close a few seconds later, so the check
+appeared and vanished with nobody able to click it. Every visit failed, and on
+the panel that looked identical to a page with nothing on it — which points the
+blame at the reader, and the reader was fine.
+
+**Now the extension shows you the window and waits.** When it detects a check
+it raises the window, gives you 90 seconds, and carries on from where it left
+off once you've clicked. Passing one usually sets a cookie good for a while, so
+the click buys more than the single page it was spent on.
+
+Nothing is clicked for you. Satisfying the check is the point of the check;
+the only bug was never giving you the chance.
+
+Turn it off with **"Show me 'confirm you're human' checks"** in the extension's
+options if you'd rather those visits just fail quietly.
+
+### If nobody answers
+
+The check is only offered once per site per session. Without that, sixty queued
+Jooble visits would be sixty windows raised at an empty chair, each holding the
+browser for 90 seconds while every working board waits behind it.
+
+The server backs off too. A host that asked and got no answer is left alone for
+`BROWSE_CHALLENGE_BACKOFF_HOURS` (24 by default) — new pages are not queued for
+it from either the crawl or the enrichment backlog, and `/runs` names it:
+
+> Asked for a human check: jooble.org. Left alone for now.
+
+The backoff is deliberately short and re-earned. These checks are usually about
+the traffic pattern rather than the visitor, so a host that blocked us this
+morning is worth one attempt tomorrow — and passing the check is never held
+against a host, or the click would stop the pages it just unlocked.
+
+A crawl **you press a button for** ignores the backoff entirely. Its whole
+premise is that nobody is at the keyboard, and pressing a button disproves
+that.
+
 ## When a site says it has noticed you
 
 You may get a mail or an interstitial like this one, which is real and worth

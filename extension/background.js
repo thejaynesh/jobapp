@@ -126,6 +126,11 @@ const TAB_LOAD_TIMEOUT_MS = 25000;
 // Time after "complete" for a meta-refresh or JS redirect to happen. The
 // interstitials this exists for very often bounce a moment after painting.
 const TAB_SETTLE_MS = 1800;
+// How long to leave a "confirm you're human" window up before concluding
+// nobody is at the machine. Long enough to notice and click, short enough that
+// an unattended run loses one page rather than its whole evening — and it is
+// only ever paid once per host per session.
+const CHALLENGE_WAIT_MS = 90000;
 
 // One at a time. Escalating a backlog of link resolutions in parallel would
 // open a dozen windows at once, which is not a thing to do to someone's screen.
@@ -206,6 +211,21 @@ async function visitInTab(url, settleMs, passes) {
       // posting body land, the second lets whatever the scroll asked for come
       // back before the tab is taken away.
       await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+
+      // Before the scroll, not after: scrolling an interstitial finds nothing
+      // and reports a shallow crawl, which reads as a broken scroll rather
+      // than a page that was never reached.
+      let challenge = "";
+      const gate = await challengeShowing(tabId);
+      if (gate && gate.challenge) {
+        challenge = await waitForHuman(win, tabId, url);
+        if (challenge === "passed") {
+          // The real page is only arriving now, so it gets the settle the
+          // first one was given.
+          await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS).catch(() => {});
+          await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+        }
+      }
 
       let signed_in = true;
       let title = "";
@@ -333,11 +353,144 @@ async function visitInTab(url, settleMs, passes) {
         final_url: (tab && tab.url) || url,
         signed_in, title, scrolled, batches,
         scroll_target: scrollTargetSeen,
+        // "" when the page never asked. Reported rather than swallowed so the
+        // server can tell a site that blocked us from one that had nothing on
+        // it — before this they were the same empty result.
+        challenge,
       };
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Anti-bot checks
+// ---------------------------------------------------------------------------
+
+/*
+ * Some sites put a "verify you are human" interstitial in front of the page.
+ * Jooble does it on its `away` redirects, which is exactly the URL link
+ * resolution has to open.
+ *
+ * The window is opened minimized and closed a few seconds later, so the check
+ * appeared and vanished with nobody able to click it — the visit failed every
+ * time, and looked from the panel like a page that simply had nothing on it.
+ *
+ * What this does is show the window and wait for *you*. It does not click
+ * anything, read the challenge, or try to look like a browser it isn't:
+ * solving the check is the user's to do, and the only bug was never giving
+ * them the chance. Passing one usually sets a cookie good for a while, so the
+ * click buys more than the single page it was spent on.
+ */
+
+const CHALLENGE_POLL_MS = 1000;
+
+/*
+ * Hosts that showed a check nobody answered, this service-worker lifetime.
+ *
+ * Without this, sixty queued Jooble pages would each raise a window and hold
+ * the tab lock for the full wait — an afternoon of browsing spent on an empty
+ * chair, with every other board stuck behind it. The first timeout is taken as
+ * the answer: nobody is here, stop asking. The server's own backoff is the
+ * durable half; this only stops the damage inside one run.
+ */
+const challengeGaveUp = new Set();
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch (_) {
+    return "";
+  }
+}
+
+/**
+ * Whether the tab is currently showing an anti-bot interstitial.
+ *
+ * Returns null when the page cannot be read at all — no host permission, a
+ * PDF, a download. Null is deliberately not "there is a challenge": guessing
+ * would raise a window at the user for every page we simply cannot see into.
+ */
+async function challengeShowing(tabId) {
+  try {
+    const [injected] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const title = (document.title || "").trim();
+        const text = (document.body ? document.body.innerText : "").slice(0, 2000);
+        // Three independent signals. The markup selectors are the reliable
+        // ones; the title and the wording are there for the variants that
+        // render inside an iframe this cannot reach into.
+        const markup = !!document.querySelector(
+          "#challenge-form, #challenge-running, #challenge-stage, " +
+            ".cf-turnstile, iframe[src*='challenges.cloudflare.com'], " +
+            "script[src*='/cdn-cgi/challenge-platform/']",
+        );
+        const named = /^(just a moment|attention required|access denied|verifying)/i
+          .test(title);
+        const worded =
+          /verify (that )?you (are|'re) (a )?human|checking your browser|confirm you are human|complete the security check|needs to review the security of your connection/i
+            .test(text);
+        return { challenge: markup || named || worded, title };
+      },
+    });
+    return injected && injected.result ? injected.result : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function challengesAreMine() {
+  const { solveChecks } = await chrome.storage.local.get({ solveChecks: true });
+  return Boolean(solveChecks);
+}
+
+function challengeWaitMs() {
+  return CHALLENGE_WAIT_MS;
+}
+
+/**
+ * Show the window and wait for the user to satisfy the check.
+ *
+ * Returns "passed", "timeout", or "skipped". The caller keeps going either
+ * way — a page that is still a challenge harvests nothing, which is the same
+ * outcome as before, only now it is reported as a check rather than as an
+ * empty page.
+ */
+async function waitForHuman(win, tabId, url) {
+  const host = hostOf(url);
+  if (!(await challengesAreMine())) return "skipped";
+  if (challengeGaveUp.has(host)) return "skipped";
+
+  // Raised deliberately: a minimized window cannot be clicked, and the whole
+  // failure was that nobody could reach it.
+  await chrome.windows
+    .update(win.id, { state: "normal", focused: true })
+    .catch(() => {});
+  await setStatus({
+    lastError: `${host} is asking you to confirm you're human — ` +
+      `a window is open, click it and browsing carries on.`,
+  });
+
+  const deadline = Date.now() + challengeWaitMs();
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, CHALLENGE_POLL_MS));
+    const seen = await challengeShowing(tabId);
+    // Null means the page stopped being readable — usually the challenge
+    // redirecting onward, which is what passing it looks like.
+    if (!seen || !seen.challenge) {
+      await setStatus({ lastError: "" });
+      return "passed";
+    }
+  }
+
+  challengeGaveUp.add(host);
+  await setStatus({
+    lastError: `${host} asked for a human check and nobody answered — ` +
+      `not asking again this session.`,
+  });
+  return "timeout";
 }
 
 async function openInTab(url) {
@@ -363,6 +516,20 @@ async function openInTab(url) {
       await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS);
       await new Promise((r) => setTimeout(r, TAB_SETTLE_MS));
 
+      // The path this matters most on. A Jooble `away` link is a redirect to
+      // the employer, and the check sits in front of the redirect — so being
+      // stopped here does not cost a description, it costs the apply URL
+      // itself, which is the one thing that page existed to give us.
+      let challenge = "";
+      const gate = await challengeShowing(tabId);
+      if (gate && gate.challenge) {
+        challenge = await waitForHuman(win, tabId, url);
+        if (challenge === "passed") {
+          await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS).catch(() => {});
+          await new Promise((r) => setTimeout(r, TAB_SETTLE_MS));
+        }
+      }
+
       const tab = await chrome.tabs.get(tabId);
       let html = "";
       let text = "";
@@ -386,6 +553,7 @@ async function openInTab(url) {
         html: html.slice(0, 400000),
         text: text.slice(0, 400000),
         via: "tab",
+        challenge,
       };
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
@@ -571,6 +739,10 @@ const HANDLERS = {
       signed_in: visited.signed_in,
       title: visited.title,
       settled_ms: settleMs,
+      // "", "passed", "timeout" or "skipped". The distinction the panel needs:
+      // a site that asked for a human check is not a site whose field names
+      // moved, and telling the user to go fix the reader would be wrong.
+      challenge: visited.challenge,
     };
   },
 

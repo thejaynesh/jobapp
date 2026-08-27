@@ -365,13 +365,22 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
     result = task.result or {}
     payload = task.payload or {}
     signed_in = result.get("signed_in", True)
+    # "" when the page never asked; otherwise passed / timeout / skipped.
+    challenge = str(result.get("challenge") or "")
+    blocked = challenge in ("timeout", "skipped")
 
     agent_events.record(
         db, "browse", url=result.get("final_url") or payload.get("url"),
-        agent_id=task.agent_id or "", ok=bool(signed_in),
+        agent_id=task.agent_id or "",
+        # A page we never got past is not a successful visit. Counting it as
+        # one is how a site that blocks every request shows up on the panel as
+        # a reader whose field names moved — and sends you to fix the parser
+        # for a page you never saw.
+        ok=bool(signed_in) and not blocked,
         summary={
             "purpose": payload.get("purpose") or "harvest",
             "signed_in": bool(signed_in),
+            "challenge": challenge,
             "title": str(result.get("title") or "")[:200],
             # How far down the list the scroll got. On a board that scrolls
             # infinitely this is the only measure of whether the visit walked
@@ -390,7 +399,13 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
     )
     db.commit()
 
-    if not signed_in:
+    if blocked:
+        logger.warning(
+            "agent_work: %s asked for a human check and did not get past it "
+            "(%s) — backing off that host",
+            payload.get("url"), challenge,
+        )
+    elif not signed_in:
         logger.warning(
             "agent_work: %s rendered a sign-in wall rather than the posting — "
             "the browsing session is logged out",

@@ -896,7 +896,7 @@ def enrich_jobs(
         stats.via[found.method] = stats.via.get(found.method, 0) + 1
 
     if queue_browser and for_browser:
-        queued_jobs, paused_jobs = plan_browser_queue(db, for_browser)
+        queued_jobs, deferred_jobs = plan_browser_queue(db, for_browser)
         stats.queued_browser = len(queued_jobs)
         # Stamped for exactly the reason the server-tier jobs above are, and
         # missing here until it produced sixteen passes a minute that each
@@ -910,14 +910,15 @@ def enrich_jobs(
         # sleep for a week over a moment of congestion.
         for job in queued_jobs:
             job.enrichment_attempted_at = attempted_at
-        # A paused host is the other case, and it needs the stamp for the same
-        # reason with the opposite cause: congestion clears in an hour, a pause
-        # is a decision. These jobs are browser-only and their host is off, so
-        # nothing in this pass or the next fifty can improve them — and left
-        # unstamped they would sit at the head of the ordering and starve the
-        # hosts that *are* running, which is the whole failure this stamp
-        # exists to prevent.
-        for job in paused_jobs:
+        # A host-level refusal is the other case, and it needs the stamp for
+        # the same reason with the opposite cause: congestion clears in an
+        # hour, a pause is a decision and a site demanding a human check is not
+        # going to stop because we asked again. These jobs are browser-only and
+        # their host is closed to us, so nothing in this pass or the next fifty
+        # can improve them — and left unstamped they would sit at the head of
+        # the ordering and starve the hosts that *are* running, which is the
+        # whole failure this stamp exists to prevent.
+        for job in deferred_jobs:
             job.enrichment_attempted_at = attempted_at
 
     try:
@@ -977,12 +978,21 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     """
     Hand the walled-off hosts to the extension.
 
-    Returns `(queued, paused)` — the jobs actually put on the queue, and the
-    ones skipped because their host is paused. Two lists rather than a count
-    because the caller has to stamp exactly the jobs it queued: it used to
-    stamp `for_browser[:count]`, which assumed the queued jobs were a prefix of
-    the list. Any skip in the middle broke that, stamping a job that was never
-    queued and leaving a queued one to be picked again next pass.
+    Returns `(queued, deferred)` — the jobs actually put on the queue, and the
+    ones skipped for a reason that belongs to their host rather than to them:
+    the host is paused by hand, or it recently asked for a human check nobody
+    got past.
+
+    Two lists rather than a count because the caller has to stamp exactly the
+    jobs it queued: it used to stamp `for_browser[:count]`, which assumed the
+    queued jobs were a prefix of the list. Any skip in the middle broke that,
+    stamping a job that was never queued and leaving a queued one to be picked
+    again next pass.
+
+    Deferred jobs need the stamp as much as queued ones, which is why they come
+    back rather than being dropped silently. Nothing in this pass or the next
+    fifty can improve them, and left unstamped they sit at the head of a
+    newest-first ordering and starve the hosts that are still working.
 
     LinkedIn answers this server with a challenge and a real browser with the
     page; the difference is the residential IP and the user's own session,
@@ -997,10 +1007,17 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     """
     from app.services import browse_plan, browser_tasks
 
-    # Separated before the room check, so a paused host is reported as paused
-    # even when the queue is full. Otherwise the two reasons for a zero are
-    # indistinguishable, and only one of them is temporary.
-    paused: list[Job] = []
+    # Hosts that recently asked for a check nobody got past. Jooble puts one in
+    # front of its `away` redirects, and without this every thin Jooble job in
+    # the backlog queues a visit that cannot succeed — an evening of the
+    # browser spent on a page it will never see, with the boards that do work
+    # stuck behind it.
+    blocked = browse_plan.blocked_hosts(db)
+
+    # Separated before the room check, so a host-level refusal is reported as
+    # one even when the queue is full. Otherwise the two reasons for a zero are
+    # indistinguishable, and only one of them clears on its own in an hour.
+    deferred: list[Job] = []
     candidates: list[Job] = []
     for job in jobs:
         # This path does not go through `browse_plan.enqueue`, so the pause has
@@ -1011,8 +1028,11 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         # Both kinds, not just `browse_page`: resolving a link is a request to
         # the same host from the same session, and a pause that let those
         # through would be a pause in name only.
-        if browse_plan.is_paused(_target_url(job)):
-            paused.append(job)
+        url = _target_url(job)
+        if browse_plan.is_paused(url) or (
+            blocked and browse_plan.is_blocked(_host(url), blocked)
+        ):
+            deferred.append(job)
         else:
             candidates.append(job)
 
@@ -1024,7 +1044,7 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
             "enrichment: browser queue already holds %d task(s); queueing none",
             len(outstanding),
         )
-        return [], paused
+        return [], deferred
 
     queued: list[Job] = []
     for job in candidates:
@@ -1053,11 +1073,12 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         logger.info(
             "enrichment: queued %d job(s) for browser enrichment", len(queued),
         )
-    if paused:
+    if deferred:
         logger.info(
-            "enrichment: %d job(s) skipped — their host is paused", len(paused),
+            "enrichment: %d job(s) skipped — their host is paused or is "
+            "asking for a human check", len(deferred),
         )
-    return queued, paused
+    return queued, deferred
 
 
 def queue_for_browser(db, jobs: list[Job]) -> int:

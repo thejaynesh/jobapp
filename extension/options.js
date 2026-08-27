@@ -58,6 +58,7 @@ const els = {
   enabled: document.getElementById("enabled"),
   resolveLinks: document.getElementById("resolveLinks"),
   useTabs: document.getElementById("useTabs"),
+  solveChecks: document.getElementById("solveChecks"),
   overlay: document.getElementById("overlay"),
   save: document.getElementById("save"),
   test: document.getElementById("test"),
@@ -117,7 +118,7 @@ function originPattern(url) {
 async function load() {
   const stored = await chrome.storage.local.get({
     serverUrl: "", token: "", enabled: false, overlay: false,
-    useTabs: true, agentId: "", status: {}, events: [],
+    useTabs: true, solveChecks: true, agentId: "", status: {}, events: [],
     ...Object.fromEntries(HARVEST_SITES.map((site) => [site.storageKey, false])),
   });
   els.serverUrl.value = stored.serverUrl;
@@ -137,6 +138,7 @@ async function load() {
   els.overlay.checked =
     stored.overlay && (await chrome.permissions.contains(OVERLAY_HOSTS));
   els.useTabs.checked = stored.useTabs;
+  els.solveChecks.checked = stored.solveChecks;
   els.harvestStatus.textContent = stored.status.lastHarvest
     ? `${new Date(stored.status.lastHarvest).toLocaleString()} ` +
       `(${stored.status.lastHarvestFound} found, ${stored.status.lastHarvestNew} new)`
@@ -272,6 +274,7 @@ async function save() {
     ),
     overlay: els.overlay.checked,
     useTabs: els.useTabs.checked,
+    solveChecks: els.solveChecks.checked,
   });
   chrome.runtime.sendMessage({ type: "sync-harvest" }, () => {
     void chrome.runtime.lastError;

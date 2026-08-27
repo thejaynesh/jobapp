@@ -80,6 +80,23 @@
     and closes it. One at a time. Untick to let those tasks simply fail instead.
   </div>
 
+  <div class="row">
+    <input type="checkbox" id="solveChecks">
+    <label for="solveChecks">Show me "confirm you're human" checks</label>
+  </div>
+  <div class="hint">
+    Some sites put a check in front of the page — Jooble does it on its apply
+    redirects. The window was opening minimized and closing a few seconds
+    later, so the check appeared and vanished with nobody able to click it.
+    With this on, the window is raised and waits up to 90 seconds for you, then
+    carries on where it left off. Passing one usually lasts a while, so the
+    click buys more than the page it was spent on.
+    <br><br>
+    Nothing is clicked for you. If nobody answers, that site is not asked again
+    until the extension restarts, and your server is told to leave it alone for
+    a day rather than retrying it all evening.
+  </div>
+
   <div class="hint">
     While you browse a job site normally, harvesting reads the job data the page
     already received and sends it to your server — full descriptions and salary

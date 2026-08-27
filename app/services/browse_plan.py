@@ -268,6 +268,56 @@ def is_paused(url: str | None) -> bool:
     )
 
 
+def _challenge_hours() -> int:
+    return max(1, int(getattr(settings, "BROWSE_CHALLENGE_BACKOFF_HOURS", 24)))
+
+
+def blocked_hosts(db) -> set[str]:
+    """
+    Hosts that recently asked for a human check nobody got past.
+
+    A pause you configure is a decision; this is the same shape arrived at by
+    observation, and it needs to be automatic because the failure repeats. A
+    site that puts a check in front of every page will fail every page — so
+    sixty queued visits become sixty raised windows and an evening of the
+    browser achieving nothing, which is worse than not trying.
+
+    Deliberately short-lived and re-earned. These checks are usually about the
+    traffic pattern rather than the visitor, so a host that blocked us this
+    morning is worth one attempt tomorrow — and if it passes, nothing here
+    remembers that it ever failed.
+    """
+    from app.models.agent_event import AgentEvent
+
+    since = datetime.now(timezone.utc) - timedelta(hours=_challenge_hours())
+    rows = (
+        db.query(AgentEvent.host)
+        .filter(
+            AgentEvent.kind == "browse",
+            AgentEvent.created_at >= since,
+            AgentEvent.host.isnot(None),
+            # `timeout` is nobody home; `skipped` is the extension declining to
+            # ask again. Both mean the page was not reached. `passed` is not
+            # here on purpose — getting through is the outcome we want, and
+            # holding it against the host would punish the click.
+            AgentEvent.summary["challenge"].astext.in_(("timeout", "skipped")),
+        )
+        .distinct()
+        .all()
+    )
+    return {row[0] for row in rows if row[0]}
+
+
+def is_blocked(host: str, blocked: set[str]) -> bool:
+    """Whether a host is covered by `blocked`, subdomains included."""
+    if not host:
+        return False
+    return any(
+        host == one or host.endswith(f".{one}") or one.endswith(f".{host}")
+        for one in blocked
+    )
+
+
 # ---------------------------------------------------------------------------
 # What to open
 # ---------------------------------------------------------------------------
@@ -510,6 +560,10 @@ def enqueue(db, urls: list[str], limit: int | None = None,
     skip = _already_queued(
         db, urls, respect_cooloff=priority < PRIORITY_REQUESTED,
     )
+    # One query for the batch, like the cooloff above. A request the user is
+    # watching ignores it: they are at the keyboard, which is the entire thing
+    # the backoff concluded was not true.
+    blocked = set() if priority >= PRIORITY_REQUESTED else blocked_hosts(db)
     queued = 0
 
     for url in urls:
@@ -522,6 +576,8 @@ def enqueue(db, urls: list[str], limit: int | None = None,
         # and an enrichment top-up all arrive through it. A pause enforced
         # anywhere else is a pause with a way around it.
         if is_paused(url):
+            continue
+        if blocked and is_blocked(_host_of(url), blocked):
             continue
         browser_tasks.enqueue(
             db, "browse_page",
@@ -817,6 +873,10 @@ def status(db) -> dict:
         "enabled": enabled(),
         "waiting": waiting,
         "paused": list(paused),
+        # Named separately from `paused` because the remedy differs: a pause is
+        # yours to lift, whereas a host here is asking you to go and click
+        # something, and will keep asking until you do.
+        "blocked": sorted(blocked_hosts(db)),
         "boards": [
             {"key": board.key, "label": board.label,
              "searchable": bool(board.search),

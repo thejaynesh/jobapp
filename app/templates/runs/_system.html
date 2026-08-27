@@ -341,6 +341,16 @@
             </button>
           </div>
 
+          {% if browse.blocked %}
+          {# Not a reader that broke, and worth saying so: the fix is a click
+             on that site rather than an afternoon in harvest.py. #}
+          <p class="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded px-1.5 py-1 mt-1">
+            Asked for a human check: {{ browse.blocked|join(', ') }}. Left alone
+            for now. Open one of its pages yourself and pass the check — the
+            extension will offer you the window next time it tries.
+          </p>
+          {% endif %}
+
           {% if browse.paused %}
           {# Named, not hidden. A board that silently stopped being crawled is
              the same symptom as a broken crawler, and after a site has warned

@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # what gets an account flagged. Opening sixty pages a run through a
     # logged-in session is.
     BROWSE_PAUSED_HOSTS: str = ""
+    # How long to leave a host alone after it showed a "confirm you're human"
+    # check nobody got past. Jooble puts one in front of its apply redirects,
+    # and without a backoff every thin Jooble job queues a visit that cannot
+    # succeed. Short and re-earned on purpose: these checks are usually about
+    # the traffic pattern rather than the visitor, so tomorrow is worth a try.
+    BROWSE_CHALLENGE_BACKOFF_HOURS: int = 24
     # Pages per triggered run. Roughly an hour of browsing at the pace below.
     BROWSE_MAX_QUEUED: int = 60
     # Seconds to leave a page open after it finishes loading. LinkedIn fetches
