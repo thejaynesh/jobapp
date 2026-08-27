@@ -1,0 +1,70 @@
+{% if not events %}
+<div class="text-center py-12 text-gray-400">
+  <p class="text-lg">No events recorded yet.</p>
+  <p class="text-sm mt-1">Events appear here as the system runs — fetch cycles, matching passes, errors, and warnings.</p>
+</div>
+{% else %}
+<div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-gray-500 text-xs uppercase sticky top-0">
+      <tr>
+        <th class="text-left px-3 py-2 w-36">Time</th>
+        <th class="text-left px-3 py-2 w-20">Level</th>
+        <th class="text-left px-3 py-2 w-24">Category</th>
+        <th class="text-left px-3 py-2">Message</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for event in events %}
+      <tr class="{% if event.is_error %}bg-red-50{% elif event.is_warning %}bg-amber-50/50{% else %}bg-white{% endif %} hover:bg-gray-50">
+        <td class="px-3 py-2 text-gray-500 text-xs whitespace-nowrap tabular-nums">
+          {{ event.when }}
+        </td>
+        <td class="px-3 py-2">
+          {% if event.severity == 'error' or event.severity == 'critical' %}
+          <span class="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-medium">
+            {{ event.severity }}
+          </span>
+          {% elif event.severity == 'warning' %}
+          <span class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">
+            warning
+          </span>
+          {% else %}
+          <span class="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">
+            info
+          </span>
+          {% endif %}
+        </td>
+        <td class="px-3 py-2">
+          <span class="text-xs px-1.5 py-0.5 rounded
+            {% if event.category == 'fetch' %}bg-sky-50 text-sky-700
+            {% elif event.category == 'match' %}bg-green-50 text-green-700
+            {% elif event.category == 'generate' %}bg-purple-50 text-purple-700
+            {% elif event.category == 'enrich' %}bg-teal-50 text-teal-700
+            {% elif event.category == 'agent' %}bg-orange-50 text-orange-700
+            {% elif event.category == 'provider' %}bg-indigo-50 text-indigo-700
+            {% elif event.category == 'outreach' %}bg-pink-50 text-pink-700
+            {% elif event.category == 'task' %}bg-cyan-50 text-cyan-700
+            {% elif event.category == 'system' %}bg-gray-100 text-gray-600
+            {% else %}bg-gray-50 text-gray-500{% endif %}">
+            {{ event.category }}
+          </span>
+        </td>
+        <td class="px-3 py-2 text-gray-700 break-words">
+          <span class="block leading-snug">{{ event.message }}</span>
+          {% if event.exc_text %}
+          <details class="mt-1">
+            <summary class="text-xs text-red-500 cursor-pointer hover:text-red-700">
+              Traceback
+            </summary>
+            <pre class="text-[11px] text-red-600 bg-red-50 rounded p-2 mt-1 overflow-x-auto whitespace-pre-wrap max-h-40">{{ event.exc_text }}</pre>
+          </details>
+          {% endif %}
+          <span class="text-[10px] text-gray-400 block mt-0.5">{{ event.logger_name }}</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

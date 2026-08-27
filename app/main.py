@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import logging
 import subprocess
 import traceback
+import uuid as _uuid
 from urllib.parse import quote
 
 from fastapi import FastAPI, Depends, Request
@@ -27,6 +28,7 @@ from app.routers.runs import router as runs_router
 from app.routers.llm import router as llm_router
 from app.routers.funnel import router as funnel_router
 from app.routers.agent import router as agent_router
+from app.routers.activity import router as activity_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -38,6 +40,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+from app.services.activity_log import install_handler as _install_activity_handler
+_install_activity_handler()
 
 _templates = build_templates()
 
@@ -160,6 +165,7 @@ app.include_router(outreach_router)
 app.include_router(runs_router)
 app.include_router(funnel_router)
 app.include_router(llm_router)
+app.include_router(activity_router)
 
 
 def _is_htmx(request: Request) -> bool:
@@ -261,15 +267,30 @@ async def require_authentication(request: Request, call_next):
     return _unauthenticated(request)
 
 
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
+    request.scope["request_id"] = rid
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+
+def _rid(request: Request) -> str:
+    return request.scope.get("request_id", "")
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> HTMLResponse:
     status = exc.status_code
+    rid = _rid(request)
     detail = str(exc.detail) if exc.detail else _HTTP_TITLES.get(status, "Error")
-    logger.warning("HTTP %s: %s — %s %s", status, detail, request.method, request.url.path)
+    logger.warning("HTTP %s: %s — %s %s [%s]", status, detail, request.method, request.url.path, rid)
     if _is_htmx(request):
         return _templates.TemplateResponse(
             "errors/htmx_error.html",
-            {"request": request, "status_code": status, "detail": detail},
+            {"request": request, "status_code": status, "detail": detail,
+             "request_id": rid},
             status_code=status,
         )
     return _templates.TemplateResponse(
@@ -280,6 +301,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> HTMLRe
             "title": _HTTP_TITLES.get(status, "Error"),
             "detail": detail,
             "traceback": None,
+            "request_id": rid,
         },
         status_code=status,
     )
@@ -289,11 +311,13 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> HTMLRe
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> HTMLResponse:
     errors = "; ".join(f"{'.'.join(str(l) for l in e['loc'])}: {e['msg']}" for e in exc.errors())
     detail = f"Validation failed — {errors}"
-    logger.warning("422 validation error: %s — %s %s", errors, request.method, request.url.path)
+    rid = _rid(request)
+    logger.warning("422 validation error: %s — %s %s [%s]", errors, request.method, request.url.path, rid)
     if _is_htmx(request):
         return _templates.TemplateResponse(
             "errors/htmx_error.html",
-            {"request": request, "status_code": 422, "detail": detail},
+            {"request": request, "status_code": 422, "detail": detail,
+             "request_id": rid},
             status_code=422,
         )
     return _templates.TemplateResponse(
@@ -304,6 +328,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "title": "Validation Error",
             "detail": detail,
             "traceback": None,
+            "request_id": rid,
         },
         status_code=422,
     )
@@ -312,12 +337,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> HTMLResponse:
     tb = traceback.format_exc()
-    logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url.path, tb)
+    rid = _rid(request)
+    logger.error("Unhandled exception on %s %s [%s]:\n%s", request.method, request.url.path, rid, tb)
     detail = f"{type(exc).__name__}: {exc}"
     if _is_htmx(request):
         return _templates.TemplateResponse(
             "errors/htmx_error.html",
-            {"request": request, "status_code": 500, "detail": detail},
+            {"request": request, "status_code": 500, "detail": detail,
+             "request_id": rid},
             status_code=500,
         )
     return _templates.TemplateResponse(
@@ -328,6 +355,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> HTMLR
             "title": "Internal Server Error",
             "detail": detail,
             "traceback": tb,
+            "request_id": rid,
         },
         status_code=500,
     )
@@ -336,17 +364,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> HTMLR
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
     from app.database import pool_status
+    from app.services import activity_log
 
     try:
         db.execute(text("SELECT 1"))
         db_status = "ok"
     except Exception:
         db_status = "error"
-    # The pool goes with it. Exhaustion is invisible until it is total, and then
-    # every page fails at once with a message that names no request in
-    # particular — so the count that would have said so lives where a monitor
-    # already looks.
-    return {"status": "ok", "db": db_status, "pool": pool_status()}
+    return {
+        "status": "ok",
+        "db": db_status,
+        "pool": pool_status(),
+        "activity": activity_log.counts(),
+    }
 
 
 @app.get("/")
