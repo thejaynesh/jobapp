@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # succeed. Short and re-earned on purpose: these checks are usually about
     # the traffic pattern rather than the visitor, so tomorrow is worth a try.
     BROWSE_CHALLENGE_BACKOFF_HOURS: int = 24
+    # How long to leave a host alone after it asked us to slow down. Minutes
+    # rather than the hours a human check gets, because that is what a rate
+    # limit means — "not this fast", not "not at all". Greenhouse's board says
+    # a few minutes; this is deliberately longer than it asks for.
+    BROWSE_RATELIMIT_REST_MINUTES: int = 20
+    # Seconds to rest between scroll batches, on a board that has objected
+    # before. Zero everywhere else: pausing on a board that never complained is
+    # depth given away for nothing. Worth more than a shallower scroll — the
+    # limit is a rate, so a slower hand reaches further than a shorter run.
+    BROWSE_SCROLL_PAUSE_SECONDS: int = 2
     # Pages per triggered run. Roughly an hour of browsing at the pace below.
     BROWSE_MAX_QUEUED: int = 60
     # Seconds to leave a page open after it finishes loading. LinkedIn fetches

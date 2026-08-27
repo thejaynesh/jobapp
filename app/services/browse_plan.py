@@ -308,6 +308,80 @@ def blocked_hosts(db) -> set[str]:
     return {row[0] for row in rows if row[0]}
 
 
+def _ratelimit_minutes() -> int:
+    return max(1, int(getattr(settings, "BROWSE_RATELIMIT_REST_MINUTES", 20)))
+
+
+def resting_hosts(db) -> set[str]:
+    """
+    Hosts that asked us to wait, and have not waited long enough yet.
+
+    Different from `blocked_hosts` in the thing that matters — its duration. A
+    human check is a door that stays shut until somebody opens it; a rate limit
+    is the board saying "not this fast", and it means the few minutes it says.
+    Treating the two the same would either hammer a site for a day or abandon
+    one for a day, and both are wrong.
+
+    The pages harvested before the limit are already stored, so this is not a
+    failure to recover from. It is only the answer to "when is it worth going
+    back", and going back is the point: an infinite list cannot be resumed
+    part-way, so the next visit re-walks the top of it either way.
+    """
+    from app.models.agent_event import AgentEvent
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=_ratelimit_minutes())
+    rows = (
+        db.query(AgentEvent.host)
+        .filter(
+            AgentEvent.kind == "browse",
+            AgentEvent.created_at >= since,
+            AgentEvent.host.isnot(None),
+            AgentEvent.summary["rate_limited"].astext == "true",
+        )
+        .distinct()
+        .all()
+    )
+    return {row[0] for row in rows if row[0]}
+
+
+def tolerated_passes(db, host: str) -> int | None:
+    """
+    How deep this host let a scroll go before it objected. None if never.
+
+    The number the next visit is built from. Asking for four hundred passes
+    from a board that stopped us at forty does not get us to four hundred — it
+    gets us to forty and a rate limit, and then a rest we did not need to
+    spend. Reading it back and staying under it covers the same ground without
+    the penalty, which on a board filtered to the last day is all the ground
+    there is.
+
+    The shallowest recent objection wins rather than the average. Being wrong
+    low costs a few cards on one visit; being wrong high costs the visit.
+    """
+    from app.models.agent_event import AgentEvent
+
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    rows = (
+        db.query(AgentEvent.summary["passes_done"].astext)
+        .filter(
+            AgentEvent.kind == "browse",
+            AgentEvent.created_at >= since,
+            AgentEvent.host == host,
+            AgentEvent.summary["rate_limited"].astext == "true",
+        )
+        .all()
+    )
+    depths = []
+    for row in rows:
+        try:
+            depth = int(row[0])
+        except (TypeError, ValueError):
+            continue
+        if depth > 0:
+            depths.append(depth)
+    return min(depths) if depths else None
+
+
 def is_blocked(host: str, blocked: set[str]) -> bool:
     """Whether a host is covered by `blocked`, subdomains included."""
     if not host:
@@ -483,18 +557,50 @@ PRIORITY_ENRICHMENT = 2  # a job is waiting on this description (set elsewhere)
 PRIORITY_SWEEP = 0       # the scheduled top-up, worth doing eventually
 
 
-def _scroll_passes(url: str) -> int:
+def _scroll_passes(url: str, db=None) -> int:
     """
     How hard to scroll this URL's page.
 
     A board that pages by URL wants a few screens — its depth comes from the
     next page being queued. A board that scrolls infinitely has no next page,
     so the scroll *is* the pagination and the number has to be much larger.
+
+    Capped by what the host has actually tolerated, when it has told us. Asking
+    a board that stopped us at forty for four hundred does not reach four
+    hundred; it reaches forty, a rate limit, and a rest. Backing off a little
+    below the objection covers the same ground for free.
     """
     board = board_for(url)
     if board is not None and board.scroll_passes:
-        return int(board.scroll_passes)
-    return max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
+        asked = int(board.scroll_passes)
+    else:
+        asked = max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
+
+    if db is None:
+        return asked
+    seen = tolerated_passes(db, _host_of(url))
+    if not seen:
+        return asked
+    # A little under, not exactly at: the limit is a rate and the depth it
+    # bites at moves around, so sitting on the last known edge would find it
+    # again about half the time.
+    return max(1, min(asked, int(seen * 0.8)))
+
+
+def _scroll_pause_seconds(url: str, db=None) -> int:
+    """
+    Seconds to rest between batches on this board.
+
+    Zero by default: pausing on a board that never objected is depth given
+    away for nothing. A board that has objected gets a real pause, because the
+    limit is a *rate* — going slower reaches further than stopping sooner does,
+    and stopping sooner is all a depth cap can buy.
+    """
+    if db is None:
+        return 0
+    if not tolerated_passes(db, _host_of(url)):
+        return 0
+    return max(0, int(getattr(settings, "BROWSE_SCROLL_PAUSE_SECONDS", 2)))
 
 
 def _already_queued(db, urls: list[str],
@@ -564,6 +670,12 @@ def enqueue(db, urls: list[str], limit: int | None = None,
     # watching ignores it: they are at the keyboard, which is the entire thing
     # the backoff concluded was not true.
     blocked = set() if priority >= PRIORITY_REQUESTED else blocked_hosts(db)
+    # A rest is not overridden by a button, and that is the difference between
+    # the two. A human check being watched by a human is answerable; a board
+    # that said "wait a few minutes" says it just as firmly to somebody sitting
+    # at the keyboard, and queueing anyway would spend the request to be told
+    # again. The caller reports the wait instead — see `runs.queue_browsing`.
+    resting = resting_hosts(db)
     queued = 0
 
     for url in urls:
@@ -579,6 +691,8 @@ def enqueue(db, urls: list[str], limit: int | None = None,
             continue
         if blocked and is_blocked(_host_of(url), blocked):
             continue
+        if resting and is_blocked(_host_of(url), resting):
+            continue
         browser_tasks.enqueue(
             db, "browse_page",
             {
@@ -592,7 +706,8 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 # caller: `enqueue` takes a flat list, and a board that needs
                 # two hundred scrolls should get them whether its URLs came
                 # from a crawl, a re-visit, or the paste box.
-                "scroll_passes": _scroll_passes(url),
+                "scroll_passes": _scroll_passes(url, db),
+                "scroll_pause_seconds": _scroll_pause_seconds(url, db),
             },
             priority=priority,
         )
@@ -877,6 +992,11 @@ def status(db) -> dict:
         # yours to lift, whereas a host here is asking you to go and click
         # something, and will keep asking until you do.
         "blocked": sorted(blocked_hosts(db)),
+        # And separately again from both: this one needs nothing from you but
+        # time, so a panel that told you to go and fix something would be
+        # asking for work that is not there.
+        "resting": sorted(resting_hosts(db)),
+        "rest_minutes": _ratelimit_minutes(),
         "boards": [
             {"key": board.key, "label": board.label,
              "searchable": bool(board.search),

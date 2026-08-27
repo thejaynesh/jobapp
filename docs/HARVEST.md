@@ -166,6 +166,61 @@ The extension must have **"Open blocked pages in a hidden window"** ticked —
 that toggle is what governs opening windows at all, so browsing is not claimed
 without it.
 
+## When a board asks you to slow down
+
+An infinite list rate-limits. Greenhouse's board stops sending cards after
+enough scrolling and asks you to wait a few minutes.
+
+The scroll loop used to keep going — it saw no new content, counted it as a
+stall, and scrolled again, spending the rest of its 75-second budget on
+requests into a closed door. That is how "a few minutes" becomes longer, and
+the visit came back reporting a shallow crawl, which reads as a broken scroll
+target rather than a board that said no.
+
+A rate limit is a *rate*, and three things follow from that:
+
+**Stop on sight.** The scroll now watches for the wording and breaks out the
+moment it appears. Further passes buy nothing.
+
+**Rest for minutes, not hours.** `BROWSE_RATELIMIT_REST_MINUTES` (20 by
+default) — the board said "not this fast", not "not at all". Nothing is lost by
+waiting: the cards harvested before the limit were posted to `/harvest` as they
+arrived and are already stored.
+
+**Go slower, not just shorter.** This is the part that actually buys depth. The
+next visit to a board that objected gets `BROWSE_SCROLL_PAUSE_SECONDS` between
+batches, and a pass count set from how far it got last time — a little under,
+because the depth a limit bites at moves around and sitting on the last known
+edge finds it again about half the time. A smaller pass count on its own only
+decides where you give up; a pause is what lets you get further.
+
+Boards that have never objected are untouched by all of this: no pause, no cap.
+Slowing everything down to accommodate one board would be depth given away for
+nothing.
+
+### The one backoff a button does not override
+
+Everywhere else, pressing a button means *do it now* and skips the cooloff. Not
+here. A human check being watched by a human is answerable — that is what it is
+asking for. A board that said "wait a few minutes" says it just as firmly to
+somebody sitting at the keyboard, so queueing anyway spends a request to be told
+again. `/runs` answers with *when* instead:
+
+> my.greenhouse.io asked us to slow down. Resting it for up to 20 minutes — try
+> again after that.
+
+### There is no resuming part-way
+
+An infinitely scrolling board has no page-two URL, so a visit cut short at pass
+40 cannot be picked up at 41 — the next one re-walks the top of the list. That
+is why staying under the limit matters more than recovering from it, and why
+the depth cap is worth more than it looks: the same ground gets covered without
+the penalty.
+
+It also matters less than it sounds. A board filtered to the last day (as the
+Greenhouse feed URL is) does not have infinite depth worth reaching — the
+scroll only has to cover what was posted since the last visit.
+
 ## When a site asks you to confirm you're human
 
 Some sites put a check in front of the page. Jooble does it on its `away`

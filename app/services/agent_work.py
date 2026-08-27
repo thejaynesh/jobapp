@@ -368,6 +368,11 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
     # "" when the page never asked; otherwise passed / timeout / skipped.
     challenge = str(result.get("challenge") or "")
     blocked = challenge in ("timeout", "skipped")
+    # The board asked us to wait. Not a failure of the visit — the pages
+    # harvested before the limit are real and already stored — but the reason
+    # the visit ended, and the thing the next one has to be shaped around.
+    rate_limited = bool(result.get("rate_limited"))
+    passes_done = int(result.get("passes_done") or 0)
 
     agent_events.record(
         db, "browse", url=result.get("final_url") or payload.get("url"),
@@ -381,6 +386,11 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
             "purpose": payload.get("purpose") or "harvest",
             "signed_in": bool(signed_in),
             "challenge": challenge,
+            "rate_limited": rate_limited,
+            # How deep the scroll got. When the visit ended in a limit this is
+            # the depth this board tolerated today, which is what the next
+            # visit's depth is built from.
+            "passes_done": passes_done,
             "title": str(result.get("title") or "")[:200],
             # How far down the list the scroll got. On a board that scrolls
             # infinitely this is the only measure of whether the visit walked
@@ -399,6 +409,12 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
     )
     db.commit()
 
+    if rate_limited:
+        logger.info(
+            "agent_work: %s asked us to slow down after %d scroll pass(es) — "
+            "resting that host and going shallower next time",
+            payload.get("url"), passes_done,
+        )
     if blocked:
         logger.warning(
             "agent_work: %s asked for a human check and did not get past it "

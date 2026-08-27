@@ -377,8 +377,19 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
         # it was read. Zero has three different meanings and the user cannot
         # guess which.
         paused = browse_plan.paused_hosts()
+        resting = browse_plan.resting_hosts(db)
         if outcome["queued"]:
             flash = f"Queued {outcome['queued']} page(s) to open next."
+        elif resting:
+            # The one zero a button press cannot argue with. Everything else
+            # here yields to somebody watching; a board that said "wait a few
+            # minutes" says it to them too, so the honest answer is when rather
+            # than no.
+            flash = (
+                f"{', '.join(sorted(resting))} asked us to slow down. Resting "
+                f"it for up to {browse_plan._ratelimit_minutes()} minutes — "
+                f"try again after that."
+            )
         elif not outcome["candidates"]:
             flash = "Nothing to crawl — no URLs for that plan."
         elif paused:

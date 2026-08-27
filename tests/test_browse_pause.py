@@ -558,3 +558,244 @@ class TestRecordingWhatTheBrowserSaw:
         db.commit()
         _ingest_browse_page(db, task)
         assert self.latest(db).ok is True
+
+
+class TestABoardThatAsksUsToSlowDown:
+    """
+    Greenhouse's board rate-limits an infinite scroll: after enough passes it
+    stops sending cards and asks you to wait a few minutes.
+
+    The scroll loop did not notice. It carried on scrolling into a closed door,
+    burning the rest of its 75-second budget on requests that could not
+    succeed — which is how "a few minutes" becomes longer, and how the visit
+    reported a shallow crawl that looked like a broken scroll target.
+
+    Three things follow from a limit being a *rate*:
+
+    * Stop the moment it appears. Further passes buy nothing and cost goodwill.
+    * Rest the host for minutes, not hours. It said "not this fast", not "not
+      at all" — and the pages harvested before the limit are already stored, so
+      there is nothing to recover, only a question of when to go back.
+    * Go slower next time rather than merely shorter. A pause between batches
+      reaches further than a smaller pass count does, because the pass count
+      only decides where you stop.
+    """
+
+    def limited_at(self, db, host, passes, minutes_ago=0):
+        from app.models.agent_event import AgentEvent
+
+        row = AgentEvent(
+            kind="browse", host=host, ok=True,
+            summary={"purpose": "harvest", "rate_limited": True,
+                     "passes_done": passes},
+        )
+        db.add(row)
+        db.flush()
+        if minutes_ago:
+            row.created_at = datetime.now(timezone.utc) - timedelta(
+                minutes=minutes_ago)
+        db.commit()
+        return row
+
+    def test_a_host_that_asked_us_to_wait_is_rested(self, db):
+        self.limited_at(db, "my.greenhouse.io", 40)
+        assert "my.greenhouse.io" in browse_plan.resting_hosts(db)
+
+    def test_the_rest_is_minutes_not_hours(self, db, monkeypatch):
+        # The distinction from a human check. That is a door somebody has to
+        # open; this is a pace, and it clears on its own.
+        monkeypatch.setattr(settings, "BROWSE_RATELIMIT_REST_MINUTES", 20)
+        self.limited_at(db, "my.greenhouse.io", 40, minutes_ago=25)
+        assert browse_plan.resting_hosts(db) == set()
+
+    def test_an_ordinary_visit_is_not_a_rest(self, db):
+        from app.models.agent_event import AgentEvent
+
+        db.add(AgentEvent(kind="browse", host="my.greenhouse.io", ok=True,
+                          summary={"purpose": "harvest", "rate_limited": False,
+                                   "passes_done": 25}))
+        db.commit()
+        assert browse_plan.resting_hosts(db) == set()
+
+    def test_nothing_is_queued_while_a_host_is_resting(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.limited_at(db, "my.greenhouse.io", 40)
+        queued = browse_plan.enqueue(
+            db, ["https://my.greenhouse.io/jobs/search?query=x"],
+            priority=browse_plan.PRIORITY_SWEEP,
+        )
+        assert queued == 0
+
+    def test_a_button_press_does_not_override_a_rest(self, db, monkeypatch):
+        """
+        The one backoff a request does not beat, and the reason is the
+        difference between the two kinds. A human check being watched by a
+        human is answerable — that is exactly what it wants. A board that said
+        "wait a few minutes" says it just as firmly to somebody sitting at the
+        keyboard, so queueing anyway spends a request to be told again.
+        """
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.limited_at(db, "my.greenhouse.io", 40)
+        queued = browse_plan.enqueue(
+            db, ["https://my.greenhouse.io/jobs/search?query=x"],
+            priority=browse_plan.PRIORITY_REQUESTED,
+        )
+        assert queued == 0
+
+    def test_the_button_says_when_rather_than_no(self, db, monkeypatch, client):
+        # A silent zero from a button is the failure this codebase has already
+        # produced twice. "Wait twenty minutes" is an answer; nothing is not.
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.limited_at(db, "my.greenhouse.io", 40)
+        response = client.post(
+            "/runs/agent/browse",
+            data={"plan": "searches", "board": "greenhouse"},
+        )
+        assert response.status_code == 200
+        assert "slow down" in response.text.lower()
+
+    def test_other_boards_keep_running(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.limited_at(db, "my.greenhouse.io", 40)
+        queued = browse_plan.enqueue(
+            db, ["https://www.linkedin.com/jobs/search/?keywords=go"],
+            priority=browse_plan.PRIORITY_SWEEP,
+        )
+        assert queued == 1
+
+    def test_the_depth_it_tolerated_is_remembered(self, db):
+        self.limited_at(db, "my.greenhouse.io", 40)
+        assert browse_plan.tolerated_passes(db, "my.greenhouse.io") == 40
+
+    def test_the_shallowest_objection_wins(self, db):
+        # Being wrong low costs a few cards on one visit. Being wrong high
+        # costs the visit and a twenty-minute rest.
+        self.limited_at(db, "my.greenhouse.io", 40)
+        self.limited_at(db, "my.greenhouse.io", 25)
+        assert browse_plan.tolerated_passes(db, "my.greenhouse.io") == 25
+
+    def test_a_board_that_never_objected_has_no_ceiling(self, db):
+        assert browse_plan.tolerated_passes(db, "www.linkedin.com") is None
+
+    def test_the_next_visit_asks_for_less(self, db):
+        url = "https://my.greenhouse.io/jobs/search?query=x"
+        asked_before = browse_plan._scroll_passes(url, db)
+        self.limited_at(db, "my.greenhouse.io", 40)
+        asked_after = browse_plan._scroll_passes(url, db)
+        assert asked_after < asked_before
+        # Under the objection rather than exactly at it: the depth the limit
+        # bites at moves around, so sitting on the last known edge finds it
+        # again about half the time.
+        assert asked_after < 40
+
+    def test_it_never_asks_for_more_than_the_board_wanted(self, db):
+        # A generous tolerance is not licence to exceed the board's own number.
+        url = "https://www.linkedin.com/jobs/search/?keywords=go"
+        self.limited_at(db, "www.linkedin.com", 10_000)
+        assert browse_plan._scroll_passes(url, db) <= \
+            browse_plan._scroll_passes(url)
+
+    def test_the_depth_never_reaches_zero(self, db):
+        url = "https://my.greenhouse.io/jobs/search?query=x"
+        self.limited_at(db, "my.greenhouse.io", 1)
+        assert browse_plan._scroll_passes(url, db) >= 1
+
+    def test_a_board_that_objected_gets_a_pause_between_batches(self, db, monkeypatch):
+        """
+        Worth more than the shallower scroll. The limit is a rate, so a slower
+        hand reaches further — where a smaller pass count only decides where to
+        give up.
+        """
+        monkeypatch.setattr(settings, "BROWSE_SCROLL_PAUSE_SECONDS", 2)
+        url = "https://my.greenhouse.io/jobs/search?query=x"
+        assert browse_plan._scroll_pause_seconds(url, db) == 0
+        self.limited_at(db, "my.greenhouse.io", 40)
+        assert browse_plan._scroll_pause_seconds(url, db) == 2
+
+    def test_a_board_that_never_objected_is_not_slowed(self, db):
+        # Pausing everywhere would be depth given away for nothing.
+        assert browse_plan._scroll_pause_seconds(
+            "https://www.linkedin.com/jobs/search/?keywords=go", db) == 0
+
+    def test_the_queued_task_carries_both_numbers(self, db, monkeypatch):
+        from app.models.browser_task import BrowserTask
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        monkeypatch.setattr(settings, "BROWSE_RATELIMIT_REST_MINUTES", 1)
+        self.limited_at(db, "my.greenhouse.io", 40, minutes_ago=5)
+
+        browse_plan.enqueue(
+            db, ["https://my.greenhouse.io/jobs/search?query=x"],
+            priority=browse_plan.PRIORITY_SWEEP,
+        )
+        task = db.query(BrowserTask).filter(
+            BrowserTask.kind == "browse_page").one()
+        assert task.payload["scroll_passes"] < 40
+        assert task.payload["scroll_pause_seconds"] == \
+            settings.BROWSE_SCROLL_PAUSE_SECONDS
+
+    def test_the_panel_names_it_without_asking_for_work(self, db):
+        # It needs nothing from the user but time, unlike a paused or a
+        # challenged host — so it is reported separately from both.
+        self.limited_at(db, "my.greenhouse.io", 40)
+        status = browse_plan.status(db)
+        assert status["resting"] == ["my.greenhouse.io"]
+        assert status["blocked"] == []
+        assert status["paused"] == []
+
+    def test_the_page_renders_while_a_board_rests(self, db, monkeypatch, client):
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        self.limited_at(db, "my.greenhouse.io", 40)
+        page = client.get("/runs")
+        assert page.status_code == 200
+        assert "my.greenhouse.io" in page.text
+
+
+class TestRecordingARateLimit:
+    def finished(self, db, **result):
+        from app.models.browser_task import BrowserTask
+        from app.services.agent_work import _ingest_browse_page
+
+        url = "https://my.greenhouse.io/jobs/search?query=x"
+        task = BrowserTask(
+            kind="browse_page", status="done", agent_id="a",
+            payload={"url": url, "purpose": "harvest"},
+            result={"final_url": url, "signed_in": True, **result},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(task)
+        db.commit()
+        _ingest_browse_page(db, task)
+        return task
+
+    def latest(self, db):
+        from app.models.agent_event import AgentEvent
+
+        return (
+            db.query(AgentEvent)
+            .filter(AgentEvent.kind == "browse")
+            .order_by(AgentEvent.created_at.desc())
+            .first()
+        )
+
+    def test_the_limit_and_the_depth_are_both_kept(self, db):
+        self.finished(db, rate_limited=True, passes_done=40)
+        summary = self.latest(db).summary
+        assert summary["rate_limited"] is True
+        assert summary["passes_done"] == 40
+
+    def test_a_rate_limited_visit_is_still_a_successful_one(self, db):
+        """
+        Unlike a human check. The cards harvested before the limit are real and
+        already stored, so marking the visit failed would tell the harvest
+        health panel a working reader had broken.
+        """
+        self.finished(db, rate_limited=True, passes_done=40)
+        assert self.latest(db).ok is True
+
+    def test_an_old_extension_reporting_neither_still_works(self, db):
+        self.finished(db)
+        summary = self.latest(db).summary
+        assert summary["rate_limited"] is False
+        assert summary["passes_done"] == 0

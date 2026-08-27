@@ -190,7 +190,7 @@ function clampSeconds(value, fallback, low, high) {
 // visited again rather than held open.
 const SCROLL_BUDGET_MS = 75000;
 
-async function visitInTab(url, settleMs, passes) {
+async function visitInTab(url, settleMs, passes, pauseMs) {
   return withTabLock(async () => {
     let win;
     try {
@@ -238,11 +238,17 @@ async function visitInTab(url, settleMs, passes) {
       // pixels can move on a page that loads nothing.
       let batches = 0;
       let scrollTargetSeen = "";
+      // Whether the board asked us to slow down, and how deep the scroll got
+      // before it did. Both travel back to the server: the first so it can
+      // wait, the second so the next visit asks for a depth this board has
+      // actually tolerated.
+      let rate_limited = false;
+      let passes_done = 0;
       try {
         const [injected] = await chrome.scripting.executeScript({
           target: { tabId },
-          args: [passes, SCROLL_BUDGET_MS],
-          func: async (maxPasses, budgetMs) => {
+          args: [passes, SCROLL_BUDGET_MS, pauseMs],
+          func: async (maxPasses, budgetMs, pauseMs) => {
             // For an infinitely scrolling board this loop *is* the pagination.
             // There is no page-two URL to queue, so the only way to reach the
             // hundredth result is to keep asking — and each batch it pulls in
@@ -281,14 +287,31 @@ async function visitInTab(url, settleMs, passes) {
               document.getElementsByTagName("*").length +
               document.querySelectorAll("a[href]").length;
 
+            // 3. It kept scrolling after the board had started saying no.
+            //    An infinite list rate-limits: Greenhouse's asks you to wait a
+            //    few minutes. Every further pass past that point is a request
+            //    into a closed door, and requests into a closed door are how a
+            //    few minutes becomes an hour. Stopping on the first sight of
+            //    it is both politer and faster.
+            const limited = () => {
+              const text = (document.body ? document.body.innerText : "")
+                .slice(0, 4000);
+              return /too many requests|rate limit|slow down|try again in a (few|couple)|please wait a few|temporarily (blocked|unavailable)|you('| a)?re going too fast/i
+                .test(text);
+            };
+
             const deadline = Date.now() + budgetMs;
             let previous = signal();
             let reached = 0;
             let batches = 0;
             let stalls = 0;
+            let rateLimited = false;
+            let passes = 0;
             let target = scrollTarget();
 
             for (let n = 0; n < maxPasses && Date.now() < deadline; n += 1) {
+              if (limited()) { rateLimited = true; break; }
+              passes = n + 1;
               target = scrollTarget();
               try {
                 target.scrollTop = target.scrollHeight;
@@ -309,8 +332,17 @@ async function visitInTab(url, settleMs, passes) {
                 previous = signal();
                 batches += 1;
                 stalls = 0;
+                // Breathing room between batches. The limit is a rate, so the
+                // fix for hitting it is a slower hand rather than a smaller
+                // total — this buys depth that stopping short would not.
+                if (pauseMs > 0) {
+                  await new Promise((r) => setTimeout(r, pauseMs));
+                }
                 continue;
               }
+              // A stall is the usual moment for the message to appear: the
+              // batch did not arrive *because* the board refused it.
+              if (limited()) { rateLimited = true; break; }
               // Three stalls rather than one: these lists pause on a slow
               // request and then carry on, and giving up on the first quiet
               // moment is how a deep scroll turns into a shallow one.
@@ -325,6 +357,11 @@ async function visitInTab(url, settleMs, passes) {
               // finds nothing and looks identical to a reader that broke.
               wall: /sign in|join now to see|log in to continue/i.test(text),
               scrolled: reached,
+              // Whether the board asked us to slow down, and how far we got
+              // before it did. The second number is what makes the next visit
+              // smarter rather than identical.
+              rate_limited: rateLimited,
+              passes: passes,
               // How many times new content actually arrived. This is the
               // number that says whether the scroll worked: a deep crawl that
               // reports one batch did not scroll, whatever the pixels say.
@@ -340,6 +377,9 @@ async function visitInTab(url, settleMs, passes) {
         signed_in = !(injected && injected.result && injected.result.wall);
         scrolled = (injected && injected.result && injected.result.scrolled) || 0;
         batches = (injected && injected.result && injected.result.batches) || 0;
+        rate_limited = Boolean(
+          injected && injected.result && injected.result.rate_limited);
+        passes_done = (injected && injected.result && injected.result.passes) || 0;
         scrollTargetSeen = (injected && injected.result && injected.result.target) || "";
       } catch (_) {
         // Injection refused. The visit still happened, which is the part that
@@ -353,6 +393,7 @@ async function visitInTab(url, settleMs, passes) {
         final_url: (tab && tab.url) || url,
         signed_in, title, scrolled, batches,
         scroll_target: scrollTargetSeen,
+        rate_limited, passes_done,
         // "" when the page never asked. Reported rather than swallowed so the
         // server can tell a site that blocked us from one that had nothing on
         // it — before this they were the same empty result.
@@ -722,8 +763,13 @@ const HANDLERS = {
     // screens; on one that scrolls infinitely it is the pagination, so the
     // server asks for a lot more and the budget above decides when to stop.
     const passes = clampSeconds(payload.scroll_passes, 25, 1, 400);
+    // How long to rest between batches. An infinite list rate-limits on a
+    // rate, so a slower hand reaches further than a shorter run does — the
+    // server sets it per board because only it knows which boards have
+    // complained.
+    const pauseMs = clampSeconds(payload.scroll_pause_seconds, 0, 0, 10) * 1000;
 
-    const visited = await visitInTab(url, settleMs, passes);
+    const visited = await visitInTab(url, settleMs, passes, pauseMs);
     // Held inside the tab lock's queue by awaiting here: the next browse task
     // cannot open its window until this pause is over, which is what makes the
     // gap a real rhythm rather than a number in a payload.
@@ -743,6 +789,14 @@ const HANDLERS = {
       // a site that asked for a human check is not a site whose field names
       // moved, and telling the user to go fix the reader would be wrong.
       challenge: visited.challenge,
+      // The board asked us to wait. Reported rather than swallowed so the
+      // server can rest that host and come back, instead of sending the next
+      // sixty pages into the same closed door.
+      rate_limited: visited.rate_limited,
+      // How deep the scroll got. On an infinite list this is the honest
+      // measure of how much of the board a visit covered, and when it ends in
+      // a limit it is also the depth this board will tolerate.
+      passes_done: visited.passes_done,
     };
   },
 

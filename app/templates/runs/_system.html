@@ -341,6 +341,16 @@
             </button>
           </div>
 
+          {% if browse.resting %}
+          {# Needs nothing but time, so it does not get the "go and fix
+             something" wording the other two have. #}
+          <p class="text-[11px] text-sky-700 bg-sky-50 border border-sky-200 rounded px-1.5 py-1 mt-1">
+            Slowing down for {{ browse.resting|join(', ') }} — it asked us to
+            wait. Back to it within {{ browse.rest_minutes }} minutes, and the
+            next visit scrolls less hard.
+          </p>
+          {% endif %}
+
           {% if browse.blocked %}
           {# Not a reader that broke, and worth saying so: the fix is a click
              on that site rather than an afternoon in harvest.py. #}
