@@ -1417,13 +1417,14 @@ function hostOf(url) {
   }
 }
 
-async function forwardHarvest(payload, sourceUrl) {
+async function forwardHarvest(payload, sourceUrl, probe) {
   const config = await getConfig();
   if (!config.serverUrl || !config.token) return;
   try {
     const counts = await api("/api/agent/harvest", {
       payload,
       source_url: sourceUrl,
+      probe: Boolean(probe),
       // So the server files the event under the browser it came from. Several
       // can be running, and "harvest stopped working" is usually only true of
       // one of them.
@@ -1466,7 +1467,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Only from a tab we injected into. A message with no tab came from an
     // extension page, which has no business offering harvested jobs.
     if (!sender.tab) return false;
-    forwardHarvest(message.payload, message.sourceUrl);
+    forwardHarvest(message.payload, message.sourceUrl, message.probe);
     return false;
   }
   if (message?.type === "sync-harvest") {

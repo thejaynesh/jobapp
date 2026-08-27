@@ -431,3 +431,95 @@ class TestThePanel:
                    side_effect=RuntimeError("boom")):
             assert client.post("/runs/agent/learn",
                                data={"host": "x.test"}).status_code == 200
+
+
+class TestAPayloadThatNamedNothingWeKnow:
+    """
+    A board can open, scroll, paginate and yield nothing while offering no
+    "Learn" button at all — which is what JobRight and Hiring Cafe did.
+
+    The button is built from stored samples, and a sample only exists once a
+    payload has reached the server. The interceptor was dropping these in the
+    browser: a response whose field names it did not recognise never left the
+    page, so there was nothing to learn from and nothing to say. "Pages opened,
+    nothing forwarded" was as far as the diagnosis could go.
+
+    Near misses are forwarded now, marked as such — because a payload that
+    named none of the known keys wants new field names, while one that named
+    them and still yielded nothing wants a recipe, and the two read identically
+    without the mark.
+    """
+
+    def _post(self, client, payload, probe=False):
+        return client.post(
+            "/api/agent/harvest",
+            json={
+                "payload": payload,
+                "source_url": "https://hiring.cafe/api/search",
+                "probe": probe,
+            },
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    def _samples(self, db):
+        from app.models.harvest_recipe import HarvestSample
+
+        return db.query(HarvestSample).filter(
+            HarvestSample.host == "hiring.cafe").all()
+
+    def test_a_near_miss_becomes_evidence(self, client, db, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        self._post(client, {"results": [{"job_title": "Engineer"}]}, probe=True)
+        assert self._samples(db)
+
+    def test_the_host_is_then_offered_for_learning(self, client, db, monkeypatch):
+        # The whole point. Without a sample there is no button, and without the
+        # button there is no way to act on a board that yields nothing.
+        from app.config import settings
+        from app.services import harvest_samples
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        self._post(client, {"results": [{"job_title": "Engineer"}]}, probe=True)
+        assert "hiring.cafe" in {row["host"] for row in harvest_samples.hosts(db)}
+
+    def test_a_near_miss_says_it_was_one(self, client, db, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        self._post(client, {"results": [{"job_title": "Engineer"}]}, probe=True)
+        assert "near miss" in (self._samples(db)[0].note or "")
+
+    def test_an_ordinary_unreadable_payload_is_not_called_a_near_miss(
+        self, client, db, monkeypatch,
+    ):
+        # It named a key the reader knows and still yielded nothing, which is
+        # the recipe case rather than the field-names case.
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        self._post(client, {"items": [{"title": "Engineer"}]}, probe=False)
+        assert "near miss" not in (self._samples(db)[0].note or "")
+
+    def test_a_near_miss_that_turns_out_readable_is_still_stored_as_jobs(
+        self, client, db, monkeypatch,
+    ):
+        """
+        The probe flag is a hint about why it was sent, not an instruction to
+        treat it differently. If the walker can read it after all, that is a
+        job — refusing to store one because the browser was unsure would be
+        the reader deferring to the weaker judge.
+        """
+        from app.config import settings
+        from app.models.job import Job
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
+        response = self._post(client, {"results": [{
+            "title": "Backend Engineer",
+            "companyName": "Acme",
+            "id": "hc-90210",
+            "url": "https://hiring.cafe/jobs/hc-90210",
+        }]}, probe=True)
+        assert response.json()["found"] == 1
+        assert db.query(Job).filter(Job.company == "Acme").count() == 1

@@ -37,10 +37,37 @@
   // Responses larger than this are not job lists, they are asset manifests.
   const MAX_BYTES = 3_000_000;
 
-  function offer(payload, sourceUrl) {
+  // Keys a job payload names somewhere. Widened to snake_case, which is what
+  // every Python and Rails backend produces: `"job_title"` does not match a
+  // pattern anchored on `"title"`, because the quote sits before `job`. A
+  // board whose API answered in snake_case was invisible — the response
+  // arrived, was read, matched nothing, and was dropped without trace.
+  const SHAPE =
+    /"(title|jobTitle|job_title|jobtitle|companyName|company_name|employer_name|jobPostingId|job_id|position|positionTitle)"/i;
+
+  // Near misses: JSON on a job-shaped URL that names none of the keys above.
+  //
+  // These used to be discarded silently, and that is why a board could open,
+  // scroll, paginate and yield nothing with no "Learn" button offered — the
+  // button is built from stored samples, and a payload that never left the
+  // browser cannot become one. Sending a few per page turns "nothing
+  // forwarded" from a dead end into something the recipe learner can work on.
+  //
+  // Capped hard: this is diagnostic, and a page that answers in JSON for every
+  // widget on it should not post forty of them.
+  const MAX_PROBES = 4;
+  const MAX_PROBE_BYTES = 400_000;
+  let probes = 0;
+
+  function offer(payload, sourceUrl, probe) {
     try {
       window.postMessage(
-        { channel: CHANNEL, payload, sourceUrl: String(sourceUrl || location.href) },
+        {
+          channel: CHANNEL,
+          payload,
+          sourceUrl: String(sourceUrl || location.href),
+          probe: Boolean(probe),
+        },
         location.origin,
       );
     } catch (_) {
@@ -53,13 +80,53 @@
     if (!url || !text) return;
     if (!INTERESTING.test(url)) return;
     if (text.length > MAX_BYTES) return;
-    // Cheap rejection before the expensive parse: a job payload always names
-    // one of these somewhere.
-    if (!/"(title|jobTitle|companyName|jobPostingId)"/.test(text)) return;
+
+    // Cheap rejection before the expensive parse: a job payload names one of
+    // these somewhere.
+    if (SHAPE.test(text)) {
+      try {
+        offer(JSON.parse(text), url, false);
+      } catch (_) {
+        // Not JSON. Common and uninteresting.
+      }
+      return;
+    }
+
+    // A near miss, kept as evidence rather than dropped.
+    if (probes >= MAX_PROBES || text.length > MAX_PROBE_BYTES) return;
+    let parsed;
     try {
-      offer(JSON.parse(text), url);
+      parsed = JSON.parse(text);
     } catch (_) {
-      // Not JSON. Common and uninteresting.
+      return;
+    }
+    // Something with structure. A bare string, number or empty object is a
+    // ping or a feature flag, and describes nothing worth learning from.
+    const interesting =
+      (Array.isArray(parsed) && parsed.length) ||
+      (parsed && typeof parsed === "object" && Object.keys(parsed).length);
+    if (!interesting) return;
+    probes += 1;
+    offer(parsed, url, true);
+  }
+
+  /** Hand a response body to the reader, whatever shape XHR returned it in. */
+  function offerXhrBody(xhr) {
+    const kind = xhr.responseType || "text";
+    if (kind === "text" || kind === "") {
+      maybeOffer(xhr.__jobappUrl, xhr.responseText);
+      return;
+    }
+    // Already parsed for us. This was skipped outright, which made every site
+    // using axios — or anything else that sets `responseType = "json"` —
+    // invisible to the harvest, because reading `responseText` on one of those
+    // throws rather than returning the body.
+    if (kind === "json" && xhr.response) {
+      try {
+        maybeOffer(xhr.__jobappUrl, JSON.stringify(xhr.response));
+      } catch (_) {
+        /* circular or too large to re-serialise */
+      }
     }
   }
 
@@ -96,8 +163,7 @@
   XMLHttpRequest.prototype.send = function (...args) {
     this.addEventListener("load", () => {
       try {
-        if (this.responseType && this.responseType !== "text") return;
-        maybeOffer(this.__jobappUrl, this.responseText);
+        offerXhrBody(this);
       } catch (_) {
         /* as above */
       }

@@ -152,7 +152,8 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
-def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "") -> dict:
+def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
+             probe: bool = False) -> dict:
     from app.services import agent_events, harvest_recipes, harvest_samples
     from app.services.harvest import extract_jobs, save_harvested_jobs, source_for_url
 
@@ -182,7 +183,15 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "") -> 
         # and no way to act on it short of opening DevTools by hand.
         harvest_samples.record(
             db, host, payload, source_url=source_url, found=0,
-            note="recipe found nothing" if recipe else "no recipe",
+            note=(
+                # A probe named none of the keys the reader looks for, which is
+                # a different thing from a payload that did and still yielded
+                # nothing — the first wants new field names, the second wants a
+                # recipe, and they read identically without this.
+                "near miss: no field names the reader knows"
+                if probe else
+                ("recipe found nothing" if recipe else "no recipe")
+            ),
         )
     else:
         counts = {"found": len(jobs), "source": source, **save_harvested_jobs(db, jobs)}
@@ -221,6 +230,7 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
         counts = await run_in_threadpool(
             _harvest, db, payload, body.get("source_url") or "",
             str(body.get("agent_id") or "")[:120],
+            bool(body.get("probe")),
         )
     except Exception as exc:
         # Never charge a parsing bug of ours to the browser that volunteered

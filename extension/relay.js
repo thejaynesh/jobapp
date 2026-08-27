@@ -53,7 +53,14 @@ function onMessage(event) {
 
   try {
     chrome.runtime.sendMessage(
-      { type: "harvest", payload: data.payload, sourceUrl: data.sourceUrl },
+      {
+        type: "harvest",
+        payload: data.payload,
+        sourceUrl: data.sourceUrl,
+        // A near miss rather than a recognised job payload. Forwarded so the
+        // server has evidence to learn from; marked so it can say so.
+        probe: Boolean(data.probe),
+      },
       () => {
         // The service worker may be asleep or mid-restart. Losing one payload
         // is not worth surfacing — the next page view offers more, and there
