@@ -94,6 +94,49 @@ one you opened yourself.
   rendered from an internal API.
 - **Paste your own URLs** takes anything you copied out of the address bar.
 
+### How a board's depth is reached
+
+A board's second page comes from one of three places, and picking the wrong one
+harvests page one forever while every number on the panel looks healthy. That is
+the worst shape of bug this feature has: the visit succeeds, the scroll reports
+a sensible depth, rows arrive — and they are the same rows every time.
+
+| Board | Depth comes from | Set with |
+| --- | --- | --- |
+| LinkedIn, Amazon, Google | A **URL** — `start=25`, `page=2` | `page_param` / `page_size` / `page_base` |
+| Greenhouse's board, JobRight | A **scroll**. No page two exists; the scroll *is* the pagination | `scroll_passes` |
+| Hiring Cafe | A **click** on a numbered control, with one address for every page | `click_pages` |
+
+The third had no mechanism at all until it was reported. Hiring Cafe was
+configured as an entry page with the default scroll, which reaches the bottom of
+page one, finds nothing more, and closes.
+
+**Clicking, not navigating.** These are single-page apps, so page two is often
+the same URL — there is no address to queue. The extension finds the next-page
+control and clicks it, exactly as a person would, and the interceptor reads the
+request that click causes.
+
+Finding the control is a guess at somebody's markup, so it is deliberately
+narrow: `rel="next"` first, then a button or link whose *whole label* is
+"Next", "›", "»" or similar. An element whose text merely contains "next page"
+is usually a container holding one, so the label has to be short to count.
+
+After clicking, it waits for the list to actually turn over — the first forty
+`href`s, compared before and after. Node counts cannot see this: twenty rows
+replaced by twenty rows is the same count. If nothing changes, it stops rather
+than clicking again, because re-harvesting one page repeatedly looks like depth
+and is worse than stopping.
+
+**When it does not find the control**, the visit still scrolls, still harvests,
+and still looks fine — so the number of pages reached is reported and a board
+asked for ten pages that reached one logs:
+
+> hiring.cafe was asked for 10 pages and reached 1 — the next-page control was
+> not found, so only the first page was harvested
+
+That is the line to search for if Hiring Cafe stops yielding new jobs. The fix
+is a selector, not a parser.
+
 ### Why some boards get a feed instead of a search
 
 `BOARDS` in `app/services/browse_plan.py` gives each site either a `search`

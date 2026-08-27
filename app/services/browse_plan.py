@@ -88,7 +88,7 @@ class Board:
 
     def __init__(self, key, host, label, search=None, entries=(),
                  page_param=None, page_size=25, page_base=0,
-                 feed_setting=None, scroll_passes=None):
+                 feed_setting=None, scroll_passes=None, click_pages=None):
         self.key = key
         self.host = host
         self.label = label
@@ -100,6 +100,14 @@ class Board:
         # next page. For one that scrolls infinitely there *is* no next page,
         # so this loop is the pagination and the number has to be much larger.
         self.scroll_passes = scroll_passes
+        # Result pages to click through, for a board that paginates in place.
+        # A third kind, and the one that was missing: `page_param` covers a
+        # board whose page two is a URL, and `scroll_passes` covers one with no
+        # page two at all. Hiring Cafe has numbered buttons and one address for
+        # all of them, so scrolling reaches the bottom of page one and stops —
+        # every visit harvested the first page and nothing else, while
+        # reporting a perfectly healthy scroll.
+        self.click_pages = click_pages
         self.page_param = page_param
         self.page_size = max(1, page_size)
         # What the parameter reads on the first page. Boards count two
@@ -155,10 +163,26 @@ BOARDS = (
             "https://jobright.ai/jobs/recommend",
             "https://jobright.ai/jobs/search",
         ),
+        # Infinite scroll with lazy loading, so the scroll is the pagination
+        # here exactly as it is on Greenhouse's board — and it was silently
+        # taking the default 25, the number meant for a board whose depth comes
+        # from queueing page two. There is no page two to queue. Twenty-five
+        # passes is the first screenful and then a closed tab.
+        scroll_passes=150,
     ),
     Board(
         "hiringcafe", "hiring.cafe", "Hiring Cafe",
         entries=("https://hiring.cafe/",),
+        # Numbered buttons at the bottom, and one URL for all of them. Neither
+        # of the other two mechanisms reaches page two: there is no parameter
+        # to append, and scrolling stops at the bottom of page one. The click
+        # is the only way through.
+        click_pages=10,
+        # A few screens per page rather than a deep scroll — the depth here
+        # comes from the pages, and the scrolling only has to reach the bottom
+        # where the controls are and pull in anything that lazy-loads on the
+        # way.
+        scroll_passes=8,
     ),
     # Greenhouse's own job-seeker board: every posting on the platform rather
     # than one company's. Worth crawling for the postings, but worth far more
@@ -587,6 +611,20 @@ def _scroll_passes(url: str, db=None) -> int:
     return max(1, min(asked, int(seen * 0.8)))
 
 
+def _max_pages(url: str) -> int:
+    """
+    Result pages to click through on this URL's board.
+
+    One for everything that does not say otherwise, so a scrolling board is
+    untouched by any of this and the extension's behaviour there is exactly
+    what it always was.
+    """
+    board = board_for(url)
+    if board is not None and board.click_pages:
+        return max(1, int(board.click_pages))
+    return 1
+
+
 def _scroll_pause_seconds(url: str, db=None) -> int:
     """
     Seconds to rest between batches on this board.
@@ -708,6 +746,7 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 # from a crawl, a re-visit, or the paste box.
                 "scroll_passes": _scroll_passes(url, db),
                 "scroll_pause_seconds": _scroll_pause_seconds(url, db),
+                "max_pages": _max_pages(url),
             },
             priority=priority,
         )

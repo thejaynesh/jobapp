@@ -190,7 +190,7 @@ function clampSeconds(value, fallback, low, high) {
 // visited again rather than held open.
 const SCROLL_BUDGET_MS = 75000;
 
-async function visitInTab(url, settleMs, passes, pauseMs) {
+async function visitInTab(url, settleMs, passes, pauseMs, maxPages) {
   return withTabLock(async () => {
     let win;
     try {
@@ -244,11 +244,16 @@ async function visitInTab(url, settleMs, passes, pauseMs) {
       // actually tolerated.
       let rate_limited = false;
       let passes_done = 0;
+      // Result pages reached by clicking through. One on a board that does not
+      // paginate — and one on a board that does is the signal that the control
+      // was not found, which is the only way to tell that apart from a board
+      // that genuinely has a single page.
+      let pages_done = 1;
       try {
         const [injected] = await chrome.scripting.executeScript({
           target: { tabId },
-          args: [passes, SCROLL_BUDGET_MS, pauseMs],
-          func: async (maxPasses, budgetMs, pauseMs) => {
+          args: [passes, SCROLL_BUDGET_MS, pauseMs, maxPages],
+          func: async (maxPasses, budgetMs, pauseMs, maxPages) => {
             // For an infinitely scrolling board this loop *is* the pagination.
             // There is no page-two URL to queue, so the only way to reach the
             // hundredth result is to keep asking — and each batch it pulls in
@@ -300,18 +305,76 @@ async function visitInTab(url, settleMs, passes, pauseMs) {
                 .test(text);
             };
 
+            // 4. Some boards do not scroll at all. Hiring Cafe paginates with
+            //    numbered buttons at the bottom, and scrolling a paginated
+            //    board is a no-op — it reaches the bottom of page one and
+            //    stops, so every visit harvested the first page and nothing
+            //    else, forever, while reporting a perfectly healthy scroll.
+            //
+            //    Clicking the control is the only way through, and it has to
+            //    be a click rather than a URL: these are single-page apps, and
+            //    page two is often the same address.
+
+            // What the list currently holds. Node counts cannot see a page
+            // *change* — twenty rows replaced by twenty rows is the same
+            // count — so pagination needs identity rather than size.
+            const fingerprint = () =>
+              Array.from(document.querySelectorAll("a[href]"))
+                .slice(0, 40)
+                .map((a) => a.getAttribute("href"))
+                .join("|");
+
+            // The next-page control, if this page has one that is still live.
+            // `rel="next"` first because it is the one unambiguous signal;
+            // everything after it is a guess at somebody's markup, kept narrow
+            // by requiring the text to be short — "Next" is a button label,
+            // whereas an element whose text merely contains "next page" is
+            // usually a container holding one.
+            const nextControl = () => {
+              const rel = document.querySelector("a[rel='next'], link[rel='next']");
+              if (rel && rel.tagName === "A") return rel;
+
+              const usable = (el) => {
+                if (el.disabled) return false;
+                if (el.getAttribute("aria-disabled") === "true") return false;
+                const style = getComputedStyle(el);
+                return style.display !== "none" && style.visibility !== "hidden";
+              };
+              const candidates = document.querySelectorAll(
+                "button, a, [role='button']",
+              );
+              for (const el of candidates) {
+                if (!usable(el)) continue;
+                const label = (
+                  el.getAttribute("aria-label") ||
+                  el.getAttribute("title") ||
+                  el.textContent ||
+                  ""
+                ).trim();
+                if (!label || label.length > 24) continue;
+                if (/^(next|next page|next \u203a|\u203a|\u00bb|\u2192|>)$/i.test(label)) {
+                  return el;
+                }
+              }
+              return null;
+            };
+
             const deadline = Date.now() + budgetMs;
             let previous = signal();
             let reached = 0;
             let batches = 0;
-            let stalls = 0;
             let rateLimited = false;
             let passes = 0;
+            let pagesSeen = 1;
             let target = scrollTarget();
 
+            // One page's worth of scrolling. Runs once for a board that does
+            // not paginate, which is the whole of the old behaviour.
+            const scrollThisPage = async () => {
+            let stalls = 0;
             for (let n = 0; n < maxPasses && Date.now() < deadline; n += 1) {
-              if (limited()) { rateLimited = true; break; }
-              passes = n + 1;
+              if (limited()) { rateLimited = true; return; }
+              passes += 1;
               target = scrollTarget();
               try {
                 target.scrollTop = target.scrollHeight;
@@ -342,12 +405,51 @@ async function visitInTab(url, settleMs, passes, pauseMs) {
               }
               // A stall is the usual moment for the message to appear: the
               // batch did not arrive *because* the board refused it.
-              if (limited()) { rateLimited = true; break; }
+              if (limited()) { rateLimited = true; return; }
               // Three stalls rather than one: these lists pause on a slow
               // request and then carry on, and giving up on the first quiet
               // moment is how a deep scroll turns into a shallow one.
               stalls += 1;
-              if (stalls >= 3) break;
+              if (stalls >= 3) return;
+            }
+            };
+
+            await scrollThisPage();
+
+            // Then the pages behind this one, for a board that has them.
+            // `maxPages` is 1 unless the server says otherwise, so a scrolling
+            // board never enters this loop at all.
+            for (let page = 1; page < maxPages && !rateLimited; page += 1) {
+              if (Date.now() >= deadline) break;
+              const control = nextControl();
+              if (!control) break;   // the last page, or no control we can see
+
+              const before = fingerprint();
+              try {
+                control.click();
+              } catch (_) {
+                break;
+              }
+
+              // Wait for the list to actually turn over. A click that changes
+              // nothing means the control was not what we took it for, and
+              // clicking it repeatedly would be the same page harvested over
+              // and over — worse than stopping, because it looks like depth.
+              let turned = false;
+              for (let waited = 0; waited < 6000; waited += 250) {
+                await new Promise((r) => setTimeout(r, 250));
+                if (fingerprint() !== before) { turned = true; break; }
+              }
+              if (!turned) break;
+
+              pagesSeen += 1;
+              previous = signal();
+              if (pauseMs > 0) {
+                await new Promise((r) => setTimeout(r, pauseMs));
+              }
+              // Each new page gets the same treatment: it may lazy-load its
+              // own rows as you move down it.
+              await scrollThisPage();
             }
 
             const text = (document.body ? document.body.innerText : "").slice(0, 4000);
@@ -362,6 +464,11 @@ async function visitInTab(url, settleMs, passes, pauseMs) {
               // smarter rather than identical.
               rate_limited: rateLimited,
               passes: passes,
+              // How many result pages were reached. One means either a board
+              // that does not paginate or a "next" control we could not find —
+              // and on a board the server *said* paginates, that difference is
+              // the whole diagnosis.
+              pages: pagesSeen,
               // How many times new content actually arrived. This is the
               // number that says whether the scroll worked: a deep crawl that
               // reports one batch did not scroll, whatever the pixels say.
@@ -380,6 +487,7 @@ async function visitInTab(url, settleMs, passes, pauseMs) {
         rate_limited = Boolean(
           injected && injected.result && injected.result.rate_limited);
         passes_done = (injected && injected.result && injected.result.passes) || 0;
+        pages_done = (injected && injected.result && injected.result.pages) || 0;
         scrollTargetSeen = (injected && injected.result && injected.result.target) || "";
       } catch (_) {
         // Injection refused. The visit still happened, which is the part that
@@ -393,7 +501,7 @@ async function visitInTab(url, settleMs, passes, pauseMs) {
         final_url: (tab && tab.url) || url,
         signed_in, title, scrolled, batches,
         scroll_target: scrollTargetSeen,
-        rate_limited, passes_done,
+        rate_limited, passes_done, pages_done,
         // "" when the page never asked. Reported rather than swallowed so the
         // server can tell a site that blocked us from one that had nothing on
         // it — before this they were the same empty result.
@@ -764,8 +872,11 @@ const HANDLERS = {
     // server sets it per board because only it knows which boards have
     // complained.
     const pauseMs = clampSeconds(payload.scroll_pause_seconds, 0, 0, 10) * 1000;
+    // Result pages to click through. One unless the server says this board
+    // paginates, so a scrolling board behaves exactly as it always has.
+    const maxPages = clampSeconds(payload.max_pages, 1, 1, 50);
 
-    const visited = await visitInTab(url, settleMs, passes, pauseMs);
+    const visited = await visitInTab(url, settleMs, passes, pauseMs, maxPages);
     // Held inside the tab lock's queue by awaiting here: the next browse task
     // cannot open its window until this pause is over, which is what makes the
     // gap a real rhythm rather than a number in a payload.
@@ -793,6 +904,11 @@ const HANDLERS = {
       // measure of how much of the board a visit covered, and when it ends in
       // a limit it is also the depth this board will tolerate.
       passes_done: visited.passes_done,
+      // Result pages reached. On a board the server asked to paginate, a 1
+      // here means the "next" control was not found — a different problem
+      // from a board that had nothing on it, needing a different fix, so it
+      // is reported rather than folded into the other numbers.
+      pages_done: visited.pages_done,
     };
   },
 

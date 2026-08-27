@@ -373,6 +373,13 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
     # the visit ended, and the thing the next one has to be shaped around.
     rate_limited = bool(result.get("rate_limited"))
     passes_done = int(result.get("passes_done") or 0)
+    # Result pages reached by clicking through. On a board the server asked to
+    # paginate, a 1 means the "next" control was not found — the board redesigned
+    # its pagination, or the guess at its markup was wrong. That is a specific
+    # and fixable thing, and it is invisible in every other number here: the
+    # scroll looks healthy, the harvest returns rows, and page one is all you
+    # ever get.
+    pages_done = int(result.get("pages_done") or 0)
 
     agent_events.record(
         db, "browse", url=result.get("final_url") or payload.get("url"),
@@ -387,6 +394,7 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
             "signed_in": bool(signed_in),
             "challenge": challenge,
             "rate_limited": rate_limited,
+            "pages_done": pages_done,
             # How deep the scroll got. When the visit ended in a limit this is
             # the depth this board tolerated today, which is what the next
             # visit's depth is built from.
@@ -409,6 +417,16 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
     )
     db.commit()
 
+    from app.services import browse_plan
+
+    asked_pages = browse_plan._max_pages(payload.get("url") or "")
+    if asked_pages > 1 and pages_done <= 1 and not rate_limited:
+        logger.warning(
+            "agent_work: %s was asked for %d pages and reached %d — the "
+            "next-page control was not found, so only the first page was "
+            "harvested",
+            payload.get("url"), asked_pages, pages_done,
+        )
     if rate_limited:
         logger.info(
             "agent_work: %s asked us to slow down after %d scroll pass(es) — "

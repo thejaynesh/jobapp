@@ -799,3 +799,153 @@ class TestRecordingARateLimit:
         summary = self.latest(db).summary
         assert summary["rate_limited"] is False
         assert summary["passes_done"] == 0
+
+
+class TestBoardsPaginateThreeDifferentWays:
+    """
+    A board's depth comes from one of three places, and using the wrong one
+    harvests page one forever while every number on the panel looks healthy.
+
+    * **A URL** — LinkedIn's `start=25`. Queue the next page as its own visit.
+    * **A scroll** — Greenhouse's board and JobRight. There is no page two, so
+      the scroll *is* the pagination and the pass count is the depth.
+    * **A click** — Hiring Cafe. Numbered buttons at the bottom and one address
+      for all of them, so there is no parameter to append and scrolling stops
+      at the bottom of page one.
+
+    The third had no mechanism at all. Hiring Cafe was configured as an entry
+    page with the default scroll, which reaches the bottom of the first page,
+    finds nothing more, and closes — reporting a perfectly ordinary visit.
+    """
+
+    def test_linkedin_pages_by_url(self, db):
+        board = browse_plan.BOARDS_BY_KEY["linkedin"]
+        pages = board.pages("https://www.linkedin.com/jobs/search/?keywords=go", 3)
+        assert len(pages) == 3
+        assert "start=25" in pages[1]
+
+    def test_a_scrolling_board_gets_no_url_pages(self, db):
+        board = browse_plan.BOARDS_BY_KEY["greenhouse"]
+        assert board.pages("https://my.greenhouse.io/jobs/search", 5) == [
+            "https://my.greenhouse.io/jobs/search"]
+
+    def test_jobright_scrolls_deep_rather_than_taking_the_default(self, db):
+        """
+        It was silently taking the 25 meant for a board whose depth comes from
+        queueing page two. JobRight has no page two — it is infinite scroll
+        with lazy loading, so 25 passes is the first screenful and a closed tab.
+        """
+        deep = browse_plan._scroll_passes("https://jobright.ai/jobs/recommend")
+        default = int(settings.BROWSE_SCROLL_PASSES)
+        assert deep > default
+
+    def test_hiring_cafe_is_told_to_click_through(self, db):
+        assert browse_plan._max_pages("https://hiring.cafe/") > 1
+
+    def test_a_scrolling_board_is_not_told_to_click(self, db):
+        # One everywhere else, so the extension's behaviour on every board that
+        # already worked is exactly what it was.
+        assert browse_plan._max_pages("https://my.greenhouse.io/jobs/search") == 1
+        assert browse_plan._max_pages(
+            "https://www.linkedin.com/jobs/search/?keywords=go") == 1
+        assert browse_plan._max_pages("https://example.com/whatever") == 1
+
+    def test_hiring_cafe_scrolls_only_enough_to_reach_the_controls(self, db):
+        # Its depth comes from the pages. Scrolling hard on each one would be
+        # time spent for nothing, and the controls are at the bottom of a short
+        # page anyway.
+        passes = browse_plan._scroll_passes("https://hiring.cafe/")
+        assert passes < browse_plan._scroll_passes("https://jobright.ai/jobs/recommend")
+
+    def test_the_queued_task_says_how_many_pages_to_click(self, db, monkeypatch):
+        from app.models.browser_task import BrowserTask
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        browse_plan.enqueue(db, ["https://hiring.cafe/"],
+                            priority=browse_plan.PRIORITY_REQUESTED)
+        task = db.query(BrowserTask).filter(
+            BrowserTask.kind == "browse_page").one()
+        assert task.payload["max_pages"] > 1
+
+    def test_every_queued_task_carries_the_key(self, db, monkeypatch):
+        # Absent would mean the extension falls back to its own default, which
+        # is the kind of split-brain default that drifts apart silently.
+        from app.models.browser_task import BrowserTask
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        browse_plan.enqueue(db, ["https://my.greenhouse.io/jobs/search"],
+                            priority=browse_plan.PRIORITY_REQUESTED)
+        task = db.query(BrowserTask).filter(
+            BrowserTask.kind == "browse_page").one()
+        assert task.payload["max_pages"] == 1
+
+
+class TestAPaginatedBoardThatOnlyReachedPageOne:
+    """
+    The failure this has to stay visible for. If Hiring Cafe redesigns its
+    pagination, or the guess at its markup is wrong, the visit still scrolls
+    fine and still harvests rows — it just harvests the same twenty every time.
+    Nothing in the scroll numbers can show that.
+    """
+
+    def finished(self, db, url, **result):
+        from app.models.browser_task import BrowserTask
+        from app.services.agent_work import _ingest_browse_page
+
+        task = BrowserTask(
+            kind="browse_page", status="done", agent_id="a",
+            payload={"url": url, "purpose": "harvest"},
+            result={"final_url": url, "signed_in": True, **result},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(task)
+        db.commit()
+        _ingest_browse_page(db, task)
+        return task
+
+    def latest(self, db):
+        from app.models.agent_event import AgentEvent
+
+        return (
+            db.query(AgentEvent)
+            .filter(AgentEvent.kind == "browse")
+            .order_by(AgentEvent.created_at.desc())
+            .first()
+        )
+
+    def test_the_pages_reached_are_recorded(self, db):
+        self.finished(db, "https://hiring.cafe/", pages_done=7, passes_done=30)
+        assert self.latest(db).summary["pages_done"] == 7
+
+    def test_one_page_from_a_paginated_board_is_logged(self, db, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self.finished(db, "https://hiring.cafe/", pages_done=1, passes_done=8)
+        assert "next-page control was not found" in caplog.text
+
+    def test_one_page_from_a_scrolling_board_is_not(self, db, caplog):
+        # Greenhouse reaching one "page" is simply what a scrolling board does.
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self.finished(db, "https://my.greenhouse.io/jobs/search",
+                          pages_done=1, passes_done=180)
+        assert "next-page control" not in caplog.text
+
+    def test_a_rate_limit_is_not_blamed_on_the_control(self, db, caplog):
+        """
+        Being stopped after one page by a rate limit is a different diagnosis
+        with a different fix, and it already reports itself. Two warnings for
+        one event would send the reader after the wrong one.
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self.finished(db, "https://hiring.cafe/", pages_done=1,
+                          passes_done=4, rate_limited=True)
+        assert "next-page control" not in caplog.text
+
+    def test_an_old_extension_reporting_nothing_is_not_an_error(self, db):
+        self.finished(db, "https://hiring.cafe/")
+        assert self.latest(db).summary["pages_done"] == 0
