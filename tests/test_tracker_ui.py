@@ -555,8 +555,24 @@ class TestAppsRouter:
         assert response.status_code == 200
 
     def test_get_apps_shows_job_title(self):
+        """
+        Mocked one link at a time, which is why this broke when the route
+        learned to filter: the chain gained a `.join`, the mock did not, and
+        `.all()` returned a MagicMock instead of the list. The page rendered
+        fine and the test still failed.
+
+        Pointing the whole chain at one list is the fix — `.query()`,
+        `.join()`, `.filter()` and `.order_by()` all return the same mock, so
+        the route may reorder or add to them and the terminal `.all()` still
+        answers with the rows.
+        """
         mock_db = MagicMock()
-        mock_db.query.return_value.order_by.return_value.all.return_value = [self._make_app_obj()]
+        chain = mock_db.query.return_value
+        for step in ("join", "filter", "order_by"):
+            getattr(chain, step).return_value = chain
+        chain.all.return_value = [self._make_app_obj()]
+        chain.count.return_value = 1
+
         client = self._make_client(mock_db)
         response = client.get("/apps")
         assert "Backend Engineer" in response.text

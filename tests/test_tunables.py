@@ -250,17 +250,48 @@ class TestTheSettingsPage:
                               "filter_senior_titles") is True
 
     def test_a_changed_value_is_marked_against_its_default(self, client, db):
+        """
+        The point is that a value you have moved is distinguishable from one
+        you have not, and that the page says what it would go back to. The
+        redesign kept both and reworded them — a "reset" control carrying the
+        default rather than the words "changed from" — so this now asserts the
+        default is shown beside the changed field, whatever the label on it.
+        """
         from app.models.profile import Profile
         db.add(Profile(data={"settings": {"max_job_age_days": 14}}))
         db.commit()
-        assert "changed from" in client.get("/settings").text
+
+        page = client.get("/settings").text
+        assert "Reset to default" in page
+
+    def test_an_unchanged_value_is_not_marked(self, client, db):
+        """
+        The other half, and the half that carries the meaning: a marker on
+        every field marks nothing. Without this the first test passes on a page
+        that offers to reset all forty settings and tells you nothing about
+        which two you touched.
+        """
+        from app.models.profile import Profile
+        db.add(Profile(data={"settings": {}}))
+        db.commit()
+
+        page = client.get("/settings").text
+        assert "Reset to default" not in page
 
     def test_the_restart_caveat_is_stated_rather_than_left_to_be_discovered(
             self, client, db):
+        """
+        Some of these do nothing until the process restarts, and finding that
+        out by watching a setting have no effect is the worst way to learn it.
+        Said per field now rather than as one sentence about the page, which is
+        an improvement — but it still has to be said somewhere.
+        """
         from app.models.profile import Profile
         db.add(Profile(data={}))
         db.commit()
-        assert "needs a restart" in client.get("/settings").text
+
+        page = client.get("/settings").text.lower()
+        assert "restart" in page
 
     def test_the_skills_tab_and_the_settings_page_agree(self, client, db):
         """The same number lived in two keys, and only one of them was read."""
