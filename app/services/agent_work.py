@@ -269,6 +269,33 @@ def _ingest_enrichment(db, task: BrowserTask, payload: dict, final_url: str,
         )
 
 
+def _record_challenge(db, url: str, final_url: str, outcome: str) -> None:
+    """
+    Note that a host asked for a human check, from whichever path saw it.
+
+    Written as a `browse` event so it lands in the same place the browse path's
+    challenges do: `blocked_hosts` reads that one kind, and a second shape
+    would mean a host blocked on one path and merrily retried on the other.
+    """
+    from app.services import agent_events
+
+    blocked = outcome in ("timeout", "skipped")
+    agent_events.record(
+        db, "browse", url=final_url or url, agent_id="",
+        ok=not blocked,
+        summary={"purpose": "resolve", "challenge": outcome,
+                 "signed_in": True, "rate_limited": False,
+                 "pages_done": 0, "passes_done": 0},
+    )
+    db.commit()
+    if blocked:
+        logger.warning(
+            "agent_work: %s asked for a human check on a link and did not get "
+            "past it (%s) — backing off that host",
+            url, outcome,
+        )
+
+
 def _ingest_resolve_link(db, task: BrowserTask) -> None:
     """
     Store the apply URL a browser found, and mine the page for ATS boards.
@@ -281,11 +308,24 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     from app.services.link_resolver import is_aggregator
     from app.models.profile import Profile
 
+    from app.services import agent_events, crawl_recipes  # noqa: F401
+
     payload = task.payload or {}
     original = payload.get("url") or ""
     result = task.result or {}
     final_url = (result.get("final_url") or "").strip()
     html = result.get("html") or ""
+
+    # A link that could not be followed because somebody has to click
+    # something. Recorded here as well as on the browse path, because this is
+    # the path the aggregator links take — Jooble's `away` redirects are
+    # resolve_link tasks, and until now their challenge was reported by the
+    # extension and read by nobody. The window opened, waited, timed out, and
+    # the server was told only that no URL came back, so the panel had nothing
+    # to say and there was no backoff either.
+    challenge = str(result.get("challenge") or "")
+    if challenge:
+        _record_challenge(db, original, final_url, challenge)
 
     if not original or not final_url:
         # Used to return in silence, which put the task on the panel as "done"

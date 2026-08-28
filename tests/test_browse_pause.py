@@ -986,3 +986,74 @@ class TestHandshakePagesByUrl:
         browse_plan.crawl_searches(db, PROFILE, board="handshake")
         urls = [u for u in queued_urls(db) if "joinhandshake" in u]
         assert len(urls) >= 3
+
+
+class TestAChallengeOnALinkIsReportedToo:
+    """
+    Jooble's `away` redirects are `resolve_link` tasks, not browse tasks — and
+    only the browse path read the challenge off a result. So the window opened,
+    waited ninety seconds, timed out, and told the server nothing: no event, no
+    backoff, nothing on the panel. From outside it was a window that flashed
+    and a system that never mentioned it.
+    """
+
+    def finished(self, db, challenge, url="https://jooble.org/away/1"):
+        from app.models.browser_task import BrowserTask
+        from app.services.agent_work import _ingest_resolve_link
+
+        task = BrowserTask(
+            kind="resolve_link", status="done", agent_id="a",
+            payload={"url": url},
+            result={"final_url": url, "html": "", "challenge": challenge},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(task)
+        db.commit()
+        _ingest_resolve_link(db, task)
+        return task
+
+    def latest(self, db):
+        from app.models.agent_event import AgentEvent
+
+        return (
+            db.query(AgentEvent)
+            .filter(AgentEvent.kind == "browse")
+            .order_by(AgentEvent.created_at.desc())
+            .first()
+        )
+
+    def test_an_unanswered_check_is_recorded(self, db):
+        self.finished(db, "timeout")
+        assert self.latest(db) is not None
+        assert self.latest(db).summary["challenge"] == "timeout"
+
+    def test_it_backs_the_host_off(self, db):
+        # Recorded as a `browse` event on purpose: `blocked_hosts` reads that
+        # one kind, and a second shape would leave a host blocked on one path
+        # and merrily retried on the other.
+        self.finished(db, "timeout")
+        assert "jooble.org" in browse_plan.blocked_hosts(db)
+
+    def test_passing_the_check_is_not_held_against_it(self, db):
+        self.finished(db, "passed")
+        assert browse_plan.blocked_hosts(db) == set()
+
+    def test_a_link_that_never_asked_records_nothing(self, db):
+        self.finished(db, "")
+        assert self.latest(db) is None
+
+    def test_the_panel_names_it(self, db):
+        self.finished(db, "timeout")
+        assert browse_plan.status(db)["blocked"] == ["jooble.org"]
+
+    def test_enrichment_stops_queueing_that_host(self, db, monkeypatch):
+        # The point of the backoff: without it every thin Jooble job keeps
+        # queueing a visit that cannot succeed.
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        self.finished(db, "timeout")
+        job = thin_job(db, "https://jooble.org/away/77", source="jooble")
+        queued, deferred = enrichment.plan_browser_queue(db, [job])
+        assert queued == []
+        assert [j.id for j in deferred] == [job.id]

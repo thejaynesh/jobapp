@@ -216,8 +216,11 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
       // Before the scroll, not after: scrolling an interstitial finds nothing
       // and reports a shallow crawl, which reads as a broken scroll rather
       // than a page that was never reached.
+      // Shorter here than on the resolve path: this runs on every page of a
+      // sixty-page crawl, and a board's search results are substantial enough
+      // that `awaitChallenge` returns on the first look.
       let challenge = "";
-      const gate = await challengeShowing(tabId);
+      const gate = await awaitChallenge(tabId, 4000);
       if (gate && gate.challenge) {
         challenge = await waitForHuman(win, tabId, url);
         if (challenge === "passed") {
@@ -654,21 +657,64 @@ async function challengeShowing(tabId) {
         // render inside an iframe this cannot reach into.
         const markup = !!document.querySelector(
           "#challenge-form, #challenge-running, #challenge-stage, " +
+            "#cf-challenge-running, #cf-wrapper, .cf-browser-verification, " +
+            "input[name='cf_captcha_kind'], " +
             ".cf-turnstile, iframe[src*='challenges.cloudflare.com'], " +
+            "iframe[title*='challenge' i], " +
             "script[src*='/cdn-cgi/challenge-platform/']",
         );
-        const named = /^(just a moment|attention required|access denied|verifying)/i
+        const named = /^(just a moment|attention required|access denied|verifying|please wait)/i
           .test(title);
         const worded =
-          /verify (that )?you (are|'re) (a )?human|checking your browser|confirm you are human|complete the security check|needs to review the security of your connection/i
+          /verify (that )?you (are|'re) (a )?human|checking your browser|confirm you are human|complete the security check|needs to review the security of your connection|performance (&|and) security by cloudflare|enable javascript and cookies to continue/i
             .test(text);
-        return { challenge: markup || named || worded, title };
+        // Whether this could still *become* a challenge. Cloudflare injects
+        // its widget into a near-empty shell, so a page with almost no content
+        // is one worth looking at again in a moment — and a page full of job
+        // cards is not, which is what makes polling affordable.
+        const thin =
+          text.length < 1500 && document.querySelectorAll("a[href]").length < 15;
+        return { challenge: markup || named || worded, title, thin };
       },
     });
     return injected && injected.result ? injected.result : null;
   } catch (_) {
     return null;
   }
+}
+
+/**
+ * Watch for a challenge to appear, rather than deciding on one look.
+ *
+ * A single check at a fixed moment was the bug. Cloudflare's interactive
+ * widget arrives in an iframe some seconds after `load` fires, and its shell
+ * page reloads itself on the way — so the one look landed on an empty document
+ * that named nothing, concluded there was no challenge, read the HTML and
+ * closed the window. From the outside that is a window that flashes open and
+ * shuts before anyone can click it, which is exactly what it looked like.
+ *
+ * Cheap despite the loop: it returns the moment the page turns out to have
+ * real content, because a page full of job cards is not about to become an
+ * interstitial. Only a near-empty document is worth waiting on.
+ */
+async function awaitChallenge(tabId, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  let seen = await challengeShowing(tabId);
+  while (true) {
+    if (!seen) return null;                 // cannot read the page at all
+    if (seen.challenge) return seen;        // found it
+    if (!seen.thin) return seen;            // a real page; it will not become one
+    if (Date.now() >= deadline) return seen;
+    await new Promise((r) => setTimeout(r, 700));
+    seen = await challengeShowing(tabId);
+  }
+}
+
+/** Whether fetched markup is an anti-bot interstitial rather than the page. */
+function looksLikeChallengeHtml(html) {
+  if (!html || html.length > 200000) return false;
+  return /cdn-cgi\/challenge-platform|cf-browser-verification|cf_chl_opt|challenges\.cloudflare\.com|<title>\s*just a moment/i
+    .test(html);
 }
 
 async function challengesAreMine() {
@@ -754,8 +800,11 @@ async function openInTab(url) {
       // the employer, and the check sits in front of the redirect — so being
       // stopped here does not cost a description, it costs the apply URL
       // itself, which is the one thing that page existed to give us.
+      // Up to eight seconds, and it exits the moment the page proves to be
+      // real. This path is an escalation that already failed once, so it is
+      // not on anybody's hot path and can afford to be patient.
       let challenge = "";
-      const gate = await challengeShowing(tabId);
+      const gate = await awaitChallenge(tabId, 8000);
       if (gate && gate.challenge) {
         challenge = await waitForHuman(win, tabId, url);
         if (challenge === "passed") {
@@ -800,7 +849,8 @@ function worthEscalating(message) {
   // 403/429 and network-level refusals are the shapes that mean "not like
   // this". A 404 is the page genuinely not being there, and reopening it in a
   // window would only cost the user a flicker to learn the same thing.
-  return /HTTP (401|403|405|406|429|503)\b|Failed to fetch|NetworkError/i.test(message);
+  return /HTTP (401|403|405|406|429|503)\b|Failed to fetch|NetworkError|challenge page from/i
+    .test(message);
 }
 
 async function tabsAllowed() {
@@ -1036,6 +1086,15 @@ const HANDLERS = {
           ? (await response.text()).slice(0, 400000)
           : "";
 
+        // A challenge served with a 200. Cloudflare's managed challenge often
+        // is, and `response.ok` is then true — so this returned the
+        // interstitial as though it were the employer's page, and the tab path
+        // that offers you the checkbox was never reached. The escalation rule
+        // below only ever looked at status codes, which cannot see this.
+        if (looksLikeChallengeHtml(html)) {
+          throw new Error(`challenge page from ${new URL(url).host}`);
+        }
+
         return { final_url: response.url, status: response.status, html };
       } finally {
         clearTimeout(timer);
@@ -1047,6 +1106,9 @@ const HANDLERS = {
       const message = String(error && error.message ? error.message : error);
       if (!worthEscalating(message) || !(await tabsAllowed())) throw error;
       return await openInTab(url);
+      // `openInTab` returns `challenge` alongside the URL and markup, so a
+      // link that could not be followed because somebody has to click
+      // something says so rather than coming back as an ordinary failure.
     }
   },
 };
