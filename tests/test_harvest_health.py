@@ -392,11 +392,11 @@ class TestASiteThatWasOpenedAndSentNothing:
         self.browsed(db, "jobright.ai", times=12)
         page = client.get("/runs").text
         assert "jobright.ai" in page
+        # No agent has reported reading it, so this is the checkbox case.
         # Matched within one line: the sentence wraps in the template, so a
         # phrase spanning the break would fail on the indentation rather than
         # on anything real.
-        assert "opened here and no job data" in page
-        assert "unticked in the extension" in page
+        assert "not switched on for this" in page
 
 
 class TestTheNumbersAgreeWithTheHeadingAboveThem:
@@ -448,3 +448,103 @@ class TestTheNumbersAgreeWithTheHeadingAboveThem:
         # It is not recent activity, so it is not a recent problem either.
         self.browsed(db, "www.dice.com", times=20, days_ago=40)
         assert "www.dice.com" not in self.rows(db, pages_days=7)
+
+
+class TestSayingWhichFaultItIs:
+    """
+    "Pages opened, nothing forwarded" is two quite different faults wearing one
+    face: a site the reader is not switched on for, and a site it is switched
+    on for whose requests it cannot see. The first is a checkbox; the second
+    needs a look at the page's network traffic.
+
+    The server cannot tell them apart on its own, so it guessed at both and put
+    the reader through a checkbox they may already have ticked. The extension
+    knows, and now says.
+    """
+
+    def browsed(self, db, host, times=3):
+        from app.models.agent_event import AgentEvent
+
+        for _ in range(times):
+            db.add(AgentEvent(kind="browse", host=host, ok=True, summary={}))
+        db.commit()
+
+    def reading(self, db, hosts):
+        from app.models.profile import Profile
+        from app.services import browser_tasks
+
+        db.add(Profile(data={}))
+        db.commit()
+        browser_tasks.record_agent_seen(db, "laptop", ["browse_page"], hosts)
+
+    def row(self, db, host):
+        from app.services import agent_events
+
+        return {r["host"]: r for r in agent_events.harvest_health(db)}[host]
+
+    def test_a_site_nobody_reads_is_marked_off(self, db):
+        self.browsed(db, "www.dice.com")
+        assert self.row(db, "www.dice.com")["enabled"] is False
+
+    def test_a_site_the_reader_is_on_is_marked_on(self, db):
+        self.browsed(db, "www.dice.com")
+        self.reading(db, ["dice.com"])
+        assert self.row(db, "www.dice.com")["enabled"] is True
+
+    def test_a_subdomain_counts_as_the_site(self, db):
+        # The extension reports `dice.com`; the browse event records the host
+        # the page actually loaded on.
+        self.browsed(db, "www.dice.com")
+        self.reading(db, ["dice.com"])
+        assert self.row(db, "www.dice.com")["enabled"] is True
+
+    def test_reading_one_site_does_not_vouch_for_another(self, db):
+        self.browsed(db, "www.dice.com")
+        self.reading(db, ["my.greenhouse.io"])
+        assert self.row(db, "www.dice.com")["enabled"] is False
+
+    def test_two_browsers_are_unioned(self, db):
+        """
+        A laptop reading Dice and a desktop that is not means Dice *is* being
+        read. Reporting it off because one of them has the box unticked would
+        send the user to fix something that is not broken.
+        """
+        from app.services import browser_tasks
+
+        self.browsed(db, "www.dice.com")
+        self.reading(db, ["my.greenhouse.io"])
+        browser_tasks.record_agent_seen(db, "desktop", ["browse_page"],
+                                        ["dice.com"])
+        assert self.row(db, "www.dice.com")["enabled"] is True
+
+    def test_an_older_extension_reporting_nothing_reads_as_off(self, db):
+        # Which is the safe way round: it sends the user to a checkbox, and a
+        # ticked checkbox costs them a glance rather than an afternoon with
+        # DevTools.
+        from app.services import browser_tasks
+
+        self.browsed(db, "www.dice.com")
+        self.reading(db, [])
+        browser_tasks.record_agent_seen(db, "old", ["browse_page"], None)
+        assert self.row(db, "www.dice.com")["enabled"] is False
+
+    def test_the_page_says_look_at_the_network_when_it_is_on(self, db, client,
+                                                            monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        self.browsed(db, "www.dice.com")
+        self.reading(db, ["dice.com"])
+        page = client.get("/runs").text
+        assert "with the" in page and "reader switched on" in page
+
+    def test_a_working_site_is_never_marked_off(self, db):
+        # It forwarded a payload, so it was self-evidently being read. A row
+        # arguing with its own evidence would be worse than no row.
+        from app.models.agent_event import AgentEvent
+
+        for _ in range(30):
+            db.add(AgentEvent(kind="harvest", host="my.greenhouse.io", ok=True,
+                              summary={"found": 4, "inserted": 4, "merged": 0}))
+        db.commit()
+        assert self.row(db, "my.greenhouse.io")["enabled"] is True

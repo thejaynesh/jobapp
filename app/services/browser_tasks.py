@@ -310,7 +310,8 @@ def recent(db, limit: int = 10) -> list[BrowserTask]:
     )
 
 
-def record_agent_seen(db, agent_id: str, kinds: list[str] | None) -> None:
+def record_agent_seen(db, agent_id: str, kinds: list[str] | None,
+                      harvest_sites: list[str] | None = None) -> None:
     """
     Note that an agent asked for work, and what it said it could run.
 
@@ -357,6 +358,13 @@ def record_agent_seen(db, agent_id: str, kinds: list[str] | None) -> None:
     seen = {
         "agent_id": name,
         "kinds": sorted(kinds or []),
+        # Hosts the harvest reader is actually registered on. The server cannot
+        # work this out for itself, and without it a board that opened pages
+        # and forwarded nothing got the same two-part shrug either way — the
+        # box is unticked, *or* its pages fetch from somewhere we do not watch.
+        # Those want completely different fixes and only the browser knows
+        # which one applies.
+        "harvest_sites": sorted(harvest_sites or []),
         "at": _now().isoformat(),
     }
     data = dict(profile.data or {})
@@ -463,6 +471,29 @@ def prune(db, days: int | None = None) -> int:
         logger.info("browser_tasks: pruned %d finished task(s) older than %d days",
                     removed, days)
     return removed
+
+
+def reading_hosts(db) -> set[str]:
+    """
+    Every host some browser's harvest reader is registered on.
+
+    The union across browsers on purpose: a laptop reading Dice and a desktop
+    that is not means Dice *is* being read, and reporting it as unread because
+    one of them has the box unticked would be wrong.
+    """
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return set()
+
+    hosts: set[str] = set()
+    for seen in (dict((profile.data or {}).get("agents") or {})).values():
+        for host in (seen or {}).get("harvest_sites") or []:
+            cleaned = str(host or "").strip().lower()
+            if cleaned:
+                hosts.add(cleaned)
+    return hosts
 
 
 def known_agents(db) -> list[dict]:

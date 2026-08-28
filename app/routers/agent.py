@@ -114,6 +114,11 @@ async def lease(request: Request, db: Session = Depends(get_db)):
     body = await _json_body(request)
     kinds = [str(k) for k in (body.get("kinds") or []) if str(k).strip()]
     agent_id = str(body.get("agent_id") or "")[:120]
+    harvest_sites = [
+        str(h).strip().lower()[:160]
+        for h in (body.get("harvest_sites") or [])
+        if str(h).strip()
+    ][:60]
     limit = body.get("max", 1)
     try:
         limit = max(1, int(limit))
@@ -129,7 +134,9 @@ async def lease(request: Request, db: Session = Depends(get_db)):
     # Once per request, not per attempt: the poll re-checks the queue every
     # second and this is a write.
     try:
-        await run_in_threadpool(browser_tasks.record_agent_seen, db, agent_id, kinds)
+        await run_in_threadpool(
+            browser_tasks.record_agent_seen, db, agent_id, kinds, harvest_sites,
+        )
     except Exception as exc:
         # Presence is a diagnostic, not the job. Failing to note it must not
         # stop an agent that is asking for work from getting any.

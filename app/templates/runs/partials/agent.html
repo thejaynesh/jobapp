@@ -74,14 +74,23 @@
           </td>
         </tr>
         {% if row.verdict == 'unread' %}
-        {# The other call to action, and the more common one to hit first: the
-           pages were opened and the reader was not there to see them. #}
+        {# Two quite different faults wearing the same face, and the extension
+           now says which. Guessing at it put the reader through a checkbox
+           they may already have ticked. #}
         <tr>
           <td colspan="3" class="pb-2 text-[11px] text-orange-700 leading-relaxed">
-            {{ "{:,}".format(row.pages) }} page(s) opened here and no job data
-            came back at all. Either this site is unticked in the extension's
-            options — so the reader is not registered on it — or its pages
-            fetch jobs from a URL the interceptor does not forward.
+            {% if not row.enabled %}
+              {{ "{:,}".format(row.pages) }} page(s) opened here, and the
+              reader is <span class="font-medium">not switched on for this
+              site</span> — tick it in the extension's options and the next
+              crawl will read it. Nothing else needs doing.
+            {% else %}
+              {{ "{:,}".format(row.pages) }} page(s) opened here with the
+              reader switched on, and no job data came back. Its pages fetch
+              jobs somewhere the interceptor is not watching — a websocket, or
+              a URL that does not look job-shaped. A DevTools capture of one of
+              its pages is what settles this.
+            {% endif %}
           </td>
         </tr>
         {% endif %}

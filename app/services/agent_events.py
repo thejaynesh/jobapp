@@ -274,6 +274,15 @@ HEALTH_LABELS = {
 }
 
 
+def _is_read(host: str, reading: set[str]) -> bool:
+    """Whether the reader is registered on this host, subdomains included."""
+    host = (host or "").lower()
+    return any(
+        host == one or host.endswith(f".{one}") or one.endswith(f".{host}")
+        for one in reading
+    )
+
+
 def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
                    pages_days: int | None = None) -> list[dict]:
     """
@@ -404,8 +413,20 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
     # recipe. This means no payload arrived at all: the interceptor is not
     # registered on that site (its checkbox is off), or the page fetches its
     # jobs from a URL that does not match what the interceptor forwards.
+    from app.services import browser_tasks
+
+    try:
+        reading = browser_tasks.reading_hosts(db)
+    except Exception:
+        reading = set()
+
     for host, pages in browsed.items():
-        out.append(_site_row(host, "unread", 0, 0, 0, 0, 0, 0, None, pages))
+        row = _site_row(host, "unread", 0, 0, 0, 0, 0, 0, None, pages)
+        # The distinction the panel could not draw, and the one that decides
+        # what to do about it. "Not enabled" is a checkbox; "enabled and
+        # forwarding nothing" is a reader that cannot see the page's requests.
+        row["enabled"] = _is_read(host, reading)
+        out.append(row)
 
     # Anything wrong first, then by how much the site is contributing. The
     # panel is read to find a problem, and a regression buried under four
@@ -434,6 +455,11 @@ def _site_row(host, verdict, payloads, recent_payloads, found, inserted,
         # after none, and the number was recorded all along in the other event
         # kind without ever being shown next to it.
         "pages": int(pages or 0),
+        # Only meaningful on an `unread` row, and set there. True elsewhere
+        # because a site that forwarded a payload was self-evidently being
+        # read — a row that reported otherwise would be arguing with its own
+        # evidence.
+        "enabled": True,
         "window": _RECENT_PAYLOADS,
     }
 

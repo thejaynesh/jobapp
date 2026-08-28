@@ -1227,6 +1227,37 @@ async function canReachTheWeb() {
  * out of the queue only to fail it, three times, until it retires. Not asking
  * for it leaves it queued for an engine that can.
  */
+/**
+ * Hosts the harvest reader is registered on right now.
+ *
+ * Both halves matter: the checkbox can be ticked with the host permission
+ * refused, or granted and then revoked, and either leaves the reader not
+ * running on a site the options page shows as on.
+ */
+async function enabledHarvestHosts() {
+  const keys = Object.fromEntries(
+    HARVEST_SITES.map((site) => [site.storageKey, false]),
+  );
+  const stored = await chrome.storage.local.get(keys);
+
+  const hosts = [];
+  for (const site of HARVEST_SITES) {
+    if (!stored[site.storageKey]) continue;
+    let permitted = false;
+    try {
+      permitted = await chrome.permissions.contains({ origins: site.matches });
+    } catch (_) {
+      permitted = false;
+    }
+    if (!permitted) continue;
+    for (const pattern of site.matches) {
+      const host = /^https?:\/\/([^/]+)/.exec(pattern);
+      if (host) hosts.push(host[1].replace(/^\*\./, ""));
+    }
+  }
+  return hosts;
+}
+
 async function supportedKinds() {
   const kinds = ["ping"];
   if (await canReachTheWeb()) kinds.push("resolve_link", "fetch_json");
@@ -1262,11 +1293,19 @@ async function pollOnce() {
 
     const id = await agentId();
     const kinds = await supportedKinds();
+    // Which sites the reader is actually registered on. The server cannot
+    // know this and had to guess, so a board that opened pages and forwarded
+    // nothing got the same two-part shrug either way — "the box is unticked,
+    // or its pages fetch jobs from somewhere we don't watch". Those want
+    // completely different fixes and only this side knows which applies.
+    const reading = await enabledHarvestHosts();
+
     const { tasks } = await api("/api/agent/lease", {
       kinds,
       agent_id: id,
       max: 5,
       wait: 25,
+      harvest_sites: reading,
     });
 
     // Recorded locally as well as sent, so the options page can show what this
