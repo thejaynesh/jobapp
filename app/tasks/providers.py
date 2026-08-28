@@ -56,7 +56,7 @@ def prune_agent_history() -> dict:
     """
     from app.services.agent_events import prune as prune_events
     from app.services.browser_tasks import prune as prune_tasks
-    from app.services.harvest_samples import prune as prune_samples
+    from app.services.harvest_samples import drop_unrelated, prune as prune_samples
 
     db = SessionLocal()
     try:
@@ -64,11 +64,17 @@ def prune_agent_history() -> dict:
             "events": prune_events(db),
             "tasks": prune_tasks(db),
             "samples": prune_samples(db),
+            # Telemetry the probe collected before it learned to stay on the
+            # board's own domain. Age would clear it eventually; this clears it
+            # tonight, and keeps clearing it if an old extension build is still
+            # running somewhere.
+            "unrelated": drop_unrelated(db),
         }
     except Exception as exc:
         db.rollback()
         logger.error("prune_agent_history failed: %s", exc)
-        return {"events": 0, "tasks": 0, "samples": 0, "error": str(exc)}
+        return {"events": 0, "tasks": 0, "samples": 0, "unrelated": 0,
+                "error": str(exc)}
     finally:
         db.close()
 

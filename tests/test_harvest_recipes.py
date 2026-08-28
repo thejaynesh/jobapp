@@ -301,6 +301,87 @@ class TestKeepingTheEvidence:
         assert harvest_samples.clear(db, "x.test") == 1
 
 
+class TestNotOfferingToLearnAnAdNetwork:
+    """
+    Every board loads a dozen third parties — FullStory, Bugsnag, PostHog,
+    StackAdapt, ZoomInfo, Cognito, Segment — and all of them answer in
+    structured JSON. The probe forwards near misses on purpose, so each one
+    ended up with samples filed under its own hostname and a button offering to
+    spend a model call working out how to read a session token. Thirteen of the
+    fifteen hosts in the store were telemetry.
+
+    The interceptor now declines to probe off-site, but it runs on a browser
+    that may be an old build, so the server decides too.
+    """
+
+    def _reading(self, db, hosts=("dice.com",)):
+        from app.models.profile import Profile
+        from app.services import browser_tasks
+
+        db.add(Profile(data={}))
+        db.commit()
+        browser_tasks.record_agent_seen(db, "laptop", ["browse_page"], list(hosts))
+
+    def _store(self, db, *hosts):
+        for host in hosts:
+            harvest_samples.record(db, host, {"a": 1}, note="near miss")
+        db.commit()
+
+    def test_a_board_we_browse_is_listed(self, db):
+        self._store(db, "my.greenhouse.io")
+        assert [r["host"] for r in harvest_samples.hosts(db)] == ["my.greenhouse.io"]
+
+    def test_an_analytics_host_is_not(self, db):
+        self._store(db, "sessions.bugsnag.com", "tags.srv.stackadapt.com")
+        assert harvest_samples.hosts(db) == []
+
+    def test_a_subdomain_of_a_board_counts_as_the_board(self, db):
+        # Handshake's payloads arrive under app.joinhandshake.com; the source
+        # list names joinhandshake.com.
+        self._store(db, "app.joinhandshake.com")
+        assert len(harvest_samples.hosts(db)) == 1
+
+    def test_a_site_the_extension_reads_counts_even_if_unlisted(self, db):
+        # A board nobody has added to HARVEST_SOURCES yet is exactly the kind
+        # this feature exists for. The extension saying it reads it is enough.
+        self._reading(db, ["newboard.example"])
+        self._store(db, "newboard.example")
+        assert len(harvest_samples.hosts(db)) == 1
+
+    def test_nothing_is_hidden_without_saying_so(self, db, client):
+        self._store(db, "sessions.bugsnag.com", "my.greenhouse.io")
+        assert len(harvest_samples.hosts(db, all_hosts=True)) == 2
+        assert len(harvest_samples.hosts(db)) == 1
+
+    def test_the_page_says_how_many_it_hid(self, db, client, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        self._store(db, "sessions.bugsnag.com", "my.greenhouse.io")
+        page = client.get("/runs").text
+        assert "my.greenhouse.io" in page
+        assert "sessions.bugsnag.com" not in page
+        assert "other host" in page
+
+    def test_the_cleanup_removes_them(self, db):
+        self._reading(db)
+        self._store(db, "sessions.bugsnag.com", "us.i.posthog.com",
+                    "my.greenhouse.io")
+        assert harvest_samples.drop_unrelated(db) == 2
+        assert [r["host"] for r in harvest_samples.hosts(db, all_hosts=True)] == [
+            "my.greenhouse.io"]
+
+    def test_the_cleanup_refuses_to_guess(self, db):
+        """
+        With no browser having said what it reads, the only list available is
+        the hard-coded one — and a board missing from it is precisely the case
+        this feature is for. Deleting its evidence to tidy a panel would be the
+        wrong trade in the wrong direction, so nothing is deleted at all.
+        """
+        self._store(db, "sessions.bugsnag.com", "newboard.example")
+        assert harvest_samples.drop_unrelated(db) == 0
+
+
 class TestStoringWhatWasLearned:
     def _learn(self, db, reply=None):
         import json
@@ -397,10 +478,13 @@ class TestThePanel:
         monkeypatch.setattr(settings, "AGENT_TOKEN", "test-token")
 
     def test_an_unreadable_host_is_listed_with_a_button(self, client, db):
-        sample(db)
+        # A real board rather than `x.test`: the panel only offers hosts that
+        # could plausibly have sent a job payload, so a made-up hostname is
+        # correctly hidden now. See TestNotOfferingToLearnAnAdNetwork.
+        sample(db, host="my.greenhouse.io")
         body = client.get("/runs").text
 
-        assert "x.test" in body
+        assert "my.greenhouse.io" in body
         assert "/runs/agent/learn" in body
 
     def test_a_host_with_no_samples_is_not_listed(self, client, db):

@@ -232,8 +232,17 @@ def _system_context(db: Session) -> dict:
             # "did it run?" had no answer.
             "visits": browse_plan.recent_visits(db, limit=10),
             # Hosts sending payloads nobody can read yet, and what has been
-            # learned about them.
+            # learned about them. Narrowed to boards we browse: every one of
+            # them loads a dozen analytics services that answer in JSON, and
+            # offering a model call to work out how to read a session token is
+            # worse than useless.
             "unread": harvest_samples.hosts(db),
+            # Said out loud rather than filtered away silently — if a board is
+            # missing from the list above, this is where it went.
+            "unread_hidden": (
+                len(harvest_samples.hosts(db, all_hosts=True))
+                - len(harvest_samples.hosts(db))
+            ),
             "recipes": harvest_recipes.listing(db, limit=10),
             # Boards a visit could not get past the first page of, and what
             # has been worked out about how they paginate.

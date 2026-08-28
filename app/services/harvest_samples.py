@@ -157,12 +157,54 @@ def for_host(db, host: str, limit: int = 5) -> list:
     )
 
 
-def hosts(db) -> list[dict]:
+def _related(host: str, domains: set[str]) -> bool:
+    """Whether this host is one of ours, or lives under one that is."""
+    host = (host or "").strip().lower()
+    if not host:
+        return False
+    return any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in domains if domain
+    )
+
+
+def worth_learning(db) -> set[str]:
+    """
+    The domains a job payload could plausibly have come from.
+
+    Every board loads a dozen third parties, all of them answering in
+    structured JSON, and the probe forwards near misses on purpose — so
+    FullStory, Bugsnag, PostHog, StackAdapt, ZoomInfo, Cognito and Segment all
+    end up with samples stored under their own hostnames. Thirteen of the
+    fifteen hosts in the store were telemetry, each one offering a button that
+    would spend a model call working out how to read a session token.
+
+    The interceptor now declines to probe off-site, but that runs on a browser
+    that may be an old build and is not this server's to trust. The list is
+    cheap to check here and the answer is the same either way.
+    """
+    from app.services import browser_tasks
+    from app.services.harvest import HARVEST_SOURCES
+
+    domains = set(HARVEST_SOURCES)
+    try:
+        domains |= browser_tasks.reading_hosts(db)
+    except Exception:
+        # A profile that cannot be read costs the extra hosts, not the list.
+        pass
+    return domains
+
+
+def hosts(db, all_hosts: bool = False) -> list[dict]:
     """
     Hosts with samples waiting, and whether anything has been learned yet.
 
     The worklist: a host here with no active recipe is a site sending payloads
     nobody can read.
+
+    Narrowed to boards we actually browse — see `worth_learning`. Pass
+    `all_hosts` to see everything that was stored, which is what you want when
+    asking why a site is *missing* from the list.
     """
     from sqlalchemy import func
 
@@ -182,11 +224,54 @@ def hosts(db) -> list[dict]:
         row[0] for row in
         db.query(HarvestRecipe.host).filter(HarvestRecipe.status == "active").all()
     }
+    ours = worth_learning(db)
     return [
         {"host": host, "samples": int(count or 0), "last_seen": last,
          "has_recipe": host in active}
         for host, count, last in rows
+        if all_hosts or _related(host, ours)
     ]
+
+
+def drop_unrelated(db) -> int:
+    """
+    Delete samples from hosts no board of ours could have produced.
+
+    A one-off for what the probe collected before it learned to stay on-site,
+    and a safety net afterwards for a browser still running an old build.
+
+    Deletes nothing unless some browser has told us what it is reading. The
+    hard-coded source list alone is not enough to delete on: a board nobody has
+    got round to adding to it is exactly the kind this is meant to help with,
+    and destroying its evidence to tidy a panel would be the wrong trade in the
+    wrong direction.
+    """
+    from app.models.harvest_recipe import HarvestSample
+    from app.services import browser_tasks
+
+    try:
+        if not browser_tasks.reading_hosts(db):
+            return 0
+    except Exception:
+        return 0
+
+    ours = worth_learning(db)
+    stored = {row[0] for row in db.query(HarvestSample.host).distinct().all()}
+    junk = [host for host in stored if not _related(host, ours)]
+    if not junk:
+        return 0
+    removed = (
+        db.query(HarvestSample)
+        .filter(HarvestSample.host.in_(junk))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    if removed:
+        logger.info(
+            "harvest_samples: dropped %d sample(s) from %d unrelated host(s)",
+            removed, len(junk),
+        )
+    return removed
 
 
 def clear(db, host: str) -> int:

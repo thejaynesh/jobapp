@@ -500,6 +500,15 @@
             </button>
           </div>
           {% endfor %}
+          {% if system.agent.unread_hidden %}
+          {# Named rather than quietly dropped. A board missing from the list
+             above went here, and a count is the only way to notice. #}
+          <p class="text-[11px] text-gray-400 mt-1">
+            {{ system.agent.unread_hidden }} other host{{ '' if system.agent.unread_hidden == 1 else 's' }}
+            hidden &mdash; analytics and ad services the pages loaded, not
+            boards. Cleared on the next nightly prune.
+          </p>
+          {% endif %}
         </div>
         {% endif %}
 
