@@ -412,10 +412,15 @@ def _learn_to_crawl(db, url: str, result: dict, pages_done: int) -> None:
     if not host:
         return
 
+    batches = int(result.get("batches") or 0)
+
     try:
         with db.begin_nested():
             if crawl_recipes.active_for(db, host):
-                crawl_recipes.note_outcome(db, host, pages_done)
+                # Both measures, because which one means "it worked" depends on
+                # the recipe's mode: a scroll recipe can never report more than
+                # one page however far down the list it got.
+                crawl_recipes.note_outcome(db, host, pages_done, batches)
                 return
 
             navigation = result.get("navigation")

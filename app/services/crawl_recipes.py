@@ -203,14 +203,73 @@ def _whole_number(value, default=None):
     return None
 
 
+# Query parameters that count pages, and ones that count results. The
+# difference decides what "one page further" adds to the number: an ordinal
+# goes up by one, an offset goes up by however many results a page holds.
+#
+# Getting this wrong is silent and expensive. `?page=1, 26, 51` on a board that
+# numbers its pages fetches pages 1, 26 and 51 — three real pages, wildly
+# scattered, with everything between them never visited and the crawl looking
+# like it worked.
+_ORDINAL_PARAMS = frozenset({
+    "page", "p", "pg", "pagenum", "page_num", "pagenumber", "page_number",
+    "pageindex", "page_index", "pageno", "page_no",
+})
+_OFFSET_PARAMS = frozenset({
+    "offset", "start", "from", "skip", "startindex", "start_index",
+    "startrow", "first",
+})
+
+# What the board itself calls its page length, when the URL says so.
+_SIZE_PARAMS = ("per_page", "perpage", "page_size", "pagesize", "limit",
+                "count", "num", "size", "rows", "results")
+
+
+def _default_page_size(param: str, base, query: dict) -> int:
+    """
+    How much the page parameter advances by, when the model did not say.
+
+    Read off the parameter's own name first, because that is what the board is
+    telling you it means. `?page=` counts pages and advances by one; `?offset=`
+    counts results and advances by a pageful — and if the URL says how big a
+    pageful is, that is a better answer than any default.
+    """
+    name = (param or "").strip().lower()
+    if name in _ORDINAL_PARAMS:
+        return 1
+    if name in _OFFSET_PARAMS or base == 0:
+        for key in _SIZE_PARAMS:
+            stated = _whole_number((query or {}).get(key))
+            if stated and 1 <= stated <= MAX_PAGE_SIZE:
+                return stated
+        return 25
+    # base == 1 with an unfamiliar name: counting from one is what an ordinal
+    # does, so treat it as one.
+    return 1
+
+
 def validate(evidence: dict, recipe: dict) -> dict:
     """
-    Whether this recipe is safe and plausible for this page. `{ok, reason}`.
+    Whether this recipe is safe and plausible for this page.
 
-    Refuses rather than trims. A proposal outside these bounds is a proposal
-    that did not understand the page, and quietly clamping it into range would
-    hide that — the recipe would go active, do nothing useful, and look like
-    the board had changed.
+    Returns `{ok, reason, recipe}` — the recipe normalised, which is what gets
+    stored, so what runs and what the panel says are the same thing.
+
+    The rule about what may be adjusted and what may not turns on one
+    distinction, and getting it wrong in both directions is what made this
+    reject sound proposals:
+
+    * **A fact about the board is refused when it is out of range.** How much
+      the page parameter advances by, whether pages count from zero or one —
+      a wrong answer here builds URLs that skip or repeat results, and
+      clamping it into range would hide that behind a recipe that goes active
+      and quietly under-crawls.
+
+    * **A budget of ours is clamped.** How many pages we are willing to click
+      is our appetite, not a claim about the board. Handshake really does have
+      400 pages of results, and answering "400" was correct; refusing it nine
+      times because we only walk 30 got us nothing at all from a model that
+      had read the page properly.
     """
     if not isinstance(recipe, dict):
         return {"ok": False, "reason": "The model did not return an object."}
@@ -219,58 +278,78 @@ def validate(evidence: dict, recipe: dict) -> dict:
     if mode not in MODES:
         return {"ok": False, "reason": f"Unknown mode {mode!r}."}
 
+    out = dict(recipe, mode=mode)
+
+    def ok(reason):
+        return {"ok": True, "reason": reason, "recipe": out}
+
+    def no(reason):
+        return {"ok": False, "reason": reason, "recipe": out}
+
     if mode == "scroll":
         # Absent means "this board scrolls, use the usual depth" — a complete
-        # answer, and the one the prompt invites. Only a stated depth is checked.
-        passes = _whole_number(recipe.get("scroll_passes"))
+        # answer, and the one the prompt invites.
         if recipe.get("scroll_passes") is None:
-            return {"ok": True, "reason": "Scrolls; no second page to reach."}
-        if passes is None or not 1 <= passes <= MAX_SCROLL_PASSES:
-            return {"ok": False,
-                    "reason": f"scroll_passes must be 1..{MAX_SCROLL_PASSES}."}
-        return {"ok": True, "reason": f"Scrolls {passes} times."}
+            out.pop("scroll_passes", None)
+            return ok("Scrolls; no second page to reach.")
+        passes = _whole_number(recipe.get("scroll_passes"))
+        if passes is None or passes < 1:
+            return no(f"scroll_passes must be 1..{MAX_SCROLL_PASSES}.")
+        # A budget. Asking for more than we will ever do is not a mistake about
+        # the board.
+        out["scroll_passes"] = min(passes, MAX_SCROLL_PASSES)
+        return ok(f"Scrolls {out['scroll_passes']} times.")
 
     if mode == "url":
         param = str(recipe.get("page_param") or "")
         if not _PARAM_OK.match(param):
-            return {"ok": False, "reason": f"Implausible page_param {param!r}."}
-        # Unlike the scroll depth, these two have no safe fallback: a wrong page
-        # size builds URLs that skip or repeat results. But a model that named
-        # the parameter and left the arithmetic out has still identified the
-        # mechanism, so the common defaults stand in — 25 a page, counting from
-        # the ordinal the parameter name implies.
-        size = _whole_number(recipe.get("page_size"), 25)
-        if size is None or not 1 <= size <= MAX_PAGE_SIZE:
-            return {"ok": False, "reason": f"page_size must be 1..{MAX_PAGE_SIZE}."}
+            return no(f"Implausible page_param {param!r}.")
+        seen = evidence.get("query") if isinstance(evidence, dict) else {}
+        seen = seen if isinstance(seen, dict) else {}
+
         base = _whole_number(recipe.get("page_base"), 0)
         if base not in (0, 1):
-            return {"ok": False, "reason": "page_base must be 0 or 1."}
+            return no("page_base must be 0 or 1.")
+        out["page_base"] = base
+
+        # A fact about the board, so it is refused when stated wrongly — but
+        # inferred rather than demanded when it is simply absent. A model that
+        # named the parameter has identified the mechanism, and the parameter's
+        # own name says how it advances better than any constant would.
+        if recipe.get("page_size") is None:
+            out["page_size"] = _default_page_size(param, base, seen)
+        else:
+            size = _whole_number(recipe.get("page_size"))
+            if size is None or not 1 <= size <= MAX_PAGE_SIZE:
+                return no(f"page_size must be 1..{MAX_PAGE_SIZE}.")
+            out["page_size"] = size
+
         # The parameter has to be one the page actually uses, or one that is
         # absent — inventing `?page=2` on a board that pages by `start` gives a
         # URL that returns page one, five times, and looks like depth.
-        seen = evidence.get("query") if isinstance(evidence, dict) else {}
-        if isinstance(seen, dict) and seen and param not in seen:
+        if seen and param not in seen:
             known = ", ".join(sorted(seen)) or "none"
-            return {"ok": False,
-                    "reason": f"{param!r} is not in this URL (has: {known})."}
-        return {"ok": True, "reason": f"Pages by ?{param}="}
+            return no(f"{param!r} is not in this URL (has: {known}).")
+        return ok(f"Pages by ?{param}= (+{out['page_size']} each)")
 
     # mode == "click"
     selector = str(recipe.get("selector") or "").strip()
     if not selector or len(selector) > 200:
-        return {"ok": False, "reason": "A click recipe needs a selector."}
+        return no("A click recipe needs a selector.")
     if not _SELECTOR_OK.match(selector):
-        return {"ok": False, "reason": "That selector has syntax we won't run."}
+        return no("That selector has syntax we won't run.")
+    out["selector"] = selector
 
     pages = _whole_number(recipe.get("max_pages"), 10)
-    if pages is None or not 1 <= pages <= MAX_CLICK_PAGES:
-        return {"ok": False, "reason": f"max_pages must be 1..{MAX_CLICK_PAGES}."}
+    if pages is None or pages < 1:
+        return no(f"max_pages must be 1..{MAX_CLICK_PAGES}.")
+    # Our appetite, not a claim about the board. See the docstring.
+    out["max_pages"] = min(pages, MAX_CLICK_PAGES)
 
     controls = (evidence or {}).get("controls") or []
     hits = [c for c in controls if _matches_selector(c, selector)]
     if not hits:
-        return {"ok": False,
-                "reason": "That selector matches nothing the page offered."}
+        return no("That selector matches nothing the page offered.")
 
     # Every control it matches has to be a pagination control. One match that
     # reads like an action is enough to refuse the whole recipe: a selector
@@ -278,22 +357,42 @@ def validate(evidence: dict, recipe: dict) -> dict:
     for control in hits:
         label = _label_of(control)
         if _DANGEROUS_LABEL.search(label):
-            return {"ok": False,
-                    "reason": f"That selector matches {label!r}, which is an "
-                              f"action rather than a page control."}
+            return no(f"That selector matches {label!r}, which is an action "
+                      f"rather than a page control.")
         if _BACKWARD_LABEL.match(label):
-            return {"ok": False,
-                    "reason": f"That selector matches {label!r}, which goes "
-                              f"back a page rather than forward."}
+            return no(f"That selector matches {label!r}, which goes back a "
+                      f"page rather than forward.")
+
+    # A selector that catches the whole numbered row is not a "next" control,
+    # and the browser resolves it to the *first* match — which on any board
+    # showing "1 2 3 … 400" is the button for page one. The crawl then clicks
+    # its way back to the start and reports having visited pages.
+    #
+    # Undecidable rather than merely risky: nothing in a snapshot says which of
+    # several numbers is forward from here, because that depends on the page
+    # you are on. Handshake's proposal was exactly this — one class shared by
+    # every page button — and it would have walked backwards on every visit.
+    numbered = sorted({_label_of(c) for c in hits if _label_of(c).isdigit()})
+    if len(numbered) > 1:
+        listed = ", ".join(numbered[:4])
+        hint = ""
+        query = (evidence or {}).get("query") or {}
+        for name in query:
+            if name.lower() in _ORDINAL_PARAMS or name.lower() in _OFFSET_PARAMS:
+                hint = (f" The page number is already in this URL as "
+                        f"?{name}=, so this board wants a url recipe.")
+                break
+        return no(f"That selector matches {len(numbered)} numbered buttons "
+                  f"({listed}), and the crawler clicks the first one — which "
+                  f"is not necessarily forward.{hint}")
+
     readable = [c for c in hits if _PAGINATION_LABEL.match(_label_of(c))]
     if not readable:
         labels = ", ".join(repr(_label_of(c)) for c in hits[:3])
-        return {"ok": False,
-                "reason": f"Matches {labels}, which does not read like a page "
-                          f"control."}
+        return no(f"Matches {labels}, which does not read like a page control.")
 
-    return {"ok": True,
-            "reason": f"Clicks {_label_of(readable[0])!r}, up to {pages} pages."}
+    return ok(f"Clicks {_label_of(readable[0])!r}, up to "
+              f"{out['max_pages']} pages.")
 
 
 _PROMPT = """\
@@ -330,13 +429,26 @@ Rules:
 - Choose "url" only if the parameter is already present in the query below.
   A parameter that is not there is a guess, and a wrong guess returns page one
   repeatedly while looking like depth.
-- For "click", the selector must match the control that goes FORWARD one page —
-  a "next" control, or the next number. Never a control that submits, applies,
-  deletes, withdraws, or otherwise acts on the account.
+- PREFER "url" over "click" when the parameter is present, even if the page
+  also shows numbered buttons. Changing an address is exact; clicking is not.
+- "page_base" is what the parameter reads on the FIRST page: 0 for an offset,
+  1 for an ordinal page number.
+- "page_size" is how much the parameter ADVANCES between one page and the next
+  — not how many results a page holds, unless those happen to be the same
+  number. For "?page=" counting pages it is 1, so the pages are 1, 2, 3. For
+  "?offset=" counting results, 25 results a page makes it 25, so the offsets
+  are 0, 25, 50. Getting this wrong fetches three scattered real pages and
+  never visits anything between them.
+- For "click", the selector must match ONE control, and it must be the one that
+  goes FORWARD — a "next" control. Never a control that submits, applies,
+  deletes, withdraws, or otherwise acts on the account, and never one that goes
+  back.
+- A selector matching every numbered button will be refused. The crawler clicks
+  the first thing the selector finds, and on a row reading "1 2 3 ... 400" that
+  is the button for page one. If a board paginates only by numbers, its page
+  number is nearly always in the URL — answer "url".
 - Prefer a selector built from a stable attribute (aria-label, rel, data-testid)
   over a generated class name.
-- "page_base" is what the parameter reads on the first page: 0 for an offset,
-  1 for an ordinal page number.
 - If nothing below looks like a page control, answer "scroll".
 
 URL: {url}
@@ -511,16 +623,51 @@ def save(db, host: str, recipe: dict, outcome: dict, model: str = ""):
     return row
 
 
-def note_outcome(db, host: str, pages_reached: int) -> None:
+# How far a visit got, in the unit its mode is measured in, and the value at
+# or below which it got nowhere.
+#
+# One number could not do this job, and using one is why every recipe that was
+# not a click retired itself.
+#
+#   click  — `pages_done` counts the controls clicked within a single visit,
+#            so page one alone means the click did nothing.
+#   scroll — `pages_done` is 1 by construction: one URL, one page, however far
+#            down it you got. Depth is `batches`, the number of times new
+#            content actually arrived, and zero means the scroll found nothing.
+#   url    — every page is a separate URL and a separate visit, so each one is
+#            legitimately page one of its own address. No visit can grade this,
+#            and grading it on `pages_done` retired every url recipe on its
+#            third outing however well it was working.
+_PROGRESS_FLOOR = {"click": 1, "scroll": 0}
+
+
+def _progress(recipe: dict, pages_reached: int, batches: int):
+    """How far this visit got, and the floor for its mode. `(value, floor)`."""
+    mode = str((recipe or {}).get("mode") or "").lower()
+    if mode == "click":
+        return int(pages_reached or 0), _PROGRESS_FLOOR["click"]
+    if mode == "scroll":
+        return int(batches or 0), _PROGRESS_FLOOR["scroll"]
+    return None, None
+
+
+def note_outcome(db, host: str, pages_reached: int, batches: int = 0) -> None:
     """
     Record how a visit under the active recipe went, and retire a useless one.
 
     The half that validation cannot do. A recipe is checked against a snapshot
     of the page, and a snapshot cannot say whether clicking that control
     actually advances anything — only the visit can. So a recipe that keeps
-    landing on page one after a fair number of tries is withdrawn, which puts
-    the board back on its hand-written setting and puts the host back on the
+    getting nowhere after a fair number of tries is withdrawn, which puts the
+    board back on its hand-written setting and puts the host back on the
     panel's list of things to teach.
+
+    "Nowhere" has to be measured in each mode's own unit — see
+    `_PROGRESS_FLOOR`. Measuring everything in pages meant a scroll recipe and
+    a url recipe were retired on their third visit no matter how well they
+    worked, because neither can ever report more than one page. Every non-click
+    recipe this system has ever written was withdrawn that way: it would learn
+    a board, work correctly three times, and delete what it learned.
     """
     from app.models.crawl_recipe import CrawlRecipe
 
@@ -534,13 +681,21 @@ def note_outcome(db, host: str, pages_reached: int) -> None:
         return
 
     row.tries = (row.tries or 0) + 1
-    row.best_pages = max(row.best_pages or 0, int(pages_reached or 0))
-    # Three tries before judging: one visit can reach a single page because the
-    # board had one page of results that day, which is not the recipe's fault.
-    if row.tries >= 3 and row.best_pages <= 1:
+    got, floor = _progress(row.recipe or {}, pages_reached, batches)
+    if got is None:
+        # A url recipe. Counted so the panel can show it has been used, never
+        # judged here — the check that matters for this mode is that the
+        # parameter was already in the URL, and validation has done it.
+        db.commit()
+        return
+
+    row.best_pages = max(row.best_pages or 0, got)
+    # Three tries before judging: one visit can get nowhere because the board
+    # had a single page of results that day, which is not the recipe's fault.
+    if row.tries >= 3 and row.best_pages <= floor:
         row.status = "rejected"
         row.note = (
-            f"Retired after {row.tries} visits that never got past page one. "
+            f"Retired after {row.tries} visits that got nowhere. "
             f"{row.note or ''}"
         ).strip()[:2000]
         logger.info(
@@ -567,12 +722,16 @@ def learn(db, host: str, profile_data: dict | None = None) -> dict:
     # wrote it, which is the first thing you want to know.
     provider = model_roles.resolve(profile_data, "learn")
     outcome = validate(sample.evidence or {}, proposal["recipe"])
-    row = save(db, host, proposal["recipe"], outcome,
+    # The normalised form, not the raw proposal: a budget that was clamped or a
+    # page size that was inferred has to be what runs, or the recipe does one
+    # thing and the panel says another.
+    stored = outcome.get("recipe") or proposal["recipe"]
+    row = save(db, host, stored, outcome,
                model=provider.model if provider else "")
     return {
         "ok": outcome["ok"],
         "reason": outcome["reason"],
-        "recipe": proposal["recipe"],
+        "recipe": stored,
         "id": str(row.id),
     }
 

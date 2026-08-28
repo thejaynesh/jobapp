@@ -155,19 +155,25 @@ class TestRefusingAProposalThatWouldClickTheWrongThing:
         )
         assert outcome["ok"]
 
-    def test_an_absurd_page_count_is_refused_rather_than_trimmed(self):
+    def test_a_page_count_beyond_ours_is_trimmed_rather_than_refused(self):
         """
-        Refused, not clamped. A proposal outside these bounds did not
-        understand the page, and quietly trimming it into range hides that —
-        the recipe goes active, does nothing useful, and reads as the board
-        having changed.
+        This used to be refused, on the grounds that a proposal outside our
+        bounds had not understood the page. The stored proposals said
+        otherwise: Handshake's model answered "400" because Handshake has 400
+        pages of results, and got nine rejections for being right.
+
+        `max_pages` is our appetite, not a claim about the board, so it clamps.
+        See `TestABudgetIsNotAClaimAboutTheBoard` for the other half of the
+        rule — a page *size* out of range is still refused, because that one is
+        a claim about the board and a wrong one skips results.
         """
         outcome = crawl_recipes.validate(
             EVIDENCE,
             {"mode": "click", "selector": "[data-testid='pagination-next']",
              "max_pages": 5000},
         )
-        assert not outcome["ok"]
+        assert outcome["ok"]
+        assert outcome["recipe"]["max_pages"] == crawl_recipes.MAX_CLICK_PAGES
 
 
 class TestRefusingAnImplausibleUrlRecipe:
@@ -219,10 +225,12 @@ class TestScrollRecipes:
             EVIDENCE, {"mode": "scroll", "scroll_passes": 150})
         assert outcome["ok"]
 
-    def test_an_absurd_depth_is_refused(self):
+    def test_an_absurd_depth_is_clamped_to_what_we_will_actually_do(self):
+        # A budget of ours. See TestABudgetIsNotAClaimAboutTheBoard.
         outcome = crawl_recipes.validate(
             EVIDENCE, {"mode": "scroll", "scroll_passes": 100000})
-        assert not outcome["ok"]
+        assert outcome["ok"]
+        assert outcome["recipe"]["scroll_passes"] == crawl_recipes.MAX_SCROLL_PASSES
 
     def test_a_mode_we_do_not_know_is_refused(self):
         # A closed set, so a model answering "infinite-scroll" is caught here
@@ -256,10 +264,12 @@ class TestAnAnswerWeAskedForIsNotAnAnswerWeRefuse:
         # says the only thing that matters — there is no second page.
         assert crawl_recipes.validate(EVIDENCE, {"mode": "scroll"})["ok"]
 
-    def test_a_depth_that_is_present_and_absurd_is_still_refused(self):
-        # The distinction the fix rests on. Absent is not wrong; wrong is wrong.
+    def test_a_depth_below_one_is_still_refused(self):
+        # The distinction the fix rests on. Absent is not wrong, and asking for
+        # more scrolling than we will ever do is not wrong either — but asking
+        # for none is not an answer to the question.
         assert not crawl_recipes.validate(
-            EVIDENCE, {"mode": "scroll", "scroll_passes": 100000})["ok"]
+            EVIDENCE, {"mode": "scroll", "scroll_passes": 0})["ok"]
 
     def test_a_number_sent_as_a_string_is_read_as_a_number(self):
         assert crawl_recipes.validate(
@@ -303,6 +313,172 @@ class TestAnAnswerWeAskedForIsNotAnAnswerWeRefuse:
             {"mode": "click", "selector": "[data-testid='pagination-next']",
              "max_pages": "10"},
         )["ok"]
+
+
+class TestABudgetIsNotAClaimAboutTheBoard:
+    """
+    Handshake really does have 400 pages of results, and the model answering
+    "400" had read the page correctly. It was refused nine times running,
+    because we only walk 30 — and the board got no recipe at all as a result.
+
+    Two different kinds of number were being checked the same way. How many
+    pages we are willing to click is our appetite; how much the page parameter
+    advances by is a fact about the board. A wrong appetite costs nothing and
+    clamps; a wrong fact builds URLs that skip results and must be refused.
+    """
+
+    def test_a_page_budget_beyond_ours_is_clamped_not_refused(self):
+        outcome = crawl_recipes.validate(
+            EVIDENCE,
+            {"mode": "click", "selector": "[data-testid='pagination-next']",
+             "max_pages": 400},
+        )
+        assert outcome["ok"], outcome["reason"]
+        assert outcome["recipe"]["max_pages"] == crawl_recipes.MAX_CLICK_PAGES
+
+    def test_a_scroll_budget_beyond_ours_is_clamped_too(self):
+        outcome = crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": 100000})
+        assert outcome["ok"]
+        assert outcome["recipe"]["scroll_passes"] == crawl_recipes.MAX_SCROLL_PASSES
+
+    def test_a_budget_below_one_is_still_nonsense(self):
+        assert not crawl_recipes.validate(
+            EVIDENCE,
+            {"mode": "click", "selector": "[data-testid='pagination-next']",
+             "max_pages": 0},
+        )["ok"]
+
+    def test_a_page_size_out_of_range_is_still_refused(self):
+        # A fact, not a budget. Clamping it would build URLs that skip results
+        # and call the result depth.
+        evidence = dict(EVIDENCE, query={"start": "0"})
+        outcome = crawl_recipes.validate(
+            evidence,
+            {"mode": "url", "page_param": "start", "page_size": 100000},
+        )
+        assert not outcome["ok"]
+        assert "page_size" in outcome["reason"]
+
+    def test_what_gets_stored_is_what_will_run(self, db):
+        # The clamp has to reach the database. A recipe that says 400 while the
+        # panel says 30 is worse than either on its own.
+        outcome = crawl_recipes.validate(
+            EVIDENCE,
+            {"mode": "click", "selector": "[data-testid='pagination-next']",
+             "max_pages": 400},
+        )
+        row = crawl_recipes.save(db, "hiring.cafe", outcome["recipe"], outcome)
+        assert row.recipe["max_pages"] == crawl_recipes.MAX_CLICK_PAGES
+        assert row.status == "active"
+
+
+class TestWorkingOutHowFarTheParameterJumps:
+    """
+    The prompt listed `page_size` among seven keys and never said what it
+    meant, so models left it out — and the fallback treated every parameter
+    like an offset. `?page=1, 26, 51` on a board that numbers its pages fetches
+    three real pages scattered across the results with everything between them
+    never visited, which looks exactly like a working crawl.
+    """
+
+    def test_an_ordinal_parameter_advances_by_one(self):
+        evidence = dict(EVIDENCE, query={"q": "x", "page": "5"})
+        outcome = crawl_recipes.validate(
+            evidence, {"mode": "url", "page_param": "page", "page_base": 1})
+        assert outcome["ok"]
+        assert outcome["recipe"]["page_size"] == 1
+
+    def test_an_offset_takes_the_page_length_the_url_states(self):
+        # Better than any default: the board has said how big a page is.
+        evidence = dict(EVIDENCE, query={"offset": "0", "per_page": "50"})
+        outcome = crawl_recipes.validate(
+            evidence, {"mode": "url", "page_param": "offset", "page_base": 0})
+        assert outcome["ok"]
+        assert outcome["recipe"]["page_size"] == 50
+
+    def test_an_offset_with_nothing_stated_falls_back(self):
+        evidence = dict(EVIDENCE, query={"start": "0"})
+        outcome = crawl_recipes.validate(
+            evidence, {"mode": "url", "page_param": "start", "page_base": 0})
+        assert outcome["ok"]
+        assert outcome["recipe"]["page_size"] == 25
+
+    def test_a_stated_size_is_never_second_guessed(self):
+        evidence = dict(EVIDENCE, query={"offset": "10"})
+        outcome = crawl_recipes.validate(
+            evidence,
+            {"mode": "url", "page_param": "offset", "page_size": 10,
+             "page_base": 0},
+        )
+        assert outcome["recipe"]["page_size"] == 10
+
+    def test_the_real_google_proposal_now_works(self):
+        # Verbatim from the rejected row, minus the prose. It was refused four
+        # times for a key it was never told the meaning of.
+        evidence = dict(EVIDENCE,
+                        query={"q": "Android Engineer", "page": "5",
+                               "location": "Europe"})
+        outcome = crawl_recipes.validate(
+            evidence, {"mode": "url", "page_base": 1, "page_param": "page"})
+        assert outcome["ok"], outcome["reason"]
+        assert outcome["recipe"]["page_size"] == 1
+
+
+class TestASelectorThatCatchesTheWholeNumberedRow:
+    """
+    Handshake's proposal was one class shared by every page button: `1`, `3`,
+    `4`, `5`, `400`. The crawler resolves a selector with `querySelector`,
+    which returns the *first* match — the button for page one. It would have
+    clicked its way back to the start on every visit and reported pages
+    visited.
+
+    Undecidable rather than merely risky: nothing in a snapshot says which of
+    several numbers is forward, because that depends on the page you are on.
+    """
+
+    ROW = {"query": {"page": "4", "per_page": "25"}, "scroll": {"passes": 3},
+           "controls": [
+        {"tag": "button", "text": n, "aria": "", "title": "", "rel": "",
+         "role": "", "cls": "rosetta-pagination__page", "id": "", "testid": "",
+         "href": "", "disabled": False}
+        for n in ("1", "3", "4", "400", "5")
+    ]}
+
+    def test_it_is_refused(self):
+        outcome = crawl_recipes.validate(
+            self.ROW,
+            {"mode": "click", "selector": "button.rosetta-pagination__page",
+             "max_pages": 30},
+        )
+        assert not outcome["ok"]
+        assert "numbered buttons" in outcome["reason"]
+
+    def test_it_says_where_to_go_instead(self):
+        # The answer is sitting in the URL. Saying so is the difference between
+        # a rejection and a fix.
+        outcome = crawl_recipes.validate(
+            self.ROW,
+            {"mode": "click", "selector": "button.rosetta-pagination__page",
+             "max_pages": 30},
+        )
+        assert "?page=" in outcome["reason"]
+
+    def test_a_single_numbered_control_is_fine(self):
+        # "click the 2" is unambiguous when 2 is the only thing it matches.
+        one = {"query": {}, "scroll": {}, "controls": [
+            {"tag": "button", "text": "2", "aria": "", "cls": "next-page",
+             "rel": "", "id": "", "testid": "", "href": "", "disabled": False},
+        ]}
+        assert crawl_recipes.validate(
+            one, {"mode": "click", "selector": ".next-page", "max_pages": 5},
+        )["ok"]
+
+    def test_the_url_recipe_for_the_same_board_is_accepted(self):
+        outcome = crawl_recipes.validate(
+            self.ROW, {"mode": "url", "page_param": "page", "page_base": 1})
+        assert outcome["ok"]
+        assert outcome["recipe"]["page_size"] == 1
 
 
 class TestControlsThatGoTheWrongWay:
@@ -489,6 +665,82 @@ class TestARecipeThatDoesNotActuallyWork:
 
     def test_grading_a_host_with_no_recipe_is_harmless(self, db):
         crawl_recipes.note_outcome(db, "nowhere.example", 1)
+
+
+class TestEachModeIsJudgedInItsOwnUnit:
+    """
+    The bug that quietly deleted everything this system ever learned.
+
+    "Did it get past page one" was asked of every recipe, and only a click
+    recipe can answer it. A scroll visit is one URL and therefore always one
+    page, however far down the list it got; a url recipe visits each page as a
+    separate address, so every visit is legitimately page one of its own. Both
+    were retired on their third outing no matter how well they were working.
+
+    The stored evidence showed it plainly: Dice and JobRight retired with
+    "Scrolls 150 times", Amazon retired with "Pages by ?offset=", and the only
+    recipe still standing anywhere was the one click recipe.
+    """
+
+    def _active(self, db, recipe, host="board.example"):
+        crawl_recipes.save(db, host, recipe, {"ok": True, "reason": "fine"})
+
+    def test_a_scroll_recipe_that_loads_content_survives(self, db):
+        # Its depth is batches. Pages will read 1 forever and that is correct.
+        self._active(db, {"mode": "scroll", "scroll_passes": 150})
+        for _ in range(6):
+            crawl_recipes.note_outcome(db, "board.example", 1, batches=4)
+        assert crawl_recipes.active_for(db, "board.example") is not None
+
+    def test_a_scroll_recipe_that_loads_nothing_still_retires(self, db):
+        # The real failure for this mode, and it must still be caught.
+        self._active(db, {"mode": "scroll", "scroll_passes": 150})
+        for _ in range(3):
+            crawl_recipes.note_outcome(db, "board.example", 1, batches=0)
+        assert crawl_recipes.active_for(db, "board.example") is None
+
+    def test_a_url_recipe_is_never_retired_on_page_count(self, db):
+        # Every page is its own visit and its own address, so no visit can say
+        # anything about it. The check that matters for this mode — that the
+        # parameter was already in the URL — happened at validation.
+        self._active(db, {"mode": "url", "page_param": "offset",
+                          "page_size": 10, "page_base": 0})
+        for _ in range(10):
+            crawl_recipes.note_outcome(db, "board.example", 1)
+        assert crawl_recipes.active_for(db, "board.example") is not None
+
+    def test_a_url_recipe_still_counts_its_visits(self, db):
+        # Not judged is not the same as not recorded: the panel should still
+        # show it is being used.
+        self._active(db, {"mode": "url", "page_param": "offset",
+                          "page_size": 10, "page_base": 0})
+        for _ in range(4):
+            crawl_recipes.note_outcome(db, "board.example", 1)
+        assert crawl_recipes.listing(db)[0].tries == 4
+
+    def test_a_click_recipe_is_judged_exactly_as_before(self, db):
+        self._active(db, {"mode": "click", "selector": ".next", "max_pages": 10})
+        for _ in range(3):
+            crawl_recipes.note_outcome(db, "board.example", 1, batches=9)
+        # Batches are irrelevant here: a click recipe that never advanced a
+        # page did not work, whatever the page was doing while it sat there.
+        assert crawl_recipes.active_for(db, "board.example") is None
+
+    def test_the_visit_passes_both_measures_through(self, db):
+        """
+        The measure has to reach `note_outcome` from the visit, or the fix
+        stops at the function that cannot see it.
+        """
+        from app.services import agent_work
+
+        self._active(db, {"mode": "scroll", "scroll_passes": 150},
+                     host="jobright.ai")
+        for _ in range(5):
+            agent_work._learn_to_crawl(
+                db, "https://jobright.ai/jobs/search",
+                {"batches": 3, "navigation": None}, 1,
+            )
+        assert crawl_recipes.active_for(db, "jobright.ai") is not None
 
 
 class TestTheCrawlUsesWhatWasLearned:

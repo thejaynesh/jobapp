@@ -60,6 +60,24 @@
   const MAX_PROBE_BYTES = 400_000;
   let probes = 0;
 
+  /**
+   * Roughly "same company", for deciding what is worth probing.
+   *
+   * Last two labels, which is wrong for `.co.uk` and right for everything this
+   * meets in practice. It only gates the probe — a payload that actually names
+   * job fields is forwarded from anywhere — so being approximate costs a
+   * diagnostic sample rather than a job.
+   */
+  function sameSite(url) {
+    try {
+      const there = new URL(url, location.href).hostname.split(".").slice(-2).join(".");
+      const here = location.hostname.split(".").slice(-2).join(".");
+      return Boolean(there) && there === here;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // What this page's reader actually saw. Reported once per page, because
   // "nothing forwarded" was hiding two completely different situations: a page
   // whose responses we looked at and rejected, and a page where we saw no JSON
@@ -140,6 +158,16 @@
     // which is exactly what several boards did. The cap and the structure test
     // are what keep this honest instead.
     if (probes >= MAX_PROBES || text.length > MAX_PROBE_BYTES) return;
+
+    // Off the board's own domain, a probe has to earn it with a job-shaped
+    // URL. Everything a modern job board loads is on somebody else's domain —
+    // FullStory, Bugsnag, PostHog, StackAdapt, ZoomInfo, Cognito, Segment —
+    // and all of it answers in structured JSON, so the probe budget went on
+    // session tokens and feature flags. Thirteen of the fifteen hosts in the
+    // sample store were telemetry, which is evidence about nothing crowding
+    // out the payloads the recipe learner exists to read.
+    if (!sameSite(url) && !named) return;
+
     if (parsed === undefined) {
       try {
         parsed = JSON.parse(text);
