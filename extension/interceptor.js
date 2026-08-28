@@ -87,9 +87,31 @@
     }
   }
 
-  function maybeOffer(url, text) {
-    if (!url || !text) return;
-    if (text.length > MAX_BYTES) return;
+  /** Whether a body is worth reading at all, without parsing it to find out. */
+  function looksLikeJson(text) {
+    if (typeof text !== "string") return false;
+    const head = text.slice(0, 200).trimStart();
+    return head.startsWith("{") || head.startsWith("[");
+  }
+
+  /**
+   * Consider one response body.
+   *
+   * Takes the text, an already-parsed value, or both. The parsed form is the
+   * common one now: we read bodies where the page parses them, so the object
+   * already exists and re-parsing it would be work done twice.
+   */
+  function maybeOffer(url, text, parsed) {
+    if (!url) return;
+    if (text === undefined || text === null) {
+      if (parsed === undefined) return;
+      try {
+        text = JSON.stringify(parsed);
+      } catch (_) {
+        return; // circular, or too large to re-serialise
+      }
+    }
+    if (!text || text.length > MAX_BYTES) return;
     tally.json += 1;
 
     const named = INTERESTING.test(url);
@@ -99,7 +121,7 @@
     // these somewhere.
     if (named && SHAPE.test(text)) {
       try {
-        offer(JSON.parse(text), url, false);
+        offer(parsed !== undefined ? parsed : JSON.parse(text), url, false);
         tally.sent += 1;
       } catch (_) {
         // Not JSON. Common and uninteresting.
@@ -118,11 +140,12 @@
     // which is exactly what several boards did. The cap and the structure test
     // are what keep this honest instead.
     if (probes >= MAX_PROBES || text.length > MAX_PROBE_BYTES) return;
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch (_) {
-      return;
+    if (parsed === undefined) {
+      try {
+        parsed = JSON.parse(text);
+      } catch (_) {
+        return;
+      }
     }
     // Something with structure. A bare string, number or empty object is a
     // ping or a feature flag, and describes nothing worth learning from.
@@ -180,7 +203,12 @@
   function offerXhrBody(xhr) {
     const kind = xhr.responseType || "text";
     if (kind === "text" || kind === "") {
-      maybeOffer(xhr.__jobappUrl, xhr.responseText);
+      // Same guard as the `text()` path: a page reading its own HTML this way
+      // is common, and counting those would put a number in the panel's
+      // "responses seen" that means nothing.
+      if (looksLikeJson(xhr.responseText)) {
+        maybeOffer(xhr.__jobappUrl, xhr.responseText);
+      }
       return;
     }
     // Already parsed for us. This was skipped outright, which made every site
@@ -188,75 +216,116 @@
     // invisible to the harvest, because reading `responseText` on one of those
     // throws rather than returning the body.
     if (kind === "json" && xhr.response) {
-      try {
-        maybeOffer(xhr.__jobappUrl, JSON.stringify(xhr.response));
-      } catch (_) {
-        /* circular or too large to re-serialise */
-      }
+      maybeOffer(xhr.__jobappUrl, undefined, xhr.response);
     }
   }
 
-  // --- fetch -------------------------------------------------------------
-  const nativeFetch = window.fetch;
-
-  function inspect(response) {
-    try {
-      const type = response.headers.get("content-type") || "";
-      if (type.includes("json")) {
-        // A clone, so the page still gets to read its own body. Consuming the
-        // original would break the site we are riding along on.
-        response
-          .clone()
-          .text()
-          .then((text) => maybeOffer(response.url, text))
-          .catch(() => {});
-      }
-    } catch (_) {
-      /* never let instrumentation break the page's own request */
-    }
-  }
-
-  // Returns the native promise rather than awaiting it.
+  // --- reading the body, not the request ---------------------------------
   //
-  // An `async` wrapper made every fetch on the page pass through a frame of
-  // ours, so a request the *page* made and the page's own CSP refused — an ad
-  // tag, an analytics beacon — surfaced with `interceptor.js` in its stack.
-  // Nothing was broken by that, but it is misleading to read, and a site
-  // running Bugsnag or Datadog would have posted our filename to its own error
-  // tracker for a failure that had nothing to do with us.
+  // `window.fetch` is deliberately left alone.
   //
-  // Handing back the promise the native call produced avoids the extra frame
-  // and the extra microtask. The inspection rides alongside on a derived
-  // promise with its own rejection handler, so a refused request stays
-  // entirely the page's business and cannot become an unhandled rejection of
-  // ours.
-  window.fetch = function (...args) {
-    const response = nativeFetch.apply(this, args);
+  // Patching it worked, and it put this file on the stack of every request the
+  // page made — including requests that had nothing to do with us and failed
+  // for reasons of their own. Handshake refuses its own Google Ads beacon
+  // under its own CSP, several times a page, and each refusal was reported
+  // with `interceptor.js` named as the caller. Nothing was broken by that, but
+  // it is alarming to read, and a site running Bugsnag or Datadog would have
+  // filed our filename against a failure we had no part in.
+  //
+  // Two earlier attempts tried to shrink that frame — returning the native
+  // promise instead of awaiting it, dropping the `async` wrapper. Neither
+  // could work: CSP is enforced when the request is *initiated*, and if we are
+  // `window.fetch` then we are the calling frame by definition.
+  //
+  // So the interception moves one step later, to where the page reads the body
+  // it got back. `Response.prototype.json` is what a page calls when it has a
+  // payload worth parsing, which is exactly the set we want and no more — a
+  // request that is refused never produces a Response, so a blocked ad beacon
+  // now happens entirely without us.
+  //
+  // It is also less work than what it replaces. The old path cloned every JSON
+  // response and re-read the copy; this one reads the object the page was
+  // going to parse anyway.
+  //
+  // What it gives up: a body the page fetches and never parses, and one read
+  // through `response.body` as a stream. Neither describes a job list — a
+  // board that fetches its listings and does not parse them has not rendered
+  // them either.
+  const nativeJson = Response.prototype.json;
+  const nativeText = Response.prototype.text;
+
+  Response.prototype.json = function (...args) {
+    const result = nativeJson.apply(this, args);
     try {
-      response.then(inspect, () => {});
+      const url = this.url;
+      // A derived promise with its own rejection handler. The page's promise is
+      // handed back untouched, so nothing here can turn its failure into an
+      // unhandled rejection of ours.
+      result.then(
+        (value) => {
+          try {
+            maybeOffer(url, undefined, value);
+          } catch (_) {
+            /* never let instrumentation break the page's own parse */
+          }
+        },
+        () => {},
+      );
     } catch (_) {
       /* not a promise; hand back whatever it was untouched */
     }
-    return response;
+    return result;
+  };
+
+  Response.prototype.text = function (...args) {
+    const result = nativeText.apply(this, args);
+    try {
+      const url = this.url;
+      result.then(
+        (body) => {
+          try {
+            // Only bodies that could be JSON. A page reading its own HTML
+            // through `text()` is common, and counting those would put a
+            // number in the panel's "responses seen" that means nothing.
+            if (looksLikeJson(body)) maybeOffer(url, body);
+          } catch (_) {
+            /* as above */
+          }
+        },
+        () => {},
+      );
+    } catch (_) {
+      /* as above */
+    }
+    return result;
   };
 
   // --- XMLHttpRequest ----------------------------------------------------
+  //
+  // `send` is left alone for the same reason as `fetch`: that is where the
+  // request is initiated, so that is the frame a CSP refusal would name. The
+  // listener goes on in `open` instead, which has already returned by the time
+  // anything is sent.
   const nativeOpen = XMLHttpRequest.prototype.open;
-  const nativeSend = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this.__jobappUrl = url;
-    return nativeOpen.call(this, method, url, ...rest);
-  };
-
-  XMLHttpRequest.prototype.send = function (...args) {
-    this.addEventListener("load", () => {
+    // `open` may be called more than once on a reused request object, and a
+    // second listener would offer every body twice.
+    if (!this.__jobappWatched) {
+      this.__jobappWatched = true;
       try {
-        offerXhrBody(this);
+        this.addEventListener("load", () => {
+          try {
+            offerXhrBody(this);
+          } catch (_) {
+            /* never let instrumentation break the page's own request */
+          }
+        });
       } catch (_) {
-        /* as above */
+        /* not a real XHR; leave it entirely alone */
       }
-    });
-    return nativeSend.apply(this, args);
+    }
+    return nativeOpen.call(this, method, url, ...rest);
   };
 })();

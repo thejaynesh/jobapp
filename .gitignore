@@ -19,3 +19,4 @@ storage/
 # table. Ignore the scratch output of `alembic revision --autogenerate`
 # instead, which is the file that should not be committed unedited.
 alembic/versions/*_autogen_*.py
+node_modules/
