@@ -493,10 +493,26 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
                 ).trim().slice(0, 40);
                 // Only things short enough to be a control. A whole job card
                 // is an anchor too, and forty of those describe nothing.
-                if (!label || label.length > 24) continue;
+                if (!label || label.length > 28) continue;
                 // Numbers, next-ish words, arrows. The point is to give the
                 // model the pagination row, not the whole navigation bar.
-                if (!/^(\d{1,4}|next|prev|previous|older|newer|more|load more|show more|first|last|\u203a|\u00ab|\u00bb|\u2039|\u2192|\u2190|>|<|\.\.\.)$/i
+                //
+                // Two-word labels matter more than they look. This used to
+                // demand the bare word \u2014 "next" and not "Next page" \u2014 and
+                // "Next page" is the single most common accessible label a
+                // pagination control carries. A board that used it had its
+                // controls dropped here, so the model was shown an empty list,
+                // told "if nothing looks like a page control, answer scroll",
+                // and duly answered scroll. The rejection that followed named
+                // the model, and the evidence had gone missing one layer
+                // earlier.
+                //
+                // Kept in step with `_PAGINATION_LABEL` in crawl_recipes.py,
+                // which decides what may be *clicked*. This list is wider on
+                // purpose: "Previous" and "First" are worth showing a model
+                // because they identify a pagination row, and that file
+                // refuses them as targets.
+                if (!/^(\d{1,4}|page\s*\d{1,4}|(next|prev|previous|older|newer|first|last)(\s+(page|results?|jobs?|\d{1,4}))?|(load|show|see|view)\s+more(\s+\w+)?|more(\s+(results?|jobs?))?|\u203a|\u00ab|\u00bb|\u2039|\u2192|\u2190|>|<|\.\.\.|\u2026)$/i
                       .test(label)) continue;
                 const key = label + "|" + el.tagName + "|" +
                   String(el.className || "").slice(0, 40);

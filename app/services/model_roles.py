@@ -201,11 +201,26 @@ def call(profile_data: dict | None, role_key: str, messages: list[dict],
     credentials, which is how `learn` ended up on the paid provider while the
     free one sat configured and idle.
     """
+    import contextlib
+
     from app.llm.providers import call_provider
+    from app.services import llm_log
 
     role = ROLES_BY_KEY.get(role_key)
     if role is None:
         raise RuntimeError(f"Unknown model role {role_key!r}.")
+
+    # Label the log rows with the role, unless the caller already said
+    # something more specific. Without this a role's calls are indistinguishable
+    # in `llm_calls` — every one of them says "unknown" — so the first question
+    # about a bad proposal ("what did the model actually reply?") could only be
+    # answered by matching on the prompt text. An existing stage is left alone:
+    # "score_job" tells you more than "match" does.
+    labelled = (
+        llm_log.stage(role_key)
+        if llm_log.current_stage() in ("", "unknown")
+        else contextlib.nullcontext()
+    )
 
     first = resolve(profile_data, role_key)
     if first is None:
@@ -218,16 +233,17 @@ def call(profile_data: dict | None, role_key: str, messages: list[dict],
     ]
 
     last: Exception | None = None
-    for provider in chain:
-        try:
-            return call_provider(
-                provider, messages, temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except Exception as exc:
-            last = exc
-            logger.warning("model_roles: %s on %s failed: %s",
-                           role_key, provider.name, exc)
+    with labelled:
+        for provider in chain:
+            try:
+                return call_provider(
+                    provider, messages, temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                last = exc
+                logger.warning("model_roles: %s on %s failed: %s",
+                               role_key, provider.name, exc)
     raise last if last else RuntimeError("No LLM providers configured.")
 
 

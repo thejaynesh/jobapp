@@ -47,11 +47,40 @@ MAX_CLICK_PAGES = 30
 MAX_SCROLL_PASSES = 300
 MAX_PAGE_SIZE = 200
 
-# A control that looks like it moves through pages: a bare number, "next", or
-# one of the arrow glyphs boards use instead of a word.
+# A control that looks like it moves *forward* through pages: a bare number,
+# "next", one of the arrow glyphs boards use instead of a word, or any of the
+# ways a board spells "there is more below this".
+#
+# Forward only, and that is not an oversight. The extension collects "Previous"
+# and "First" as well, because they tell a model it is looking at a pagination
+# row — but clicking one walks backwards through results already harvested, so
+# they are evidence and never a target.
+#
+# Kept deliberately wider than it reads: "Next" alone is the rare case. Real
+# boards label the control "Next page", "Next results", "Load more jobs", and
+# an accept list that only knew the bare word refused perfectly good proposals
+# for controls the page plainly offered.
 _PAGINATION_LABEL = re.compile(
-    r"^(\d{1,4}|next(\s+page)?|older|more|show more|load more"
-    r"|›|»|→|>|\.\.\.)$",
+    r"^(\d{1,4}"
+    r"|page\s*\d{1,4}"
+    r"|next(\s+(page|results?|jobs?|\d{1,4}))?"
+    r"|older|newer"
+    r"|(load|show|see|view)\s+more(\s+\w+)?"
+    r"|more(\s+(results?|jobs?))?"
+    r"|›|»|→|>|\.\.\.|…)$",
+    re.I,
+)
+
+# A control that goes the wrong way. Not dangerous, just useless — and worse
+# than useless if it is the first thing the selector matches, because the
+# extension clicks the first match: the crawl then walks backwards through
+# results it already has and reports depth for it.
+#
+# It earns its own check now that the extension collects these. It did not
+# before, which is exactly why a selector loose enough to catch the whole
+# pagination row used to be safe by accident.
+_BACKWARD_LABEL = re.compile(
+    r"^(prev(ious)?|back|first|newest|‹|«|←|<)(\s+(page|results?|jobs?))?$",
     re.I,
 )
 
@@ -137,6 +166,43 @@ def _matches_selector(control: dict, selector: str) -> bool:
     return bool(tag) and str(control.get("tag") or "").lower() == tag.group(1).lower()
 
 
+def _whole_number(value, default=None):
+    """
+    A count the model meant, or None if it did not give one we can use.
+
+    Two things this exists for, both of which were refusing sound proposals.
+
+    A model asked for JSON returns `"150"` and `150.0` about as readily as
+    `150`, and an `isinstance(value, int)` test calls all three implausible.
+    That is a transport detail being treated as a misunderstanding of the page.
+
+    And an *absent* number is not a wrong one. The prompt says "include only the
+    keys for the mode you chose" and then lists seven keys, so a model choosing
+    scroll may legitimately answer `{"mode": "scroll"}` — a complete and correct
+    statement that this board has no second page. That was rejected with
+    "scroll_passes must be 1..300", which reads like the model said something
+    absurd when it said nothing at all. The depth is the crawler's decision
+    anyway: `browse_plan` already falls back to the board's own setting when a
+    scroll recipe does not name one.
+
+    A value that is present and *wrong* still fails, which is the case the
+    range check was written for.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"-?\d{1,9}", text):
+            return int(text)
+    return None
+
+
 def validate(evidence: dict, recipe: dict) -> dict:
     """
     Whether this recipe is safe and plausible for this page. `{ok, reason}`.
@@ -154,8 +220,12 @@ def validate(evidence: dict, recipe: dict) -> dict:
         return {"ok": False, "reason": f"Unknown mode {mode!r}."}
 
     if mode == "scroll":
-        passes = recipe.get("scroll_passes")
-        if not isinstance(passes, int) or not 1 <= passes <= MAX_SCROLL_PASSES:
+        # Absent means "this board scrolls, use the usual depth" — a complete
+        # answer, and the one the prompt invites. Only a stated depth is checked.
+        passes = _whole_number(recipe.get("scroll_passes"))
+        if recipe.get("scroll_passes") is None:
+            return {"ok": True, "reason": "Scrolls; no second page to reach."}
+        if passes is None or not 1 <= passes <= MAX_SCROLL_PASSES:
             return {"ok": False,
                     "reason": f"scroll_passes must be 1..{MAX_SCROLL_PASSES}."}
         return {"ok": True, "reason": f"Scrolls {passes} times."}
@@ -164,11 +234,16 @@ def validate(evidence: dict, recipe: dict) -> dict:
         param = str(recipe.get("page_param") or "")
         if not _PARAM_OK.match(param):
             return {"ok": False, "reason": f"Implausible page_param {param!r}."}
-        size = recipe.get("page_size")
-        if not isinstance(size, int) or not 1 <= size <= MAX_PAGE_SIZE:
+        # Unlike the scroll depth, these two have no safe fallback: a wrong page
+        # size builds URLs that skip or repeat results. But a model that named
+        # the parameter and left the arithmetic out has still identified the
+        # mechanism, so the common defaults stand in — 25 a page, counting from
+        # the ordinal the parameter name implies.
+        size = _whole_number(recipe.get("page_size"), 25)
+        if size is None or not 1 <= size <= MAX_PAGE_SIZE:
             return {"ok": False, "reason": f"page_size must be 1..{MAX_PAGE_SIZE}."}
-        base = recipe.get("page_base", 0)
-        if not isinstance(base, int) or base not in (0, 1):
+        base = _whole_number(recipe.get("page_base"), 0)
+        if base not in (0, 1):
             return {"ok": False, "reason": "page_base must be 0 or 1."}
         # The parameter has to be one the page actually uses, or one that is
         # absent — inventing `?page=2` on a board that pages by `start` gives a
@@ -187,8 +262,8 @@ def validate(evidence: dict, recipe: dict) -> dict:
     if not _SELECTOR_OK.match(selector):
         return {"ok": False, "reason": "That selector has syntax we won't run."}
 
-    pages = recipe.get("max_pages", 10)
-    if not isinstance(pages, int) or not 1 <= pages <= MAX_CLICK_PAGES:
+    pages = _whole_number(recipe.get("max_pages"), 10)
+    if pages is None or not 1 <= pages <= MAX_CLICK_PAGES:
         return {"ok": False, "reason": f"max_pages must be 1..{MAX_CLICK_PAGES}."}
 
     controls = (evidence or {}).get("controls") or []
@@ -206,6 +281,10 @@ def validate(evidence: dict, recipe: dict) -> dict:
             return {"ok": False,
                     "reason": f"That selector matches {label!r}, which is an "
                               f"action rather than a page control."}
+        if _BACKWARD_LABEL.match(label):
+            return {"ok": False,
+                    "reason": f"That selector matches {label!r}, which goes "
+                              f"back a page rather than forward."}
     readable = [c for c in hits if _PAGINATION_LABEL.match(_label_of(c))]
     if not readable:
         labels = ", ".join(repr(_label_of(c)) for c in hits[:3])

@@ -235,6 +235,173 @@ class TestScrollRecipes:
         assert not crawl_recipes.validate(EVIDENCE, ["scroll"])["ok"]
 
 
+class TestAnAnswerWeAskedForIsNotAnAnswerWeRefuse:
+    """
+    The rejections that were our fault rather than the model's.
+
+    The prompt says "include only the keys for the mode you chose" and then
+    lists seven keys. A model choosing scroll answers `{"mode": "scroll"}` —
+    complete, correct, and the literal thing we asked for — and got back
+    "scroll_passes must be 1..300", which reads like it said something absurd
+    when it said nothing at all.
+
+    The same shape of mistake sat under every number in here: JSON from a model
+    arrives as `"150"` and `150.0` about as readily as `150`, and treating the
+    transport as a misunderstanding of the page refused sound proposals.
+    """
+
+    def test_scroll_with_no_depth_is_a_complete_answer(self):
+        # The crawler decides the depth anyway: browse_plan falls back to the
+        # board's own setting when a scroll recipe does not name one. So this
+        # says the only thing that matters — there is no second page.
+        assert crawl_recipes.validate(EVIDENCE, {"mode": "scroll"})["ok"]
+
+    def test_a_depth_that_is_present_and_absurd_is_still_refused(self):
+        # The distinction the fix rests on. Absent is not wrong; wrong is wrong.
+        assert not crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": 100000})["ok"]
+
+    def test_a_number_sent_as_a_string_is_read_as_a_number(self):
+        assert crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": "150"})["ok"]
+
+    def test_a_whole_number_sent_as_a_float_is_read_as_a_number(self):
+        assert crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": 150.0})["ok"]
+
+    def test_a_fractional_depth_is_refused(self):
+        # Not a transport artefact — nothing sane produces 2.5 scroll passes.
+        assert not crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": 2.5})["ok"]
+
+    def test_a_boolean_is_not_a_number(self):
+        # Python would otherwise take True as 1 and accept a nonsense recipe.
+        assert not crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": True})["ok"]
+
+    def test_prose_where_a_number_belongs_is_refused(self):
+        assert not crawl_recipes.validate(
+            EVIDENCE, {"mode": "scroll", "scroll_passes": "as many as needed"},
+        )["ok"]
+
+    def test_a_url_recipe_may_leave_the_arithmetic_out(self):
+        # It named the mechanism, which is the hard part. browse_plan uses the
+        # same defaults this stands in, so the two cannot disagree.
+        evidence = dict(EVIDENCE, query={"q": "engineer", "start": "0"})
+        assert crawl_recipes.validate(
+            evidence, {"mode": "url", "page_param": "start"})["ok"]
+
+    def test_a_click_recipe_may_leave_the_page_count_out(self):
+        assert crawl_recipes.validate(
+            EVIDENCE,
+            {"mode": "click", "selector": "[data-testid='pagination-next']"},
+        )["ok"]
+
+    def test_a_stringly_typed_page_count_is_read(self):
+        assert crawl_recipes.validate(
+            EVIDENCE,
+            {"mode": "click", "selector": "[data-testid='pagination-next']",
+             "max_pages": "10"},
+        )["ok"]
+
+
+class TestControlsThatGoTheWrongWay:
+    """
+    The extension collects "Previous" and "First" now, because their presence
+    is what tells a model it is looking at a pagination row rather than a
+    footer. They are evidence, never a target.
+
+    That distinction has to be enforced here or the widening is a regression:
+    the extension clicks the *first* match, so a selector loose enough to catch
+    the whole row would walk backwards through results already harvested and
+    report depth for it.
+    """
+
+    ROW = {"controls": [
+        {"tag": "button", "text": "Previous", "aria": "Previous page",
+         "cls": "pg", "rel": "", "id": "", "testid": "", "href": "",
+         "disabled": True},
+        {"tag": "button", "text": "2", "aria": "", "cls": "pg", "rel": "",
+         "id": "", "testid": "", "href": "", "disabled": False},
+        {"tag": "button", "text": "Next", "aria": "Next page", "cls": "pg-next",
+         "rel": "", "id": "", "testid": "", "href": "", "disabled": False},
+    ], "query": {}, "scroll": {"passes": 4, "batches": 0}}
+
+    def test_a_selector_catching_the_whole_row_is_refused(self):
+        outcome = crawl_recipes.validate(
+            self.ROW, {"mode": "click", "selector": ".pg", "max_pages": 5})
+        assert not outcome["ok"]
+        assert "back a page" in outcome["reason"]
+
+    def test_the_forward_control_on_its_own_is_still_accepted(self):
+        assert crawl_recipes.validate(
+            self.ROW,
+            {"mode": "click", "selector": ".pg-next", "max_pages": 5},
+        )["ok"]
+
+
+class TestLabelsRealBoardsActuallyUse:
+    """
+    "Next" on its own is the rare case. The accept list knew only that, so a
+    board labelling its control "Next results" or "Load more jobs" had a
+    perfectly good proposal refused for a control the page plainly offered.
+    """
+
+    def _row(self, label):
+        return {"controls": [
+            {"tag": "button", "text": label, "aria": "", "cls": "go",
+             "rel": "", "id": "", "testid": "", "href": "", "disabled": False},
+        ], "query": {}, "scroll": {"passes": 4, "batches": 0}}
+
+    @pytest.mark.parametrize("label", [
+        "Next", "Next page", "Next results", "Next jobs", "2", "Page 2",
+        "Load more", "Load more jobs", "Show more", "See more results",
+        "More results", "›", "»", "→", ">", "...",
+    ])
+    def test_it_reads_like_a_page_control(self, label):
+        outcome = crawl_recipes.validate(
+            self._row(label), {"mode": "click", "selector": ".go",
+                               "max_pages": 5})
+        assert outcome["ok"], f"{label!r} was refused: {outcome['reason']}"
+
+    @pytest.mark.parametrize("label", [
+        "Help", "Save this search", "Sign in", "About us", "Filters",
+    ])
+    def test_it_does_not(self, label):
+        assert not crawl_recipes.validate(
+            self._row(label), {"mode": "click", "selector": ".go",
+                               "max_pages": 5})["ok"]
+
+    @pytest.mark.parametrize("label", [
+        "Withdraw application", "Delete", "Apply now", "Submit",
+    ])
+    def test_an_action_is_refused_however_it_is_worded(self, label):
+        outcome = crawl_recipes.validate(
+            self._row(label), {"mode": "click", "selector": ".go",
+                               "max_pages": 5})
+        assert not outcome["ok"]
+
+    def test_the_extension_collects_everything_this_accepts(self):
+        """
+        The two lists are in different languages in different files, and a
+        label the extension drops is a label no model ever sees. That is the
+        failure this pairs with: the evidence went missing one layer before the
+        rejection, so the panel blamed the model for an empty list.
+        """
+        import re
+
+        source = open("extension/background.js").read()
+        # The collection filter, as written in the content script.
+        pattern = re.search(r"if \(!/\^\((.+?)\)\$/i\n?\s*\.test\(label\)\)",
+                            source, re.S)
+        assert pattern, "could not find the control filter in background.js"
+        collected = pattern.group(1)
+        for label in ("next", "page", "load", "show", "more", "older"):
+            assert label in collected.lower(), (
+                f"the extension drops {label!r}, which validate() accepts"
+            )
+
+
 class TestStoringWhatWasLearned:
     def test_a_valid_recipe_goes_active(self, db):
         row = crawl_recipes.save(
