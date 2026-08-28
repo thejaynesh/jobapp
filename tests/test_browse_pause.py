@@ -1057,3 +1057,112 @@ class TestAChallengeOnALinkIsReportedToo:
         queued, deferred = enrichment.plan_browser_queue(db, [job])
         assert queued == []
         assert [j.id for j in deferred] == [job.id]
+
+
+class TestPassingTheCheckYourself:
+    """
+    The thing that was actually missing, and no amount of better detection was
+    going to supply it.
+
+    Two structural faults, either of which alone made this unwinnable:
+
+    *The proof was thrown away.* Passing a Cloudflare check sets a clearance
+    cookie, and that cookie is the only evidence you passed. Link resolution
+    fetched with `credentials: "omit"`, so every request arrived as a first-time
+    visitor and was challenged again — solve it perfectly and the next link is
+    challenged identically, forever.
+
+    *There was nowhere to solve it.* Every tab this system opens is minimized
+    and closed again, which is right for a crawl and exactly wrong for the one
+    case where a person has to see the page and click something.
+    """
+
+    def event(self, db, host, outcome, minutes_ago=0):
+        from app.models.agent_event import AgentEvent
+
+        row = AgentEvent(
+            kind="browse", host=host, ok=(outcome == "passed"),
+            summary={"purpose": "resolve", "challenge": outcome},
+        )
+        db.add(row)
+        db.flush()
+        if minutes_ago:
+            row.created_at = datetime.now(timezone.utc) - timedelta(
+                minutes=minutes_ago)
+        db.commit()
+        return row
+
+    def test_passing_clears_an_earlier_block(self, db):
+        """
+        Without this the backoff outlived the thing it was waiting for: you
+        would go and pass the check, and the host would stay untouched for the
+        rest of the day anyway — which reads as the click having achieved
+        nothing, which is exactly the complaint.
+        """
+        self.event(db, "jooble.org", "timeout", minutes_ago=30)
+        assert "jooble.org" in browse_plan.blocked_hosts(db)
+
+        self.event(db, "jooble.org", "passed")
+        assert "jooble.org" not in browse_plan.blocked_hosts(db)
+
+    def test_a_later_block_still_counts(self, db):
+        # Clearance expires. Passing once is not a permanent exemption.
+        self.event(db, "jooble.org", "passed", minutes_ago=60)
+        self.event(db, "jooble.org", "timeout")
+        assert "jooble.org" in browse_plan.blocked_hosts(db)
+
+    def test_one_host_passing_does_not_clear_another(self, db):
+        self.event(db, "jooble.org", "timeout")
+        self.event(db, "indeed.com", "timeout")
+        self.event(db, "jooble.org", "passed")
+        assert browse_plan.blocked_hosts(db) == {"indeed.com"}
+
+    def test_the_button_queues_a_visible_tab(self, db, client, monkeypatch):
+        from app.models.browser_task import BrowserTask
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        response = client.post("/runs/agent/pass-check",
+                               data={"host": "jooble.org"})
+        assert response.status_code == 200
+
+        task = db.query(BrowserTask).filter(
+            BrowserTask.kind == "pass_check").one()
+        assert task.payload["url"] == "https://jooble.org/"
+
+    def test_it_goes_to_the_front_of_the_queue(self, db, client, monkeypatch):
+        # You pressed it and are about to go and look at the tab it opens.
+        from app.models.browser_task import BrowserTask
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        browse_plan.enqueue(db, ["https://my.greenhouse.io/jobs/search"],
+                            priority=browse_plan.PRIORITY_SWEEP)
+        client.post("/runs/agent/pass-check", data={"host": "jooble.org"})
+
+        first = browser_tasks.lease(db, None, agent_id="a", limit=1)[0]
+        assert first.kind == "pass_check"
+
+    def test_the_page_offers_it_for_a_blocked_host(self, db, client, monkeypatch):
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        self.event(db, "jooble.org", "timeout")
+        page = client.get("/runs").text
+        assert "Let me pass jooble.org" in page
+
+    def test_a_host_with_no_block_is_not_offered(self, db, client, monkeypatch):
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        assert "Let me pass" not in client.get("/runs").text
+
+    def test_a_missing_host_is_refused_rather_than_queued(self, db, client, monkeypatch):
+        from app.models.browser_task import BrowserTask
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+        client.post("/runs/agent/pass-check", data={"host": "  "})
+        assert db.query(BrowserTask).filter(
+            BrowserTask.kind == "pass_check").count() == 0
+
+    def test_the_kind_is_one_the_queue_accepts(self, db):
+        # It is leased and reported like any other task, so it has to be in the
+        # closed set rather than passed through as a string.
+        from app.models.browser_task import TASK_KINDS
+
+        assert "pass_check" in TASK_KINDS

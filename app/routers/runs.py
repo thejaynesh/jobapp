@@ -327,6 +327,53 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
     )
 
 
+@router.post("/agent/pass-check", response_class=HTMLResponse)
+def queue_pass_check(request: Request, host: str = Form(...),
+                     db: Session = Depends(get_db)):
+    """
+    Open a site in a normal tab so you can pass its check yourself.
+
+    Every other tab this system opens is minimized and closed again, which is
+    right for a crawl and exactly wrong for the one case where a person has to
+    see the page and click something. So this queues the one task that opens a
+    visible tab and leaves it there — no detection, no polling, nothing that
+    can close it before you reach it.
+
+    One click is worth more than the link it was spent on: passing the check
+    sets a clearance cookie in the browser, and every later request carries it.
+    """
+    from app.services import browser_tasks
+
+    host = (host or "").strip().lower().lstrip(".")
+    if not host:
+        return templates.TemplateResponse(
+            "runs/_system.html",
+            {"request": request, "system": _system_context(db),
+             "browse_flash": "No host given."},
+        )
+
+    try:
+        browser_tasks.enqueue(
+            db, "pass_check", {"url": f"https://{host}/", "purpose": "check"},
+            # Straight to the front: you pressed this and are about to go and
+            # look at the tab it opens.
+            priority=9, ttl_hours=1,
+        )
+        db.commit()
+        flash = (
+            f"A tab for {host} will open shortly — pass its check there and "
+            f"close the tab. Links for it are retried once you have."
+        )
+    except Exception as exc:
+        logger.error("runs: could not queue a check for %s: %s", host, exc)
+        flash = f"Could not queue that: {exc}"
+    return templates.TemplateResponse(
+        "runs/_system.html",
+        {"request": request, "system": _system_context(db),
+         "browse_flash": flash},
+    )
+
+
 @router.post("/agent/learn-crawl", response_class=HTMLResponse)
 def learn_crawl_recipe(request: Request, host: str = Form(...),
                        db: Session = Depends(get_db)):

@@ -348,11 +348,27 @@
           {% if browse.blocked %}
           {# Not a reader that broke, and worth saying so: the fix is a click
              on that site rather than an afternoon in harvest.py. #}
-          <p class="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded px-1.5 py-1 mt-1">
-            Asked for a human check: {{ browse.blocked|join(', ') }}. Left alone
-            for now. Open one of its pages yourself and pass the check — the
-            extension will offer you the window next time it tries.
-          </p>
+          <div class="text-[11px] text-orange-700 bg-orange-50 border border-orange-200 rounded px-1.5 py-1 mt-1">
+            <p>
+              Asked for a human check: {{ browse.blocked|join(', ') }}. Nothing
+              is queued for it until somebody passes that check.
+            </p>
+            {# The button that was missing. Telling the user to "open a page
+               yourself" put the work on them and left the timing to chance;
+               this opens a real tab that stays open until they close it. #}
+            <div class="flex flex-wrap gap-1 mt-1">
+              {% for host in browse.blocked %}
+              <button hx-post="/runs/agent/pass-check"
+                      hx-vals='{"host": {{ host | tojson }}}'
+                      hx-target="#system-panel" hx-swap="outerHTML"
+                      hx-disabled-elt="this"
+                      title="Opens {{ host }} in a normal tab and leaves it open, so you can click its checkbox"
+                      class="text-[11px] border border-orange-600 text-orange-700 rounded px-1.5 py-0.5 hover:bg-orange-100">
+                Let me pass {{ host }}
+              </button>
+              {% endfor %}
+            </div>
+          </div>
           {% endif %}
 
           {% if browse.paused %}

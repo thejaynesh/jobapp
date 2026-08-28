@@ -57,7 +57,11 @@ from app.database import Base
 # script rather than work anyone queues, and the name is kept so a future
 # pull-based variant has somewhere to live.
 TASK_KINDS = ("ping", "fetch_page", "fetch_json", "resolve_link", "harvest_jobs",
-              "browse_page")
+              "browse_page",
+              # Opens a site in a normal tab and leaves it there, so a person
+              # can pass its "confirm you're human" check. The one tab task
+              # that is deliberately visible and deliberately not closed.
+              "pass_check")
 
 # queued  — waiting for an agent
 # leased  — an agent holds it, with a deadline

@@ -339,21 +339,37 @@ def blocked_hosts(db) -> set[str]:
 
     since = datetime.now(timezone.utc) - timedelta(hours=_challenge_hours())
     rows = (
-        db.query(AgentEvent.host)
+        db.query(AgentEvent.host, AgentEvent.created_at,
+                 AgentEvent.summary["challenge"].astext)
         .filter(
             AgentEvent.kind == "browse",
             AgentEvent.created_at >= since,
             AgentEvent.host.isnot(None),
             # `timeout` is nobody home; `skipped` is the extension declining to
-            # ask again. Both mean the page was not reached. `passed` is not
-            # here on purpose — getting through is the outcome we want, and
-            # holding it against the host would punish the click.
-            AgentEvent.summary["challenge"].astext.in_(("timeout", "skipped")),
+            # ask again. Both mean the page was not reached. `passed` is here
+            # too, but as the thing that *clears* a block rather than causes
+            # one — see below.
+            AgentEvent.summary["challenge"].astext.in_(
+                ("timeout", "skipped", "passed")),
         )
-        .distinct()
+        .order_by(AgentEvent.created_at.asc())
         .all()
     )
-    return {row[0] for row in rows if row[0]}
+
+    # Last word per host wins. Passing the check is precisely the event that
+    # invalidates an earlier block, and without this the backoff outlived the
+    # thing it was waiting for: you would go and pass the check, and the host
+    # would stay untouched for the rest of the day anyway — which reads as the
+    # click having achieved nothing.
+    blocked: set[str] = set()
+    for host, _created_at, outcome in rows:
+        if not host:
+            continue
+        if outcome == "passed":
+            blocked.discard(host)
+        else:
+            blocked.add(host)
+    return blocked
 
 
 def _ratelimit_minutes() -> int:

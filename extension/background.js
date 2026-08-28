@@ -1060,6 +1060,47 @@ const HANDLERS = {
     };
   },
 
+  /**
+   * Open a site so you can pass its check, and leave it open.
+   *
+   * Every other tab path here is built to be unobtrusive: minimized, closed
+   * again, gone before you notice. That is exactly wrong for the one case
+   * where the whole point is that a person has to see the page and click
+   * something, and it is why the check "closed too fast to click" however good
+   * the detection got.
+   *
+   * So this one detects nothing, polls nothing, and closes nothing. It opens a
+   * normal focused tab and finishes. You click the checkbox in your own time
+   * and close the tab yourself; the clearance cookie is set in the browser's
+   * cookie jar, and every later request carries it — which is what makes one
+   * click worth something rather than being spent on a single link.
+   *
+   * It is also immune to the service worker being terminated mid-wait, which
+   * a ninety-second poll is not: by the time the worker can be killed, this
+   * has already done everything it was going to do.
+   */
+  async pass_check(payload) {
+    const url = payload && payload.url;
+    if (!url) throw new Error("pass_check needs a url.");
+    if (!(await tabsAllowed())) {
+      throw new Error(
+        "Opening pages is turned off in the extension's options.",
+      );
+    }
+
+    const tab = await chrome.tabs.create({ url, active: true });
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (_) {
+      /* the window is there either way */
+    }
+    await setStatus({
+      lastError: `Opened ${new URL(url).host} in a tab — pass its check ` +
+        `there, then close the tab. Nothing else needs doing.`,
+    });
+    return { opened: url, left_open: true };
+  },
+
   async resolve_link(payload) {
     const url = payload && payload.url;
     if (!url) throw new Error("resolve_link needs a url.");
@@ -1071,10 +1112,24 @@ const HANDLERS = {
         const response = await fetch(url, {
           method: "GET",
           redirect: "follow",
-          // No cookies. Resolving a public redirect does not need the user's
-          // sessions, and sending them to an arbitrary aggregator would be a
-          // gratuitous widening of what this handler can leak.
-          credentials: "omit",
+          // Cookies included, and this is the fix for Jooble rather than a
+          // convenience.
+          //
+          // Passing a Cloudflare check sets a clearance cookie, and that
+          // cookie is the *only* evidence that you passed. Omitting it meant
+          // every request arrived as a first-time visitor and was challenged
+          // again — so the check could be solved perfectly and the next link
+          // would be challenged identically, forever. No amount of better
+          // detection fixes that; the proof was being thrown away on the way
+          // out.
+          //
+          // The earlier reasoning here — that this would leak the user's
+          // sessions to an arbitrary aggregator — does not hold up. Cookies go
+          // to the origin they belong to and nowhere else: a request to
+          // jooble.org carries jooble.org's cookies to jooble.org. Following a
+          // redirect gives each hop its own, which is exactly what the browser
+          // does when you click the link yourself.
+          credentials: "include",
           signal: controller.signal,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`);
@@ -1179,7 +1234,7 @@ async function supportedKinds() {
   // not reading a page, and the reading is the interceptor's, under the
   // permission its own checkbox already asked for. So the toggle that governs
   // opening windows at all is the one that decides this.
-  if (await tabsAllowed()) kinds.push("browse_page");
+  if (await tabsAllowed()) kinds.push("browse_page", "pass_check");
   return kinds;
 }
 
