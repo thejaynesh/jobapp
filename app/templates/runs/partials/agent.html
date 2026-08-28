@@ -84,12 +84,31 @@
               reader is <span class="font-medium">not switched on for this
               site</span> — tick it in the extension's options and the next
               crawl will read it. Nothing else needs doing.
-            {% else %}
+            {% elif not row.saw %}
               {{ "{:,}".format(row.pages) }} page(s) opened here with the
-              reader switched on, and no job data came back. Its pages fetch
-              jobs somewhere the interceptor is not watching — a websocket, or
-              a URL that does not look job-shaped. A DevTools capture of one of
-              its pages is what settles this.
+              reader switched on, and it never reported back — not even to say
+              it saw nothing. The reader is not running on these pages at all:
+              the host permission was granted but the script did not inject,
+              which is what a service worker that failed to register looks
+              like. Check the extension's own error line first.
+            {% elif not row.saw.json %}
+              The reader ran on {{ "{:,}".format(row.saw.reports) }} page(s)
+              here and <span class="font-medium">saw no JSON responses at
+              all</span>. Its listings are not fetched over an API this can
+              observe — server-rendered HTML, or a websocket. Widening what the
+              reader forwards cannot help; this site needs its jobs taken from
+              the rendered page instead.
+            {% else %}
+              The reader saw
+              <span class="font-medium">{{ "{:,}".format(row.saw.json) }}</span>
+              JSON response(s) here and forwarded
+              {{ "{:,}".format(row.saw.sent + row.saw.probed) }}.
+              {% if row.saw.url_no %}
+              {{ "{:,}".format(row.saw.url_no) }} came from URLs that don't
+              look job-shaped.
+              {% endif %}
+              So the data <em>is</em> arriving over an API — what is missing is
+              a match, not access. Its payloads are the thing to look at.
             {% endif %}
           </td>
         </tr>
@@ -113,6 +132,11 @@
             Forwarding responses but nothing job-shaped has ever come out of
             them. Either its payloads use field names the reader doesn't know,
             or these were listing pages rather than job pages.
+            {% if row.saw and row.saw.json %}
+            The reader looked at {{ "{:,}".format(row.saw.json) }} response(s)
+            here and forwarded {{ "{:,}".format(row.saw.sent + row.saw.probed) }};
+            the rest named none of the fields it matches on.
+            {% endif %}
           </td>
         </tr>
         {% endif %}

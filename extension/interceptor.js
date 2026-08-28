@@ -32,7 +32,8 @@
   // Voyager route names would be the same brittleness as CSS selectors, one
   // layer down. The server decides what is job-shaped; this only avoids
   // shipping the whole internet at it.
-  const INTERESTING = /(job|posting|search|hiring)/i;
+  const INTERESTING =
+    /(job|posting|search|hiring|career|vacanc|opening|listing|position|graphql)/i;
 
   // Responses larger than this are not job lists, they are asset manifests.
   const MAX_BYTES = 3_000_000;
@@ -59,6 +60,16 @@
   const MAX_PROBE_BYTES = 400_000;
   let probes = 0;
 
+  // What this page's reader actually saw. Reported once per page, because
+  // "nothing forwarded" was hiding two completely different situations: a page
+  // whose responses we looked at and rejected, and a page where we saw no JSON
+  // at all. The first is a filter to widen; the second means the listings are
+  // not coming over an API we can read, and no amount of widening helps.
+  //
+  // Without this the panel could only say "nothing came back", which is where
+  // every one of these investigations stalled.
+  const tally = { json: 0, url_no: 0, shape_no: 0, sent: 0, probed: 0 };
+
   function offer(payload, sourceUrl, probe) {
     try {
       window.postMessage(
@@ -78,21 +89,34 @@
 
   function maybeOffer(url, text) {
     if (!url || !text) return;
-    if (!INTERESTING.test(url)) return;
     if (text.length > MAX_BYTES) return;
+    tally.json += 1;
+
+    const named = INTERESTING.test(url);
+    if (!named) tally.url_no += 1;
 
     // Cheap rejection before the expensive parse: a job payload names one of
     // these somewhere.
-    if (SHAPE.test(text)) {
+    if (named && SHAPE.test(text)) {
       try {
         offer(JSON.parse(text), url, false);
+        tally.sent += 1;
       } catch (_) {
         // Not JSON. Common and uninteresting.
       }
       return;
     }
+    tally.shape_no += 1;
 
-    // A near miss, kept as evidence rather than dropped.
+    // A near miss, kept as evidence rather than dropped — and deliberately
+    // *not* behind the URL filter above.
+    //
+    // It used to be, which defeated the whole point of it: the probe exists to
+    // catch the payloads our guesses miss, so gating it behind the same guess
+    // meant a board whose API lives at a URL the filter does not name produced
+    // no forward, no probe, no sample, and no Learn button. Nothing at all,
+    // which is exactly what several boards did. The cap and the structure test
+    // are what keep this honest instead.
     if (probes >= MAX_PROBES || text.length > MAX_PROBE_BYTES) return;
     let parsed;
     try {
@@ -107,8 +131,50 @@
       (parsed && typeof parsed === "object" && Object.keys(parsed).length);
     if (!interesting) return;
     probes += 1;
+    tally.probed += 1;
     offer(parsed, url, true);
   }
+
+  // Reported a few seconds in, and again as the page goes away.
+  //
+  // Both, because neither alone is reliable here. A crawl closes the tab on
+  // its own schedule and a message posted from `pagehide` may not survive it,
+  // so waiting for the unload risks losing the report on exactly the
+  // fast-closing pages this was written to explain. And the timer alone would
+  // miss everything a lazily-loading board fetches after it.
+  //
+  // The second report carries the *difference*, not the running total. Sending
+  // the total twice would have the server add a page's responses to itself and
+  // report a site as busier than it is — which is the sort of thing that makes
+  // a diagnostic panel worse than none. `first` marks the report that stands
+  // for the page itself, so counting pages stays a count of pages.
+  const reported = { json: 0, url_no: 0, shape_no: 0, sent: 0, probed: 0 };
+  let everReported = false;
+
+  function reportTally() {
+    const delta = {};
+    let any = false;
+    for (const key of Object.keys(tally)) {
+      delta[key] = tally[key] - reported[key];
+      if (delta[key]) any = true;
+    }
+    // A page that saw nothing still reports, once — that zero is the finding.
+    if (everReported && !any) return;
+    for (const key of Object.keys(tally)) reported[key] = tally[key];
+    delta.first = !everReported;
+    everReported = true;
+    try {
+      window.postMessage(
+        { channel: CHANNEL, stats: delta, sourceUrl: String(location.href) },
+        location.origin,
+      );
+    } catch (_) {
+      /* nothing worth interrupting the page over */
+    }
+  }
+
+  setTimeout(reportTally, 3000);
+  window.addEventListener("pagehide", reportTally);
 
   /** Hand a response body to the reader, whatever shape XHR returned it in. */
   function offerXhrBody(xhr) {

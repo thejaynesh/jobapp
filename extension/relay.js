@@ -41,7 +41,9 @@ function onMessage(event) {
   // could feed the pipeline.
   if (event.source !== window) return;
   const data = event.data;
-  if (!data || data.channel !== CHANNEL || data.payload === undefined) return;
+  if (!data || data.channel !== CHANNEL) return;
+  const isStats = data.payload === undefined && data.stats;
+  if (data.payload === undefined && !isStats) return;
 
   // Orphaned by a reload. Stop listening rather than fail per response: this
   // tab's harvest is over until the page is refreshed, and the interceptor
@@ -53,14 +55,23 @@ function onMessage(event) {
 
   try {
     chrome.runtime.sendMessage(
-      {
-        type: "harvest",
-        payload: data.payload,
-        sourceUrl: data.sourceUrl,
-        // A near miss rather than a recognised job payload. Forwarded so the
-        // server has evidence to learn from; marked so it can say so.
-        probe: Boolean(data.probe),
-      },
+      isStats
+        ? {
+            // Not a payload: a count of what the reader looked at on this
+            // page. Sent even — especially — when it forwarded nothing, which
+            // is the case that otherwise reaches the server as silence.
+            type: "harvest-stats",
+            stats: data.stats,
+            sourceUrl: data.sourceUrl,
+          }
+        : {
+            type: "harvest",
+            payload: data.payload,
+            sourceUrl: data.sourceUrl,
+            // A near miss rather than a recognised job payload. Forwarded so
+            // the server has evidence to learn from; marked so it can say so.
+            probe: Boolean(data.probe),
+          },
       () => {
         // The service worker may be asleep or mid-restart. Losing one payload
         // is not worth surfacing — the next page view offers more, and there

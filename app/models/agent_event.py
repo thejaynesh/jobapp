@@ -22,6 +22,12 @@ KINDS = (
     "task_done",        # a browser task came back
     "task_failed",
     "harvest",          # job JSON the browser saw, offered unasked
+    "read",             # what the page's reader *looked at*, forwarded or not.
+                        # The denominator for `harvest`: a page that forwards
+                        # nothing because it answered in no JSON at all and one
+                        # that forwards nothing because every response was
+                        # rejected are opposite problems, and without this they
+                        # are the same silence.
     "browse",           # a page opened because the server queued it, not the
                         # user. `ok` false means it rendered a sign-in wall,
                         # which is the one failure a harvest cannot report:

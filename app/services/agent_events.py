@@ -274,6 +274,69 @@ HEALTH_LABELS = {
 }
 
 
+def read_stats(db, days: int) -> dict[str, dict]:
+    """
+    Per host: how many responses the page's reader actually looked at.
+
+    The denominator every one of these diagnoses was missing. A harvest event
+    only exists when something got through, so a site that opened, scrolled,
+    paginated and forwarded nothing left no harvest row — and the panel could
+    only report the absence, which reads the same whether the extension was
+    switched off, the page answered in no JSON at all, or forty job payloads
+    arrived and the URL filter threw all of them away.
+
+    Those want three different fixes, and the counts here are what tell them
+    apart without a DevTools capture.
+    """
+    from sqlalchemy import case, func
+
+    from app.models.agent_event import AgentEvent
+
+    def total(key: str):
+        return func.sum(
+            func.coalesce(AgentEvent.summary[key].astext.cast(Integer), 0)
+        )
+
+    # Pages, not reports. Each page reports twice — once early, once as it
+    # unloads with whatever arrived after — so counting rows would say a site
+    # was visited twice as often as it was.
+    pages = func.sum(
+        case((AgentEvent.summary["first"].astext == "true", 1), else_=0)
+    )
+
+    rows = (
+        db.query(
+            AgentEvent.host,
+            pages,
+            func.count(AgentEvent.id),
+            total("json"),
+            total("sent"),
+            total("probed"),
+            total("url_no"),
+        )
+        .filter(
+            AgentEvent.created_at >= _window_start(days),
+            AgentEvent.kind == "read",
+            AgentEvent.host.isnot(None),
+        )
+        .group_by(AgentEvent.host)
+        .all()
+    )
+    return {
+        host: {
+            # Falls back to the row count for reports from an extension that
+            # predates the flag. Better slightly high than a panel that says
+            # "the reader ran on 0 pages" directly above the responses it read.
+            "reports": int(first or 0) or int(seen or 0),
+            "json": int(payloads or 0),
+            "sent": int(sent or 0),
+            "probed": int(probed or 0),
+            "url_no": int(url_no or 0),
+        }
+        for host, first, seen, payloads, sent, probed, url_no in rows
+    }
+
+
 def _is_read(host: str, reading: set[str]) -> bool:
     """Whether the reader is registered on this host, subdomains included."""
     host = (host or "").lower()
@@ -363,6 +426,12 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
         .all()
     )
 
+    # What the reader looked at, over the same window as the page count. Its
+    # own kind of event, because it is reported by pages that forwarded
+    # nothing — which is precisely the case with no harvest event to hang it
+    # off.
+    seen = read_stats(db, pages_days or days)
+
     is_recent = numbered.c.nth <= _RECENT_PAYLOADS
     rows = (
         db.query(
@@ -402,7 +471,7 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
         out.append(_site_row(host, verdict, payloads, recent_payloads,
                              recent_found, recent_inserted, recent_merged,
                              earlier_found, last_found_at,
-                             browsed.pop(host, 0)))
+                             browsed.pop(host, 0), saw=seen.pop(host, None)))
 
     # Sites that were opened and sent nothing back. Everything above came from
     # a harvest event, so these have no row there — and being absent reads as
@@ -420,12 +489,22 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
     except Exception:
         reading = set()
 
-    for host, pages in browsed.items():
-        row = _site_row(host, "unread", 0, 0, 0, 0, 0, 0, None, pages)
+    # Hosts the reader reported from are included even with no queued browse
+    # behind them: most browsing is the user's own, and a site whose reader ran
+    # and forwarded nothing is the same fault whoever opened the page.
+    for host in sorted(set(browsed) | set(seen)):
+        saw = seen.get(host)
+        row = _site_row(host, "unread", 0, 0, 0, 0, 0, 0, None,
+                        browsed.get(host, 0), saw=saw)
         # The distinction the panel could not draw, and the one that decides
         # what to do about it. "Not enabled" is a checkbox; "enabled and
         # forwarding nothing" is a reader that cannot see the page's requests.
-        row["enabled"] = _is_read(host, reading)
+        #
+        # A read report settles it outright: the reader cannot have counted
+        # responses on a site it was not registered on, so its own evidence
+        # outranks the registration list, which describes the browser's
+        # configuration *now* rather than at the time of the visit.
+        row["enabled"] = bool(saw) or _is_read(host, reading)
         out.append(row)
 
     # Anything wrong first, then by how much the site is contributing. The
@@ -437,7 +516,7 @@ def harvest_health(db, days: int = _MAX_WINDOW_DAYS,
 
 
 def _site_row(host, verdict, payloads, recent_payloads, found, inserted,
-              merged, earlier_found, last_found_at, pages) -> dict:
+              merged, earlier_found, last_found_at, pages, saw=None) -> dict:
     """One site's line on the panel."""
     return {
         "host": host,
@@ -460,6 +539,9 @@ def _site_row(host, verdict, payloads, recent_payloads, found, inserted,
         # read — a row that reported otherwise would be arguing with its own
         # evidence.
         "enabled": True,
+        # What the reader looked at here, or None if it never reported — which
+        # is itself a finding on an `unread` row: registered but never running.
+        "saw": saw,
         "window": _RECENT_PAYLOADS,
     }
 

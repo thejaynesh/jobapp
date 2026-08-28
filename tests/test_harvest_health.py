@@ -548,3 +548,150 @@ class TestSayingWhichFaultItIs:
                               summary={"found": 4, "inserted": 4, "merged": 0}))
         db.commit()
         assert self.row(db, "my.greenhouse.io")["enabled"] is True
+
+
+class TestWhatTheReaderActuallySaw:
+    """
+    The denominator. Until now the only evidence of the reader working was a
+    payload it forwarded, so a site that opened, scrolled, paginated and
+    forwarded nothing reached the server as silence — and silence reads the
+    same whether the box is unticked, the page answers in no JSON at all, or
+    forty job payloads arrived and every one was filtered out.
+
+    Three faults, three different fixes, one symptom. The reader now reports
+    what it looked at whether or not anything got through, which is what tells
+    them apart without opening DevTools.
+    """
+
+    def browsed(self, db, host, times=3):
+        for _ in range(times):
+            db.add(AgentEvent(kind="browse", host=host, ok=True, summary={}))
+        db.commit()
+
+    def read(self, db, host, *, json=0, sent=0, probed=0, url_no=0,
+             first=True, days_ago=0):
+        row = AgentEvent(
+            kind="read", host=host, ok=True,
+            summary={"json": json, "sent": sent, "probed": probed,
+                     "url_no": url_no, "shape_no": 0, "first": first},
+            created_at=datetime.now(timezone.utc) - timedelta(days=days_ago),
+        )
+        db.add(row)
+        db.commit()
+        return row
+
+    def row(self, db, host, **kwargs):
+        return {r["host"]: r
+                for r in agent_events.harvest_health(db, **kwargs)}[host]
+
+    def test_a_site_that_only_reported_reads_still_gets_a_row(self, db):
+        # Most browsing is the user's own, with no queued browse behind it. A
+        # reader that ran and forwarded nothing is the same fault either way.
+        self.read(db, "www.dice.com", json=40)
+        assert self.row(db, "www.dice.com")["verdict"] == "unread"
+
+    def test_the_counts_reach_the_row(self, db):
+        self.browsed(db, "www.dice.com")
+        self.read(db, "www.dice.com", json=40, sent=0, probed=2, url_no=38)
+        saw = self.row(db, "www.dice.com")["saw"]
+        assert (saw["json"], saw["sent"], saw["probed"], saw["url_no"]) == (
+            40, 0, 2, 38)
+
+    def test_a_page_reporting_twice_is_counted_once(self, db):
+        # The second report carries only what arrived after the first. Adding
+        # the totals would have the panel say a site was busier than it is.
+        self.read(db, "jobright.ai", json=10, sent=1, first=True)
+        self.read(db, "jobright.ai", json=6, sent=1, first=False)
+        saw = self.row(db, "jobright.ai")["saw"]
+        assert saw["reports"] == 1
+        assert (saw["json"], saw["sent"]) == (16, 2)
+
+    def test_an_extension_that_predates_the_flag_still_counts_pages(self, db):
+        # Better slightly high than a panel that says "the reader ran on 0
+        # pages" directly above the responses it read.
+        db.add(AgentEvent(kind="read", host="otta.com", ok=True,
+                          summary={"json": 5, "sent": 0}))
+        db.commit()
+        assert self.row(db, "otta.com")["saw"]["reports"] == 1
+
+    def test_a_reader_that_reported_is_enabled_whatever_the_list_says(self, db):
+        # Its own evidence outranks the registration list, which describes the
+        # browser's configuration now rather than at the time of the visit.
+        self.browsed(db, "www.dice.com")
+        self.read(db, "www.dice.com", json=12)
+        assert self.row(db, "www.dice.com")["enabled"] is True
+
+    def test_a_site_with_no_reports_carries_no_counts(self, db):
+        # None rather than zeros: "never reported" and "reported zero" are
+        # different findings and the panel says different things about them.
+        self.browsed(db, "hiring.cafe")
+        assert self.row(db, "hiring.cafe")["saw"] is None
+
+    def test_reads_outside_the_window_are_not_counted(self, db):
+        self.browsed(db, "www.dice.com")
+        self.read(db, "www.dice.com", json=40, days_ago=40)
+        assert self.row(db, "www.dice.com", pages_days=7)["saw"] is None
+
+    def test_a_working_site_carries_them_too(self, db):
+        for _ in range(30):
+            db.add(AgentEvent(kind="harvest", host="my.greenhouse.io", ok=True,
+                              summary={"found": 4, "inserted": 4, "merged": 0}))
+        db.commit()
+        self.read(db, "my.greenhouse.io", json=30, sent=30)
+        row = self.row(db, "my.greenhouse.io")
+        assert row["verdict"] == "healthy"
+        assert row["saw"]["sent"] == 30
+
+    def test_reads_do_not_invent_harvest_yield(self, db):
+        self.read(db, "www.dice.com", json=40)
+        assert self.row(db, "www.dice.com")["found"] == 0
+
+
+class TestTheThreeFaultsReadDifferentlyOnThePage:
+    def setup_agent(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "t")
+
+    def read(self, db, host, **counts):
+        db.add(AgentEvent(kind="browse", host=host, ok=True, summary={}))
+        db.add(AgentEvent(kind="read", host=host, ok=True,
+                          summary={"first": True, **counts}))
+        db.commit()
+
+    def test_no_json_at_all_says_widening_the_filter_cannot_help(
+            self, db, client, monkeypatch):
+        # The honest answer, and the one that saves the most time: its listings
+        # are not fetched over an API this can observe.
+        self.setup_agent(monkeypatch)
+        self.read(db, "www.dice.com", json=0, sent=0, probed=0, url_no=0)
+        page = client.get("/runs").text
+        assert "saw no JSON responses at" in page
+
+    def test_json_seen_and_none_forwarded_points_at_the_payloads(
+            self, db, client, monkeypatch):
+        # The opposite finding: the data is arriving, so what is missing is a
+        # match rather than access.
+        self.setup_agent(monkeypatch)
+        self.read(db, "www.dice.com", json=40, sent=0, probed=0, url_no=40)
+        page = client.get("/runs").text
+        assert "arriving over an API" in page
+
+    def test_nothing_reported_at_all_points_at_the_extension(
+            self, db, client, monkeypatch):
+        # Registered but never running: the host permission was granted and the
+        # script did not inject.
+        from app.services import browser_tasks
+        from app.models.profile import Profile
+
+        self.setup_agent(monkeypatch)
+        db.add(Profile(data={}))
+        db.commit()
+        browser_tasks.record_agent_seen(db, "laptop", ["browse_page"],
+                                        ["dice.com"])
+        for _ in range(3):
+            db.add(AgentEvent(kind="browse", host="www.dice.com", ok=True,
+                              summary={}))
+        db.commit()
+        page = client.get("/runs").text
+        assert "never reported back" in page

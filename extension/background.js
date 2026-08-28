@@ -1598,6 +1598,43 @@ async function forwardHarvest(payload, sourceUrl, probe) {
   }
 }
 
+/**
+ * What the page's reader looked at, forwarded or not.
+ *
+ * The counterpart to `forwardHarvest`, and it exists because that function is
+ * only ever called when something got through. A board that opens, scrolls,
+ * paginates and forwards nothing produced no call at all, so the server saw a
+ * browse event and no harvest and could say nothing more useful than "nothing
+ * came back" — which is where every one of these investigations stalled.
+ *
+ * These counts separate the two faults hiding behind that silence. Zero JSON
+ * responses seen means the listings do not arrive over an API the reader can
+ * observe, and no filter change will ever help. Forty seen and none forwarded
+ * means they do, and the filter is what needs widening.
+ */
+async function reportReadStats(stats, url) {
+  if (!stats || typeof stats !== "object") return;
+  // A page that saw nothing is the whole point of this call, so it is not
+  // filtered out here. Only a report with no numbers at all is.
+  await reportEvent("read", {
+    url,
+    ok: true,
+    summary: {
+      json: Number(stats.json) || 0,
+      sent: Number(stats.sent) || 0,
+      probed: Number(stats.probed) || 0,
+      // Rejected for the URL it came from, versus rejected for its contents.
+      // Different filters, so counted separately.
+      url_no: Number(stats.url_no) || 0,
+      shape_no: Number(stats.shape_no) || 0,
+      // A page reports twice — once early, once as it unloads — and the second
+      // carries only what arrived in between. This marks the one that stands
+      // for the page, so "the reader ran on N pages here" counts pages.
+      first: Boolean(stats.first),
+    },
+  });
+}
+
 function ensureAlarm() {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
 }
@@ -1624,6 +1661,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // extension page, which has no business offering harvested jobs.
     if (!sender.tab) return false;
     forwardHarvest(message.payload, message.sourceUrl, message.probe);
+    return false;
+  }
+  if (message?.type === "harvest-stats") {
+    if (!sender.tab) return false;
+    reportReadStats(message.stats, message.sourceUrl || sender.tab.url);
     return false;
   }
   if (message?.type === "sync-harvest") {
