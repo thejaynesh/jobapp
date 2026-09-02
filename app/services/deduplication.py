@@ -1,5 +1,6 @@
 import hashlib
 import re
+from datetime import datetime
 from difflib import SequenceMatcher
 
 from sqlalchemy.orm import Session
@@ -213,24 +214,129 @@ def note_description_growth(job: Job, old_length: int) -> bool:
     return True
 
 
-def merge_or_skip(
-    db: Session,
-    existing: Job,
-    new_url: str,
-    new_description: str,
-    layer: int,
-) -> None:
-    """Update an existing job when a cross-post is found (layer=3)."""
-    if new_url not in existing.source_urls:
-        existing.source_urls = existing.source_urls + [new_url]
+# ---------------------------------------------------------------------------
+# Taking the better half of two sightings
+# ---------------------------------------------------------------------------
+#
+# The same posting reaches us from several places. LinkedIn's guest API knows
+# the title and almost never the pay; the employer's own Greenhouse board knows
+# the pay, the employment type and the day it went up; an aggregator card knows
+# the direct apply link that LinkedIn buries behind a redirect. Each is missing
+# something another one has, and which of them happened to be fetched first is
+# an accident of scheduling.
+#
+# So a second sighting is not a duplicate to discard, it is the rest of the
+# posting arriving late. What follows is the one place that decides what "more
+# data" means, shared by every path that can see a job twice, because the rules
+# only stay consistent if there is one copy of them.
+#
+# Two things are deliberately *not* merged:
+#
+# * `location`, because it is a third of the dedupe hash. A row whose stored
+#   location no longer agrees with the hash computed from it is a row that
+#   splits in two the next time the hashes are recomputed. This is the same
+#   reason `url` is not user-editable.
+# * `experience_level`, because both ingest paths default it to "mid" rather
+#   than leaving it null. There is no absence to fill, only a guess to
+#   overwrite with another guess.
 
-    # The cross-post is still worth recording as a source URL above — it is a
-    # real second listing of this job. Its description is not: the user already
-    # replaced that text with the posting they read.
+# Fields where a stored null means "no source has told us yet", so the first
+# source that does is strictly better than nothing.
+_FILL_IF_NULL = (
+    "employment_type",
+    "posted_at",
+    "required_years",
+    "education_required",
+    "benefits_note",
+    "language",
+)
+
+# Same rule, for the list columns whose empty state is `[]` rather than null.
+_FILL_IF_EMPTY = ("required_skills", "nice_to_have_skills")
+
+
+def enrich_from(job: Job, data: dict) -> list[str]:
+    """
+    Take from a second sighting whatever the stored job is missing.
+
+    Returns the names of the fields it filled, which is what lets a caller
+    report "enriched" only when something actually improved. Never overwrites a
+    value that is already there, and never touches a field the user has edited
+    — `manual_fields` outranks every rule below.
+
+    `data` uses the ingest dicts' own keys. `posted_at` must already be a
+    datetime; a source's raw string is ignored rather than guessed at, because
+    a mis-parsed date silently ages a job out of the pipeline.
+    """
     from app.services.job_edits import is_manual
 
-    if is_manual(existing, "description"):
-        return
+    filled: list[str] = []
+
+    def take(field, value):
+        if value is None or is_manual(job, field):
+            return
+        setattr(job, field, value)
+        filled.append(field)
+
+    # Pay moves as a unit. A minimum from one source and a maximum from another
+    # is not a band anybody stated — it is two halves of two different bands,
+    # and the salary filter would then drop jobs on a range nobody wrote down.
+    incoming_min = data.get("salary_min")
+    incoming_max = data.get("salary_max")
+    if (incoming_min is not None or incoming_max is not None) \
+            and job.salary_min is None and job.salary_max is None \
+            and not is_manual(job, "salary_min") \
+            and not is_manual(job, "salary_max"):
+        job.salary_min = incoming_min
+        job.salary_max = incoming_max
+        job.salary_currency = data.get("salary_currency")
+        filled.append("salary")
+
+    # A resolved apply URL is the end of a redirect chain we followed once and
+    # would rather not follow again, so this only ever fills a blank.
+    apply_url = (data.get("apply_url") or "").strip()
+    if apply_url and not job.apply_url and not is_manual(job, "apply_url"):
+        job.apply_url = apply_url
+        filled.append("apply_url")
+
+    # A one-way ratchet, because the column cannot tell "not remote" from "the
+    # source didn't say": it is a boolean defaulting to false. A source that
+    # says remote is asserting something; a source that says nothing produces
+    # exactly the same false. So true can be gained and never lost, which is
+    # the only direction that cannot destroy information.
+    if data.get("is_remote") and not job.is_remote and not is_manual(job, "is_remote"):
+        job.is_remote = True
+        filled.append("is_remote")
+
+    for field in _FILL_IF_NULL:
+        if getattr(job, field, None) is None:
+            value = data.get(field)
+            if field == "posted_at" and not isinstance(value, datetime):
+                continue
+            take(field, value)
+
+    for field in _FILL_IF_EMPTY:
+        if not getattr(job, field, None):
+            value = data.get(field)
+            if isinstance(value, (list, tuple)) and value:
+                take(field, list(value))
+
+    return filled
+
+
+def merge_description(job: Job, new_description: str) -> bool:
+    """
+    Replace the stored description if this sighting carries a fuller one.
+
+    Returns whether it did. The length comparison is the whole rule: between
+    two machines, more text is more posting, and neither side has any way to
+    judge quality. Against a person it is the wrong rule entirely, which is
+    what the `manual_fields` check is for.
+    """
+    from app.services.job_edits import is_manual
+
+    if is_manual(job, "description"):
+        return False
 
     # Cleaned before the comparison, never after. Raw markup inflates a
     # description's length by roughly a third, so an HTML cross-post would beat
@@ -239,7 +345,41 @@ def merge_or_skip(
     from app.services.descriptions import clean
 
     cleaned = clean(new_description)
-    old_length = len(existing.description or "")
-    if len(cleaned) > old_length:
-        existing.description = cleaned
-        note_description_growth(existing, old_length)
+    old_length = len(job.description or "")
+    if len(cleaned) <= old_length:
+        return False
+    job.description = cleaned
+    note_description_growth(job, old_length)
+    return True
+
+
+def merge_or_skip(
+    db: Session,
+    existing: Job,
+    new_url: str,
+    new_description: str,
+    layer: int,
+    data: dict | None = None,
+) -> list[str]:
+    """
+    Fold a cross-post into the job it duplicates. Returns what it improved.
+
+    `data` is the rest of the incoming sighting, and it is what makes this a
+    merge rather than a URL append: without it the pay, the employment type and
+    the posting date that this second source knew and the first did not were
+    read, matched to an existing row, and dropped on the floor.
+    """
+    improved: list[str] = []
+
+    # Recorded even when nothing else is: a second listing of the same job is a
+    # real second listing, and this array is how the overlay finds the row from
+    # whichever URL the user is looking at.
+    if new_url not in existing.source_urls:
+        existing.source_urls = existing.source_urls + [new_url]
+        improved.append("source_urls")
+
+    if data:
+        improved.extend(enrich_from(existing, data))
+    if merge_description(existing, new_description):
+        improved.append("description")
+    return improved

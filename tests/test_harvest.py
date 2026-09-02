@@ -793,3 +793,82 @@ class TestABoardThatRedirectsToAnotherHost:
         from app.services.browse_plan import board_for
 
         assert board_for("https://hiringcafe.example.org/") is None
+
+
+class TestASecondSourceFillsInTheGaps:
+    """
+    The point of collapsing cross-posts into one row is that the row ends up
+    knowing more than any single source did.
+
+    Before this, a harvested card that met a fetched job contributed its
+    description and its URL and nothing else: the employment type, the posting
+    date, the skills and the direct apply link it also carried were read,
+    matched to the row, and thrown away.
+    """
+
+    def card(self, **extra):
+        return [{
+            "title": "Senior Backend Engineer",
+            "company": "Acme Corp",
+            "location": "Boston, MA",
+            "url": "https://boards.greenhouse.io/acme/jobs/9",
+            **extra,
+        }]
+
+    def test_a_cross_post_s_employment_type_reaches_the_row(self, db):
+        make_job(db, description="short")
+        counts = harvest.save_harvested_jobs(
+            db, self.card(employment_type="contract"))
+        assert counts["merged"] == 1
+        assert db.query(Job).one().employment_type == "contract"
+
+    def test_a_cross_post_s_apply_link_reaches_the_row(self, db):
+        make_job(db, description="short")
+        harvest.save_harvested_jobs(
+            db, self.card(apply_url="https://acme.com/apply/9"))
+        assert db.query(Job).one().apply_url == "https://acme.com/apply/9"
+
+    def test_remote_is_gained_from_whichever_source_says_so(self, db):
+        make_job(db, description="short", is_remote=False)
+        harvest.save_harvested_jobs(db, self.card(is_remote=True))
+        assert db.query(Job).one().is_remote is True
+
+    def test_a_repeat_that_adds_nothing_is_not_reported_as_enriched(self, db):
+        # "Merged" is the number the harvest panel calls "enriched". Counting
+        # every sighting as one made a source look like it was contributing
+        # when it was repeating itself.
+        job = make_job(db, description="A long stored description. " * 20)
+        counts = harvest.save_harvested_jobs(db, self.card(url=job.url))
+        assert counts["merged"] == 0
+        assert counts["skipped"] == 1
+
+    def test_a_listing_at_a_new_address_counts_even_with_no_new_fields(self, db):
+        # The URL itself is the gain: `source_urls` is how the overlay finds
+        # this row from whichever posting the user happens to be looking at.
+        make_job(db, description="A long stored description. " * 20)
+        counts = harvest.save_harvested_jobs(db, self.card())
+        assert counts["merged"] == 1
+        assert "https://boards.greenhouse.io/acme/jobs/9" in (
+            db.query(Job).one().source_urls)
+
+    def test_the_same_posting_again_still_counts_a_fuller_description(self, db):
+        make_job(db, description="short")
+        counts = harvest.save_harvested_jobs(db, harvest.extract_jobs(VOYAGER))
+        assert counts["merged"] == 1
+
+    def test_an_edited_field_survives_a_cross_post(self, db):
+        job = make_job(db, description="short", employment_type="full_time")
+        job.manual_fields = ["employment_type"]
+        db.commit()
+        harvest.save_harvested_jobs(db, self.card(employment_type="internship"))
+        assert db.query(Job).one().employment_type == "full_time"
+
+    def test_a_new_row_keeps_what_the_card_stated(self, db):
+        # The insert path takes the same rule now. A card naming an employment
+        # type used to have it thrown away and re-derived from prose by an LLM.
+        harvest.save_harvested_jobs(
+            db, self.card(employment_type="part_time",
+                          required_skills=["python", "sql"]))
+        stored = db.query(Job).one()
+        assert stored.employment_type == "part_time"
+        assert stored.required_skills == ["python", "sql"]

@@ -24,7 +24,14 @@ def _make_profile_with_targets(db):
 
 def _std_job(*, title="SWE", company="ACME", location="NYC",
              url="https://ex.com/1", source_job_id="J1",
-             description="Build things.", source="adzuna") -> dict:
+             description="Build things.", source="adzuna", **extra) -> dict:
+    """
+    One adapter's take on a posting.
+
+    `**extra` is how a test says "this source stated something the last one
+    didn't" — a salary band, an employment type, a posting date — which is the
+    whole point of the sources being different.
+    """
     return {
         "source": source,
         "source_job_id": source_job_id,
@@ -35,6 +42,7 @@ def _std_job(*, title="SWE", company="ACME", location="NYC",
         "url": url,
         "description": description,
         "experience_level": "mid",
+        **extra,
     }
 
 
@@ -913,3 +921,81 @@ class TestFetchGroups:
         # The combined task stays for the manual trigger, but nothing schedules
         # it — that would run everything twice.
         assert "app.tasks.fetch.fetch_jobs" not in scheduled
+
+
+class TestTheSecondSourceContributesWhatTheFirstMissed:
+    """
+    Adzuna knows the title and rarely the pay; the employer's own board knows
+    the pay, the employment type and the day it went up. Which one the schedule
+    reached first decides nothing — the row should end up with both halves.
+    """
+
+    def cross_post(self, **extra):
+        return _std_job(url="https://indeed.com/x", source_job_id=None,
+                        source="indeed", **extra)
+
+    def first(self, db, **extra):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with _patch_adapters([_std_job(url="https://adzuna.com/x", **extra)]):
+            fetch_and_save_jobs(db)
+
+    def then(self, db, job):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        with _patch_adapters([job]):
+            return fetch_and_save_jobs(db)
+
+    def test_the_pay_the_first_source_did_not_state(self, db):
+        self.first(db)
+        result = self.then(db, self.cross_post(
+            salary_min=140000, salary_max=180000, salary_currency="USD"))
+        assert result["merged"] == 1
+        job = db.query(Job).one()
+        assert (job.salary_min, job.salary_max) == (140000, 180000)
+
+    def test_the_employment_type_the_first_source_did_not_state(self, db):
+        self.first(db)
+        self.then(db, self.cross_post(employment_type="contract"))
+        assert db.query(Job).one().employment_type == "contract"
+
+    def test_a_hand_cleared_salary_is_not_refilled(self, db):
+        # This was the one automatic writer in the codebase that did not
+        # consult `manual_fields`: a user who deleted a wrong salary by hand
+        # had it put back on the next cycle.
+        self.first(db, salary_min=90000)
+        job = db.query(Job).one()
+        job.salary_min = None
+        job.salary_max = None
+        job.manual_fields = ["salary_min"]
+        db.commit()
+        self.then(db, self.cross_post(salary_min=140000, salary_max=180000))
+        assert db.query(Job).one().salary_min is None
+
+    def test_a_repeat_of_a_job_we_already_know_everything_about(self, db):
+        # Same URL, same text, nothing stated that we did not already have:
+        # a skip, and not counted towards the cycle's "merged" total.
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        job = _std_job(url="https://ex.com/same", source_job_id="SAME")
+        with _patch_adapters([job]):
+            fetch_and_save_jobs(db)
+        with _patch_adapters([job]):
+            again = fetch_and_save_jobs(db)
+        assert again["merged"] == 0
+        assert again["skipped"] == 1
+
+    def test_a_refetch_carrying_new_pay_is_an_enrichment_not_a_skip(self, db):
+        # The same posting again is not automatically nothing: a board that
+        # added a salary band since last week is news, and reporting it as a
+        # skip hid every late-arriving field the pipeline ever gained.
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with _patch_adapters([_std_job(url="https://ex.com/pay",
+                                       source_job_id="PAY")]):
+            fetch_and_save_jobs(db)
+        with _patch_adapters([_std_job(url="https://ex.com/pay",
+                                       source_job_id="PAY",
+                                       salary_min=100000)]):
+            again = fetch_and_save_jobs(db)
+        assert again["merged"] == 1
+        assert db.query(Job).one().salary_min == 100000

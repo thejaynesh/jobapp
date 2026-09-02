@@ -8,7 +8,8 @@ from app.config import settings
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
 from app.services.deduplication import (
-    compute_dedupe_hash, find_existing_job, merge_or_skip, was_archived,
+    compute_dedupe_hash, enrich_from, find_existing_job, merge_description,
+    merge_or_skip, was_archived,
 )
 from app.services.descriptions import clean as clean_description
 
@@ -1121,27 +1122,45 @@ def fetch_and_save_jobs(
                 existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
 
                 if existing is not None:
-                    # A direct apply link is worth backfilling even on a job we're
-                    # otherwise skipping — it's what the user actually clicks.
-                    if apply_url and not existing.apply_url:
-                        existing.apply_url = apply_url
-                    # Same for stated pay: one source's listing carries it and
-                    # another's doesn't, and the one that does should win over
-                    # whichever happened to be fetched first.
-                    for field, value in _adapter_details(job_data).items():
-                        if getattr(existing, field, None) is None:
-                            setattr(existing, field, value)
-                    if url in existing.source_urls:
-                        counts["skipped"] += 1
-                        _tally(source, "skipped")
-                        continue
-                    if source_job_id and existing.source_job_id == source_job_id and existing.source == source:
-                        counts["skipped"] += 1
-                        _tally(source, "skipped")
-                        continue
-                    merge_or_skip(db, existing, url, description, layer=3)
-                    counts["merged"] += 1
-                    _tally(source, "merged")
+                    # What this sighting knows, in the shape the shared merge
+                    # reads. `posted_at` goes in already parsed: the merge
+                    # refuses to guess at a date string, because a mis-parsed
+                    # one silently ages a job out of the pipeline.
+                    sighting = {**job_data, **_adapter_details(job_data),
+                                "apply_url": apply_url, "posted_at": posted_at}
+
+                    # Worth taking even on a job we are otherwise skipping. The
+                    # pay this listing states and the last one didn't is the
+                    # same windfall whether the two are cross-posts or the same
+                    # posting fetched twice.
+                    #
+                    # This used to be an inline backfill that checked only for
+                    # null — and so was the one automatic writer in the codebase
+                    # that did not consult `manual_fields`. A user who cleared a
+                    # wrong salary by hand had it refilled on the next cycle.
+                    improved = enrich_from(existing, sighting)
+
+                    same_row = url in existing.source_urls or (
+                        source_job_id
+                        and existing.source_job_id == source_job_id
+                        and existing.source == source
+                    )
+                    if same_row:
+                        # The same posting again, not a cross-post: its URL is
+                        # already ours, so only the contents can be news.
+                        if merge_description(existing, description):
+                            improved.append("description")
+                    else:
+                        improved += merge_or_skip(db, existing, url, description,
+                                                  layer=3, data=sighting)
+
+                    # "Merged" means the row got better, not that it was
+                    # touched. It is the number the panel reports as "enriched",
+                    # and counting every cross-post as one made a source look
+                    # like it was contributing when it was repeating itself.
+                    outcome = "merged" if improved else "skipped"
+                    counts[outcome] += 1
+                    _tally(source, outcome)
                     continue
 
                 # Seen, judged and retired months ago. Without this check

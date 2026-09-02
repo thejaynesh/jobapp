@@ -33,8 +33,10 @@ from datetime import datetime, timezone
 from app.models.job import Job, JobStatus
 from app.services.deduplication import (
     compute_dedupe_hash,
+    enrich_from,
     was_archived,
     find_existing_job,
+    merge_description,
     merge_or_skip,
 )
 from app.services.descriptions import clean as clean_description
@@ -509,42 +511,11 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE) -> list[dict]:
     return list(found.values())
 
 
-def _apply_salary(job, data: dict) -> None:
-    """
-    Record a pay band the browser saw, without overwriting one we already have.
-
-    Never clobbers: the detail extractor reads pay out of the description with
-    a model that was told never to guess, and a harvested card is a summary of
-    the same posting. First stated figure wins, and a card that says nothing
-    leaves the column alone rather than blanking it.
-    """
-    from app.services.job_edits import is_manual
-
-    if data.get("salary_min") is None and data.get("salary_max") is None:
-        return
-    if job.salary_min is not None or job.salary_max is not None:
-        return
-    if is_manual(job, "salary_min") or is_manual(job, "salary_max"):
-        return
-    job.salary_min = data.get("salary_min")
-    job.salary_max = data.get("salary_max")
-    job.salary_currency = data.get("salary_currency")
-
-
-def _apply_apply_url(job, data: dict) -> None:
-    """
-    Fill in an apply URL a harvested card named, if the job has none.
-
-    Only fills a blank. A resolved apply URL is the end of a redirect chain we
-    followed once and would rather not follow again, and a hand-entered one is
-    the user's. Neither is improved by a card's guess at the same thing.
-    """
-    from app.services.job_edits import is_manual
-
-    found = (data.get("apply_url") or "").strip()
-    if not found or job.apply_url or is_manual(job, "apply_url"):
-        return
-    job.apply_url = found
+# The pay band and apply URL a harvested card carries used to be applied by two
+# private helpers here. They said the same thing as every other "take what we
+# are missing" rule in the codebase and drifted from them anyway — the fetcher's
+# version forgot to check `manual_fields` — so they now live in
+# `deduplication.enrich_from` with the rest, and this module calls that.
 
 
 def save_harvested_jobs(db, jobs: list[dict]) -> dict:
@@ -586,8 +557,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     db, source, url, source_job_id, dedupe_hash
                 )
                 if existing is not None:
-                    _apply_salary(existing, data)
-                    _apply_apply_url(existing, data)
+                    improved = enrich_from(existing, data)
                     # The harvested copy usually carries a fuller description than the
                     # guest API managed, which is the main reason this path exists.
                     if url in existing.source_urls or (
@@ -595,21 +565,15 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                         and existing.source_job_id == source_job_id
                         and existing.source == source
                     ):
-                        from app.services.job_edits import is_manual
+                        if merge_description(existing, description):
+                            improved.append("description")
+                    else:
+                        improved += merge_or_skip(db, existing, url, description,
+                                                  layer=3, data=data)
 
-                        old_length = len(existing.description or "")
-                        if is_manual(existing, "description"):
-                            counts["skipped"] += 1
-                        elif description and len(description) > old_length:
-                            existing.description = description
-                            from app.services.deduplication import note_description_growth
-                            note_description_growth(existing, old_length)
-                            counts["merged"] += 1
-                        else:
-                            counts["skipped"] += 1
-                        continue
-                    merge_or_skip(db, existing, url, description, layer=3)
-                    counts["merged"] += 1
+                    # Counted by whether the row got better, not by which branch
+                    # it went down. The panel calls this number "enriched".
+                    counts["merged" if improved else "skipped"] += 1
                     continue
 
                 # Already seen, judged and retired. Same reasoning as the
@@ -636,7 +600,12 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                     fetched_at=now,
                     dedupe_hash=dedupe_hash,
                 )
-                _apply_salary(job, data)
+                # The same rule a second sighting gets, on a row where every
+                # column it looks at is still null. It is strictly more than the
+                # pay band this used to take: a card naming an employment type
+                # or a posting date had both thrown away on insert and then
+                # re-derived from prose by an LLM call later.
+                enrich_from(job, data)
                 db.add(job)
                 db.flush()
                 counts["inserted"] += 1
