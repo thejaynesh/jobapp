@@ -295,7 +295,7 @@ surface to find.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/agent/hello` | Handshake: supported kinds, timings, queue depth |
-| `POST /api/agent/lease` | Claim work. `{kinds, agent_id, max, wait}` |
+| `POST /api/agent/lease` | Claim work. `{kinds, agent_id, max, wait}` → `{tasks, lease_seconds}` |
 | `POST /api/agent/tasks/<id>/result` | Success. `{result, agent_id}` |
 | `POST /api/agent/tasks/<id>/fail` | Failure. `{error, agent_id, permanent}` — `permanent` skips the retries |
 | `POST /api/agent/tasks/<id>/heartbeat` | Extend the lease on long-running work |
@@ -306,11 +306,27 @@ surface to find.
 
 A lease is exclusive and time-limited. If this browser closes mid-task the lease
 lapses and the task returns to the queue for whoever asks next — no attempt is
-counted against it, since a closed laptop is not a failed attempt.
+counted against it, since a closed laptop is not a failed attempt. (`lease`
+counts one on every claim including a recovery, so `reap` gives that one back;
+otherwise two lapsed leases would retire a task that had run once.)
+
+A batch of up to five is leased at a single instant and then worked through one
+task at a time, so the agent holds the leases open itself: while a batch is in
+progress it heartbeats every task still outstanding, every `lease_seconds / 3`.
+Without that, a deep board — a 75-second scroll budget plus loads, settles and a
+pacing gap — outran its own 120-second lease, and the later tasks in the batch
+were reaped and re-queued while this browser was still working on them.
 
 Failures are retried up to three times, except when the agent marks them
-`permanent`. It does that for a 4xx other than 429: a refused request will be
-refused again, and three identical rows bury whatever else failed that hour.
+`permanent`. It does that for a 4xx other than 408 and 429: a refused request
+will be refused again, and three identical rows bury whatever else failed that
+hour. A *timeout* is exactly the case worth retrying, which is why 408 is out.
+
+Reporting a success is separate from doing the work. If the visit succeeded and
+only the upload failed — the server restarted, the proxy answered 502, the wifi
+dropped — nothing is reported at all: the lease lapses, the task comes back to
+the queue, and no attempt is charged for a network we do not control. Posting a
+`/fail` there used to burn an attempt for work that had been done correctly.
 
 ## Adding a task kind
 

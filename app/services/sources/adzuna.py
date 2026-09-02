@@ -64,14 +64,14 @@ def fetch(
     jobs = []
     for item in items:
         job_url = item.get("redirect_url", "")
-        loc = item.get("location", {}).get("display_name", "")
+        loc = (item.get("location") or {}).get("display_name", "")
         title = item.get("title", "")
         desc = item.get("description", "")
         jobs.append({
             "source": "adzuna",
             "source_job_id": str(item.get("id", "")),
             "title": title,
-            "company": item.get("company", {}).get("display_name", ""),
+            "company": (item.get("company") or {}).get("display_name", ""),
             "location": loc,
             "is_remote": "remote" in loc.lower() or "remote" in title.lower(),
             "url": job_url,

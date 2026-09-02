@@ -32,7 +32,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 continue
             title = item.get("text", "")
             desc = item.get("descriptionPlain", "")
-            loc = item.get("categories", {}).get("location", "")
+            loc = (item.get("categories") or {}).get("location", "")
             jobs.append({
                 "source": "lever",
                 "source_job_id": item.get("id"),

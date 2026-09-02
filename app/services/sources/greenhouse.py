@@ -41,7 +41,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                     pass
             title = item.get("title", "")
             desc = item.get("content", "")
-            loc = item.get("location", {}).get("name", "")
+            loc = (item.get("location") or {}).get("name", "")
             jobs.append({
                 "source": "greenhouse",
                 "source_job_id": str(item.get("id", "")),

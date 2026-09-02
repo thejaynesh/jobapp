@@ -146,7 +146,12 @@
       }
       return;
     }
-    tally.shape_no += 1;
+    // Only when the URL passed and the *shape* was what failed. The two
+    // counters are meant to be different diagnoses — "our URL guess does not
+    // name this board's API" and "this payload has no job in it" — and
+    // counting a URL rejection in both made the second unreadable: every
+    // telemetry response on the page landed in it too.
+    if (named) tally.shape_no += 1;
 
     // A near miss, kept as evidence rather than dropped — and deliberately
     // *not* behind the URL filter above.

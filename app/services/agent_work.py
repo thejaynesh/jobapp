@@ -389,7 +389,8 @@ def _ingest_resolve_link(db, task: BrowserTask) -> None:
     db.commit()
 
 
-def _learn_to_crawl(db, url: str, result: dict, pages_done: int) -> None:
+def _learn_to_crawl(db, url: str, result: dict, pages_done: int,
+                    reached_the_board: bool = True) -> None:
     """
     Keep what the page offered when a visit got nowhere, and grade the recipe.
 
@@ -400,6 +401,14 @@ def _learn_to_crawl(db, url: str, result: dict, pages_done: int) -> None:
     keeps landing on page one withdraws itself rather than quietly under-
     crawling the board forever.
 
+    `reached_the_board` is the other half of that sentence: only a visit can
+    grade a recipe, and a visit that rendered a sign-in wall or a Cloudflare
+    check is not one. It reports zero pages and zero batches through no fault of
+    the recipe, and three of them in a row retired a correct, hard-won recipe
+    with "retired after 3 visits that got nowhere" — so a session expiring on a
+    Friday cost the board's crawl on Monday. Nothing is learned from such a
+    visit either: the markup it offers is the login form's.
+
     Never raises. This is a side effect of recording a visit, and a board whose
     navigation we cannot describe should cost the description rather than the
     record of the visit.
@@ -407,6 +416,9 @@ def _learn_to_crawl(db, url: str, result: dict, pages_done: int) -> None:
     from app.services import crawl_recipes
 
     from app.services.agent_events import host_of
+
+    if not reached_the_board:
+        return
 
     host = (host_of(url) or "").lower()
     if not host:
@@ -511,7 +523,8 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
 
     from app.services import browse_plan
 
-    _learn_to_crawl(db, payload.get("url") or "", result, pages_done)
+    _learn_to_crawl(db, payload.get("url") or "", result, pages_done,
+                    reached_the_board=bool(signed_in) and not blocked)
 
     asked_pages = browse_plan._max_pages(payload.get("url") or "", db)
     if asked_pages > 1 and pages_done <= 1 and not rate_limited:

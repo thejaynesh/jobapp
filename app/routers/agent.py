@@ -110,6 +110,12 @@ async def lease(request: Request, db: Session = Depends(get_db)):
     Returns `{"tasks": []}` on timeout rather than an error — an empty queue is
     the normal case, not a problem, and an agent should not have to distinguish
     "nothing to do" from "something went wrong" by reading a status code.
+
+    `lease_seconds` rides along with the work, so an agent can pace its
+    heartbeats off the server's actual setting rather than a number copied into
+    its own source. A batch is leased at one instant and worked through one task
+    at a time, so the agent has to hold the leases open itself; it can only do
+    that if it knows how long it has.
     """
     body = await _json_body(request)
     kinds = [str(k) for k in (body.get("kinds") or []) if str(k).strip()]
@@ -153,9 +159,9 @@ async def lease(request: Request, db: Session = Depends(get_db)):
             logger.info(
                 "agent: leased %d task(s) to %s", len(tasks), agent_id or "anonymous"
             )
-            return {"tasks": tasks}
+            return {"tasks": tasks, "lease_seconds": browser_tasks._lease_seconds()}
         if time.monotonic() >= deadline:
-            return {"tasks": []}
+            return {"tasks": [], "lease_seconds": browser_tasks._lease_seconds()}
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 

@@ -199,20 +199,28 @@ def find_duplicate_application_job(db: Session, job) -> Job | None:
 
     from app.models.application import Application
 
+    # Three columns, not whole rows. This runs once per matched job and the
+    # candidate set is every job ever applied to, so hydrating full ORM objects
+    # meant loading each one's description — and, through the selectin
+    # relationship, its scores — to read a company and a title off it. That is
+    # the pipeline's own backlog on the read side of a scoring pass, growing for
+    # as long as the user keeps applying to things. The match is re-fetched
+    # below, which is one row.
     rows = (
-        db.query(Job)
+        db.query(Job.id, Job.company, Job.title)
         .join(Application, Application.job_id == Job.id)
         .filter(Job.id != job.id)
+        .distinct()
         .all()
     )
-    for candidate in rows:
-        if normalize_company(candidate.company or "") != norm_company:
+    for candidate_id, company, title in rows:
+        if normalize_company(company or "") != norm_company:
             continue
-        cand_title = normalize_title(candidate.title or "")
+        cand_title = normalize_title(title or "")
         if cand_title == norm_title or SequenceMatcher(
             None, norm_title, cand_title
         ).ratio() >= TITLE_SIMILARITY_THRESHOLD:
-            return candidate
+            return db.get(Job, candidate_id)
     return None
 
 

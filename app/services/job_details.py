@@ -224,16 +224,48 @@ def apply(job, details: dict) -> None:
     """
     Write extracted details onto the job, stamping when it was read.
 
+    Two rules, both about not destroying something better than what we have.
+
     Fields the user set by hand are skipped. A salary band read out of prose by
     a model is a good guess; a figure a person typed after reading the posting
     is not a guess at all, and this ran on every description change — so
     without the check one enrichment pass would quietly undo the correction.
+
+    And a null never overwrites. The prompt's central rule is "null when the
+    posting does not say", so a null here means *this description* is silent —
+    which is not evidence that the stored value is wrong. Adapters supply pay
+    and employment type as their own fields, out of band from the description:
+    USAJOBS states a grade-based band, every `base.jobs_from_listing` board
+    (iCIMS, Teamtailor, Jobvite) carries one in the listing JSON, hiring.cafe
+    ships a whole structured block. The description then routinely does not
+    restate any of it, and writing the null back deleted a figure the employer
+    published. A later read on a fuller description may still *correct* a value
+    — that is a non-null and it wins.
+
+    Pay moves as a band, the same rule the cross-source merge follows: a
+    minimum from a model and a maximum from an adapter is a range nobody ever
+    stated, and the salary floor filter would then drop jobs on it.
     """
     from app.services.job_edits import is_manual
 
-    for field, value in details.items():
+    def write(field, value):
         if hasattr(job, field) and not is_manual(job, field):
             setattr(job, field, value)
+
+    if details.get("salary_min") is not None or details.get("salary_max") is not None:
+        write("salary_min", details.get("salary_min"))
+        write("salary_max", details.get("salary_max"))
+        write("salary_currency", details.get("salary_currency"))
+
+    for field, value in details.items():
+        if field in ("salary_min", "salary_max", "salary_currency"):
+            continue
+        # `[]` is the list columns' spelling of "the posting does not say", and
+        # gets the same treatment as a null for the same reason.
+        if value is None or value == []:
+            continue
+        write(field, value)
+
     job.details_extracted_at = datetime.now(timezone.utc)
 
 

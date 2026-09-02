@@ -1582,3 +1582,62 @@ class TestLinkedInPostingDates:
         from app.services.sources import linkedin
         linkedin._cache_description("42", "text", "2026-05-01")
         assert linkedin._fetch_description("42", {}) == ("text", "2026-05-01")
+
+
+# ---------------------------------------------------------------------------
+# A JSON null where a nested object was expected
+# ---------------------------------------------------------------------------
+
+class TestABoardThatSendsNullWhereAnObjectGoes:
+    """
+    `item.get("location", {})` returns the default only when the key is
+    *absent*. A board that ships `"location": null` — which every one of these
+    APIs does for a posting with no location on it — hands back None, and the
+    `.get("name")` behind it raises AttributeError.
+
+    The fetch loop catches that per job, so the posting is silently dropped:
+    not stale, not a duplicate, just gone, on a board that is otherwise
+    working. Under "find every job" that is the expensive kind of bug, because
+    the numbers still look fine.
+    """
+
+    def test_greenhouse_keeps_a_posting_with_no_location_object(self):
+        from app.services.sources.greenhouse import fetch
+
+        resp = MagicMock(raise_for_status=MagicMock())
+        resp.json.return_value = {"jobs": [{
+            "id": 4001, "title": "Software Engineer", "location": None,
+            "absolute_url": "https://boards.greenhouse.io/stripe/jobs/4001",
+            "content": "Build APIs.",
+        }]}
+        with patch("httpx.get", return_value=resp):
+            results = fetch(company_slugs=["stripe"])
+
+        assert [job["location"] for job in results] == [""]
+
+    def test_lever_keeps_a_posting_with_no_categories(self):
+        from app.services.sources.lever import fetch
+
+        raw = [{"id": "u1", "text": "ML Engineer", "categories": None,
+                "hostedUrl": "https://jobs.lever.co/openai/u1",
+                "descriptionPlain": "Build ML systems."}]
+        with patch("httpx.get", return_value=MagicMock(
+            json=lambda: raw, raise_for_status=MagicMock()
+        )):
+            results = fetch(company_slugs=["openai"])
+
+        assert [job["location"] for job in results] == [""]
+
+    def test_adzuna_keeps_a_posting_with_neither_company_nor_location(self):
+        from app.services.sources.adzuna import fetch
+
+        resp = MagicMock(raise_for_status=MagicMock())
+        resp.json.return_value = {"results": [{
+            "id": "AZ1", "title": "Python Engineer", "company": None,
+            "location": None, "redirect_url": "https://adzuna.com/jobs/AZ1",
+            "description": "Build things.",
+        }]}
+        with patch("httpx.get", return_value=resp):
+            results = fetch(app_id="ID", app_key="KEY", query="Python", location="NY")
+
+        assert [(job["company"], job["location"]) for job in results] == [("", "")]

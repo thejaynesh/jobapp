@@ -119,6 +119,29 @@ class TestLease:
     def test_a_missing_body_is_tolerated(self, agent):
         assert agent.post("/api/agent/lease", headers=auth_header()).status_code == 200
 
+    def test_the_lease_says_how_long_it_lasts(self, agent, db, monkeypatch):
+        """
+        A batch is leased at one instant and worked through one task at a time,
+        so the agent has to hold the later leases open itself. It can only pace
+        those heartbeats correctly if the server says how long a lease is,
+        rather than the extension carrying a copy of the number that drifts the
+        first time the setting is changed.
+        """
+        monkeypatch.setattr(settings, "AGENT_LEASE_SECONDS", 90)
+        browser_tasks.enqueue(db, "ping")
+        body = agent.post(
+            "/api/agent/lease", json={"agent_id": "ext-1"}, headers=auth_header()
+        ).json()
+        assert body["lease_seconds"] == 90
+
+    def test_an_empty_queue_says_so_too(self, agent, monkeypatch):
+        # The agent caches nothing between polls, so a poll that found no work
+        # still has to be able to answer the question next time.
+        monkeypatch.setattr(settings, "AGENT_LEASE_SECONDS", 90)
+        body = agent.post("/api/agent/lease", json={}, headers=auth_header()).json()
+        assert body["tasks"] == []
+        assert body["lease_seconds"] == 90
+
     def test_wait_is_capped_by_the_server(self, agent, monkeypatch):
         # A client asking to wait an hour would otherwise tie up a worker for
         # one; the server's ceiling wins.

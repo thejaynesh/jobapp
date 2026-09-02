@@ -457,7 +457,7 @@ def _stated_facts(job) -> str:
 def _build_match_prompt(job, profile_data: dict) -> list[dict[str, str]]:
     personal = profile_data.get("personal") or {}
     name = personal.get("name") or profile_data.get("name") or "Candidate"
-    summary = profile_data.get("narrative", {}).get("summary", "")
+    summary = (profile_data.get("narrative") or {}).get("summary", "")
     skills_flat = _flatten_skills(profile_data.get("skills", {}))
     roles = profile_data.get("target_roles", [])
     experience = profile_data.get("experience", [])
@@ -1098,7 +1098,8 @@ def count_unmatched(db) -> int:
     return db.query(Job).filter(Job.status == JobStatus.new).count()
 
 
-def match_all_new_jobs(db, limit: int | None = None, on_matched=None) -> dict[str, int]:
+def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
+                       budget: dict | None = None) -> dict[str, int]:
     """
     Score jobs still sitting at `new`.
 
@@ -1137,7 +1138,17 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None) -> dict[st
     # One shared budget for the whole cycle: paid failover calls
     # (see _score_via_fallbacks) and second-opinion calls (see _deep_score),
     # counted separately because they are spent for different reasons.
-    budget = {"paid_calls": 0, "deep_calls": 0}
+    #
+    # "The cycle" is the chain of batches, not this pass — a batch is 25 jobs
+    # and the caps are 150 and 100, so a per-pass dict could never reach either
+    # of them and both ceilings were unreachable by arithmetic. It is carried
+    # between batches in `match_budget`; a caller that passes its own dict (the
+    # tests, and anything scoring outside the chain) keeps it to itself.
+    from app.services import match_budget
+
+    shared = budget is None
+    if shared:
+        budget = match_budget.load()
 
     for job in new_jobs:
         try:
@@ -1166,6 +1177,9 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None) -> dict[st
             logger.error("match_all_new_jobs error on job %s: %s", getattr(job, "id", "?"), exc)
             db.rollback()
             errors += 1
+
+    if shared:
+        match_budget.save(budget)
 
     remaining = count_unmatched(db)
     logger.info(

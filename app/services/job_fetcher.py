@@ -839,7 +839,7 @@ def fetch_and_save_jobs(
     if only is None:
         only = group_sources(group)
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0,
-              "sources": {}, "group": group or "all"}
+              "dropped": 0, "sources": {}, "group": group or "all"}
 
     profile = db.query(Profile).first()
     if not profile:
@@ -1087,7 +1087,7 @@ def fetch_and_save_jobs(
 
     def _tally(source: str, outcome: str) -> None:
         entry = per_source.setdefault(
-            source, {"inserted": 0, "merged": 0, "skipped": 0, "stale": 0}
+            source, {"inserted": 0, "merged": 0, "skipped": 0, "stale": 0, "dropped": 0}
         )
         entry[outcome] += 1
 
@@ -1203,7 +1203,19 @@ def fetch_and_save_jobs(
                 _tally(source, "inserted")
 
         except Exception as exc:
-            logger.error("job_fetcher: error processing job: %s", exc)
+            # A job that fell out here is a job we fetched and then lost, and
+            # the four outcome counters above all sum to less than `fetched`
+            # without it — so the cycle reported "230 fetched, 229 accounted
+            # for" and nobody could say which one went missing or why. Name the
+            # posting, and count it, so a source that has started emitting rows
+            # we cannot store shows up as a number instead of a discrepancy.
+            counts["dropped"] += 1
+            _tally(job_data.get("source", "") or "unknown", "dropped")
+            logger.error(
+                "job_fetcher: dropped a job from %s — %s at %s (%s): %s",
+                job_data.get("source") or "?", job_data.get("title") or "?",
+                job_data.get("company") or "?", job_data.get("url") or "?", exc,
+            )
 
     # Now, with the job loop finished and the commit one line away. Re-read
     # first: this cycle has been running for minutes and the agent poll, the
@@ -1285,9 +1297,10 @@ def _log_run_summary(counts: dict, source_stats: dict, per_source: dict,
 
     elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
     logger.info(
-        "=== fetch cycle done in %.1fs — fetched=%d new=%d merged=%d dup=%d stale=%d ===",
+        "=== fetch cycle done in %.1fs — fetched=%d new=%d merged=%d dup=%d "
+        "stale=%d dropped=%d ===",
         elapsed, counts["fetched"], counts["inserted"], counts["merged"],
-        counts["skipped"], counts["stale"],
+        counts["skipped"], counts["stale"], counts.get("dropped", 0),
     )
     logger.info("  %-16s %-9s %7s %6s %7s  %s",
                 "SOURCE", "STATUS", "FETCHED", "NEW", "DUP", "REASON")

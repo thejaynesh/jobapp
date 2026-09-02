@@ -810,3 +810,147 @@ class TestTheGreenhouseBoardHarvestHandoff:
             description=None,
         )
         assert enrichment.looks_like_ats(enrichment._target_url(job))
+
+
+class TestThePageStatedMoreThanTheDescription:
+    """
+    Both extraction methods read salary and employment type on the way past —
+    `_details_from_ld` out of the schema.org JobPosting block, the LLM out of
+    its own reply — and the writer used to read `location` out of that dict and
+    drop everything else. A board publishing a structured band arrived with the
+    band parsed, validated, and thrown away, on a job the salary filter was
+    about to decide.
+    """
+
+    def _found(self, **details):
+        return enrichment.Extraction(description=LONG, method="ats_api", details=details)
+
+    def test_a_band_from_the_json_ld_block_reaches_the_column(self, db):
+        job = _job(description="stub")
+        db.add(job)
+        db.commit()
+
+        outcome = enrichment.apply_extraction(db, job, self._found(
+            salary_min=120000, salary_max=160000, salary_currency="usd",
+        ))
+
+        assert (job.salary_min, job.salary_max) == (120000.0, 160000.0)
+        assert job.salary_currency == "USD"
+        assert "salary" in outcome["filled"]
+
+    def test_schema_org_employment_vocabulary_is_translated(self, db):
+        # The block says FULL_TIME; the column stores full_time, and a raw
+        # write would have put a value no filter recognises into it.
+        job = _job(description="stub")
+        db.add(job)
+        db.commit()
+
+        enrichment.apply_extraction(db, job, self._found(employment_type="FULL_TIME"))
+
+        assert job.employment_type == "full_time"
+
+    def test_what_the_job_already_knew_is_not_overwritten(self, db):
+        job = _job(description="stub", salary_min=200000.0, salary_max=250000.0)
+        db.add(job)
+        db.commit()
+
+        enrichment.apply_extraction(db, job, self._found(salary_min=120000))
+
+        assert (job.salary_min, job.salary_max) == (200000.0, 250000.0)
+
+    def test_a_hand_typed_figure_outranks_the_page(self, db):
+        job = _job(description="stub", manual_fields=["salary_min", "salary_max"])
+        db.add(job)
+        db.commit()
+
+        enrichment.apply_extraction(db, job, self._found(salary_min=120000))
+
+        assert job.salary_min is None
+
+    def test_details_are_only_taken_when_the_description_was_worth_storing(self, db):
+        # The early returns above this all mean "nothing about this page was
+        # better than what we hold"; that has to include its details.
+        job = _job(description=LONG, salary_min=None)
+        db.add(job)
+        db.commit()
+
+        enrichment.apply_extraction(
+            db, job,
+            enrichment.Extraction(description="Short.", method="llm",
+                                  details={"salary_min": 120000}),
+        )
+
+        assert job.salary_min is None
+
+
+class TestALearnedLocationKeepsTheHashHonest:
+    """
+    The dedupe hash is sha256 of the normalized company, title and location, and
+    every "have we seen this posting?" asks by it. Filling in a location the
+    ingest path never had left the stored hash computed from a blank one, so the
+    next sighting — which now does carry the location — hashed differently,
+    missed, and was stored a second time.
+    """
+
+    def test_the_hash_follows_the_location_that_was_just_learned(self, db):
+        from app.services.deduplication import compute_dedupe_hash
+
+        job = _job(description="stub", location="")
+        job.dedupe_hash = compute_dedupe_hash(job.company, job.title, "")
+        db.add(job)
+        db.commit()
+
+        enrichment.apply_extraction(
+            db, job,
+            enrichment.Extraction(description=LONG, method="ats_api",
+                                  details={"location": "Boston, MA"}),
+        )
+
+        assert job.location == "Boston, MA"
+        assert job.dedupe_hash == compute_dedupe_hash("Acme", "Backend Engineer",
+                                                      "Boston, MA")
+
+    def test_a_location_that_collides_leaves_both_rows_standing(self, db):
+        """
+        The recomputed hash being taken means these two rows are the same job
+        under different addresses. That is a merge, and doing it mid-enrichment
+        is the wrong place for it — so the location is kept and the old hash
+        left alone. A duplicate is the right way round under "find every job";
+        a unique-constraint failure would roll back the whole pass.
+        """
+        from app.services.deduplication import compute_dedupe_hash
+
+        taken = compute_dedupe_hash("Acme", "Backend Engineer", "Boston, MA")
+        sibling = _job(url="https://example.com/other",
+                       source_urls=["https://example.com/other"],
+                       location="Boston, MA", description=LONG)
+        sibling.dedupe_hash = taken
+        job = _job(description="stub", location="")
+        job.dedupe_hash = compute_dedupe_hash("Acme", "Backend Engineer", "")
+        db.add_all([sibling, job])
+        db.commit()
+
+        enrichment.apply_extraction(
+            db, job,
+            enrichment.Extraction(description=LONG, method="ats_api",
+                                  details={"location": "Boston, MA"}),
+        )
+        db.commit()
+
+        assert job.location == "Boston, MA"
+        assert job.dedupe_hash != taken
+
+    def test_a_job_that_already_had_a_location_is_left_entirely_alone(self, db):
+        job = _job(description="stub", location="Remote")
+        before = job.dedupe_hash
+        db.add(job)
+        db.commit()
+
+        enrichment.apply_extraction(
+            db, job,
+            enrichment.Extraction(description=LONG, method="ats_api",
+                                  details={"location": "Boston, MA"}),
+        )
+
+        assert job.location == "Remote"
+        assert job.dedupe_hash == before

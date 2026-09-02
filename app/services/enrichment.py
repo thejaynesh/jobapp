@@ -653,6 +653,43 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
 # Writing what we found
 # ---------------------------------------------------------------------------
 
+def _rehash(db, job: Job) -> None:
+    """
+    Keep the dedupe hash agreeing with the location we just learned.
+
+    The hash is sha256 of the normalized company, title and location, and
+    everything that asks "have we seen this posting?" asks by that hash. Filling
+    in a location the ingest path never had leaves the stored hash computed from
+    a blank one, so the next sighting of the same job — which now *does* carry
+    the location — hashes differently, misses, and is stored a second time.
+
+    The one thing that can go wrong is that the recomputed hash is already
+    taken, which means this posting and that one are the same job under a
+    different address. That is a merge, not a rename, and doing it here in the
+    middle of an enrichment pass is the wrong place for it: the location is
+    still worth keeping, so it is written and the old hash left standing. The
+    row is then a duplicate rather than a lost job, which is the right way round
+    under "find every job", and the next hash-recompute migration folds it.
+    """
+    from sqlalchemy import select
+
+    from app.services.deduplication import compute_dedupe_hash
+
+    fresh = compute_dedupe_hash(job.company or "", job.title or "", job.location or "")
+    if fresh == job.dedupe_hash:
+        return
+    taken = db.execute(
+        select(Job.id).where(Job.dedupe_hash == fresh, Job.id != job.id).limit(1)
+    ).first()
+    if taken:
+        logger.info(
+            "enrichment: job %s learned a location that collides with job %s; "
+            "keeping both and leaving the hash alone", job.id, taken[0],
+        )
+        return
+    job.dedupe_hash = fresh
+
+
 def apply_extraction(db, job: Job, found: Extraction) -> dict:
     """
     Store a better description, and let the job be judged again.
@@ -663,7 +700,7 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     """
     from app.services.job_edits import is_manual
 
-    outcome = {"improved": False, "chars_gained": 0, "requeued": False}
+    outcome = {"improved": False, "chars_gained": 0, "requeued": False, "filled": []}
     if not found or not found.description:
         return outcome
 
@@ -688,9 +725,26 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
         if parsed:
             job.posted_at = parsed
 
-    location = (found.details or {}).get("location")
+    # Everything else the page stated. Both extraction methods read salary and
+    # employment type — `_details_from_ld` out of the JobPosting block, the LLM
+    # out of its own reply — and this used to read `location` and drop the
+    # rest, so a page whose schema.org block published a band arrived with the
+    # band parsed, validated and thrown away. Normalised through the same
+    # function the description extractor uses, because these are the same
+    # columns and a raw "FULL_TIME" is not the vocabulary they store; merged
+    # through `enrich_from`, because filling only what is missing and never
+    # over a manual edit is one rule that belongs in one place.
+    details = found.details or {}
+    if details:
+        from app.services.deduplication import enrich_from
+        from app.services.job_details import normalize
+
+        outcome["filled"] = enrich_from(job, normalize(details))
+
+    location = details.get("location")
     if location and not (job.location or "").strip() and not is_manual(job, "location"):
         job.location = str(location)[:255]
+        _rehash(db, job)
 
     if _worth_rescoring(job):
         job.status = JobStatus.new

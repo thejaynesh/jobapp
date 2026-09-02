@@ -407,6 +407,18 @@ class TestWhichPostingsItOpens:
             "https://www.linkedin.com/jobs/view/slug-name"
         ]
 
+    def test_a_posting_on_a_boards_other_host_is_opened_too(self, db):
+        """
+        hiring.cafe serves its payloads — and so stores its postings — under
+        `hiringcafe.com`, which is the entire reason `alt_hosts` exists. The
+        filter matched only each board's canonical host, so every posting that
+        board contributed was invisible to the queue whose whole job is to go
+        and fetch its description.
+        """
+        make_job(db, source="hiringcafe_harvest", source_job_id="hc1",
+                 url="https://hiringcafe.com/job/hc1", description="thin")
+        assert browse_plan.posting_urls(db) == ["https://hiringcafe.com/job/hc1"]
+
     def test_two_jobs_sharing_a_posting_are_one_page(self, db):
         make_job(db, source_job_id="4012345678", description="thin")
         make_job(db, source_job_id="4012345678", description="thin",

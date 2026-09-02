@@ -107,7 +107,7 @@ def _description(descriptor: dict) -> str:
     The summary alone is a paragraph of framing; the duties are what the skill
     filter and the matcher are actually reading for.
     """
-    details = descriptor.get("UserArea", {}).get("Details", {})
+    details = (descriptor.get("UserArea") or {}).get("Details") or {}
     parts = [
         descriptor.get("QualificationSummary") or "",
         details.get("JobSummary") or "",

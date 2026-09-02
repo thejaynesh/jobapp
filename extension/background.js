@@ -12,6 +12,11 @@
  *      the poll ceiling stays under that timeout so a request never outlives
  *      the worker that is waiting on it. An in-flight fetch counts as activity,
  *      which is why a 25-second long poll survives and a 45-second one dies.
+ *      A bare timer counts as nothing, so every wait longer than a moment goes
+ *      through `sleep`, which serves it in chunks with a `chrome.*` call
+ *      between them. The settle and the between-page gap are both configurable
+ *      well past 30 seconds, and without that they killed the worker after the
+ *      page had been visited and before its result was posted.
  *
  *   2. chrome.alarms is the only way to be woken reliably, and its floor is one
  *      minute. So the worst case for an idle queue is: work is enqueued, and up
@@ -169,6 +174,45 @@ function clampSeconds(value, fallback, low, high) {
   return Math.max(low, Math.min(high, Math.round(seconds)));
 }
 
+// Comfortably inside the worker's ~30-second idle timeout, with room for a
+// scheduling hiccup.
+const KEEPALIVE_TICK_MS = 20000;
+
+/**
+ * Wait, without the worker being terminated while we do.
+ *
+ * An in-flight `fetch` or `chrome.*` call keeps an MV3 service worker alive; a
+ * bare timer does not. Thirty seconds of one is exactly what the browser reads
+ * as an idle worker, and the file header's promise that every ceiling here
+ * stays under that timeout was not true of three paths. The pacing gap between
+ * browses is clamped to 300 seconds, and the settle to 60 — so setting
+ * `BROWSE_GAP_SECONDS=45`, an entirely reasonable "be gentler with LinkedIn",
+ * killed the worker after each page was visited but before its result was
+ * posted. The visit happened, the server never heard about it, and the page was
+ * opened again on the requeue.
+ *
+ * So the wait is served in chunks, with an extension API call between them.
+ * Calling into `chrome.*` resets the idle timer, which turns an arbitrarily
+ * long pause into a sequence of short ones the worker survives.
+ */
+async function sleep(ms) {
+  let remaining = Math.max(0, Number(ms) || 0);
+  while (remaining > 0) {
+    const chunk = Math.min(remaining, KEEPALIVE_TICK_MS);
+    await new Promise((resolve) => setTimeout(resolve, chunk));
+    remaining -= chunk;
+    if (remaining > 0) {
+      // Cheap, synchronous on the browser side, and enough to count as
+      // activity. Guarded because a worker being torn down anyway will throw.
+      try {
+        await chrome.runtime.getPlatformInfo();
+      } catch (_) {
+        /* nothing to do: the wait continues either way */
+      }
+    }
+  }
+}
+
 /**
  * Open a page and leave it open long enough to be read.
  *
@@ -280,7 +324,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
       // Half the settle before scrolling, half after: the first lets the
       // posting body land, the second lets whatever the scroll asked for come
       // back before the tab is taken away.
-      await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+      await sleep(Math.round(settleMs / 2));
 
       // Before the scroll, not after: scrolling an interstitial finds nothing
       // and reports a shallow crawl, which reads as a broken scroll rather
@@ -296,7 +340,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
           // The real page is only arriving now, so it gets the settle the
           // first one was given.
           await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS).catch(() => {});
-          await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+          await sleep(Math.round(settleMs / 2));
         }
       }
 
@@ -308,7 +352,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
       if (submitSearch) {
         searched = await submitSearchIn(tabId);
         // The results are a fetch away, so the same settle the first page got.
-        await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+        await sleep(Math.round(settleMs / 2));
       }
 
       let signed_in = true;
@@ -682,7 +726,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
         // matters — the interceptor runs whether or not this could look.
       }
 
-      await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
+      await sleep(Math.round(settleMs / 2));
 
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       return {
@@ -805,7 +849,7 @@ async function awaitChallenge(tabId, budgetMs) {
     if (seen.challenge) return seen;        // found it
     if (!seen.thin) return seen;            // a real page; it will not become one
     if (Date.now() >= deadline) return seen;
-    await new Promise((r) => setTimeout(r, 700));
+    await sleep(700);
     seen = await challengeShowing(tabId);
   }
 }
@@ -855,7 +899,7 @@ async function waitForHuman(win, tabId, url) {
 
   const deadline = Date.now() + challengeWaitMs();
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, CHALLENGE_POLL_MS));
+    await sleep(CHALLENGE_POLL_MS);
     const seen = await challengeShowing(tabId);
     // Null means the page stopped being readable — usually the challenge
     // redirecting onward, which is what passing it looks like.
@@ -894,7 +938,7 @@ async function openInTab(url) {
 
     try {
       await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS);
-      await new Promise((r) => setTimeout(r, TAB_SETTLE_MS));
+      await sleep(TAB_SETTLE_MS);
 
       // The path this matters most on. A Jooble `away` link is a redirect to
       // the employer, and the check sits in front of the redirect — so being
@@ -909,7 +953,7 @@ async function openInTab(url) {
         challenge = await waitForHuman(win, tabId, url);
         if (challenge === "passed") {
           await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS).catch(() => {});
-          await new Promise((r) => setTimeout(r, TAB_SETTLE_MS));
+          await sleep(TAB_SETTLE_MS);
         }
       }
 
@@ -1128,7 +1172,7 @@ const HANDLERS = {
     // Held inside the tab lock's queue by awaiting here: the next browse task
     // cannot open its window until this pause is over, which is what makes the
     // gap a real rhythm rather than a number in a payload.
-    await new Promise((resolve) => setTimeout(resolve, gapMs));
+    await sleep(gapMs);
 
     return {
       final_url: visited.final_url,
@@ -1384,6 +1428,67 @@ async function runTask(task) {
   return await handler(task.payload);
 }
 
+/**
+ * Hold a batch's leases open while we work through it.
+ *
+ * The server leases up to five tasks at one instant and gives each the same
+ * expiry, but they are run strictly one after another — `visitInTab` is
+ * serialized behind a tab lock, and a browse adds a pacing gap on top. A single
+ * deep board can spend longer than the whole lease on its own, so tasks two
+ * through five were routinely reported minutes after their leases had lapsed.
+ *
+ * What that cost was not theoretical. A lapsed lease is reaped and requeued, so
+ * a second engine polling the same server re-opens pages this one is still
+ * sitting on; and when the first finally reports, the server sees the task held
+ * by somebody else, refuses the report, and the visit that actually happened is
+ * thrown away.
+ *
+ * The interval comes from the server's own `lease_seconds` rather than a number
+ * copied into this file, and each beat is deliberately quiet: a heartbeat that
+ * fails is a task that has already been taken away, and there is nothing this
+ * side can do about it that reporting the result will not do better.
+ */
+/**
+ * Tell the server a task could not be run. Never throws.
+ *
+ * This lives outside the batch loop's own try because it used to sit inside the
+ * catch block with nothing around it. Every refusal the server can give —
+ * "that lease is not yours any more", "that task is already done", or a plain
+ * network blip — arrives as a rejected promise, and from inside a catch it
+ * escaped the whole for-loop: the rest of the leased batch was never run and
+ * never reported, the status counters never updated, and the immediate re-poll
+ * that drains the queue never fired. One task's report failing stopped four
+ * other pages from ever being visited.
+ */
+async function reportFailure(task, error, agent) {
+  // Only this side knows whether a retry could ever help, so a refusal is
+  // flagged as final. A 403 will be a 403 again, and three identical rows bury
+  // whatever else failed that hour. 408 is deliberately excluded: a request
+  // timeout is the definition of worth retrying.
+  const message = String(error && error.message ? error.message : error);
+  try {
+    await api(`/api/agent/tasks/${task.id}/fail`, {
+      error: message,
+      permanent: /HTTP 4(0[0-7]|09|1[0-8])\b/.test(message),
+      agent_id: agent,
+    });
+  } catch (reportError) {
+    console.warn("jobapp: could not report a failed task", task.id, reportError);
+  }
+}
+
+function keepLeasesAlive(pending, agent, leaseSeconds) {
+  const lease = Number(leaseSeconds) > 0 ? Number(leaseSeconds) : 120;
+  // A third of the lease: two beats can be missed before anything lapses.
+  const every = Math.max(15000, Math.floor((lease * 1000) / 3));
+  const timer = setInterval(() => {
+    for (const id of pending) {
+      api(`/api/agent/tasks/${id}/heartbeat`, { agent_id: agent }).catch(() => {});
+    }
+  }, every);
+  return () => clearInterval(timer);
+}
+
 // ---------------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------------
@@ -1409,13 +1514,14 @@ async function pollOnce() {
     // completely different fixes and only this side knows which applies.
     const reading = await enabledHarvestHosts();
 
-    const { tasks } = await api("/api/agent/lease", {
+    const lease = await api("/api/agent/lease", {
       kinds,
       agent_id: id,
       max: 5,
       wait: 25,
       harvest_sites: reading,
     });
+    const tasks = lease.tasks;
 
     // Recorded locally as well as sent, so the options page can show what this
     // install offers without waking the worker to ask.
@@ -1427,23 +1533,41 @@ async function pollOnce() {
     if (!tasks || tasks.length === 0) return;
 
     let done = 0;
-    for (const task of tasks) {
-      try {
-        const result = await runTask(task);
-        await api(`/api/agent/tasks/${task.id}/result`, { result, agent_id: id });
-        done += 1;
-      } catch (error) {
-        // Report the failure rather than dropping it. The server decides what
-        // to do with it — but only this side knows whether a retry could ever
-        // help, so a refusal is flagged as final. A 403 will be a 403 again,
-        // and three identical rows bury whatever else failed that hour.
-        const message = String(error && error.message ? error.message : error);
-        await api(`/api/agent/tasks/${task.id}/fail`, {
-          error: message,
-          permanent: /HTTP 4(0[0-9]|1[0-8])\b/.test(message),
-          agent_id: id,
-        });
+    // The tasks still leased to us, kept current so the heartbeat does not
+    // keep asking for ones we have already reported on.
+    const pending = new Set(tasks.map((task) => task.id));
+    const stopHeartbeat = keepLeasesAlive(pending, id, lease.lease_seconds);
+
+    try {
+      for (const task of tasks) {
+        let result;
+        try {
+          result = await runTask(task);
+        } catch (error) {
+          pending.delete(task.id);
+          await reportFailure(task, error, id);
+          continue;
+        }
+
+        // Reported separately from the work, because the two fail for
+        // completely different reasons and only one of them is the task's
+        // fault. A visit that succeeded and could not be uploaded — the server
+        // restarted, the proxy answered 502, the wifi dropped — used to be
+        // posted as a task failure, burning an attempt and, on requeue,
+        // re-opening the same page through the same logged-in session for work
+        // that had already been done correctly. Saying nothing is better: the
+        // lease lapses, the reaper returns the task to the queue, and no
+        // attempt is charged for a network we do not control.
+        pending.delete(task.id);
+        try {
+          await api(`/api/agent/tasks/${task.id}/result`, { result, agent_id: id });
+          done += 1;
+        } catch (error) {
+          console.warn("jobapp: could not report a finished task", task.id, error);
+        }
       }
+    } finally {
+      stopHeartbeat();
     }
     await setStatus({ lastCompleted: done, lastTaskAt: new Date().toISOString() });
 
@@ -1794,7 +1918,27 @@ async function reportSweep(sweep, url) {
   });
 }
 
-function ensureAlarm() {
+/**
+ * Make sure the poll alarm exists — without resetting the one that already
+ * does.
+ *
+ * `chrome.alarms.create` on an existing name cancels and replaces it, and with
+ * only `periodInMinutes` the replacement fires a minute from now. This runs at
+ * the top level, so it runs every time the worker is woken — and the worker is
+ * woken by every harvest message a page you are browsing sends it, several
+ * times a minute.
+ *
+ * So the alarm's deadline was pushed forward faster than it could ever arrive.
+ * Browse a harvest site for half an hour with the agent on and it leased no
+ * work at all for the whole session — the exact window in which browsing work
+ * is most worth doing, and one that looks from the outside like an empty queue.
+ */
+async function ensureAlarm() {
+  try {
+    if (await chrome.alarms.get(ALARM_NAME)) return;
+  } catch (_) {
+    /* Older Chrome without a promise-returning get: fall through and create. */
+  }
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
 }
 

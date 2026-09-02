@@ -278,14 +278,16 @@
   async function sweep() {
     if (recentlySwept()) return;
 
-    const token = await askForToken();
-
-    // Claimed on the way out of the ask, whichever way it went, and before the
-    // first request rather than after the last. A sweep that dies halfway
-    // through should not have the next tab start it again from page one — and
-    // a signed-out session that answers nothing should not report that once a
-    // minute for as long as the browser is open.
+    // Claimed before the ask, not after it. Waiting for a token takes up to 25
+    // seconds, and the check above is the only thing keeping two tabs from
+    // sweeping the whole board at once — leaving the claim until afterwards
+    // left a 25-second window in which both tabs passed it. Marking first
+    // costs nothing that the old placement did not already cost: the mark was
+    // already made whichever way the ask went, including for a page that never
+    // answered.
     markSwept();
+
+    const token = await askForToken();
 
     if (!token) {
       // A marketing page answering nothing is correct behaviour, and this
@@ -314,7 +316,7 @@
     let served = 0;
 
     for (let page = 1; page <= MAX_PAGES; page += 1) {
-      const url = pageUrl(page, limit);
+      let url = pageUrl(page, limit);
       let result = await readPage(url, token);
 
       // A page size they do not accept looks like a rejected request, so the
@@ -323,18 +325,28 @@
       if (page === 1 && !result.body && limit !== FALLBACK_LIMIT) {
         limit = FALLBACK_LIMIT;
         await sleep(PAUSE_MS);
-        result = await readPage(pageUrl(page, limit), token);
+        // Reassigned, not shadowed: the body about to be forwarded came from
+        // the retry, and offering it under the address of the request that was
+        // refused files the rows against a URL that produced nothing.
+        url = pageUrl(page, limit);
+        result = await readPage(url, token);
       }
 
       if (!result.body) {
         status = result.status;
         detail = result.error;
-        stopped =
-          result.status === 401 || result.status === 403
-            ? "not signed in"
-            : result.status
-              ? `HTTP ${result.status}`
-              : `request failed: ${result.error}`;
+        if (result.status === 401 || result.status === 403) {
+          stopped = "not signed in";
+        } else if (result.status >= 400) {
+          stopped = `HTTP ${result.status}`;
+        } else if (result.error) {
+          // A 200 whose body we could not use — too large, or not JSON. The
+          // status code is the least informative thing about it, and reporting
+          // "HTTP 200" as the reason a sweep stopped reads as a bug in us.
+          stopped = result.status ? result.error : `request failed: ${result.error}`;
+        } else {
+          stopped = "unreadable answer";
+        }
         break;
       }
 

@@ -19,7 +19,7 @@ is refused whatever else is true of it.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -741,6 +741,81 @@ class TestEachModeIsJudgedInItsOwnUnit:
                 {"batches": 3, "navigation": None}, 1,
             )
         assert crawl_recipes.active_for(db, "jobright.ai") is not None
+
+
+class TestAVisitThatNeverSawTheBoardGradesNothing:
+    """
+    Only a visit can grade a recipe — and a page that rendered a sign-in wall or
+    a Cloudflare check is not one. It reports zero pages and zero batches
+    through no fault of the recipe, and three in a row retired a correct,
+    hard-won recipe with "retired after 3 visits that got nowhere". A session
+    expiring on a Friday cost the board's crawl on Monday.
+    """
+
+    def _active(self, db, navigation, host="jobright.ai"):
+        crawl_recipes.save(db, host, navigation, {"ok": True, "reason": "fine"})
+
+    def test_a_signed_out_visit_does_not_retire_a_working_recipe(self, db):
+        from app.services import agent_work
+        from app.models.browser_task import BrowserTask
+
+        self._active(db, {"mode": "scroll", "scroll_passes": 150})
+        for _ in range(5):
+            task = BrowserTask(
+                kind="browse_page", status="done", agent_id="ext",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                payload={"url": "https://jobright.ai/jobs/search"},
+                result={"signed_in": False, "batches": 0, "pages_done": 0},
+            )
+            db.add(task)
+            db.flush()
+            agent_work._ingest_browse_page(db, task)
+
+        assert crawl_recipes.active_for(db, "jobright.ai") is not None
+        # And nothing was recorded against it either — the visit is not
+        # evidence in the recipe's favour any more than against it.
+        assert crawl_recipes.listing(db)[0].tries == 0
+
+    def test_a_challenge_that_never_cleared_is_not_evidence_either(self, db):
+        from app.services import agent_work
+        from app.models.browser_task import BrowserTask
+
+        self._active(db, {"mode": "scroll", "scroll_passes": 150})
+        for _ in range(5):
+            task = BrowserTask(
+                kind="browse_page", status="done", agent_id="ext",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                payload={"url": "https://jobright.ai/jobs/search"},
+                result={"signed_in": True, "challenge": "timeout",
+                        "batches": 0, "pages_done": 0},
+            )
+            db.add(task)
+            db.flush()
+            agent_work._ingest_browse_page(db, task)
+
+        assert crawl_recipes.active_for(db, "jobright.ai") is not None
+
+    def test_a_visit_that_did_reach_the_board_is_still_judged(self, db):
+        # The retirement loop has to keep working, or a recipe that genuinely
+        # stopped advancing the board stays active forever.
+        from app.services import agent_work
+        from app.models.browser_task import BrowserTask
+
+        self._active(db, {"mode": "click", "selector": ".next", "max_pages": 10},
+                     host="hiring.cafe")
+        for _ in range(3):
+            task = BrowserTask(
+                kind="browse_page", status="done", agent_id="ext",
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                payload={"url": "https://hiring.cafe/"},
+                result={"signed_in": True, "challenge": "passed",
+                        "batches": 0, "pages_done": 1},
+            )
+            db.add(task)
+            db.flush()
+            agent_work._ingest_browse_page(db, task)
+
+        assert crawl_recipes.active_for(db, "hiring.cafe") is None
 
 
 class TestTheCrawlUsesWhatWasLearned:

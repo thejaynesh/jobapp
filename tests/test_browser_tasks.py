@@ -117,8 +117,14 @@ class TestReap:
         assert leased.agent_id is None
 
     def test_a_lapsed_lease_does_not_count_as_an_attempt(self, db):
-        # A closed laptop is not a failed attempt. Counting it would burn
-        # through max_attempts on a task that never actually ran.
+        """
+        A closed laptop is not a failed attempt.
+
+        `lease` counts one on every claim, recoveries included, so the recovery
+        has to give that one back — otherwise the comment in `reap` describes
+        behaviour the code does not implement. This test used to assert the
+        counter stayed at 1, which *is* counting it.
+        """
         browser_tasks.enqueue(db, "ping", max_attempts=2)
         leased = browser_tasks.lease(db, agent_id="gone")[0]
         assert leased.attempts == 1
@@ -127,7 +133,47 @@ class TestReap:
 
         browser_tasks.reap(db)
         db.refresh(leased)
-        assert leased.attempts == 1
+        assert leased.attempts == 0
+
+    def test_a_task_still_gets_every_attempt_it_was_promised(self, db):
+        """
+        The arithmetic that made this matter. A browse of a deep board can
+        outrun its own 120-second lease with no network trouble at all, so two
+        lapses in a row is an ordinary Tuesday — and it used to arrive at its
+        first genuine failure already at `max_attempts`, retired on the spot
+        having run exactly once.
+        """
+        task = browser_tasks.enqueue(db, "ping", max_attempts=3)
+        for _ in range(2):
+            leased = browser_tasks.lease(db, agent_id="slow")[0]
+            leased.lease_expires_at = _now() - timedelta(seconds=1)
+            db.commit()
+            browser_tasks.reap(db)
+
+        for _ in range(2):
+            browser_tasks.lease(db, agent_id="slow")
+            browser_tasks.fail(db, task.id, agent_id="slow", error="boom")
+            db.refresh(task)
+            assert task.status == "queued", "retired before its third attempt"
+
+        browser_tasks.lease(db, agent_id="slow")
+        browser_tasks.fail(db, task.id, agent_id="slow", error="boom")
+        db.refresh(task)
+        assert task.status == "failed"
+
+    def test_the_attempt_count_never_goes_below_zero(self, db):
+        # Two reaps of the same recovered row would otherwise walk it negative,
+        # and a negative count is a task that can never be retired.
+        browser_tasks.enqueue(db, "ping")
+        leased = browser_tasks.lease(db, agent_id="gone")[0]
+        leased.status = "leased"
+        leased.attempts = 0
+        leased.lease_expires_at = _now() - timedelta(seconds=1)
+        db.commit()
+
+        browser_tasks.reap(db)
+        db.refresh(leased)
+        assert leased.attempts == 0
 
     def test_recovered_work_can_be_leased_by_someone_else(self, db):
         browser_tasks.enqueue(db, "ping")

@@ -458,3 +458,77 @@ class TestTheModelSeesTheWholePosting:
 
         assert "[description truncated]" in user
         assert len(user) < settings.MATCH_DESCRIPTION_CHARS + 5000
+
+
+class TestASilentDescriptionDoesNotDeleteAStatedFact:
+    """
+    The prompt's rule is "null when the posting does not say", and the writer
+    has to honour the same reading: a null means *this description* is silent,
+    not that what we already hold is wrong.
+
+    Adapters carry pay and employment type as their own fields, alongside the
+    description rather than inside it — USAJOBS states a grade band, every
+    `base.jobs_from_listing` board (iCIMS, Teamtailor, Jobvite) puts one in the
+    listing JSON, hiring.cafe ships a structured block. The prose then very
+    often does not restate it, so writing the null back deleted a figure the
+    employer had published, on a job the salary filter was about to read.
+    """
+
+    def test_a_stated_band_survives_a_description_that_never_mentions_pay(self):
+        job = _job(salary_min=120000.0, salary_max=160000.0, salary_currency="USD")
+
+        job_details.apply(job, job_details.normalize({"salary_min": None}))
+
+        assert (job.salary_min, job.salary_max) == (120000.0, 160000.0)
+        assert job.salary_currency == "USD"
+
+    def test_the_adapters_employment_type_survives_too(self):
+        job = _job(employment_type="contract")
+
+        job_details.apply(job, job_details.normalize({}))
+
+        assert job.employment_type == "contract"
+
+    def test_a_fuller_description_may_still_correct_the_band(self):
+        # The whole point of re-reading a grown description: a non-null is a
+        # correction and wins. Only silence is treated as "no news".
+        job = _job(salary_min=120000.0, salary_max=160000.0, salary_currency="USD")
+
+        job_details.apply(job, job_details.normalize({
+            "salary_min": 150000, "salary_max": 190000, "salary_currency": "USD",
+        }))
+
+        assert (job.salary_min, job.salary_max) == (150000.0, 190000.0)
+
+    def test_pay_is_replaced_as_a_band_never_half_of_one(self):
+        # A minimum from the model over a maximum from the adapter is a range
+        # nobody stated, and the salary floor would then filter on it.
+        job = _job(salary_min=120000.0, salary_max=160000.0, salary_currency="USD")
+
+        job_details.apply(job, job_details.normalize({"salary_max": 190000}))
+
+        # normalize() reads a lone maximum as "the figure", so both move.
+        assert job.salary_min == 190000.0
+        assert job.salary_max == 190000.0
+
+    def test_an_empty_skill_list_does_not_wipe_the_skills_we_have(self):
+        job = _job(required_skills=["Python", "Go"])
+
+        job_details.apply(job, job_details.normalize({"required_skills": []}))
+
+        assert job.required_skills == ["Python", "Go"]
+
+    def test_the_read_is_still_stamped_even_when_the_posting_said_nothing(self):
+        # Otherwise `needs_extraction` would ask again on every pass forever.
+        job = _job()
+
+        job_details.apply(job, job_details.normalize({}))
+
+        assert job.details_extracted_at is not None
+
+    def test_a_hand_typed_figure_still_outranks_the_model(self):
+        job = _job(salary_min=99000.0, salary_max=99000.0, manual_fields=["salary_min"])
+
+        job_details.apply(job, job_details.normalize({"salary_min": 150000}))
+
+        assert job.salary_min == 99000.0

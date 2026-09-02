@@ -88,7 +88,18 @@ def match_jobs(limit: int | None = None) -> dict[str, Any]:
 
 
 def _chain_if_more(result: dict | None) -> None:
+    """
+    Queue the next batch, or close the cycle out.
+
+    Every path that stops chaining also clears the shared call budget: the
+    batches spend one ceiling between them, so "the cycle" ends exactly where
+    the chain does, and a cycle that started against the last one's spend would
+    do no paid failover at all.
+    """
+    from app.services import match_budget
+
     if not result or not result.get("remaining"):
+        match_budget.clear()
         return
     if not (result.get("matched", 0) or result.get("filtered_out", 0)):
         # Every job in the batch came back rate-limited or errored. Another
@@ -98,6 +109,7 @@ def _chain_if_more(result: dict | None) -> None:
             "leaving the rest to the next scheduled pass",
             result["remaining"],
         )
+        match_budget.clear()
         return
     try:
         match_jobs.delay()

@@ -97,6 +97,13 @@ def reap(db) -> tuple[int, int]:
     # A lapsed lease is not a failure — the laptop closed. Return it to the
     # queue without counting an attempt against it, or a flaky connection would
     # burn through max_attempts without the task ever having run.
+    #
+    # Giving the attempt back is what makes that true. `lease` counts one on
+    # every claim, recoveries included, so leaving the counter alone here meant
+    # the comment above described behaviour the code did not implement: a task
+    # whose lease lapsed twice — which a slow board can manage with no network
+    # trouble at all — reached its first genuine failure already at
+    # `max_attempts` and was retired on the spot, having been run once.
     recovered = (
         db.query(BrowserTask)
         .filter(
@@ -105,7 +112,12 @@ def reap(db) -> tuple[int, int]:
             BrowserTask.lease_expires_at < now,
         )
         .update(
-            {"status": "queued", "agent_id": None, "lease_expires_at": None},
+            {
+                "status": "queued",
+                "agent_id": None,
+                "lease_expires_at": None,
+                "attempts": func.greatest(BrowserTask.attempts - 1, 0),
+            },
             synchronize_session=False,
         )
     )

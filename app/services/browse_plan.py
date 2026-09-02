@@ -586,8 +586,13 @@ def posting_urls(db, limit: int | None = None) -> list[str]:
 
     from app.models.job import Job
 
+    # Every host a board answers on, not just its canonical one. hiring.cafe
+    # serves its payloads — and so stores its postings — under `hiringcafe.com`,
+    # which is precisely why `alt_hosts` exists and precisely the host this
+    # matched none of. Every posting the board contributed was invisible to the
+    # queue that exists to fetch its description.
     host_clause = or_(*[
-        Job.url.ilike(f"%{board.host}%") for board in BOARDS
+        Job.url.ilike(f"%{host}%") for host in _BROWSABLE_HOSTS
     ])
     rows = (
         db.query(Job.source_job_id, Job.url)

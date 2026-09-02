@@ -999,3 +999,61 @@ class TestTheSecondSourceContributesWhatTheFirstMissed:
             again = fetch_and_save_jobs(db)
         assert again["merged"] == 1
         assert db.query(Job).one().salary_min == 100000
+
+
+class TestAJobWeCouldNotStoreIsCountedAndNamed:
+    """
+    Every fetched posting used to end up in exactly one of four buckets —
+    inserted, merged, skipped, stale — except the ones that raised on the way
+    in. Those were logged as "error processing job" with no URL, no source and
+    no title, and counted nowhere, so the cycle reported a fetched total that
+    its own outcomes did not add up to and there was no way to find out which
+    postings were missing.
+    """
+
+    def test_a_row_that_cannot_be_stored_is_counted_as_dropped(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        good = _std_job(url="https://ex.com/good", source_job_id="G1")
+        # A board that ships its location as a nested object and an adapter
+        # that passes it straight through: hashing it raises, the savepoint
+        # rolls back that one row, and the rest of the batch still lands.
+        bad = _std_job(url="https://ex.com/bad", source_job_id="B1",
+                       location={"name": "NYC"}, source="jsearch")
+
+        with _patch_adapters([good, bad]):
+            result = fetch_and_save_jobs(db)
+
+        assert result["inserted"] == 1
+        assert result["dropped"] == 1
+        assert result["per_source"]["jsearch"]["dropped"] == 1
+
+    def test_the_log_line_names_the_posting_that_was_lost(self, db, caplog):
+        import logging
+
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        bad = _std_job(url="https://ex.com/bad", source_job_id="B1",
+                       company="Vanishing Corp", location={"name": "NYC"})
+
+        with caplog.at_level(logging.ERROR, logger="app.services.job_fetcher"):
+            with _patch_adapters([bad]):
+                fetch_and_save_jobs(db)
+
+        dropped = "\n".join(r.getMessage() for r in caplog.records)
+        assert "https://ex.com/bad" in dropped
+        assert "Vanishing Corp" in dropped
+
+    def test_the_outcomes_still_add_up_when_nothing_goes_wrong(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+
+        with _patch_adapters([_std_job(url=f"https://ex.com/{n}", source_job_id=str(n))
+                              for n in range(3)]):
+            result = fetch_and_save_jobs(db)
+
+        accounted = sum(result[key] for key in
+                        ("inserted", "merged", "skipped", "stale", "dropped"))
+        assert accounted == result["fetched"] == 3
