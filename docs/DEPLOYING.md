@@ -48,6 +48,43 @@ docker compose -f docker-compose.prod.yml exec redis \
   redis-cli DEL jobapp:enrich:running jobapp:match:running
 ```
 
+## Migration 0034 needs running by hand
+
+`alembic upgrade head` runs inside the web container's startup with a
+**60-second ceiling** (`app/main.py`), and 0034 is the first migration in this
+project that cannot finish inside it. It recomputes every hash in `jobs` and
+`archived_jobs`, then folds the duplicates the new grouping produces — one
+round trip per group plus eight per folded duplicate, which on a six-figure
+table is tens of thousands of statements.
+
+Nothing is damaged if you let it fail: the subprocess is killed, Postgres rolls
+the whole migration back, and the database is exactly as it was. But the app
+serves 503 until the upgrade completes, so run it outside that window instead:
+
+```bash
+cd /opt/jobapp
+git pull
+
+# 1. See what it will collapse. Read-only, writes nothing.
+docker compose -f docker-compose.prod.yml run --rm web python scripts/preview_0034.py
+
+# 2. Take a backup. 0034 DELETES the duplicate rows it folds, and that is the
+#    only irreversible thing in it.
+docker compose -f docker-compose.prod.yml exec web python -m app.tasks.backup
+docker compose -f docker-compose.prod.yml exec web python -m app.tasks.backup --verify
+
+# 3. Quiet the writers, build, migrate with no clock on it, then start.
+docker compose -f docker-compose.prod.yml stop worker beat
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
+docker compose -f docker-compose.prod.yml up -d
+```
+
+Step 3's `run --rm web` starts a throwaway container with no timeout around it,
+so the migration takes as long as it takes. By the time `up -d` starts the real
+web container the schema is already at head and its startup upgrade returns
+immediately.
+
 ## The one case worth stopping for
 
 A migration that builds an index on a large table takes a lock on it while it
