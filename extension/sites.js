@@ -120,6 +120,19 @@ export const HARVEST_SITES = [
       "only way its listings are seen at all.",
   },
   {
+    id: "tsenta",
+    label: "Tsenta",
+    storageKey: "harvestTsenta",
+    // The board lives on `dashboard.`, and the bare domain is where sign-in
+    // and the marketing pages are. Both are matched so a redirect through
+    // either one still lands somewhere the reader is registered.
+    matches: ["https://*.tsenta.com/*", "https://tsenta.com/*"],
+    note:
+      "An aggregator like JobRight, reading from a wider set of career pages " +
+      "and boards. Login-only, and it will not show a full list until its " +
+      "search is submitted — the crawl does that for you.",
+  },
+  {
     id: "handshake",
     label: "Handshake",
     storageKey: "harvestHandshake",

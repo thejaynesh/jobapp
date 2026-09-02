@@ -190,8 +190,77 @@ function clampSeconds(value, fallback, low, high) {
 // visited again rather than held open.
 const SCROLL_BUDGET_MS = 75000;
 
+/**
+ * Press Enter in this page's search box, with nothing typed into it.
+ *
+ * Some boards render a placeholder handful of results and only fetch the real
+ * list once their search has been run. Tsenta is one: it matches against the
+ * profile rather than a keyword, so there is nothing to type — but until the
+ * search is submitted it shows about five, and a scroll reaches the bottom of
+ * those five and reports the list finished. That is indistinguishable from a
+ * board with nothing to show.
+ *
+ * A synthetic Enter does not submit a form the way a real keypress does, and
+ * that is fine here: these are single-page apps listening for `keydown` on the
+ * input. `requestSubmit` is deliberately not called as a fallback — on a board
+ * that does use a real form it would navigate, throwing away the app state the
+ * results live in.
+ *
+ * Returns what it found, so a board that stops working can say whether the box
+ * moved or went missing rather than just yielding less.
+ */
+async function submitSearchIn(tabId) {
+  try {
+    const [done] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const box = document.querySelector(
+          [
+            "input[type='search']",
+            "[role='searchbox']",
+            "input[name*='search' i]",
+            "input[id*='search' i]",
+            "input[placeholder*='search' i]",
+            "input[aria-label*='search' i]",
+            "input[placeholder*='job title' i]",
+          ].join(", "),
+        );
+        if (!box) return { found: false };
+        try {
+          box.focus();
+          for (const type of ["keydown", "keypress", "keyup"]) {
+            box.dispatchEvent(
+              new KeyboardEvent(type, {
+                key: "Enter",
+                code: "Enter",
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+          }
+        } catch (_) {
+          return { found: true, pressed: false };
+        }
+        return { found: true, pressed: true };
+      },
+    });
+    return (injectedResult(done) || { found: false });
+  } catch (_) {
+    // A page that will not take an injection is a page the scroll is about to
+    // fail on anyway. Nothing here is worth failing the visit over.
+    return { found: false };
+  }
+}
+
+/** The value an executeScript frame returned, or null. */
+function injectedResult(frame) {
+  return frame && frame.result ? frame.result : null;
+}
+
 async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
-                          clickSelector) {
+                          clickSelector, submitSearch) {
   return withTabLock(async () => {
     let win;
     try {
@@ -229,6 +298,17 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
           await waitForLoad(tabId, TAB_LOAD_TIMEOUT_MS).catch(() => {});
           await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
         }
+      }
+
+      // Before the scroll and after the challenge, because it is what makes
+      // the list worth scrolling. Reported either way: "the search box has
+      // gone" and "the board has nothing today" produce the same small number
+      // of results otherwise.
+      let searched = null;
+      if (submitSearch) {
+        searched = await submitSearchIn(tabId);
+        // The results are a fetch away, so the same settle the first page got.
+        await new Promise((r) => setTimeout(r, Math.round(settleMs / 2)));
       }
 
       let signed_in = true;
@@ -614,6 +694,10 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
         // server can tell a site that blocked us from one that had nothing on
         // it — before this they were the same empty result.
         challenge,
+        // null unless the board was asked for its search to be submitted.
+        // `{found: false}` on a board that needs it is the whole diagnosis: it
+        // yields the same handful of results as a board with nothing to show.
+        searched,
       };
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
@@ -1034,9 +1118,13 @@ const HANDLERS = {
     // board nothing has been learned about, which is where the extension's own
     // heuristics apply.
     const clickSelector = String(payload.click_selector || "").slice(0, 200);
+    // Whether this board hides its list until its search is run. Off unless
+    // the server says so: pressing Enter on a board that did not need it
+    // re-runs a search that had already run.
+    const submitSearch = Boolean(payload.submit_search);
 
     const visited = await visitInTab(url, settleMs, passes, pauseMs, maxPages,
-                                     clickSelector);
+                                     clickSelector, submitSearch);
     // Held inside the tab lock's queue by awaiting here: the next browse task
     // cannot open its window until this pause is over, which is what makes the
     // gap a real rhythm rather than a number in a payload.
@@ -1073,6 +1161,11 @@ const HANDLERS = {
       // offers, so the server can work out how the board paginates instead of
       // waiting to be told.
       navigation: visited.navigation,
+      // Whether the board's search box was there to be submitted, on the
+      // boards that need it. A board that quietly loses its search box yields
+      // the same five results as a board with nothing new, and this is the
+      // only thing that tells them apart.
+      searched_ok: visited.searched ? Boolean(visited.searched.found) : null,
     };
   },
 

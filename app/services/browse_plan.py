@@ -89,7 +89,7 @@ class Board:
     def __init__(self, key, host, label, search=None, entries=(),
                  page_param=None, page_size=25, page_base=0,
                  feed_setting=None, scroll_passes=None, click_pages=None,
-                 alt_hosts=()):
+                 alt_hosts=(), submit_search=False):
         self.key = key
         self.host = host
         self.label = label
@@ -109,6 +109,13 @@ class Board:
         # every visit harvested the first page and nothing else, while
         # reporting a perfectly healthy scroll.
         self.click_pages = click_pages
+        # Whether this board needs its search submitting before it will show a
+        # full list. A fourth thing that can go wrong, and it looks exactly
+        # like a board with nothing to show: the page loads, renders a handful
+        # of results, and scrolling reaches the bottom of those few and stops.
+        # Pressing Enter in the search box — with nothing typed in it — is what
+        # makes the real list appear.
+        self.submit_search = bool(submit_search)
         # Other hosts that are this same board. A board whose entry URL
         # redirects lands on a different host, and `board_for` on the final URL
         # then finds nothing — so the board's own depth and pacing stop
@@ -216,6 +223,26 @@ BOARDS = (
         # is another API response the interceptor reads, and on this board each
         # one carries company slugs — so scrolling deep here buys permanent
         # sources rather than just more rows.
+        scroll_passes=200,
+    ),
+    # Tsenta. An aggregator like JobRight, matching against the profile rather
+    # than a keyword, and reading from a much wider set of career pages and
+    # boards than either of them — which is the whole reason it is here.
+    #
+    # Login-only and entirely stateful: the filters live in the app rather than
+    # the address, so there is no `{q}` to fill in and no page-two URL to
+    # queue. The list is infinite scroll, and it will not show more than a
+    # handful of results until its search is submitted — see `submit_search`.
+    Board(
+        "tsenta", "tsenta.com", "Tsenta",
+        feed_setting="BROWSE_TSENTA_FEED",
+        # Nothing is typed into the box. The board is already matching against
+        # the profile, so submitting it empty is what a person does here, and
+        # without it the visit sees five results and calls the list finished.
+        submit_search=True,
+        # Infinite scroll, so this loop is the pagination. Deep for the same
+        # reason Greenhouse is: every batch is another API response the
+        # interceptor reads on the way past.
         scroll_passes=200,
     ),
     Board(
@@ -750,6 +777,19 @@ def _click_selector(url: str, db=None) -> str:
     return ""
 
 
+def _submit_search(url: str) -> bool:
+    """
+    Whether this board hides its list until its search is submitted.
+
+    A board property rather than something the extension guesses at. Pressing
+    Enter in a search box is a real interaction with a logged-in session, and
+    doing it speculatively on every board would re-run searches that had
+    already run — so it happens only where a board is known to need it.
+    """
+    board = board_for(url)
+    return bool(board is not None and board.submit_search)
+
+
 def _scroll_pause_seconds(url: str, db=None) -> int:
     """
     Seconds to rest between batches on this board.
@@ -875,6 +915,12 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 # Empty unless a recipe named one. The extension keeps its own
                 # heuristics for everything else.
                 "click_selector": _click_selector(url, db),
+                # Whether to press Enter in this board's search box before
+                # scrolling. False everywhere but the boards that need it: on
+                # any other site this would re-run a search the page had
+                # already run, which at best costs a round trip and at worst
+                # scrolls back to the top.
+                "submit_search": _submit_search(url),
             },
             priority=priority,
         )
@@ -1131,6 +1177,10 @@ def recent_visits(db, limit: int = 12) -> list[dict]:
             "scrolled_px": (row.summary or {}).get("scrolled_px") or 0,
             "batches": (row.summary or {}).get("batches") or 0,
             "scroll_target": (row.summary or {}).get("scroll_target") or "",
+            # None on every board but the ones that hide their list until the
+            # search is run. False there means the box was gone, and the
+            # shallow visit that follows is that rather than an empty board.
+            "searched_ok": (row.summary or {}).get("searched_ok"),
         }
         for row in rows
     ]

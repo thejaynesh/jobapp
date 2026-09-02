@@ -142,6 +142,14 @@ class Settings(BaseSettings):
         "&location=United%20States&lat=39.71614&lon=-96.999246"
         "&location_type=country&country_short_name=US"
     )
+    # Tsenta's recommendations feed. A setting for the same reason as the one
+    # above, and one more: this board keeps its filters entirely in its own
+    # state rather than in the address, so the URL cannot say what it is
+    # showing. Changing what gets crawled means setting the filters on the site
+    # and pasting whatever page you land on.
+    BROWSE_TSENTA_FEED: str = (
+        "https://dashboard.tsenta.com/dashboard/recommendations"
+    )
     # Mark the session cookie `Secure`, so browsers only send it over HTTPS.
     # On by default. Set false ONLY while the deployment is still on plain
     # http:// — with it on, the browser accepts the cookie at login and then

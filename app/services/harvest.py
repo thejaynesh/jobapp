@@ -67,6 +67,14 @@ HARVEST_SOURCES = {
     "otta.com": "otta_harvest",
     "welcometothejungle.com": "otta_harvest",
     "jobright.ai": "jobright_harvest",
+    "tsenta.com": "tsenta_harvest",
+    # Tsenta's board is served by an API on a different domain entirely
+    # (`api.autojobs.me/api/v1/jobs/recommendations`), and a harvested payload
+    # is filed under the host it came *from*. Without this line its jobs would
+    # be counted as LinkedIn's — the fallback source — and its samples would be
+    # filtered off the panel as belonging to no board of ours, which is the
+    # same mistake in the opposite direction from the ad-tech hosts.
+    "autojobs.me": "tsenta_harvest",
     "joinhandshake.com": "handshake_harvest",
     "hiring.cafe": "hiringcafe_harvest",
     # Where hiring.cafe redirects to, and therefore the host every payload

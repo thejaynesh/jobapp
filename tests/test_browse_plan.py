@@ -234,6 +234,76 @@ class TestBoardsWhoseSearchIsNotAUrl:
             ), f"{board.host} is crawled but not harvested"
 
 
+class TestABoardThatHidesItsListUntilYouSearch:
+    """
+    Tsenta shows about five results on load and only fetches the real list once
+    its search has been submitted — with nothing typed in, because it matches
+    against the profile rather than a keyword.
+
+    That is a fourth way a crawl can come back nearly empty, and from the
+    outside it is indistinguishable from the other three: the page loads, a few
+    results render, and the scroll reaches the bottom of those few and reports
+    the list finished. Nothing about it looks like a fault.
+    """
+
+    def test_it_is_queued_from_its_feed(self, db):
+        urls = browse_plan.search_urls(PROFILE)
+        assert any("tsenta.com" in url for url in urls)
+
+    def test_it_needs_no_keyword(self, db):
+        # An aggregator already matching against the account, so an empty
+        # profile must not silence it.
+        assert any("tsenta.com" in url for url in browse_plan.search_urls({}))
+
+    def test_the_task_asks_for_the_search_to_be_submitted(self, db):
+        from app.models.browser_task import BrowserTask
+
+        browse_plan.crawl_searches(db, PROFILE, board="tsenta")
+        task = db.query(BrowserTask).first()
+        assert task.payload["submit_search"] is True
+
+    def test_no_other_board_is_asked_to(self, db):
+        # Pressing Enter re-runs a search that already ran, and on a board that
+        # did not need it that costs a round trip and the scroll position.
+        for url in ("https://www.linkedin.com/jobs/search?keywords=x",
+                    "https://jobright.ai/jobs/recommend",
+                    "https://my.greenhouse.io/jobs/search?query=x"):
+            assert browse_plan._submit_search(url) is False
+
+    def test_a_url_belonging_to_no_board_does_not_either(self, db):
+        assert browse_plan._submit_search("https://example.test/jobs") is False
+
+    def test_it_scrolls_deep_because_that_is_its_pagination(self, db):
+        # Infinite scroll with no page-two URL, so the scroll loop is the only
+        # way past the first screenful.
+        board = browse_plan.BOARDS_BY_KEY["tsenta"]
+        assert board.page_param is None
+        assert board.scroll_passes >= 100
+
+    def test_its_api_lives_on_another_domain_and_is_still_its_own(self):
+        """
+        The board is served by `api.autojobs.me`, and a harvested payload is
+        filed under the host it came from. Unlisted, its jobs would be counted
+        as LinkedIn's — the fallback — and its samples filtered off the panel
+        as belonging to no board of ours.
+        """
+        from app.services.harvest import source_for_url
+
+        api = ("https://api.autojobs.me/api/v1/jobs/recommendations"
+               "?limit=20&page=5")
+        assert source_for_url(api) == "tsenta_harvest"
+        assert source_for_url("https://dashboard.tsenta.com/dashboard/"
+                              "recommendations") == "tsenta_harvest"
+
+    def test_its_samples_are_not_swept_up_as_telemetry(self, db):
+        # The cleanup added for ad-tech hosts would otherwise delete exactly
+        # the payloads this board exists to collect.
+        from app.services import harvest_samples
+
+        assert harvest_samples._related(
+            "api.autojobs.me", harvest_samples.worth_learning(db))
+
+
 class TestPastedUrls:
     def test_it_queues_what_was_pasted(self, db):
         outcome = browse_plan.crawl_urls(db, """

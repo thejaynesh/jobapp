@@ -500,6 +500,11 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
             # Which element got scrolled, so a wrong guess about where the
             # list lives is diagnosable instead of invisible.
             "scroll_target": str(result.get("scroll_target") or "")[:80],
+            # Only on boards that hide their list until the search is run.
+            # False means the box was not found, which yields the same handful
+            # of results as a board with nothing new — and would otherwise be
+            # diagnosed as the second thing forever.
+            "searched_ok": result.get("searched_ok"),
         },
     )
     db.commit()
