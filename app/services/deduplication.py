@@ -33,6 +33,21 @@ _TITLE_DROP_TOKENS = frozenset({"remote", "hybrid", "onsite", "urgent", "fulltim
 
 _REMOTE_LOCATION_RE = re.compile(r"remote|anywhere|worldwide|work from home|wfh", re.I)
 
+# Tokens that say where a city is without saying which city it is: the country
+# around it, the state around it, and the words a metro area wraps it in. See
+# `normalize_location` for why dropping them by name is safe.
+_LOCATION_NOISE = frozenset(
+    {"usa", "us", "u", "s", "united", "states", "america"}
+    | {"greater", "area", "metro", "metropolitan", "region", "county"}
+    | {
+        "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga", "hi", "id",
+        "il", "in", "ia", "ks", "ky", "la", "me", "md", "ma", "mi", "mn", "ms",
+        "mo", "mt", "ne", "nv", "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok",
+        "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv",
+        "wi", "wy", "dc",
+    }
+)
+
 
 def _tokens(s: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", (s or "").lower())
@@ -52,14 +67,42 @@ def normalize_title(title: str) -> str:
 
 
 def normalize_location(location: str) -> str:
+    """
+    Reduce a posting's stated location to the city it names.
+
+    A job's location is written differently by every board that lists it, and
+    the differences are never a different job — but this is a third of the
+    dedupe hash, so each unmatched formatting variant is one posting stored
+    twice. Measured against real pairs, taking the first comma-segment alone
+    missed three shapes:
+
+        "US-MA-Boston"            vs "Boston, MA"     (country first, no comma)
+        "United States - New York" vs "New York, NY"  (same, spelled out)
+        "Greater Boston Area"      vs "Boston, MA"    (metro wrapper)
+
+    So the country, the state and the metro-area filler are dropped by name.
+    The country-first forms fall out of that for free: tokenising already
+    splits on the dashes, and once "us" and "ma" are gone what is left of
+    "US-MA-Boston" is the city.
+    """
     text = (location or "").strip()
     if not text:
         return ""
     if _REMOTE_LOCATION_RE.search(text):
         return "remote"
-    # "San Francisco, CA, United States" and "San Francisco, CA" → "san francisco"
+    # "San Francisco, CA, United States" and "San Francisco, CA" → the city is
+    # the first segment. In the country-first forms there is no comma at all,
+    # and the dash split below is what separates them.
     first_segment = re.split(r"[,;/|]", text)[0]
-    return " ".join(_tokens(first_segment))
+    tokens = _tokens(first_segment)
+    kept = [t for t in tokens if t not in _LOCATION_NOISE]
+    # Falling back is what makes stripping by name safe. Several state
+    # abbreviations are also cities — LA is Los Angeles as often as it is
+    # Louisiana — and a location reduced to nothing would collide with every
+    # other job at that company whose location also vanished, merging two real
+    # postings into one and losing a job. Keeping the tokens is the worse
+    # dedup and the safe failure.
+    return " ".join(kept or tokens)
 
 
 def compute_dedupe_hash(company: str, title: str, location: str) -> str:

@@ -523,3 +523,101 @@ class TestACrossPostBringsMoreThanItsUrl:
         assert merge_or_skip(db, job, "https://other.com/x5",
                              "long description " * 50, layer=3) == [
             "source_urls", "description"]
+
+
+class TestLocationsWrittenTwoWaysAreTheSamePlace:
+    """
+    A location is a third of the dedupe hash, so every formatting variant that
+    fails to normalise the same way is one posting stored twice.
+
+    Each pair below is one posting as two real sources write it. They were all
+    misses before the noise tokens were named.
+    """
+
+    def same(self, a, b):
+        from app.services.deduplication import normalize_location
+        return normalize_location(a) == normalize_location(b)
+
+    def test_a_country_first_form_matches_the_comma_form(self):
+        assert self.same("US-MA-Boston", "Boston, MA")
+
+    def test_a_spelled_out_country_prefix_matches_too(self):
+        assert self.same("United States - New York", "New York, NY")
+
+    def test_a_metro_area_matches_its_city(self):
+        assert self.same("Greater Boston Area", "Boston, MA")
+
+    def test_a_state_written_out_matches_its_abbreviation(self):
+        assert self.same("Boston, Massachusetts, United States", "Boston, MA")
+
+    def test_a_trailing_state_with_no_comma_matches(self):
+        assert self.same("Washington DC", "Washington, DC")
+
+    def test_two_real_cities_stay_apart(self):
+        # The failure that would matter: merging these loses a job.
+        assert not self.same("Boston, MA", "Austin, TX")
+
+    def test_a_city_that_is_also_a_state_code_survives(self):
+        # "LA" is Los Angeles as often as it is Louisiana. Stripping it would
+        # leave nothing, and an empty location collides with every other job at
+        # that company whose location also vanished.
+        from app.services.deduplication import normalize_location
+        assert normalize_location("LA, CA") == "la"
+
+    def test_a_city_named_only_by_a_state_word_survives(self):
+        from app.services.deduplication import normalize_location
+        assert normalize_location("Ontario, CA") == "ontario"
+
+    def test_a_hyphenated_city_is_unchanged(self):
+        from app.services.deduplication import normalize_location
+        assert normalize_location("Winston-Salem, NC") == "winston salem"
+
+    def test_remote_still_wins_over_everything(self):
+        assert self.same("Remote - US", "Remote")
+
+    def test_the_whole_hash_collapses_the_cross_post(self):
+        from app.services.deduplication import compute_dedupe_hash
+        assert compute_dedupe_hash("Acme Corp", "Senior Backend Engineer",
+                                   "US-MA-Boston") == compute_dedupe_hash(
+            "Acme", "Sr. Backend Engineer", "Boston, MA")
+
+
+class TestTheMigrationsFrozenCopyStillAgrees:
+    """
+    Migration 0034 carries an inline copy of the normalizer, because a
+    migration must not import app code — a later edit to the service would
+    otherwise silently rewrite what an already-applied migration did.
+
+    The cost of freezing it is that it can drift, and drift here is invisible
+    and expensive: the hashes in the database would no longer be the hashes the
+    running code computes, so nothing would ever match again. Every fetched job
+    would look new, every archived job would come back, and the only symptom
+    would be the duplicate count climbing.
+    """
+
+    def frozen(self):
+        import importlib.util
+        import pathlib
+
+        path = (pathlib.Path(__file__).parent.parent / "alembic" / "versions"
+                / "0034_recompute_dedupe_hashes_location.py")
+        spec = importlib.util.spec_from_file_location("_mig0034", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.mark.parametrize("company,title,location", [
+        ("Acme Corp", "Sr. Backend Engineer", "Boston, MA"),
+        ("Acme", "Senior Backend Engineer", "US-MA-Boston"),
+        ("Stripe, Inc.", "Software Engineer", "San Francisco, California, United States"),
+        ("Globex GmbH", "Data Engineer - Remote", "Greater Boston Area"),
+        ("Initech", "QA Engineer", "Remote"),
+        ("Hooli", "Designer", ""),
+        ("Umbrella", "Analyst", "LA, CA"),
+        ("Soylent", "Chef", "Winston-Salem, NC"),
+    ])
+    def test_it_computes_the_same_hash_as_the_service(self, company, title, location):
+        from app.services.deduplication import compute_dedupe_hash
+
+        assert self.frozen()._new_hash(company, title, location) == \
+            compute_dedupe_hash(company, title, location)
