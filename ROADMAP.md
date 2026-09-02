@@ -684,6 +684,15 @@ python -m app.tasks.archive --dry-run
 python -m app.tasks.archive
 ```
 
+## What comes next
+
+`docs/IMPROVING.md` is the forward-looking half of this file: a design pass
+written after the bug hunt, ordered against the same two priorities. Its central
+observation is that nearly every number this system reports is a numerator with
+no denominator — yield without reach, fields written without fields checked —
+so the work it puts first is the work that makes the rest of the work
+falsifiable.
+
 ## Done so far (Aug 2026)
 
 - Code-review pass: 13 bug fixes (session-poisoning batch losses, profile
