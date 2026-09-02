@@ -695,3 +695,101 @@ class TestTheThreeFaultsReadDifferentlyOnThePage:
         db.commit()
         page = client.get("/runs").text
         assert "never reported back" in page
+
+
+class TestABoardAskedOverItsOwnApi:
+    """
+    A sweep's silence means the opposite of the reader's silence.
+
+    The passive reader only runs when a page fetches something, so it reporting
+    nothing means the page was quiet. A sweep *asks*, so it reporting nothing
+    means the ask failed — and it fails for three unrelated reasons: the site
+    never handed over a token, the API refused the one it did, or the board
+    genuinely had nothing new. All three reach this table as zero payloads and
+    all three want a different fix, so the reason it stopped is the field the
+    whole event exists for.
+    """
+
+    def sweep(self, db, host, *, ok=True, pages=0, rows=0, limit=20,
+              stopped="end of list", detail="", status=0, minutes_ago=0):
+        row = AgentEvent(
+            kind="sweep", host=host, ok=ok,
+            summary={"pages": pages, "rows": rows, "limit": limit,
+                     "stopped": stopped, "status": status, "detail": detail},
+            created_at=datetime.now(timezone.utc)
+            - timedelta(minutes=minutes_ago),
+        )
+        db.add(row)
+        db.commit()
+        return row
+
+    def only(self, db, **kwargs):
+        rows = agent_events.sweep_stats(db, **kwargs)
+        assert len(rows) == 1, rows
+        return rows[0]
+
+    def test_a_host_nobody_swept_is_absent(self, db):
+        assert agent_events.sweep_stats(db) == []
+
+    def test_what_it_fetched_is_totalled(self, db):
+        self.sweep(db, "dashboard.tsenta.com", pages=12, rows=240)
+        self.sweep(db, "dashboard.tsenta.com", pages=8, rows=160)
+        row = self.only(db)
+        assert (row["runs"], row["pages"], row["records"]) == (2, 20, 400)
+
+    def test_the_reason_is_the_last_one_not_a_summary(self, db):
+        # "What is wrong with it now" is the useful question. A host that
+        # failed twice yesterday and worked this morning is working.
+        self.sweep(db, "dashboard.tsenta.com", ok=False, stopped="no token",
+                   minutes_ago=90)
+        self.sweep(db, "dashboard.tsenta.com", pages=9, rows=180,
+                   stopped="short page")
+        row = self.only(db)
+        assert row["last_ok"] is True
+        assert row["stopped"] == "short page"
+        assert row["reason"] == "reached the end of the list"
+
+    def test_a_refused_token_says_to_sign_in_again(self, db):
+        self.sweep(db, "dashboard.tsenta.com", ok=False,
+                   stopped="not signed in", status=401)
+        row = self.only(db)
+        assert row["last_ok"] is False
+        assert "sign in" in row["reason"]
+
+    def test_no_token_at_all_is_a_different_sentence(self, db):
+        # The two sign-in failures are not the same fault: one is the site
+        # never answering, the other is the API rejecting what it answered
+        # with, and only the second means the session itself expired.
+        self.sweep(db, "dashboard.tsenta.com", ok=False, stopped="no token")
+        assert "never handed over a token" in self.only(db)["reason"]
+
+    def test_a_budget_stop_says_there_is_more(self, db):
+        self.sweep(db, "dashboard.tsenta.com", pages=40, rows=4000,
+                   stopped="page budget")
+        assert "probably more" in self.only(db)["reason"]
+
+    def test_an_unanticipated_failure_is_shown_as_reported(self, db):
+        # Rounding an unknown reason to the nearest known one would be exactly
+        # the sort of diagnostic that sends you looking in the wrong place.
+        self.sweep(db, "dashboard.tsenta.com", ok=False, stopped="HTTP 503")
+        assert self.only(db)["reason"] == "HTTP 503"
+
+    def test_the_page_size_that_worked_is_kept(self, db):
+        # The only record of whether asking for more than the site's own
+        # client uses was honoured.
+        self.sweep(db, "dashboard.tsenta.com", pages=4, rows=400, limit=100)
+        assert self.only(db)["limit"] == 100
+
+    def test_sweeps_outside_the_window_are_not_counted(self, db):
+        self.sweep(db, "dashboard.tsenta.com", pages=5, minutes_ago=60 * 24 * 9)
+        assert agent_events.sweep_stats(db, days=7) == []
+
+    def test_the_panel_carries_them(self, db):
+        self.sweep(db, "dashboard.tsenta.com", pages=6, rows=120)
+        assert agent_events.summary(db)["sweeps"][0]["pages"] == 6
+
+    def test_a_sweep_is_not_a_harvest(self, db):
+        # It reports what was asked for; the payloads it forwards are counted
+        # by the harvest events they become, and counting both would double.
+        self.sweep(db, "dashboard.tsenta.com", pages=6, rows=120)
+        assert agent_events.harvest_yield(db)["found"] == 0

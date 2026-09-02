@@ -28,6 +28,12 @@ KINDS = (
                         # that forwards nothing because every response was
                         # rejected are opposite problems, and without this they
                         # are the same silence.
+    "sweep",            # a board asked for its own pages over its API rather
+                        # than waiting to be scrolled. Its own kind because the
+                        # question is different: `read` counts what a page
+                        # happened to fetch, this counts what we requested and
+                        # says why it stopped — no token, refused, or the end
+                        # of the list. All three arrive as no payloads.
     "browse",           # a page opened because the server queued it, not the
                         # user. `ok` false means it rendered a sign-in wall,
                         # which is the one failure a harvest cannot report:

@@ -33,6 +33,8 @@
  *              other site is `harvest<Id>`.
  *   matches    host patterns — the content-script match *and* the permission
  *   note       optional, shown under the checkbox
+ *   active     optional, a MAIN-world script file. For the rare board that
+ *              will not hand over its list by being read — see tsenta.js.
  */
 export const HARVEST_SITES = [
   {
@@ -127,10 +129,16 @@ export const HARVEST_SITES = [
     // and the marketing pages are. Both are matched so a redirect through
     // either one still lands somewhere the reader is registered.
     matches: ["https://*.tsenta.com/*", "https://tsenta.com/*"],
+    // The one board with a script of its own. Its UI shows only the postings
+    // it can auto-apply to, twenty at a time, so scrolling cannot reach the
+    // rest however long it runs — this asks its API for them directly, using
+    // the token its own app offers to extensions.
+    active: "tsenta.js",
     note:
       "An aggregator like JobRight, reading from a wider set of career pages " +
       "and boards. Login-only, and it will not show a full list until its " +
-      "search is submitted — the crawl does that for you.",
+      "search is submitted — the crawl does that for you. It also hides every " +
+      "posting it cannot auto-apply to, so its own API is asked for those.",
   },
   {
     id: "handshake",

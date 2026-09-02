@@ -75,6 +75,36 @@ nobody wrote a parser for — which is why adding one is a single line.
 
 That is the whole procedure. There is no parser to write.
 
+### The rare board that has to be asked
+
+One site so far needs more than reading: Tsenta. Its feed hides every posting
+it cannot auto-apply to — its own client hardcodes that filter — so those
+postings are fetched by nobody, rendered to nobody, and therefore read by
+nobody. No amount of scrolling reaches them.
+
+So that site gets one extra script of its own, named in an `active` field on
+its row in `sites.js` (`extension/tsenta.js`), which asks its API directly.
+That is a deliberate exception and should stay a rare one: a script per site is
+the brittleness this whole design exists to avoid. The bar for adding another
+is that the board demonstrably will not show you something it holds, not that
+asking would be faster.
+
+Three things make it safe:
+
+* **It runs in the page's own world**, so the request carries the site's own
+  origin and passes the same CORS check its own client does. From the
+  extension's world every request would be refused before it was sent.
+* **The token never leaves the browser.** Tsenta's client publishes it to
+  extensions on request — that handshake is theirs, not ours — and it is asked
+  for, used, and dropped when the tab closes. Nothing is stored and the server
+  is never told it exists.
+* **It reports what it did**, under the `sweep` event kind, including when it
+  fetched nothing. That matters more here than for the passive reader: the
+  reader is silent when a page was quiet, but a sweep is silent when the *ask*
+  failed, and "no token", "refused", and "the board had nothing" want three
+  different fixes. The **Boards asked over their own API** table on `/runs` is
+  where that lands.
+
 ## Having the extension open the pages for you
 
 Harvesting was never limited by what it could read — it reads a site's own API

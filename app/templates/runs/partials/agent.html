@@ -146,6 +146,47 @@
   </div>
   {% endif %}
 
+  {# Boards that are asked for their pages rather than read while you scroll.
+     Kept apart from the table above because nothing arriving means the
+     opposite thing here: the reader is silent when a page was quiet, but a
+     sweep is silent when the ask itself failed. #}
+  {% set sweeps = agent_events.sweeps %}
+  {% if sweeps %}
+  <div class="mb-4">
+    <p class="text-xs font-medium text-gray-600 mb-1">Boards asked over their own API</p>
+    <table class="w-full text-xs">
+      <tbody>
+        {% for row in sweeps %}
+        <tr class="border-t border-gray-100">
+          <td class="py-1 text-gray-600">{{ row.host }}</td>
+          <td class="py-1 text-right text-gray-500 whitespace-nowrap">
+            {{ "{:,}".format(row.runs) }} sweep{{ '' if row.runs == 1 else 's' }} &middot;
+            {{ "{:,}".format(row.pages) }} page{{ '' if row.pages == 1 else 's' }} &middot;
+            {{ "{:,}".format(row.records) }} record{{ '' if row.records == 1 else 's' }}
+          </td>
+          <td class="py-1 pl-3 text-right whitespace-nowrap">
+            <span class="px-1.5 py-0.5 rounded font-medium
+              {% if row.last_ok %}bg-green-50 text-green-700
+              {% else %}bg-red-50 text-red-700{% endif %}">
+              {{ 'Working' if row.last_ok else 'Fetched nothing' }}
+            </span>
+          </td>
+        </tr>
+        {% if row.reason %}
+        <tr>
+          <td colspan="3" class="pb-2 text-[11px] leading-relaxed
+            {{ 'text-gray-500' if row.last_ok else 'text-red-600' }}">
+            Last sweep {{ row.reason }}{% if row.limit %}, {{ row.limit }} per
+            page{% endif %}.{% if row.detail %} {{ row.detail }}{% endif %}
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div>
       <p class="text-xs font-medium text-gray-600 mb-1">What happened</p>

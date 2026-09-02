@@ -1473,7 +1473,7 @@ async function pollOnce() {
 const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
 
 function harvestScriptsFor(site) {
-  return [
+  const scripts = [
     {
       id: `jobapp-interceptor-${site.id}`,
       matches: site.matches,
@@ -1490,6 +1490,22 @@ function harvestScriptsFor(site) {
       runAt: "document_start",
     },
   ];
+
+  // A site that will not hand over its board by being scrolled gets one extra
+  // script of its own — see `active` in sites.js, and tsenta.js for the only
+  // one so far. MAIN for the same two reasons the interceptor is: it needs the
+  // page's own origin for the request to survive CORS, and the page's own
+  // `postMessage` to ask the app for a token.
+  if (site.active) {
+    scripts.push({
+      id: `jobapp-active-${site.id}`,
+      matches: site.matches,
+      js: [site.active],
+      runAt: "document_start",
+      world: "MAIN",
+    });
+  }
+  return scripts;
 }
 
 async function registeredIds(ids) {
@@ -1744,6 +1760,40 @@ async function reportReadStats(stats, url) {
   });
 }
 
+/**
+ * What an API sweep managed on a site that fetches its own board.
+ *
+ * The passive reader reports what it *looked at*; this reports what was
+ * *asked for*, which is a different question on a site where the pages exist
+ * only because we requested them. Reported when it fetched nothing, too — a
+ * sweep with no token, one the API refused, and one that ran and found the
+ * board empty all reach the server as the same silence otherwise, and they
+ * want three different fixes.
+ */
+async function reportSweep(sweep, url) {
+  if (!sweep || typeof sweep !== "object") return;
+  const summary = sweep.summary && typeof sweep.summary === "object"
+    ? sweep.summary
+    : {};
+  await reportEvent("sweep", {
+    url,
+    ok: sweep.ok !== false,
+    summary: {
+      // Pages fetched and records seen in them. Records rather than jobs: this
+      // side counts array entries, and what is a job is the server's decision.
+      pages: Number(summary.pages) || 0,
+      rows: Number(summary.rows) || 0,
+      // The page size that worked, which is the only record of whether asking
+      // for a bigger one was honoured.
+      limit: Number(summary.limit) || 0,
+      // Why it stopped. The field the whole event exists for.
+      stopped: String(summary.stopped || "").slice(0, 80),
+      status: Number(summary.status) || 0,
+      detail: String(summary.detail || "").slice(0, 200),
+    },
+  });
+}
+
 function ensureAlarm() {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
 }
@@ -1775,6 +1825,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "harvest-stats") {
     if (!sender.tab) return false;
     reportReadStats(message.stats, message.sourceUrl || sender.tab.url);
+    return false;
+  }
+  if (message?.type === "harvest-sweep") {
+    if (!sender.tab) return false;
+    reportSweep(message.sweep, message.sourceUrl || sender.tab.url);
     return false;
   }
   if (message?.type === "sync-harvest") {

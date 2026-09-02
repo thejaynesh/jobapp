@@ -43,7 +43,12 @@ function onMessage(event) {
   const data = event.data;
   if (!data || data.channel !== CHANNEL) return;
   const isStats = data.payload === undefined && data.stats;
-  if (data.payload === undefined && !isStats) return;
+  // A site that fetches its own API rather than waiting to be scrolled — see
+  // tsenta.js. It reports what the sweep did, including when it did nothing,
+  // because "no payloads arrived" has three causes here and they need
+  // different fixes.
+  const isSweep = data.payload === undefined && !isStats && data.sweep;
+  if (data.payload === undefined && !isStats && !isSweep) return;
 
   // Orphaned by a reload. Stop listening rather than fail per response: this
   // tab's harvest is over until the page is refreshed, and the interceptor
@@ -55,7 +60,17 @@ function onMessage(event) {
 
   try {
     chrome.runtime.sendMessage(
-      isStats
+      isSweep
+        ? {
+            // What an API sweep managed. The kind is fixed on the other side
+            // rather than carried here: this channel is public, and a page
+            // choosing its own event kind could write anything into the
+            // diagnostic table.
+            type: "harvest-sweep",
+            sweep: data.sweep,
+            sourceUrl: data.sourceUrl,
+          }
+        : isStats
         ? {
             // Not a payload: a count of what the reader looked at on this
             // page. Sent even — especially — when it forwarded nothing, which

@@ -210,8 +210,96 @@ def summary(db, days: int = 7) -> dict:
         # comparison away. The page count is bounded, because it is a plain
         # count shown next to other plain counts over this window.
         "harvest_health": harvest_health(db, pages_days=days),
+        "sweeps": sweep_stats(db, days=days),
         "recent": recent(db, limit=12),
     }
+
+
+# Why a sweep stopped, in the words the panel should use. Anything not listed
+# is shown as reported — a sweep that fails in a way nobody anticipated should
+# say so rather than be rounded to the nearest known reason.
+SWEEP_REASONS = {
+    "no token": "the site never handed over a token — sign in to it in this browser",
+    "not signed in": "the API refused the token — sign in to the site again",
+    "end of list": "reached the end of the list",
+    "short page": "reached the end of the list",
+    "empty page": "reached the end of the list",
+    "page budget": "stopped at its page budget, so there is probably more",
+    "row budget": "stopped at its row budget, so there is probably more",
+}
+
+
+def sweep_stats(db, days: int = 7) -> list[dict]:
+    """
+    Per host: what the API sweeps fetched, and why the last one stopped.
+
+    A sweep is the one harvest path where nothing arriving is not evidence of
+    anything on its own. The passive reader only runs when a page fetches
+    something, so its silence means the page was quiet; a sweep asks, so its
+    silence means the ask failed — and it fails for three unrelated reasons.
+    Not signed in, refused by the API, and a board that genuinely has nothing
+    new all reach this table as zero payloads, and the fix differs every time.
+
+    Hence the last reason rather than an aggregate of them: the useful question
+    is "what is wrong with it now", and a host that failed twice yesterday and
+    worked this morning is working.
+    """
+    from sqlalchemy import func
+
+    from app.models.agent_event import AgentEvent
+
+    def total(key: str):
+        return func.sum(
+            func.coalesce(AgentEvent.summary[key].astext.cast(Integer), 0)
+        )
+
+    rows = (
+        db.query(
+            AgentEvent.host,
+            func.count(AgentEvent.id),
+            total("pages"),
+            total("rows"),
+            func.max(AgentEvent.created_at),
+        )
+        .filter(
+            AgentEvent.created_at >= _window_start(days),
+            AgentEvent.kind == "sweep",
+            AgentEvent.host.isnot(None),
+        )
+        .group_by(AgentEvent.host)
+        .order_by(func.max(AgentEvent.created_at).desc())
+        .all()
+    )
+
+    out = []
+    for host, runs, pages, records, last_at in rows:
+        last = (
+            db.query(AgentEvent)
+            .filter(
+                AgentEvent.kind == "sweep",
+                AgentEvent.host == host,
+                AgentEvent.created_at >= _window_start(days),
+            )
+            .order_by(AgentEvent.created_at.desc())
+            .first()
+        )
+        summary = (last.summary if last else None) or {}
+        stopped = str(summary.get("stopped") or "")
+        out.append({
+            "host": host,
+            "runs": int(runs or 0),
+            "pages": int(pages or 0),
+            "records": int(records or 0),
+            "last_at": last_at,
+            "last_ok": bool(last.ok) if last else False,
+            "stopped": stopped,
+            "reason": SWEEP_REASONS.get(stopped, stopped),
+            # The page size that worked. The only record of whether asking for
+            # a bigger one than the site's own client uses was honoured.
+            "limit": int(summary.get("limit") or 0),
+            "detail": str(summary.get("detail") or ""),
+        })
+    return out
 
 
 def harvest_yield(db, days: int = 7) -> dict:
