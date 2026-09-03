@@ -347,6 +347,30 @@ def _challenge_hours() -> int:
     return max(1, int(getattr(settings, "BROWSE_CHALLENGE_BACKOFF_HOURS", 24)))
 
 
+def _max_challenge_hours() -> int:
+    return max(
+        _challenge_hours(),
+        int(getattr(settings, "BROWSE_CHALLENGE_MAX_BACKOFF_HOURS", 24 * 21)),
+    )
+
+
+def _backoff_hours(strikes: int) -> int:
+    """
+    How long to leave a host alone, after `strikes` days of being turned away.
+
+    Doubling, because a flat backoff is not a backoff against a host that has
+    simply decided to check everyone. Jooble is the case that proved it: the
+    pause lifted every twenty-four hours, the enqueuer queued another sixty
+    pages, every one of them raised a check nobody got past, and the cycle
+    repeated — four hundred and forty-eight visits in a week, none of which
+    reached a job. A day, then two, then four, gets to "leave it alone" in
+    under a week while still trying often enough to notice if it relents.
+    """
+    if strikes <= 1:
+        return _challenge_hours()
+    return min(_challenge_hours() * (2 ** (strikes - 1)), _max_challenge_hours())
+
+
 def blocked_hosts(db) -> set[str]:
     """
     Hosts that recently asked for a human check nobody got past.
@@ -364,7 +388,11 @@ def blocked_hosts(db) -> set[str]:
     """
     from app.models.agent_event import AgentEvent
 
-    since = datetime.now(timezone.utc) - timedelta(hours=_challenge_hours())
+    now = datetime.now(timezone.utc)
+    # The whole horizon, not one backoff window: how long a host is left alone
+    # depends on how many days it has turned us away, and that cannot be
+    # counted from inside the window it decides the size of.
+    since = now - timedelta(hours=_max_challenge_hours())
     rows = (
         db.query(AgentEvent.host, AgentEvent.created_at,
                  AgentEvent.summary["challenge"].astext)
@@ -383,20 +411,36 @@ def blocked_hosts(db) -> set[str]:
         .all()
     )
 
-    # Last word per host wins. Passing the check is precisely the event that
-    # invalidates an earlier block, and without this the backoff outlived the
+    # Per host: how many separate days it turned us away, and when it last did.
+    #
+    # Days rather than visits, and that distinction is the whole of it. A queue
+    # of sixty pages for one host fails sixty times in one evening, which is
+    # one refusal repeated — counting them individually would escalate a single
+    # bad night into a year-long pause.
+    #
+    # Passing the check resets the count outright. It is precisely the event
+    # that invalidates the block, and without this the backoff outlived the
     # thing it was waiting for: you would go and pass the check, and the host
-    # would stay untouched for the rest of the day anyway — which reads as the
-    # click having achieved nothing.
-    blocked: set[str] = set()
-    for host, _created_at, outcome in rows:
+    # would stay untouched anyway — which reads as the click having achieved
+    # nothing.
+    state: dict[str, tuple[int, datetime, object]] = {}
+    for host, created_at, outcome in rows:
         if not host:
             continue
         if outcome == "passed":
-            blocked.discard(host)
-        else:
-            blocked.add(host)
-    return blocked
+            state.pop(host, None)
+            continue
+        strikes, _last, last_day = state.get(host, (0, created_at, None))
+        day = created_at.date()
+        if day != last_day:
+            strikes += 1
+        state[host] = (strikes, created_at, day)
+
+    return {
+        host
+        for host, (strikes, last_at, _day) in state.items()
+        if now - last_at < timedelta(hours=_backoff_hours(strikes))
+    }
 
 
 def _ratelimit_minutes() -> int:

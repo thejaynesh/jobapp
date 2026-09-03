@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     # succeed. Short and re-earned on purpose: these checks are usually about
     # the traffic pattern rather than the visitor, so tomorrow is worth a try.
     BROWSE_CHALLENGE_BACKOFF_HOURS: int = 24
+    # And the ceiling it doubles towards. Flat was not enough: the pause lifted
+    # every day, another sixty pages were queued, every one raised a check
+    # nobody got past, and it repeated — 448 visits in a week that reached no
+    # job at all. Doubling reaches "leave it alone" in under a week and still
+    # tries occasionally, because these checks are usually about the traffic
+    # pattern rather than the visitor and a host can relent.
+    BROWSE_CHALLENGE_MAX_BACKOFF_HOURS: int = 24 * 21
     # How long to leave a host alone after it asked us to slow down. Minutes
     # rather than the hours a human check gets, because that is what a rate
     # limit means — "not this fast", not "not at all". Greenhouse's board says

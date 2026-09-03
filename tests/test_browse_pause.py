@@ -1166,3 +1166,88 @@ class TestPassingTheCheckYourself:
         from app.models.browser_task import TASK_KINDS
 
         assert "pass_check" in TASK_KINDS
+
+
+class TestAHostThatKeepsTurningUsAwayIsLeftAloneForLonger:
+    """
+    A flat backoff is not a backoff against a host that has decided to check
+    everyone. Jooble proved it: the pause lifted every twenty-four hours,
+    another sixty pages were queued, every one of them raised a check nobody
+    got past, and it repeated — 448 visits in a week that reached no job, while
+    Handshake and JobRight got sixteen and ten between them.
+    """
+
+    def _challenge(self, db, host, when, outcome="timeout"):
+        from app.models.agent_event import AgentEvent
+
+        event = AgentEvent(
+            kind="browse", host=host, ok=False,
+            summary={"challenge": outcome, "signed_in": True},
+        )
+        db.add(event)
+        db.flush()
+        # created_at has a server default, so the date being tested has to be
+        # written over it rather than passed in.
+        event.created_at = when
+        db.commit()
+
+    def test_one_bad_day_is_the_base_backoff(self, db):
+        from app.services import browse_plan
+
+        now = datetime.now(timezone.utc)
+        self._challenge(db, "jooble.org", now - timedelta(hours=2))
+        assert "jooble.org" in browse_plan.blocked_hosts(db)
+
+        self._challenge(db, "other.example", now - timedelta(hours=30))
+        assert "other.example" not in browse_plan.blocked_hosts(db)
+
+    def test_sixty_refusals_in_one_evening_count_as_one(self, db):
+        # Otherwise a single bad night escalates to a year, and a host that was
+        # briefly unhappy is never tried again.
+        from app.services import browse_plan
+
+        now = datetime.now(timezone.utc)
+        for minute in range(60):
+            self._challenge(db, "jooble.org", now - timedelta(hours=30, minutes=minute))
+
+        assert "jooble.org" not in browse_plan.blocked_hosts(db), (
+            "one day of refusals earns one day of backoff, however many pages"
+        )
+
+    def test_each_further_day_doubles_the_pause(self, db):
+        from app.services import browse_plan
+
+        now = datetime.now(timezone.utc)
+        # Three separate days of being turned away: 24h, then 48, then 96.
+        for days in (5, 4, 3):
+            self._challenge(db, "jooble.org", now - timedelta(days=days))
+        self._challenge(db, "jooble.org", now - timedelta(hours=50))
+
+        # Four strikes is a 192-hour pause, and the last refusal was 50 hours
+        # ago, so it stays blocked where a flat 24 would have let it go.
+        assert "jooble.org" in browse_plan.blocked_hosts(db)
+
+    def test_passing_the_check_wipes_the_record(self, db):
+        # The click has to be worth something. Passing is precisely the event
+        # that invalidates the block, including everything it had accumulated.
+        from app.services import browse_plan
+
+        now = datetime.now(timezone.utc)
+        for days in (5, 4, 3, 2):
+            self._challenge(db, "jooble.org", now - timedelta(days=days))
+        self._challenge(db, "jooble.org", now - timedelta(hours=1), outcome="passed")
+
+        assert "jooble.org" not in browse_plan.blocked_hosts(db)
+
+    def test_the_pause_is_capped_rather_than_doubling_forever(self, db):
+        from app.services import browse_plan
+        from app.config import settings
+
+        now = datetime.now(timezone.utc)
+        for days in range(30, 1, -1):
+            self._challenge(db, "jooble.org", now - timedelta(days=days))
+
+        # Thirty strikes would be centuries of doubling; the ceiling is what
+        # keeps a host that might relent from being written off forever.
+        assert browse_plan._backoff_hours(30) == \
+            settings.BROWSE_CHALLENGE_MAX_BACKOFF_HOURS

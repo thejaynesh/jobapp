@@ -225,9 +225,32 @@ def sweep(db, *, client: httpx.Client | None = None,
     capped: list[str] = []
     fatal = ""
     failed = ""
+    # One re-mint, not a loop. An ID token lasts an hour and the deep sweep is
+    # a thousand requests, so a run that starts against a token minted fifty
+    # minutes ago by the feed sweep — same worker process, same cache — walks
+    # off the end of it partway through. That is exactly what happened on the
+    # first real run: thirty-three slices of fifty-one, then 401, and the last
+    # eighteen states were never asked for.
+    #
+    # Once, because a second failure straight after a fresh mint is the
+    # credential being refused rather than expiring, and retrying that is just
+    # a faster way to be refused.
+    reminted = False
     try:
         for query in slices:
             stopped = _sweep_one(db, client, headers, query, outcome)
+
+            if stopped == "not signed in" and not reminted:
+                reminted = True
+                fresh = linked_auth.id_token(db, SITE)
+                if fresh:
+                    headers["authorization"] = f"Bearer {fresh}"
+                    logger.info("tsenta sweep: token expired mid-run; re-minted")
+                    # The same slice again: it stopped where the token died, and
+                    # whatever it had already stored is deduplicated on the way
+                    # back in rather than counted twice as new.
+                    stopped = _sweep_one(db, client, headers, query, outcome)
+
             outcome["slices"] += 1
             if stopped == "capped":
                 outcome["capped_slices"] += 1

@@ -169,6 +169,19 @@ class TestTheServerSideSweep:
     def _with_token(self):
         return patch.object(linked_auth, "id_token", return_value="ID-1")
 
+    def _complete_slice(self, start=0):
+        """
+        The two responses one slice costs: a full page, then a shorter one.
+
+        `served` is measured from page one, so a slice can never end on it —
+        the first page is always "full" by definition. Two responses is the
+        minimum for a slice that finishes.
+        """
+        return [
+            _resp(payload={"jobs": [_card(start), _card(start + 1)]}),
+            _resp(payload={"jobs": [_card(start + 2)]}),
+        ]
+
     def test_it_pages_until_a_short_one_and_stores_what_it_finds(self, db):
         pages = [
             _resp(payload={"jobs": [_card(n) for n in range(20)]}),
@@ -223,7 +236,8 @@ class TestTheServerSideSweep:
         # would fail the same way for the same hour.
         _linked(db)
         linked_auth._cache["tsenta"] = ("ID-1", 9e12)
-        pages = [_resp(status=401)]
+        # Twice: the slice, then the retry after the one permitted re-mint.
+        pages = [_resp(status=401), _resp(status=401)]
         with self._with_token(), patch("time.sleep"):
             out = tsenta.sweep(db, client=self._client(pages))
 
@@ -314,12 +328,49 @@ class TestTheServerSideSweep:
         assert out["rows"] == 16
         assert out["stopped"] == "end of list"
 
+    def test_a_token_that_expires_mid_run_is_re_minted_and_the_run_continues(self, db):
+        """
+        The deep sweep is a thousand requests and an ID token lasts an hour, so
+        a run inheriting a token the feed sweep minted fifty minutes ago walks
+        off the end of it partway through. On the first real run that cost the
+        last eighteen states: thirty-three slices, then 401, then nothing.
+        """
+        _linked(db)
+        pages = (
+            self._complete_slice(0)          # CA: fine
+            + [_resp(status=401)]            # NY: the token dies here
+            + self._complete_slice(10)       # NY again, after the re-mint
+            + self._complete_slice(20)       # TX: reached only because of it
+        )
+        with patch.object(linked_auth, "id_token", side_effect=["ID-1", "ID-2"]), \
+             patch("time.sleep"):
+            out = tsenta.sweep(db, client=self._client(pages),
+                               slices=[{"locations": f"state:{s}"}
+                                       for s in ("CA", "NY", "TX")])
+
+        assert out["slices"] == 3, "every slice was swept"
+        assert out["stopped"] == "end of list"
+        assert out["rows"] == 9
+
+    def test_it_gives_up_after_one_re_mint(self, db):
+        # A fresh token refused straight away is the credential being rejected,
+        # not expiring. Retrying that is a faster way to be refused.
+        _linked(db)
+        with patch.object(linked_auth, "id_token", side_effect=["ID-1", "ID-2"]), \
+             patch("time.sleep"):
+            out = tsenta.sweep(db, client=self._client([_resp(status=401)] * 4),
+                               slices=[{"locations": f"state:{s}"}
+                                       for s in ("CA", "NY", "TX")])
+
+        assert out["stopped"] == "not signed in"
+        assert out["slices"] == 1, "it stopped rather than trying the other two"
+
     def test_a_dead_credential_stops_the_whole_run_not_just_one_slice(self, db):
         # Fifty more slices would be fifty more ways to say the same thing,
         # and fifty more requests at a board that has already refused us.
         _linked(db)
         with self._with_token(), patch("time.sleep"):
-            out = tsenta.sweep(db, client=self._client([_resp(status=401)]),
+            out = tsenta.sweep(db, client=self._client([_resp(status=401)] * 2),
                                slices=[{"locations": f"state:{s}"}
                                        for s in ("CA", "NY", "TX")])
         assert out["slices"] == 1
