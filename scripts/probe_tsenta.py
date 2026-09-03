@@ -49,6 +49,26 @@ VARIANTS = [
     ("remote anywhere",                 {"locations": "remote"}),
 ]
 
+# Partitions, for the ceiling the first run found.
+#
+# Dropping `locations` or setting `datePosted=all` does not return more of one
+# list — it returns a *different, larger* list, and both stop at page 21 with
+# HTTP 400. Twenty pages of twenty is 400 rows, which is a hard offset cap, not
+# the end of anything: the baseline's 215 ends on a short page, and these do
+# not end at all.
+#
+# The way past a capped list is to ask for it in slices small enough to fit
+# under the cap, and union what comes back. These are the candidate slice keys.
+# A slice returning 400 is still truncated and needs slicing further; one
+# returning fewer is complete.
+PARTITIONS = [
+    ("datePosted", ["all", "past_24_hours", "past_week", "past_month",
+                    "past_3_days", "today"]),
+    ("locations", ["country:US", "remote", "state:CA", "state:NY", "state:TX",
+                   "state:WA", "state:MA"]),
+    ("sortBy", ["relevance", "date", "newest", "recent"]),
+]
+
 
 def _ids(jobs):
     """What identifies a posting, for comparing one variant against another."""
@@ -146,6 +166,44 @@ def main():
         print("always the one asked for. `new` counts postings this variant")
         print("returned that the baseline did not — the only column that says")
         print("whether a variant is worth adding to the sweep.")
+
+        # ---- Past the 400-row ceiling -------------------------------------
+        #
+        # A variant stopping at `HTTP 400` on page 21 has not reached the end
+        # of anything; it has hit an offset cap. So the question stops being
+        # "which single query is best" and becomes "which set of slices covers
+        # the most between them".
+        print()
+        print("=" * 92)
+        print("Slicing, to get under the 400-row ceiling")
+        print("=" * 92)
+        client = httpx.Client(timeout=30, follow_redirects=True)
+        union: set = set()
+        try:
+            for key, values in PARTITIONS:
+                print()
+                print(f"--- {key} " + "-" * (86 - len(key)))
+                print(f"{'value':<20} {'pages':>6} {'rows':>6} {'unique':>7} "
+                      f"{'new to union':>13}  stopped")
+                for value in values:
+                    out = _sweep(client, headers, {key: value, "datePosted": "all"},
+                                 API)
+                    added = len(out["ids"] - union)
+                    union |= out["ids"]
+                    flag = "  <-- still truncated" if out["stopped"] == "HTTP 400" else ""
+                    print(f"{value:<20} {out['pages']:>6} {out['rows']:>6} "
+                          f"{len(out['ids']):>7} {added:>13}  "
+                          f"{out['stopped']}{flag}")
+        finally:
+            client.close()
+
+        print()
+        print(f"Distinct postings across every slice: {len(union)}")
+        print(f"The current sweep collects:           {len(baseline)}")
+        print()
+        print("A slice that stopped at HTTP 400 is still truncated and needs")
+        print("slicing further. One that ended on a short or empty page is")
+        print("complete, and is safe to sweep as it stands.")
     finally:
         db.close()
 

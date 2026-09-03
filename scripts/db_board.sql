@@ -170,14 +170,37 @@ ORDER BY jobs_found DESC;
 -- A board with no crawl recipe is being walked by the generic heuristics,
 -- which is fine until it is not. A retired one is the interesting case: it
 -- means visits under it kept landing on page one.
-SELECT host, mode, active, tries, wins,
-       left(coalesce(note, ''), 70) AS note, updated_at
+SELECT host,
+       recipe->>'mode'              AS mode,
+       status,
+       tries,
+       best_pages,
+       left(coalesce(note, ''), 70) AS note,
+       created_at
 FROM crawl_recipes
-ORDER BY updated_at DESC
+ORDER BY created_at DESC
 LIMIT 20;
 
 \echo ''
-SELECT host, active, tries, wins, left(coalesce(note, ''), 70) AS note, updated_at
+\echo '-- And how to read each board''s payloads -------------------------'
+-- No row for a host means nothing was ever learned for it, so its payloads
+-- are being read by the generic shape walker alone. That is the intended
+-- fallback and it is also the thing that returns zero on a board whose JSON
+-- does not name a title and a company in the same object.
+SELECT host, status, jobs_found, samples_tried,
+       left(coalesce(note, ''), 70) AS note, created_at
 FROM harvest_recipes
-ORDER BY updated_at DESC
+ORDER BY created_at DESC
+LIMIT 20;
+
+\echo ''
+\echo '-- Evidence kept for hosts nothing could be read from -------------'
+-- The input to the Learn button. A host with samples and no active recipe is
+-- one visit away from being readable; a host with neither never forwarded a
+-- payload worth keeping.
+SELECT host, count(*) AS samples, sum(found) AS jobs_the_walker_saw,
+       max(bytes) AS biggest, max(created_at) AS newest
+FROM harvest_samples
+GROUP BY host
+ORDER BY samples DESC
 LIMIT 20;
