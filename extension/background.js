@@ -399,20 +399,43 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
             //    no fetch is triggered, and the loop concludes the list ended.
             //    So find the element that actually scrolls, and re-find it each
             //    pass because the layout moves as content arrives.
-            function scrollTarget() {
+            //
+            //    Candidates rather than a winner, because the first guess is
+            //    routinely wrong in a way that reports as success. A document
+            //    can be *taller* than the viewport and still not scroll — the
+            //    body is `overflow: hidden` and an inner panel does the
+            //    scrolling — and the old code returned that document, set its
+            //    scrollTop, watched it stay at zero, and reported the element
+            //    it had failed to move. Tsenta did exactly this: `scrolled_px:
+            //    0`, `batches: 0`, `scroll_target: "HTML."`.
+            //
+            //    Scrolling three candidates costs nothing. A wrong one is a
+            //    no-op by definition — an element that cannot scroll does not
+            //    move — so there is no need to work out which is right, only
+            //    to include it.
+            function scrollTargets() {
               const doc = document.scrollingElement || document.documentElement;
-              if (doc && doc.scrollHeight > doc.clientHeight + 200) return doc;
-              let best = doc;
-              let bestArea = 0;
+              const out = [];
+              if (doc && doc.scrollHeight > doc.clientHeight + 200) out.push(doc);
+              const boxes = [];
               for (const el of document.querySelectorAll("div,main,section,ul,ol")) {
                 if (el.scrollHeight <= el.clientHeight + 200) continue;
                 const style = getComputedStyle(el);
                 if (!/(auto|scroll)/.test(style.overflowY)) continue;
-                const area = el.clientHeight * el.clientWidth;
-                if (area > bestArea) { bestArea = area; best = el; }
+                boxes.push([el.clientHeight * el.clientWidth, el]);
               }
-              return best;
+              boxes.sort((a, b) => b[0] - a[0]);
+              for (const box of boxes.slice(0, 3)) out.push(box[1]);
+              return out.length ? out : [doc];
             }
+
+            // The one that actually moved, for the report. "Which element did
+            // we scroll" is only worth recording if it is the element that
+            // went somewhere; naming the one we failed to move sends you to
+            // read the wrong markup.
+            const describe = (el) =>
+              (el && el.tagName ? el.tagName : "?") +
+              "." + String((el && el.className) || "").slice(0, 40);
 
             // 2. It measured progress by document height. A virtualized list
             //    recycles its rows, so the height never changes however much
@@ -511,7 +534,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
             let rateLimited = false;
             let passes = 0;
             let pagesSeen = 1;
-            let target = scrollTarget();
+            let moved = "";
 
             // One page's worth of scrolling. Runs once for a board that does
             // not paginate, which is the whole of the old behaviour.
@@ -520,18 +543,33 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
             for (let n = 0; n < maxPasses && Date.now() < deadline; n += 1) {
               if (limited()) { rateLimited = true; return; }
               passes += 1;
-              target = scrollTarget();
-              try {
-                target.scrollTop = target.scrollHeight;
-              } catch (_) { /* not scrollable after all */ }
-              // The window too, in case the container guess was wrong.
+              for (const el of scrollTargets()) {
+                try {
+                  el.scrollTop = el.scrollHeight;
+                } catch (_) { /* not scrollable after all */ }
+                const at = el.scrollTop || 0;
+                if (at > reached) { reached = at; moved = describe(el); }
+              }
+              // The window too, in case every container guess was wrong.
               window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
-              reached = Math.max(reached, target.scrollTop || window.scrollY || 0);
+              if ((window.scrollY || 0) > reached) {
+                reached = window.scrollY;
+                moved = "window";
+              }
 
-              // Two seconds for the batch to land, checked often so a fast
-              // board is not held to a slow board's pace.
+              // How long to wait for the batch to land, checked often so a
+              // fast board is not held to a slow board's pace.
+              //
+              // Longer after each stall, rather than one fixed budget. Two
+              // seconds is right for a board that answers in a few hundred
+              // milliseconds and far too short for one taking two to five —
+              // and on that board every pass timed out, three stalls ended the
+              // scroll after six seconds, and it reported a board with nothing
+              // to show. Escalating costs a fast board nothing, because the
+              // wait breaks the moment anything arrives.
+              const waitMs = 2000 * (stalls + 1);
               let grew = false;
-              for (let waited = 0; waited < 2000; waited += 200) {
+              for (let waited = 0; waited < waitMs; waited += 200) {
                 await new Promise((r) => setTimeout(r, 200));
                 if (signal() > previous) { grew = true; break; }
               }
@@ -704,10 +742,11 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
               // number that says whether the scroll worked: a deep crawl that
               // reports one batch did not scroll, whatever the pixels say.
               batches: batches,
-              // Which element was scrolled, so a wrong guess is diagnosable
-              // rather than invisible.
-              target: (target && target.tagName ? target.tagName : "?") +
-                      "." + String((target && target.className) || "").slice(0, 40),
+              // Which element actually moved, so a wrong guess is diagnosable
+              // rather than invisible. Empty means nothing on the page scrolled
+              // at all, which is a different and much more useful statement
+              // than naming the element we tried and failed to move.
+              target: moved || "(nothing scrolled)",
             };
           },
         });
