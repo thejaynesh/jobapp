@@ -47,8 +47,13 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 # immediate, long enough that an idle agent is not a busy loop against Postgres.
 _POLL_INTERVAL_SECONDS = 1.0
 
+# Boards this server knows how to sweep on its own, and therefore the only ones
+# worth being handed a credential for. A name not on this list would store
+# something nothing ever reads, and report success for it.
+LINKABLE_SITES = frozenset({"tsenta"})
 
-def _bad_request(exc: TaskError) -> JSONResponse:
+
+def _bad_request(exc: "TaskError | str") -> JSONResponse:
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
 
@@ -256,6 +261,55 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
             counts["found"], (body.get("source_url") or "an intercepted response")[:200],
         )
     return counts
+
+
+@router.post("/link")
+async def link_account(request: Request, db: Session = Depends(get_db)):
+    """
+    A board's own credential, handed over so the server can call its API.
+
+    Body: {"site": "tsenta", "api_key": "...", "refresh_token": "..."}
+
+    The one thing the browser has and the server cannot get for itself. Tsenta's
+    API takes a Firebase ID token that lasts an hour; the refresh token behind
+    it lasts until it is revoked, and Google's public `securetoken` endpoint
+    mints fresh ID tokens from it. So this is what turns a sweep that needs a
+    laptop open into one that runs on a schedule.
+
+    Sent on every visit to the board rather than once. That is the repair path:
+    a credential that has gone stale is fixed by the user opening the site, and
+    nobody has to know that is the fix.
+
+    Only sites this server actually knows how to sweep are accepted — not as a
+    gate on anything, but because a typo'd site name would store a credential
+    that nothing would ever read and report success for it.
+    """
+    from app.services import linked_auth
+
+    body = await _json_body(request)
+    site = str(body.get("site") or "").strip().lower()[:40]
+    api_key = str(body.get("api_key") or "").strip()[:200]
+    refresh_token = str(body.get("refresh_token") or "").strip()
+
+    if site not in LINKABLE_SITES:
+        return _bad_request(
+            f"Unknown site {site!r}. Known: {', '.join(sorted(LINKABLE_SITES))}."
+        )
+    if not api_key or not refresh_token:
+        return _bad_request("Both api_key and refresh_token are required.")
+
+    try:
+        row = await run_in_threadpool(
+            linked_auth.link, db, site, api_key, refresh_token
+        )
+    except Exception as exc:
+        logger.error("agent: could not store the %s credential: %s", site, exc)
+        return JSONResponse({"detail": "Could not store it."}, status_code=500)
+
+    # Deliberately not echoed back, not logged, and not returned: there is
+    # nothing the caller learns from seeing its own token again.
+    logger.info("agent: linked %s", site)
+    return {"ok": True, "site": site, "linked_at": row.linked_at.isoformat()}
 
 
 @router.post("/report")

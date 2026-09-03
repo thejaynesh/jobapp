@@ -66,6 +66,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.fetch.fetch_browser_tier",
         "schedule": celery_schedule(settings.FETCH_BROWSER_INTERVAL_HOURS * 3600),
     },
+    # Boards with a stored credential, asked over their own API. Its own entry
+    # rather than a fourth fetch group because it is the one source that can be
+    # *unlinked* — a state the fetch cycle has no vocabulary for — and because
+    # it needs no browser, which is the entire reason it exists.
+    "sweep-linked-boards": {
+        "task": "app.tasks.fetch.sweep_linked_boards",
+        "schedule": celery_schedule(settings.FETCH_LINKED_INTERVAL_HOURS * 3600),
+    },
     # Matching used to happen only as a tail-call from a fetch, so a pass that
     # did not finish left jobs sitting as `new` until the next fetch hours
     # later. On its own schedule, unmatched jobs are a delay rather than a

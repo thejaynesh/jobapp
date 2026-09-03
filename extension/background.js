@@ -1668,6 +1668,20 @@ function harvestScriptsFor(site) {
       world: "MAIN",
     });
   }
+
+  // Isolated, unlike the two above, and deliberately so: this one carries a
+  // credential, and the page's `postMessage` channel is audible to every
+  // analytics and error-reporting bundle the site loads. An isolated script
+  // shares the origin's storage without sharing its globals, so it reads the
+  // same IndexedDB and talks to us directly.
+  if (site.link) {
+    scripts.push({
+      id: `jobapp-link-${site.id}`,
+      matches: site.matches,
+      js: [site.link],
+      runAt: "document_idle",
+    });
+  }
   return scripts;
 }
 
@@ -1958,6 +1972,36 @@ async function reportSweep(sweep, url) {
 }
 
 /**
+ * Pass a board's credential through to the server.
+ *
+ * Deliberately thin. This side neither reads nor validates the token — it came
+ * from an isolated content script on the board's own origin and it goes to the
+ * user's own server, and every judgement about whether the site is one we can
+ * sweep belongs where the sweeping happens.
+ *
+ * Failures are swallowed on purpose. The board still works through the tab; a
+ * server that could not be reached is a scheduled sweep that does not start
+ * yet, and the next page view tries again. Reporting it would put a scary
+ * message in front of someone whose Tsenta harvest is working fine.
+ */
+async function linkAccount(message) {
+  const site = String(message.site || "").slice(0, 40);
+  const apiKey = String(message.apiKey || "");
+  const refreshToken = String(message.refreshToken || "");
+  if (!site || !apiKey || !refreshToken) return;
+  try {
+    await api("/api/agent/link", {
+      site,
+      api_key: apiKey,
+      refresh_token: refreshToken,
+    });
+    await setStatus({ lastLinked: site, lastLinkedAt: new Date().toISOString() });
+  } catch (error) {
+    console.warn("jobapp: could not link", site, error);
+  }
+}
+
+/**
  * Make sure the poll alarm exists — without resetting the one that already
  * does.
  *
@@ -2008,6 +2052,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "harvest-stats") {
     if (!sender.tab) return false;
     reportReadStats(message.stats, message.sourceUrl || sender.tab.url);
+    return false;
+  }
+  if (message?.type === "link-account") {
+    // Only from a tab we injected into, like every other page-sourced message
+    // here. The site name is not taken from the message either — the server
+    // checks it against the boards it can actually sweep.
+    if (!sender.tab) return false;
+    linkAccount(message);
     return false;
   }
   if (message?.type === "harvest-sweep") {

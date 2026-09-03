@@ -300,6 +300,7 @@ surface to find.
 | `POST /api/agent/tasks/<id>/fail` | Failure. `{error, agent_id, permanent}` — `permanent` skips the retries |
 | `POST /api/agent/tasks/<id>/heartbeat` | Extend the lease on long-running work |
 | `POST /api/agent/harvest` | Offer intercepted job JSON. `{payload, source_url}` — a push, not a task |
+| `POST /api/agent/link` | Hand over a board's own credential. `{site, api_key, refresh_token}` — see below |
 | `GET /api/agent/job-context?url=` | What we know about a posting: score, flags, whether you applied |
 | `GET /api/agent/autofill-fields` | The profile values a form asks for — a fixed list, not the profile |
 | `POST /api/agent/prepare` | Save a posting and open an application for it. `{url, posting}` |
@@ -327,6 +328,42 @@ only the upload failed — the server restarted, the proxy answered 502, the wif
 dropped — nothing is reported at all: the lease lapses, the task comes back to
 the queue, and no attempt is charged for a network we do not control. Posting a
 `/fail` there used to burn an attempt for work that had been done correctly.
+
+## Linking a board, so the server can sweep it without us
+
+`tsenta.js` reads Tsenta's API from inside a tab, which works and which only
+happens while a browser is open on that board. `link.js` closes that gap: it
+reads the Firebase refresh token the site's own SDK stored, posts it to
+`/api/agent/link`, and the server mints hour-long ID tokens from it against
+Google's public `securetoken` endpoint — so the sweep runs on a schedule with
+no browser at all.
+
+Three things about it are deliberate:
+
+**It is an isolated-world script, not a MAIN-world one.** Everything else the
+extension reads off a page travels through `window.postMessage`, which every
+script on the page can listen to — including the analytics and error-reporting
+bundles a modern site loads from third parties. A job listing going past those
+is nothing; a refresh token going past them is the account. An isolated content
+script shares the origin's storage without sharing its globals, so it opens the
+same IndexedDB the site's SDK wrote and calls `chrome.runtime.sendMessage`
+directly.
+
+**It searches rather than addresses.** The documented layout is a
+`firebaseLocalStorageDb` database with a `firebase:authUser:<apiKey>:<appName>`
+key, but the app name is the site's choice and the SDK has moved this before. It
+walks the Firebase databases for anything holding a `stsTokenManager`, and falls
+back to `localStorage` for a site using one of the other two persistences.
+
+**It re-links on every visit.** That is the repair path: a credential that has
+gone stale is fixed by opening the board, and nobody has to learn that is the
+fix. The `/runs` panel says when a board was last linked and what the last mint
+error was, so "the scheduled sweep stopped" reads as an instruction.
+
+Adding a board means a `link:` entry in `sites.js`, a site name in
+`LINKABLE_SITES` in `app/routers/agent.py`, and a sweep the scheduled task can
+call. Everything else — minting, rotation, caching, the failure record — is in
+`app/services/linked_auth.py` and is not per-site.
 
 ## Adding a task kind
 

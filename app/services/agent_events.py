@@ -226,6 +226,13 @@ SWEEP_REASONS = {
     "empty page": "reached the end of the list",
     "page budget": "stopped at its page budget, so there is probably more",
     "row budget": "stopped at its row budget, so there is probably more",
+    # The scheduled sweep's own three. It runs without a browser, so its
+    # failures are about the stored credential rather than about a tab — and
+    # all three are repaired the same way, by opening the board once.
+    "not linked": "no credential stored — open the board in your browser once",
+    "credential refused": "the stored credential expired — open the board again",
+    "request failed": "the board could not be reached",
+    "unreadable answer": "the board answered with something that was not JSON",
 }
 
 

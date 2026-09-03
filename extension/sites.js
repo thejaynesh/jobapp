@@ -35,6 +35,10 @@
  *   note       optional, shown under the checkbox
  *   active     optional, a MAIN-world script file. For the rare board that
  *              will not hand over its list by being read — see tsenta.js.
+ *   link       optional, an ISOLATED-world script file. For a board whose API
+ *              the server can call for itself once it has been handed a
+ *              credential — see link.js, and note the world: a credential must
+ *              not travel through the page's own message channel.
  */
 export const HARVEST_SITES = [
   {
@@ -134,6 +138,9 @@ export const HARVEST_SITES = [
     // rest however long it runs — this asks its API for them directly, using
     // the token its own app offers to extensions.
     active: "tsenta.js",
+    // And the server sweeps it on a schedule once this has handed over the
+    // refresh token, which is the half a tab cannot do.
+    link: "link.js",
     note:
       "An aggregator like JobRight, reading from a wider set of career pages " +
       "and boards. Login-only, and it will not show a full list until its " +

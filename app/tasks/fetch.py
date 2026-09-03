@@ -112,3 +112,53 @@ def fetch_browser_tier() -> dict:
     if not settings.BROWSER_TIER_ENABLED:
         return {**_EMPTY, "skipped_reason": "disabled"}
     return _run("browser", None, True)
+
+
+@celery_app.task(name="app.tasks.fetch.sweep_linked_boards", bind=False, max_retries=0)
+def sweep_linked_boards() -> dict:
+    """
+    Boards that have to be asked over their own API, with a stored credential.
+
+    Separate from the three tiers above because it is a different kind of
+    source. Those adapters need nothing but a URL and a key from the
+    environment; this one needs a credential a person had to be signed in to
+    obtain, which means it can be *unlinked* — a state the fetch cycle has no
+    vocabulary for and should not learn one for.
+
+    It also fails differently. A board here does not break, it expires: the
+    refresh token dies when the user signs out everywhere or changes a
+    password, and the repair is to open the site in a browser once, which
+    re-links automatically. So a failure is recorded and reported rather than
+    retried, because retrying a dead credential faster does not revive it.
+    """
+    from app.services import agent_events
+    from app.services.sources import tsenta
+
+    db = SessionLocal()
+    results: dict[str, dict] = {}
+    try:
+        outcome = tsenta.sweep(db)
+        results[tsenta.SITE] = outcome
+        try:
+            # The same event kind the extension's sweep reports under, so the
+            # panel shows both and a board that moved from one path to the
+            # other stays comparable across the move.
+            agent_events.record(
+                db, "sweep", url=tsenta.API, agent_id="server",
+                ok=bool(outcome["pages"]),
+                summary={
+                    "pages": outcome["pages"], "rows": outcome["rows"],
+                    "limit": outcome["limit"], "stopped": outcome["stopped"],
+                    "detail": outcome["detail"], "status": 0,
+                    "inserted": outcome["inserted"], "merged": outcome["merged"],
+                },
+            )
+            db.commit()
+        except Exception as exc:
+            logger.warning("sweep_linked_boards: could not record the sweep: %s", exc)
+    except Exception as exc:
+        logger.error("sweep_linked_boards: %s", exc)
+        results["error"] = {"detail": str(exc)[:200]}
+    finally:
+        db.close()
+    return results

@@ -527,6 +527,12 @@ class Settings(BaseSettings):
     FETCH_API_INTERVAL_HOURS: int = 2
     FETCH_BOARDS_INTERVAL_HOURS: int = 5
     FETCH_BROWSER_INTERVAL_HOURS: int = 12
+    # Boards asked over their own API with a stored credential. Cheap — one
+    # request per page of twenty — and the board it exists for is personalised,
+    # so it changes on the site's schedule rather than ours. Three hours is
+    # frequent enough to catch a day's new recommendations and slow enough to
+    # be unremarkable traffic.
+    FETCH_LINKED_INTERVAL_HOURS: int = 3
     # The browser tier is the one worth being able to switch off wholesale: it
     # is the most expensive thing in the pipeline and the least productive.
     BROWSER_TIER_ENABLED: bool = True
