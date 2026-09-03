@@ -179,7 +179,9 @@ class TestTheServerSideSweep:
 
         assert out["pages"] == 2
         assert out["rows"] == 33
-        assert out["stopped"] == "short page"
+        # "end of list" is about the run, not the last page: every slice it was
+        # asked for ran out of postings, which is the whole board collected.
+        assert out["stopped"] == "end of list"
         assert out["inserted"] > 0
 
     def test_the_page_size_reported_is_the_one_the_board_served(self, db):
@@ -232,7 +234,7 @@ class TestTheServerSideSweep:
         pages = [_resp(payload={"jobs": []})]
         with self._with_token(), patch("time.sleep"):
             out = tsenta.sweep(db, client=self._client(pages))
-        assert out["stopped"] == "empty page"
+        assert out["stopped"] == "end of list"
         assert out["pages"] == 0
 
     def test_a_network_failure_mid_sweep_keeps_the_pages_already_stored(self, db):
@@ -266,6 +268,73 @@ class TestTheServerSideSweep:
 
         headers = client.get.call_args.kwargs["headers"]
         assert headers["authorization"] == "Bearer ID-1"
+
+    def test_the_offset_cap_is_reported_as_capped_not_as_the_end(self, db):
+        """
+        The API answers HTTP 400 from page 21 on. That is an offset cap at 400
+        rows, and reading it as the end of a list is how the sweep came to
+        collect 216 postings out of at least 1,845: a query that genuinely runs
+        out ends on a short page long before it.
+        """
+        pages = [_resp(payload={"jobs": [_card(n) for n in range(20)]})
+                 for _ in range(20)] + [_resp(status=400)]
+        with self._with_token(), patch("time.sleep"):
+            out = tsenta.sweep(db, client=self._client(pages),
+                               slices=[{"locations": "state:CA"}])
+
+        assert out["capped_slices"] == 1
+        assert "capped" in out["stopped"]
+        assert "state:CA" in out["detail"], "name the slice we cannot see behind"
+
+    def test_a_400_on_the_very_first_page_is_a_real_error(self, db):
+        # The cap cannot fire on page one — there is no offset yet — so a 400
+        # there is the board refusing the query and should say so.
+        with self._with_token(), patch("time.sleep"):
+            out = tsenta.sweep(db, client=self._client([_resp(status=400)]),
+                               slices=[{"locations": "state:CA"}])
+        assert out["stopped"] == "HTTP 400"
+        assert out["capped_slices"] == 0
+
+    def test_every_slice_is_swept_and_the_totals_add_up(self, db):
+        # Two pages per slice, two slices: the mock has to answer all four or
+        # the second slice fails on a missing response rather than on anything
+        # the code did.
+        pages = [
+            _resp(payload={"jobs": [_card(n) for n in range(5)]}),
+            _resp(payload={"jobs": [_card(n) for n in range(5, 8)]}),
+            _resp(payload={"jobs": [_card(n) for n in range(8, 13)]}),
+            _resp(payload={"jobs": [_card(n) for n in range(13, 16)]}),
+        ]
+        with self._with_token(), patch("time.sleep"):
+            out = tsenta.sweep(db, client=self._client(pages),
+                               slices=[{"locations": "state:WA"},
+                                       {"locations": "state:MA"}])
+
+        assert out["slices"] == 2
+        assert out["rows"] == 16
+        assert out["stopped"] == "end of list"
+
+    def test_a_dead_credential_stops_the_whole_run_not_just_one_slice(self, db):
+        # Fifty more slices would be fifty more ways to say the same thing,
+        # and fifty more requests at a board that has already refused us.
+        _linked(db)
+        with self._with_token(), patch("time.sleep"):
+            out = tsenta.sweep(db, client=self._client([_resp(status=401)]),
+                               slices=[{"locations": f"state:{s}"}
+                                       for s in ("CA", "NY", "TX")])
+        assert out["slices"] == 1
+        assert out["stopped"] == "not signed in"
+
+    def test_the_feed_and_the_index_ask_different_questions(self):
+        # `datePosted` is not a date filter here: absent it returns their
+        # recommendation feed, present with any value it returns their whole
+        # index. Getting that backwards is what capped the sweep at 216.
+        feed = tsenta.recommendation_slice()
+        index = tsenta.index_slices()
+
+        assert all("datePosted" not in q for q in feed)
+        assert len(index) > 40, "the index is swept state by state"
+        assert sum(1 for q in index if q.get("datePosted")) >= 40
 
     def test_a_second_sweep_of_the_same_board_inserts_nothing_new(self, db):
         # The board returns the same recommendation set every few hours. The

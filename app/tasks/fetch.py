@@ -115,9 +115,17 @@ def fetch_browser_tier() -> dict:
 
 
 @celery_app.task(name="app.tasks.fetch.sweep_linked_boards", bind=False, max_retries=0)
-def sweep_linked_boards() -> dict:
+def sweep_linked_boards(deep: bool = False) -> dict:
     """
     Boards that have to be asked over their own API, with a stored credential.
+
+    `deep` picks which of Tsenta's two lists to read. The default is their
+    recommendation feed — 216 postings, eleven round trips — which is what the
+    site itself shows and is worth re-reading every few hours. The deep sweep
+    reads their whole index, which the offset cap will not let anyone page
+    through in one query, so it goes state by state: about a thousand requests
+    for roughly 1,845 postings, which is a daily job rather than a three-hourly
+    one.
 
     Separate from the three tiers above because it is a different kind of
     source. Those adapters need nothing but a URL and a key from the
@@ -137,7 +145,7 @@ def sweep_linked_boards() -> dict:
     db = SessionLocal()
     results: dict[str, dict] = {}
     try:
-        outcome = tsenta.sweep(db)
+        outcome = tsenta.sweep(db, deep=deep)
         results[tsenta.SITE] = outcome
         try:
             # The same event kind the extension's sweep reports under, so the
@@ -151,6 +159,11 @@ def sweep_linked_boards() -> dict:
                     "limit": outcome["limit"], "stopped": outcome["stopped"],
                     "detail": outcome["detail"], "status": 0,
                     "inserted": outcome["inserted"], "merged": outcome["merged"],
+                    # Coverage, not throughput: a capped slice is postings we
+                    # know exist and cannot reach with this partition.
+                    "slices": outcome["slices"],
+                    "capped_slices": outcome["capped_slices"],
+                    "deep": outcome["deep"],
                 },
             )
             db.commit()

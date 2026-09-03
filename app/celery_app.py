@@ -74,6 +74,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.fetch.sweep_linked_boards",
         "schedule": celery_schedule(settings.FETCH_LINKED_INTERVAL_HOURS * 3600),
     },
+    # The same board's whole index rather than its feed. Its own entry because
+    # it costs a thousand requests to the feed sweep's eleven — one is what you
+    # run every few hours, the other is what you run once a day.
+    "sweep-linked-boards-deep": {
+        "task": "app.tasks.fetch.sweep_linked_boards",
+        "schedule": celery_schedule(settings.FETCH_LINKED_DEEP_INTERVAL_HOURS * 3600),
+        "kwargs": {"deep": True},
+    },
     # Matching used to happen only as a tail-call from a fetch, so a pass that
     # did not finish left jobs sitting as `new` until the next fetch hours
     # later. On its own schedule, unmatched jobs are a delay rather than a

@@ -533,6 +533,11 @@ class Settings(BaseSettings):
     # frequent enough to catch a day's new recommendations and slow enough to
     # be unremarkable traffic.
     FETCH_LINKED_INTERVAL_HOURS: int = 3
+    # The deep sweep: the same board's whole index rather than its feed, in
+    # per-state slices because the API caps any single query at 400 rows. About
+    # a thousand requests for roughly 1,845 postings, so daily rather than
+    # three-hourly — the index does not turn over fast enough to be worth more.
+    FETCH_LINKED_DEEP_INTERVAL_HOURS: int = 24
     # The browser tier is the one worth being able to switch off wholesale: it
     # is the most expensive thing in the pipeline and the least productive.
     BROWSER_TIER_ENABLED: bool = True
