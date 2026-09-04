@@ -872,3 +872,127 @@ class TestASecondSourceFillsInTheGaps:
         stored = db.query(Job).one()
         assert stored.employment_type == "part_time"
         assert stored.required_skills == ["python", "sql"]
+
+
+class TestAPayloadThatNamesTheEmployerOnceAtTheTop:
+    """
+    The rule was that a title, a company and an identifier must sit in the same
+    object. That is true of a card list and false of every payload that groups
+    postings under an employer, or resolves companies through a lookup — and
+    the cost of not reading those was every job in the response.
+
+    Measured, not supposed: 260 Handshake payloads, 2,800 LinkedIn payloads and
+    9,504 Dice responses produced zero jobs between them, while 106 Tsenta
+    payloads — whose cards name the company inline — produced 1,211.
+    """
+
+    def test_postings_grouped_under_an_employer_are_read(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {
+            "employer": {"name": "Acme Robotics"},
+            "postings": [
+                {"title": "Backend Engineer", "id": "1",
+                 "url": "https://example.com/1"},
+                {"title": "Data Engineer", "id": "2",
+                 "url": "https://example.com/2"},
+            ],
+        }
+        jobs = extract_jobs(payload, source="handshake_harvest")
+
+        assert {job["title"] for job in jobs} == {"Backend Engineer", "Data Engineer"}
+        assert {job["company"] for job in jobs} == {"Acme Robotics"}
+
+    def test_the_nearest_naming_wins(self):
+        # A company on the posting beats one on the page around it, or a board
+        # listing another employer's cross-post would file it under itself.
+        from app.services.harvest import extract_jobs
+
+        payload = {
+            "company": {"name": "The Job Board"},
+            "results": [
+                {"title": "Backend Engineer", "id": "1",
+                 "url": "https://example.com/1", "companyName": "Acme Robotics"},
+            ],
+        }
+        jobs = extract_jobs(payload, source="handshake_harvest")
+
+        assert jobs[0]["company"] == "Acme Robotics"
+
+    def test_a_heading_that_inherits_a_company_is_still_not_a_job(self):
+        """
+        The identifier is what keeps the relaxation honest. Without it, every
+        section heading under an employer block would become a posting — and a
+        payload full of invented jobs is far worse than one we cannot read.
+        """
+        from app.services.harvest import extract_jobs
+
+        payload = {
+            "employer": {"name": "Acme Robotics"},
+            "sections": [
+                {"title": "About us"},
+                {"title": "Benefits"},
+                {"name": "Open roles"},
+            ],
+        }
+        assert extract_jobs(payload, source="handshake_harvest") == []
+
+    def test_a_company_named_far_above_still_reaches_the_posting(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"page": {"header": {},
+                   "employerName": "Acme Robotics",
+                   "body": {"feed": {"sections": [{"items": [
+                       {"title": "Backend Engineer", "id": "1",
+                        "url": "https://example.com/1"}]}]}}}}}
+        jobs = extract_jobs(payload, source="handshake_harvest")
+
+        assert len(jobs) == 1
+        assert jobs[0]["company"] == "Acme Robotics"
+
+
+class TestTheWalkReachesThroughABigModernPayload:
+    """
+    The other half of the same finding. Every host the walker reads has small
+    payloads — Tsenta's biggest stored sample is 7KB — and every host it reads
+    nothing from has large ones: Handshake 161KB, Hiring Cafe 992KB. A depth of
+    12 and a budget of 20,000 nodes were chosen against card lists, and a
+    GraphQL response puts its postings further down than that.
+    """
+
+    def test_a_posting_sixteen_levels_down_is_found(self):
+        from app.services.harvest import extract_jobs
+
+        job = {"title": "Backend Engineer", "companyName": "Acme",
+               "id": "1", "url": "https://example.com/1"}
+        payload = job
+        for _ in range(16):
+            payload = {"node": payload}
+
+        assert len(extract_jobs(payload)) == 1
+
+    def test_a_thousand_postings_are_all_found(self):
+        # A budget of 20,000 nodes sounds generous until every scalar in the
+        # document spends one of them.
+        from app.services.harvest import extract_jobs
+
+        payload = {"jobs": [
+            {"title": f"Engineer {n}", "companyName": f"Acme {n}",
+             "id": str(n), "url": f"https://example.com/{n}",
+             "location": "Boston, MA", "description": "x" * 50,
+             "postedAt": "2026-09-01", "extra": {"a": 1, "b": 2, "c": 3}}
+            for n in range(1000)
+        ]}
+        assert len(extract_jobs(payload)) == 1000
+
+    def test_pathological_nesting_is_still_refused(self):
+        # The guard is against a payload built to be walked forever, not
+        # against a big one, and it still has to hold.
+        from app.services.harvest import extract_jobs
+
+        payload = {"title": "Backend Engineer", "companyName": "Acme",
+                   "id": "1", "url": "https://example.com/1"}
+        for _ in range(200):
+            payload = {"node": payload}
+
+        assert extract_jobs(payload) == []

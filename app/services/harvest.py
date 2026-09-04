@@ -180,8 +180,19 @@ _URN_ID_RE = re.compile(r"(\d{6,})")
 
 # A payload nests deeply; without a ceiling a cyclic or pathological structure
 # would walk forever.
-_MAX_DEPTH = 12
-_MAX_NODES = 20000
+# Guards against a pathological payload, not against a big one. Both numbers
+# were chosen when a job payload was a card list; a modern board answers with a
+# GraphQL response whose jobs sit ten or more levels down inside a document of
+# a hundred thousand nodes, and the old ceilings stopped the walk before it
+# reached them. Every host the walker reads successfully has small payloads
+# (Tsenta's biggest sample is 7KB) and every host it reads nothing from has
+# large ones (Handshake 161KB, Hiring Cafe 992KB) — which is not a coincidence
+# worth defending.
+#
+# The payload is already parsed and in memory by the time this runs, so walking
+# all of it costs a traversal and nothing else.
+_MAX_DEPTH = 24
+_MAX_NODES = 200_000
 
 
 def _text(value) -> str:
@@ -402,18 +413,70 @@ def _walk(node, depth: int = 0, budget: list | None = None):
             yield from _walk(item, depth + 1, budget)
 
 
-def _looks_like_job(node: dict) -> bool:
+# Keys whose value describes the employer of everything nested under it. A
+# subset of `_COMPANY_KEYS`: `subtitle` and `primarySubtitle` are in there
+# because LinkedIn puts the company in them *on a card*, and they mean nothing
+# as a scope — a subtitle above a list is a heading, not an employer.
+_COMPANY_SCOPE_KEYS = (
+    "companyName", "company", "companyUrn", "employerName", "employer",
+    "hiringOrganization", "organization",
+)
+
+
+def _walk_scoped(node, depth: int = 0, budget: list | None = None,
+                 company: str = ""):
+    """
+    Every dict in the payload, each paired with the company named above it.
+
+    The reason this exists rather than `_walk`. A board that answers with
+
+        {"employer": {"name": "Acme"}, "postings": [{"title": ..., "id": ...}]}
+
+    has said whose jobs these are exactly once, at the top, and the rule that a
+    title and a company must sit in the *same* object cannot see it. That shape
+    is not unusual — it is what any payload does when it groups postings under
+    an employer, or resolves companies through a lookup table — and the cost of
+    not reading it is every job in the response.
+
+    The hint passed to a node is its *ancestors'* company, never its own:
+    `_looks_like_job` tests the node itself first, and this is only the fallback
+    for when that finds nothing.
+    """
+    if budget is None:
+        budget = [_MAX_NODES]
+    if depth > _MAX_DEPTH or budget[0] <= 0:
+        return
+    budget[0] -= 1
+
+    if isinstance(node, dict):
+        yield node, company
+        # Anything named here applies to everything below, and the nearest
+        # naming wins — a company on the posting beats one on the page.
+        inner = _first(node, _COMPANY_SCOPE_KEYS) or company
+        for value in node.values():
+            yield from _walk_scoped(value, depth + 1, budget, inner)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_scoped(item, depth + 1, budget, company)
+
+
+def _looks_like_job(node: dict, company: str = "") -> bool:
     """
     A title and a company, plus something to identify it by.
 
     All three are required together on purpose. A title alone matches every
     heading in the payload, and a company alone matches the sidebar.
+
+    `company` is one relaxation of "together": an employer named on an
+    enclosing object counts for the postings inside it. The identifier is what
+    keeps that honest — a heading that inherits a company still has no id and
+    no link, so it is still not a job.
     """
     if not isinstance(node, dict):
         return False
     if not _first(node, _TITLE_KEYS):
         return False
-    if not _first(node, _COMPANY_KEYS):
+    if not (_first(node, _COMPANY_KEYS) or company):
         return False
     return bool(_job_id(node) or _first(node, _URL_KEYS))
 
@@ -446,9 +509,11 @@ def _greenhouse_board_url(node: dict) -> str:
     return f"https://job-boards.greenhouse.io/{slug}/jobs/{job_id}"
 
 
-def _normalize(node: dict, source: str = HARVEST_SOURCE) -> dict | None:
+def _normalize(node: dict, source: str = HARVEST_SOURCE,
+               company: str = "") -> dict | None:
     title = _first(node, _TITLE_KEYS)
-    company = _first(node, _COMPANY_KEYS)
+    # The node's own naming first, then whatever was named above it.
+    company = _first(node, _COMPANY_KEYS) or company
     if not title or not company:
         return None
 
@@ -496,10 +561,10 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE) -> list[dict]:
         return []
 
     found: dict[str, dict] = {}
-    for node in _walk(payload):
-        if not _looks_like_job(node):
+    for node, company in _walk_scoped(payload):
+        if not _looks_like_job(node, company=company):
             continue
-        job = _normalize(node, source=source)
+        job = _normalize(node, source=source, company=company)
         if not job:
             continue
         key = job["source_job_id"] or job["url"]
