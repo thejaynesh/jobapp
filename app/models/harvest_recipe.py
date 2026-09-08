@@ -15,7 +15,7 @@ those, and six months later nobody can say why it broke.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -49,6 +49,19 @@ class HarvestSample(Base):
 
     # What the shape-based walker made of it. Zero is the case this exists for.
     found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Whether this arrived as a near-miss probe or as a real forward.
+    #
+    # The difference is how much it is worth. A forward means the payload named
+    # job fields — `"jobTitle"`, `"companyName"` — and the reader still could
+    # not assemble a job out of it, which is precisely what a recipe is written
+    # from. A probe named none of them and is a guess kept in case it turns out
+    # to matter. Five of those guesses filling a host's five slots is how
+    # JobRight came to be represented in the evidence store by five copies of a
+    # video SDK's config while its own listings were refused for lack of room.
+    probe: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

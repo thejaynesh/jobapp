@@ -95,7 +95,7 @@ def _fits(payload) -> dict | list:
 
 
 def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
-           note: str = "") -> bool:
+           note: str = "", probe: bool = False) -> bool:
     """
     Keep this payload, displacing a slighter one if the host is full.
 
@@ -111,12 +111,20 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
     to learn a recipe for Handshake all reported "found no jobs in any sample",
     which was true and was about the samples rather than the board.
 
-    Size is the tiebreak because on this particular question it is a very good
-    one. A job list is kilobytes and a telemetry ping is bytes: every junk
-    sample in the store was under 5KB and the one that turned out to hold jobs
-    was 161KB. It is a heuristic and it is allowed to be — the cost of getting
-    it wrong is one diagnostic sample, and the cost of the old rule was every
-    board whose jobs arrive late.
+    Ranked by usefulness, and size is only the last word.
+
+    A *forward* is a payload that named job fields and still could not be read
+    — the exact thing a recipe is written from. A *probe* named none of them
+    and is a guess. So a forward displaces a probe whatever their sizes, and a
+    probe never displaces a forward: five guesses filling five slots is how
+    JobRight came to be represented by five copies of a video SDK's config
+    while its own listings were turned away for lack of room.
+
+    Between two of the same kind, size decides, and on this question it is a
+    good tiebreak: a job list is kilobytes and a telemetry ping is bytes. It is
+    a heuristic and it is allowed to be — the cost of getting it wrong is one
+    diagnostic sample, and the cost of the old rule was every board whose jobs
+    arrive late.
 
     Never raises. This runs inside the harvest, and a sample that could not be
     written must not cost the jobs that were.
@@ -137,20 +145,31 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
         held = (
             db.query(HarvestSample)
             .filter(HarvestSample.host == host)
-            .order_by(HarvestSample.bytes.asc())
+            # Least useful first: probes before forwards, then smallest.
+            .order_by(HarvestSample.probe.desc(), HarvestSample.bytes.asc())
             .all()
         )
         if len(held) >= _keep():
             weakest = held[0]
             # A sample that already yielded jobs is evidence that worked, and
-            # is never displaced by one that has not been read yet.
-            if weakest.found or weakest.bytes >= size:
+            # is never displaced by one nobody has read yet.
+            if weakest.found:
+                return False
+            if bool(weakest.probe) != bool(probe):
+                # Different kinds, so the kind decides and size does not come
+                # into it: a forward displaces a probe however small, and a
+                # probe never displaces a forward however large.
+                if probe:
+                    return False
+            elif weakest.bytes >= size:
                 return False
             db.delete(weakest)
             db.flush()
             logger.info(
-                "harvest_samples: %s was full; dropped a %d-byte sample for a "
-                "%d-byte one", host, weakest.bytes, size,
+                "harvest_samples: %s was full; dropped a %d-byte %s for a "
+                "%d-byte %s", host, weakest.bytes,
+                "probe" if weakest.probe else "forward", size,
+                "probe" if probe else "forward",
             )
 
         db.add(HarvestSample(
@@ -160,6 +179,7 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
             bytes=size,
             found=int(found or 0),
             note=(str(note)[:200] or None),
+            probe=bool(probe),
         ))
         # Flushed so the count above sees it next time. A failing site sends
         # payload after payload inside one request cycle, and without this the

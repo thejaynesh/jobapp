@@ -445,34 +445,48 @@ def blocked_hosts(db) -> set[str]:
         .all()
     )
 
-    # Per host: how many separate days it turned us away, and when it last did.
+    # Per host: how many separate occasions it turned us away, and when it last
+    # did.
     #
-    # Days rather than visits, and that distinction is the whole of it. A queue
-    # of sixty pages for one host fails sixty times in one evening, which is
-    # one refusal repeated — counting them individually would escalate a single
-    # bad night into a year-long pause.
+    # Occasions rather than visits, and that distinction is the whole of it. A
+    # queue of sixty pages for one host fails sixty times in one evening, which
+    # is one refusal repeated — counting them individually would escalate a
+    # single bad night into a year-long pause.
+    #
+    # An occasion is a rolling day from the refusal that opened it, not a
+    # calendar date. Calendar dates read the same most of the time and are
+    # wrong at the edge: an evening of refusals either side of midnight UTC is
+    # one bad night that would score as two, and whether it does depends on
+    # nothing but where the user happens to live relative to UTC. A rolling
+    # window asks the question the rule is actually about — was this a fresh
+    # occasion, or more of the last one.
     #
     # Passing the check resets the count outright. It is precisely the event
     # that invalidates the block, and without this the backoff outlived the
     # thing it was waiting for: you would go and pass the check, and the host
     # would stay untouched anyway — which reads as the click having achieved
     # nothing.
-    state: dict[str, tuple[int, datetime, object]] = {}
+    a_day = timedelta(days=1)
+    state: dict[str, tuple[int, datetime, datetime]] = {}
     for host, created_at, outcome in rows:
         if not host:
             continue
         if outcome == "passed":
             state.pop(host, None)
             continue
-        strikes, _last, last_day = state.get(host, (0, created_at, None))
-        day = created_at.date()
-        if day != last_day:
+        held = state.get(host)
+        if held is None:
+            state[host] = (1, created_at, created_at)
+            continue
+        strikes, _last, opened = held
+        if created_at - opened >= a_day:
             strikes += 1
-        state[host] = (strikes, created_at, day)
+            opened = created_at
+        state[host] = (strikes, created_at, opened)
 
     return {
         host
-        for host, (strikes, last_at, _day) in state.items()
+        for host, (strikes, last_at, _opened) in state.items()
         if now - last_at < timedelta(hours=_backoff_hours(strikes))
     }
 

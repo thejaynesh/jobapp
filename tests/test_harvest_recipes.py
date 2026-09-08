@@ -622,12 +622,13 @@ class TestTheEvidenceStoreKeepsTheBestFiveNotTheFirstFive:
     about the samples rather than about the board.
     """
 
-    def _fill(self, db, host, sizes, found=0):
+    def _fill(self, db, host, sizes, found=0, probe=False):
         from app.services import harvest_samples
 
         for size in sizes:
             harvest_samples.record(
-                db, host, {"pad": "x" * max(0, size - 12)}, found=found)
+                db, host, {"pad": "x" * max(0, size - 12)}, found=found,
+                probe=probe)
         db.commit()
 
     def _sizes(self, db, host):
@@ -682,3 +683,146 @@ class TestTheEvidenceStoreKeepsTheBestFiveNotTheFirstFive:
         assert harvest_samples.record(db, "new.example", {"a": 1})
         db.commit()
         assert len(self._sizes(db, "new.example")) == 1
+
+
+class TestAForwardOutranksAProbe:
+    """
+    Size alone was not a good enough tiebreak, and JobRight is the proof.
+
+    Its five slots were filled by five copies of a video SDK's configuration —
+    kilobytes each, forwarded on a guess because the URL looked plausible — and
+    JobRight's own listings were then refused for lack of room. Sorting by size
+    kept the biggest junk and dropped the smallest evidence.
+
+    What distinguishes them is not how big they are but why they were kept. A
+    *forward* named job fields and still could not be read, which is the exact
+    input a recipe is written from. A *probe* named none and is a guess. So the
+    kind decides first and size is only the tiebreak between two of a kind.
+    """
+
+    def _fill(self, db, host, sizes, found=0, probe=False):
+        from app.services import harvest_samples
+
+        for size in sizes:
+            harvest_samples.record(
+                db, host, {"pad": "x" * max(0, size - 12)}, found=found,
+                probe=probe)
+        db.commit()
+
+    def _rows(self, db, host):
+        from app.models.harvest_recipe import HarvestSample
+
+        return (
+            db.query(HarvestSample)
+            .filter(HarvestSample.host == host)
+            .order_by(HarvestSample.bytes.asc())
+            .all()
+        )
+
+    def test_a_small_forward_displaces_a_large_probe(self, db):
+        """The JobRight case, in one assertion."""
+        from app.services import harvest_samples
+
+        self._fill(db, "jobright.example", [9_000] * 5, probe=True)
+        assert harvest_samples.record(
+            db, "jobright.example", {"pad": "x" * 200}, probe=False)
+        db.commit()
+
+        rows = self._rows(db, "jobright.example")
+        assert len(rows) == 5
+        forwards = [row for row in rows if not row.probe]
+        assert len(forwards) == 1, "the forward got in despite being the smallest"
+        assert forwards[0].bytes < 1_000
+
+    def test_a_large_probe_does_not_displace_a_small_forward(self, db):
+        from app.services import harvest_samples
+
+        self._fill(db, "guessy.example", [200] * 5, probe=False)
+        assert not harvest_samples.record(
+            db, "guessy.example", {"pad": "x" * 100_000}, probe=True)
+        db.commit()
+
+        rows = self._rows(db, "guessy.example")
+        assert len(rows) == 5
+        assert all(not row.probe for row in rows)
+        assert max(row.bytes for row in rows) < 1_000
+
+    def test_between_two_probes_size_still_decides(self, db):
+        from app.services import harvest_samples
+
+        self._fill(db, "noisy.example", [20, 40, 120, 500, 900], probe=True)
+        assert harvest_samples.record(
+            db, "noisy.example", {"pad": "x" * 100_000}, probe=True)
+        db.commit()
+
+        sizes = sorted(row.bytes for row in self._rows(db, "noisy.example"))
+        assert 20 not in sizes
+        assert max(sizes) > 90_000
+
+    def test_a_probe_that_yielded_jobs_is_still_never_displaced(self, db):
+        """
+        The found rule is checked before the kind rule, and stays first.
+
+        A guess that turned out to hold readable jobs has stopped being a
+        guess — it is the one payload in the store known to work, and no
+        forward, however large, is worth losing it for.
+        """
+        from app.services import harvest_samples
+
+        self._fill(db, "lucky.example", [200], found=3, probe=True)
+        self._fill(db, "lucky.example", [9_000] * 4, probe=True)
+        assert not harvest_samples.record(
+            db, "lucky.example", {"pad": "x" * 100_000}, probe=False)
+        db.commit()
+
+        rows = self._rows(db, "lucky.example")
+        assert len(rows) == 5
+        assert any(row.found == 3 for row in rows)
+
+    def test_forgetting_a_host_frees_its_slots(self, db, client):
+        """
+        The escape hatch for the rows the ranking cannot help.
+
+        Ranking a forward above a probe fixes this going forward and cannot fix
+        it backwards: a probe stored before the store could tell them apart
+        reads as a forward and holds its slot until the TTL. JobRight's five
+        slots hold five copies of a video SDK's config, and no correct ranking
+        gets its listings past rows claiming to be evidence.
+        """
+        from app.models.harvest_recipe import HarvestSample
+
+        self._fill(db, "jobright.ai", [9_000] * 5)
+        response = client.post("/runs/agent/forget-samples",
+                               data={"host": "jobright.ai"})
+
+        assert response.status_code == 200
+        assert db.query(HarvestSample).filter(
+            HarvestSample.host == "jobright.ai").count() == 0
+
+    def test_forgetting_leaves_every_other_host_alone(self, db, client):
+        from app.models.harvest_recipe import HarvestSample
+
+        self._fill(db, "jobright.ai", [9_000] * 2)
+        self._fill(db, "app.joinhandshake.com", [9_000] * 2)
+        client.post("/runs/agent/forget-samples", data={"host": "jobright.ai"})
+
+        assert db.query(HarvestSample).filter(
+            HarvestSample.host == "app.joinhandshake.com").count() == 2
+
+    def test_samples_kept_before_the_column_existed_count_as_forwards(self, db):
+        """
+        The migration defaults existing rows to false, which is the
+        conservative direction: they are treated as the more valuable kind and
+        a new probe cannot displace them. They age out on the TTL instead.
+        """
+        from app.models.harvest_recipe import HarvestSample
+        from app.services import harvest_samples
+
+        self._fill(db, "old.example", [100] * 5)
+        assert all(not row.probe for row in self._rows(db, "old.example"))
+        assert not harvest_samples.record(
+            db, "old.example", {"pad": "x" * 100_000}, probe=True)
+        db.commit()
+
+        assert db.query(HarvestSample).filter(
+            HarvestSample.host == "old.example").count() == 5

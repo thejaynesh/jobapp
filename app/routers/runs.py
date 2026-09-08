@@ -336,6 +336,50 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
     )
 
 
+@router.post("/agent/forget-samples", response_class=HTMLResponse)
+def forget_harvest_samples(request: Request, host: str = Form(...),
+                           db: Session = Depends(get_db)):
+    """
+    Throw away a host's stored payloads so the next visit collects fresh ones.
+
+    Five slots per host, and what fills them is whatever arrived first — which
+    on a modern board is its analytics, its feature flags and its session
+    config, because those are what a page fetches before it fetches any jobs.
+    The store ranks a *forward* above a *probe* now, so the board's own
+    listings displace a guess whatever their sizes. That fixes it going
+    forward and cannot fix it backwards: a probe kept before the store could
+    tell the two apart reads as a forward and holds its slot until the TTL.
+
+    JobRight is the case. Its five slots hold five copies of a video SDK's
+    configuration, and no amount of correct ranking gets its listings past
+    rows that claim to be evidence.
+
+    Deleting costs nothing that is not immediately replaceable. These are
+    diagnostic copies of responses, not job data — the jobs they described were
+    either read at the time or were never readable. The next visit to the board
+    refills the host.
+    """
+    from app.services import harvest_samples
+
+    host = (host or "").strip().lower()
+    flash = "No host given."
+    if host:
+        try:
+            dropped = harvest_samples.clear(db, host)
+            flash = (f"Dropped {dropped} stored payload"
+                     f"{'' if dropped == 1 else 's'} from {host}. "
+                     "The next visit will collect fresh ones.")
+            logger.info("runs: forgot %d sample(s) for %s", dropped, host)
+        except Exception as exc:
+            logger.error("runs: could not forget samples for %s: %s", host, exc)
+            flash = f"Could not drop {host}'s samples: {exc}"
+    return templates.TemplateResponse(
+        "runs/_system.html",
+        {"request": request, "system": _system_context(db),
+         "browse_flash": flash},
+    )
+
+
 @router.post("/agent/pass-check", response_class=HTMLResponse)
 def queue_pass_check(request: Request, host: str = Form(...),
                      db: Session = Depends(get_db)):

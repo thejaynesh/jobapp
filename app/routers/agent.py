@@ -201,6 +201,7 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
         # and no way to act on it short of opening DevTools by hand.
         harvest_samples.record(
             db, host, payload, source_url=source_url, found=0,
+            probe=bool(probe),
             note=(
                 # A probe named none of the keys the reader looks for, which is
                 # a different thing from a payload that did and still yielded

@@ -490,14 +490,29 @@
               <span class="ml-1 text-green-600">recipe active</span>
               {% endif %}
             </span>
-            <button hx-post="/runs/agent/learn"
-                    hx-vals='{"host": {{ row.host | tojson }}}'
-                    hx-target="#system-panel" hx-swap="outerHTML"
-                    hx-disabled-elt="this"
-                    title="Ask the model how this site's payloads are shaped, then check the answer against these samples"
-                    class="shrink-0 text-[11px] border border-blue-600 text-blue-600 rounded px-1.5 py-0.5 hover:bg-blue-50">
-              {% if row.has_recipe %}Re-learn{% else %}Learn{% endif %}
-            </button>
+            <div class="shrink-0 flex items-center gap-1">
+              <button hx-post="/runs/agent/learn"
+                      hx-vals='{"host": {{ row.host | tojson }}}'
+                      hx-target="#system-panel" hx-swap="outerHTML"
+                      hx-disabled-elt="this"
+                      title="Ask the model how this site's payloads are shaped, then check the answer against these samples"
+                      class="text-[11px] border border-blue-600 text-blue-600 rounded px-1.5 py-0.5 hover:bg-blue-50">
+                {% if row.has_recipe %}Re-learn{% else %}Learn{% endif %}
+              </button>
+              {# For the host whose slots filled with the wrong thing. The store
+                 ranks a forward above a probe now, but a probe kept before it
+                 could tell them apart looks like a forward and holds its slot
+                 until the TTL. Dropping them costs nothing: the next visit to
+                 the board refills them, and this time with its listings. #}
+              <button hx-post="/runs/agent/forget-samples"
+                      hx-vals='{"host": {{ row.host | tojson }}}'
+                      hx-target="#system-panel" hx-swap="outerHTML"
+                      hx-disabled-elt="this"
+                      title="Throw away this host's stored payloads so the next visit collects fresh ones"
+                      class="text-[11px] border border-gray-300 text-gray-500 rounded px-1.5 py-0.5 hover:bg-gray-50">
+                Forget
+              </button>
+            </div>
           </div>
           {% endfor %}
           {% if system.agent.unread_hidden %}

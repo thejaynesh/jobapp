@@ -1214,16 +1214,38 @@ class TestAHostThatKeepsTurningUsAwayIsLeftAloneForLonger:
             "one day of refusals earns one day of backoff, however many pages"
         )
 
+    def test_an_evening_that_runs_past_midnight_is_still_one_evening(self, db):
+        """
+        Counting calendar dates got this wrong, and got it wrong invisibly.
+
+        An hour of refusals either side of midnight UTC is one bad night that
+        scored as two, doubling the pause — and whether any given night
+        straddled the boundary depended on nothing but where the user lives
+        relative to UTC. The window is rolled from the refusal that opened it
+        instead, so the answer no longer moves with the clock.
+        """
+        from app.services import browse_plan
+
+        midnight = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        for minute in (-40, -20, 1, 21):
+            self._challenge(db, "jooble.org", midnight + timedelta(minutes=minute))
+
+        # One strike, so a 24-hour pause, and the last refusal was more than a
+        # day ago. Two strikes would have held it for another day.
+        assert "jooble.org" not in browse_plan.blocked_hosts(db)
+
     def test_each_further_day_doubles_the_pause(self, db):
         from app.services import browse_plan
 
         now = datetime.now(timezone.utc)
-        # Three separate days of being turned away: 24h, then 48, then 96.
+        # Three separate occasions of being turned away, each opening its own
+        # rolling day: 24h of backoff, then 48, then 96.
         for days in (5, 4, 3):
             self._challenge(db, "jooble.org", now - timedelta(days=days))
         self._challenge(db, "jooble.org", now - timedelta(hours=50))
 
-        # Four strikes is a 192-hour pause, and the last refusal was 50 hours
+        # Three strikes is a 96-hour pause, and the last refusal was 50 hours
         # ago, so it stays blocked where a flat 24 would have let it go.
         assert "jooble.org" in browse_plan.blocked_hosts(db)
 
