@@ -1087,3 +1087,89 @@ class TestTwoRequestsStoringTheSamePostingAtOnce:
         counts = harvest.save_harvested_jobs(db, [self._card()])
         assert counts["inserted"] == 1
         assert counts["invalid"] == 0
+
+
+class TestAJobRecognisedAndThenThrownAway:
+    """
+    `_looks_like_job` accepts an id *or* a URL; `_normalize` requires a URL and
+    reconstructs one only for LinkedIn. So every board that identifies a
+    posting by id alone has all of them recognised and all of them dropped.
+
+    Handshake is the case. Its GraphQL responses carry `id` and no absolute
+    URL, so 265 title-bearing objects became a hundred and thirty-six harvests
+    reporting `found: 0` — the same thing a payload with no jobs in it reports,
+    which is why the search for the cause started in the wrong place and stayed
+    there. Greenhouse's aggregate board did this too until `publicUrl` joined
+    `_URL_KEYS`.
+
+    The rule is not what these tests pin. The *silence* is: a reader that
+    returns nothing has to be able to say whether it saw nothing or refused
+    everything.
+    """
+
+    def _grouped(self):
+        return {"data": {"employer": {"name": "Acme"}, "postings": [
+            {"title": "Backend Engineer", "id": "1"},
+            {"title": "Data Analyst", "id": "2"},
+        ]}}
+
+    def test_it_says_how_many_it_dropped_for_want_of_a_url(self):
+        from app.services.harvest import extract_jobs
+
+        refused = {}
+        jobs = extract_jobs(self._grouped(), source="handshake_harvest",
+                            refused=refused)
+        assert jobs == []
+        assert refused == {"no_url": 2}
+
+    def test_linkedin_still_reconstructs_rather_than_refusing(self):
+        from app.services.harvest import extract_jobs
+
+        refused = {}
+        jobs = extract_jobs(self._grouped(), refused=refused)
+        assert len(jobs) == 2
+        assert refused == {}
+        assert all(j["url"].startswith("https://www.linkedin.com/jobs/view/")
+                   for j in jobs)
+
+    def test_a_payload_with_no_jobs_reads_differently_from_one_it_refused(self):
+        """The distinction the whole change exists to make."""
+        from app.services.harvest import extract_jobs
+
+        empty, refusing = {}, {}
+        extract_jobs({"config": {"v": "5.7.4"}}, source="jobright_harvest",
+                     refused=empty)
+        extract_jobs(self._grouped(), source="jobright_harvest",
+                     refused=refusing)
+        assert empty == {}
+        assert refusing["no_url"] == 2
+
+    def test_a_title_with_no_company_anywhere_is_counted_separately(self):
+        from app.services.harvest import extract_jobs
+
+        refused = {}
+        extract_jobs({"postings": [{"title": "Backend Engineer", "id": "1"}]},
+                     source="handshake_harvest", refused=refused)
+        # Recognised nothing at all: without a company `_looks_like_job` says
+        # no, so this never reaches `_normalize` and nothing is refused.
+        assert refused == {}
+
+    def test_the_counter_is_optional(self):
+        """Every existing caller passes nothing and must keep working."""
+        from app.services.harvest import extract_jobs
+
+        assert extract_jobs(self._grouped(), source="handshake_harvest") == []
+        assert len(extract_jobs(self._grouped())) == 2
+
+    def test_a_board_that_does_give_urls_is_unaffected(self):
+        from app.services.harvest import extract_jobs
+
+        refused = {}
+        jobs = extract_jobs(
+            {"data": {"employer": {"name": "Acme"}, "postings": [
+                {"title": "Backend Engineer", "id": "1",
+                 "url": "https://app.joinhandshake.com/stu/postings/1"},
+            ]}},
+            source="handshake_harvest", refused=refused)
+        assert len(jobs) == 1
+        assert refused == {}

@@ -512,11 +512,24 @@ def _greenhouse_board_url(node: dict) -> str:
 
 
 def _normalize(node: dict, source: str = HARVEST_SOURCE,
-               company: str = "") -> dict | None:
+               company: str = "", refused: dict | None = None) -> dict | None:
+    """
+    One recognised node as a job row, or `None` with the reason recorded.
+
+    `refused` is how the reason gets out. There are two ways to fail here and
+    both used to be the same silence, which cost days on Handshake: 265
+    title-bearing objects, 150 of them recognised as jobs, and a live harvest
+    reporting `found: 0` a hundred and thirty-six times. A board losing every
+    posting for want of a URL reported exactly what a board with no postings in
+    it reported, so the search started from "the reader cannot read this
+    payload" and went looking in the wrong place entirely.
+    """
     title = _first(node, _TITLE_KEYS)
     # The node's own naming first, then whatever was named above it.
     company = _first(node, _COMPANY_KEYS) or company
     if not title or not company:
+        if refused is not None:
+            refused["no_company"] = refused.get("no_company", 0) + 1
         return None
 
     job_id = _job_id(node)
@@ -527,6 +540,13 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
         # no other source's ids belong in a linkedin.com URL.
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
     if not url:
+        # Recognised as a job and thrown away. `_looks_like_job` accepts an id
+        # *or* a URL and this requires a URL, so every board that identifies a
+        # posting by id alone loses all of them — which is what Handshake does,
+        # and what Greenhouse's aggregate board did until `publicUrl` was added
+        # to `_URL_KEYS`.
+        if refused is not None:
+            refused["no_url"] = refused.get("no_url", 0) + 1
         return None
 
     board_url = _greenhouse_board_url(node)
@@ -547,7 +567,8 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
     }
 
 
-def extract_jobs(payload, source: str = HARVEST_SOURCE) -> list[dict]:
+def extract_jobs(payload, source: str = HARVEST_SOURCE,
+                 refused: dict | None = None) -> list[dict]:
     """
     Every job-shaped object anywhere in a JSON payload.
 
@@ -558,6 +579,11 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE) -> list[dict]:
     browser harvest it was written for — any aggregator with an undocumented
     JSON endpoint can be read this way, and a redesign that moves the nesting
     around keeps working.
+
+    Pass `refused` — any dict — to learn what was recognised as a job and then
+    thrown out, keyed by which of `_normalize`'s two rules did it. Returning
+    nothing is the most common outcome this function has, and until this it was
+    indistinguishable from a payload with no jobs in it.
     """
     if not isinstance(payload, (dict, list)):
         return []
@@ -566,7 +592,7 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE) -> list[dict]:
     for node, company in _walk_scoped(payload):
         if not _looks_like_job(node, company=company):
             continue
-        job = _normalize(node, source=source, company=company)
+        job = _normalize(node, source=source, company=company, refused=refused)
         if not job:
             continue
         key = job["source_job_id"] or job["url"]

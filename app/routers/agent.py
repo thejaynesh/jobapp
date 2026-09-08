@@ -186,16 +186,23 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
     # recipe may add a way to read a site and must not be able to remove one.
     read_by = "walker"
     jobs = []
+    # What the walker recognised as a job and then refused, and on which rule.
+    # A payload with no jobs in it and a payload whose every job was dropped
+    # for want of a URL both reported `found: 0`, which is how Handshake came
+    # to look unreadable for days while the reader was recognising a hundred
+    # and fifty postings in every response.
+    refused: dict[str, int] = {}
     recipe = harvest_recipes.active_for(db, host)
     if recipe:
         jobs = harvest_recipes.apply_recipe(payload, recipe, source)
         if jobs:
             read_by = "recipe"
     if not jobs:
-        jobs = extract_jobs(payload, source=source)
+        jobs = extract_jobs(payload, source=source, refused=refused)
 
     if not jobs:
-        counts = {"found": 0, "inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
+        counts = {"found": 0, "inserted": 0, "merged": 0, "skipped": 0,
+                  "invalid": 0, **refused}
         # Keep the payload. Until now it was discarded here, which left
         # "forwarding, never finds jobs" a verdict with no evidence attached
         # and no way to act on it short of opening DevTools by hand.
