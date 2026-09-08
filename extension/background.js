@@ -1897,6 +1897,43 @@ async function forwardHarvest(payload, sourceUrl, probe) {
     }
   } catch (error) {
     await setStatus({ lastError: `harvest: ${error.message}` });
+    // And tell the server, which otherwise cannot know this happened.
+    //
+    // Every payload that arrives leaves a `harvest` event; a payload that
+    // fails to arrive left nothing but a string in this browser's local
+    // storage. So "the reader offered 114 payloads and the server holds none"
+    // had two explanations — never sent, or sent and refused — and no way to
+    // tell them apart without sitting in front of the service worker console
+    // at the moment it happened. Dice is exactly that case.
+    //
+    // `ok: false` is what separates these from the successes, and the size is
+    // here because the first suspect for a payload that posts and fails is a
+    // body limit somewhere between this worker and the application.
+    await reportEvent("harvest", {
+      url: sourceUrl,
+      ok: false,
+      summary: {
+        error: String(error && error.message ? error.message : error).slice(0, 300),
+        bytes: byteLength(payload),
+        probe: Boolean(probe),
+      },
+    });
+  }
+}
+
+/**
+ * How big this payload is on the wire, near enough.
+ *
+ * Only ever used to describe a failure, so an unserialisable payload
+ * reporting zero is the right outcome rather than a case to handle: the
+ * report is the point, and it must not throw inside the error path that
+ * exists to explain a throw.
+ */
+function byteLength(payload) {
+  try {
+    return JSON.stringify(payload).length;
+  } catch (_) {
+    return 0;
   }
 }
 
