@@ -120,6 +120,40 @@ _TITLE_KEYS = (
     "displayTitle", "normTitle", "jobTitleText",  # Indeed
     "jobTitleText", "listingTitle",               # Glassdoor
 )
+# `name` earns its place — plenty of boards call the job's title that — and it
+# is also the weakest alias here by a wide margin, because *everything* in a
+# normalized payload has a name. Handshake's response is the demonstration: of
+# 407 objects the reader recognised as jobs, 52 were postings and 355 were
+# enums, employers and industries whose only qualification was a `name` and a
+# company inherited from an enclosing object.
+#
+# They did no harm while a URL was required, since none of them had one. That
+# made the URL rule load-bearing for something it was never about, and the
+# moment a posting URL is reconstructed from an id — which is the whole point
+# of `_POSTING_URL` — those 355 become 355 junk rows per payload.
+_WEAK_TITLE_KEYS = ("name",)
+_STRONG_TITLE_KEYS = tuple(k for k in _TITLE_KEYS if k not in _WEAK_TITLE_KEYS)
+
+# Where a posting lives, for a board that identifies one by id and never gives
+# a link. Without an entry here such a board loses every job it has: the
+# reader walks the payload, recognises the postings, and `_normalize` refuses
+# them all for want of a URL. Handshake lost 407 objects a payload that way and
+# Greenhouse's aggregate board lost its whole board until `publicUrl` was added
+# to `_URL_KEYS`.
+#
+# Deliberately short, and it should only grow from a URL somebody has actually
+# opened. A guessed template is worse than a dropped job by some distance: the
+# URL becomes the row's identity and one of its three dedupe keys, so a wrong
+# one writes rows that point nowhere *and* cannot be merged with the real
+# posting when a source that does give links finds it later. Dropping a job
+# costs that job until the next visit. Inventing its address corrupts the
+# record permanently.
+_POSTING_URL = {
+    # Stable for years, and what the site's own cards link to.
+    HARVEST_SOURCE: "https://www.linkedin.com/jobs/view/{id}/",
+    # Handshake's GraphQL `Job` nodes carry a numeric `id` and no link at all.
+    "handshake_harvest": "https://app.joinhandshake.com/jobs/{id}",
+}
 _COMPANY_KEYS = (
     "companyName", "company", "companyUrn", "primarySubtitle", "subtitle",
     "employerName", "truncatedCompany",           # Indeed / Glassdoor
@@ -473,14 +507,27 @@ def _looks_like_job(node: dict, company: str = "") -> bool:
     enclosing object counts for the postings inside it. The identifier is what
     keeps that honest — a heading that inherits a company still has no id and
     no link, so it is still not a job.
+
+    And one tightening, for the node whose claim rests entirely on having a
+    `name`. Two weak signals — a title that is only a name, and a company that
+    is only inherited — used to add up to a job, and in a normalized payload
+    they add up to every enum and lookup row in the response. Such a node has
+    to corroborate: a posting says where it is or what it involves, and a
+    `JobTypeEnum` says neither.
     """
     if not isinstance(node, dict):
         return False
     if not _first(node, _TITLE_KEYS):
         return False
-    if not (_first(node, _COMPANY_KEYS) or company):
+    own_company = _first(node, _COMPANY_KEYS)
+    if not (own_company or company):
         return False
-    return bool(_job_id(node) or _first(node, _URL_KEYS))
+    if not (_job_id(node) or _first(node, _URL_KEYS)):
+        return False
+    if not _first(node, _STRONG_TITLE_KEYS) and not own_company:
+        return bool(_first(node, _LOCATION_KEYS)
+                    or _first(node, _DESCRIPTION_KEYS))
+    return True
 
 
 # Greenhouse's board links each card twice: `publicUrl` goes wherever the
@@ -534,11 +581,12 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
 
     job_id = _job_id(node)
     url = _first(node, _URL_KEYS)
-    if not url and job_id and source == HARVEST_SOURCE:
-        # Reconstructing beats dropping the job: this URL shape has been stable
-        # for years and is what the site itself links to. Only for LinkedIn —
-        # no other source's ids belong in a linkedin.com URL.
-        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+    if not url and job_id:
+        # Reconstructing beats dropping the job, for a board whose posting URL
+        # we actually know. See `_POSTING_URL` for why that list is short.
+        template = _POSTING_URL.get(source)
+        if template:
+            url = template.format(id=job_id)
     if not url:
         # Recognised as a job and thrown away. `_looks_like_job` accepts an id
         # *or* a URL and this requires a URL, so every board that identifies a

@@ -1113,11 +1113,16 @@ class TestAJobRecognisedAndThenThrownAway:
             {"title": "Data Analyst", "id": "2"},
         ]}}
 
+    # Dice rather than Handshake, now that Handshake has an entry in
+    # `_POSTING_URL`. What is being pinned is the reporting, so the example has
+    # to be a source whose posting URL nobody has established yet — which is
+    # every source but two, and is the state Handshake was in when this cost a
+    # day.
     def test_it_says_how_many_it_dropped_for_want_of_a_url(self):
         from app.services.harvest import extract_jobs
 
         refused = {}
-        jobs = extract_jobs(self._grouped(), source="handshake_harvest",
+        jobs = extract_jobs(self._grouped(), source="dice_harvest",
                             refused=refused)
         assert jobs == []
         assert refused == {"no_url": 2}
@@ -1158,7 +1163,7 @@ class TestAJobRecognisedAndThenThrownAway:
         """Every existing caller passes nothing and must keep working."""
         from app.services.harvest import extract_jobs
 
-        assert extract_jobs(self._grouped(), source="handshake_harvest") == []
+        assert extract_jobs(self._grouped(), source="dice_harvest") == []
         assert len(extract_jobs(self._grouped())) == 2
 
     def test_a_board_that_does_give_urls_is_unaffected(self):
@@ -1173,3 +1178,101 @@ class TestAJobRecognisedAndThenThrownAway:
             source="handshake_harvest", refused=refused)
         assert len(jobs) == 1
         assert refused == {}
+
+
+class TestABoardThatIdentifiesAPostingByIdAlone:
+    """
+    Handshake gives its postings a numeric `id` and no link anywhere, so
+    `_normalize` refused all 407 objects the reader recognised in a payload and
+    the board reported `found: 0` a hundred and thirty-six times.
+
+    Reconstructing the URL is only half of it, and the dangerous half on its
+    own. Of those 407, exactly 52 were postings; the other 355 were enums,
+    employers and industries qualifying as jobs on nothing but a `name` and a
+    company inherited from an enclosing object. They were harmless while a URL
+    was required — none of them had one — which made the URL rule load-bearing
+    for something it was never about. Reconstruct a URL from an id without
+    fixing that and the board yields 355 junk rows per payload instead of none.
+
+    The nodes below are copied from a real response.
+    """
+
+    def _payload(self):
+        return {"data": {"employer": {"name": "Washon MedData Inc"}, "jobs": [
+            {"id": "11383768", "title": "Python Developer",
+             "duration": "PERMANENT", "locations": ["Boston, MA"],
+             "__typename": "Job",
+             "description": "<p><strong>Responsibilities</strong></p>"},
+            {"id": "9", "name": "Job", "__typename": "JobTypeEnum",
+             "behaviorIdentifier": "JOB"},
+            {"id": "1065961", "name": "Washon MedData Inc", "logo": {},
+             "industry": {}, "__typename": "Employer"},
+        ]}}
+
+    def test_the_posting_is_read_and_given_its_url(self):
+        from app.services.harvest import extract_jobs
+
+        jobs = extract_jobs(self._payload(), source="handshake_harvest")
+        assert len(jobs) == 1
+        assert jobs[0]["title"] == "Python Developer"
+        assert jobs[0]["company"] == "Washon MedData Inc"
+        assert jobs[0]["url"] == "https://app.joinhandshake.com/jobs/11383768"
+        assert jobs[0]["source_job_id"] == "11383768"
+
+    def test_the_enum_and_the_employer_are_not_jobs(self):
+        from app.services.harvest import extract_jobs
+
+        titles = {j["title"] for j in
+                  extract_jobs(self._payload(), source="handshake_harvest")}
+        assert "Job" not in titles, "a JobTypeEnum is not a job"
+        assert "Washon MedData Inc" not in titles, "an Employer is not a job"
+
+    def test_a_name_plus_an_inherited_company_is_not_enough(self):
+        """
+        The tightening, stated on its own. Two weak signals used to add up to a
+        job, and in a normalized payload they add up to every lookup row in it.
+        """
+        from app.services.harvest import _looks_like_job as looks
+
+        assert not looks({"id": "9", "name": "Job"}, company="Acme")
+        # Corroborated by a location, so it is a posting after all.
+        assert looks({"id": "9", "name": "Job", "location": "Boston"},
+                     company="Acme")
+
+    def test_a_name_with_its_own_company_still_counts(self):
+        """
+        Not every `name` is an enum. A node naming its own employer has made a
+        claim about itself rather than inherited one, and that is the shape a
+        flat search card has.
+        """
+        from app.services.harvest import _looks_like_job as looks
+
+        assert looks({"id": "1", "name": "Backend Engineer",
+                      "companyName": "Acme"})
+
+    def test_a_source_with_no_known_url_shape_still_refuses(self):
+        """
+        `_POSTING_URL` grows only from a URL somebody has opened. Until then
+        the job is dropped, and dropping is the safe direction: a guessed URL
+        becomes the row's identity and one of its dedupe keys, so it writes a
+        row pointing nowhere that can never be merged with the real posting.
+        """
+        from app.services.harvest import extract_jobs
+
+        refused = {}
+        jobs = extract_jobs(
+            {"data": {"employer": {"name": "Acme"},
+                      "jobs": [{"id": "7", "title": "Analyst"}]}},
+            source="dice_harvest", refused=refused)
+        assert jobs == []
+        assert refused == {"no_url": 1}
+
+    def test_a_url_in_the_payload_always_wins_over_the_template(self):
+        from app.services.harvest import extract_jobs
+
+        jobs = extract_jobs(
+            {"data": {"employer": {"name": "Acme"}, "jobs": [
+                {"id": "7", "title": "Analyst",
+                 "url": "https://app.joinhandshake.com/stu/postings/7"}]}},
+            source="handshake_harvest")
+        assert jobs[0]["url"] == "https://app.joinhandshake.com/stu/postings/7"
