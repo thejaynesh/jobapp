@@ -35,6 +35,29 @@
   const INTERESTING =
     /(job|posting|search|hiring|career|vacanc|opening|listing|position|graphql)/i;
 
+  /**
+   * Whether a URL's *endpoint* names a job, ignoring the host.
+   *
+   * Tested against the path and query rather than the whole address, because
+   * a job board's hostname says nothing: `jobright.ai` contains "job", so
+   * every request that page makes — analytics, feature flags, a video SDK's
+   * config — counted as job-shaped, and the budget reserved for real endpoints
+   * was spent on whichever loaded first. The evidence stored for JobRight was
+   * five copies of a Jitter config. Same for `hiring.cafe` and
+   * `job-boards.greenhouse.io`, which is to say for exactly the boards the
+   * filter exists to help.
+   */
+  function namesAJob(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      return INTERESTING.test(parsed.pathname + parsed.search);
+    } catch (_) {
+      // Not parseable as a URL. Fall back to the whole string rather than
+      // dropping it: being over-inclusive here costs a probe, not a job.
+      return INTERESTING.test(String(url));
+    }
+  }
+
   // Responses larger than this are not job lists, they are asset manifests.
   const MAX_BYTES = 3_000_000;
 
@@ -67,9 +90,18 @@
   //
   // A URL naming a job, a search or a graphql endpoint gets its own budget,
   // which telemetry on some other path cannot touch.
-  const MAX_PROBES = 4;
+  const MAX_PROBES = 8;
   const MAX_NAMED_PROBES = 10;
   const MAX_PROBE_BYTES = 400_000;
+
+  // And a floor, because the budget kept going on things that could not
+  // possibly be a job list. Every junk sample the store accumulated was tiny —
+  // an ad-tech tag at 121 bytes, a status page at 17, an SDK config, a user
+  // record at 505 — while every payload that turned out to hold jobs was
+  // kilobytes: 13KB from JobRight, 161KB from Handshake, 992KB from Hiring
+  // Cafe. A response too small to contain a page of postings is not evidence
+  // about how a board names its fields.
+  const MIN_PROBE_BYTES = 1500;
   let probes = 0;
   let namedProbes = 0;
 
@@ -145,12 +177,24 @@
     if (!text || text.length > MAX_BYTES) return;
     tally.json += 1;
 
-    const named = INTERESTING.test(url);
+    const named = namesAJob(url);
+    const own = sameSite(url);
     if (!named) tally.url_no += 1;
 
-    // Cheap rejection before the expensive parse: a job payload names one of
-    // these somewhere.
-    if (named && SHAPE.test(text)) {
+    // Forwarded when the payload names job fields *and* it came from either a
+    // job-shaped endpoint or the board's own domain.
+    //
+    // The origin half used to be the URL filter alone, and with that filter
+    // reading the hostname it was free on any board whose name contains "job"
+    // — so `SHAPE` was doing all the work there and nobody noticed the
+    // conjunction. Reading the path instead makes it real, and requiring a
+    // job-shaped *path* would then drop a board's own listings for being
+    // served from `/swan/list`. So the board's own domain counts too: a
+    // response that literally contains `"jobTitle"` and came from the site you
+    // are looking at is job data whatever its path is called, and a third
+    // party's CDN mentioning "title" is still kept out by being neither.
+    const eligible = named || own;
+    if (eligible && SHAPE.test(text)) {
       try {
         offer(parsed !== undefined ? parsed : JSON.parse(text), url, false);
         tally.sent += 1;
@@ -159,12 +203,12 @@
       }
       return;
     }
-    // Only when the URL passed and the *shape* was what failed. The two
-    // counters are meant to be different diagnoses — "our URL guess does not
-    // name this board's API" and "this payload has no job in it" — and
+    // Only when the payload was eligible and the *shape* was what failed. The
+    // two counters are meant to be different diagnoses — "our URL guess does
+    // not name this board's API" and "this payload has no job in it" — and
     // counting a URL rejection in both made the second unreadable: every
     // telemetry response on the page landed in it too.
-    if (named) tally.shape_no += 1;
+    if (eligible) tally.shape_no += 1;
 
     // A near miss, kept as evidence rather than dropped — and deliberately
     // *not* behind the URL filter above.
@@ -176,7 +220,8 @@
     // which is exactly what several boards did. The cap and the structure test
     // are what keep this honest instead.
     const budget = named ? namedProbes < MAX_NAMED_PROBES : probes < MAX_PROBES;
-    if (!budget || text.length > MAX_PROBE_BYTES) return;
+    if (!budget) return;
+    if (text.length < MIN_PROBE_BYTES || text.length > MAX_PROBE_BYTES) return;
 
     // Off the board's own domain, a probe has to earn it with a job-shaped
     // URL. Everything a modern job board loads is on somebody else's domain —
@@ -185,7 +230,7 @@
     // session tokens and feature flags. Thirteen of the fifteen hosts in the
     // sample store were telemetry, which is evidence about nothing crowding
     // out the payloads the recipe learner exists to read.
-    if (!sameSite(url) && !named) return;
+    if (!own && !named) return;
 
     if (parsed === undefined) {
       try {
