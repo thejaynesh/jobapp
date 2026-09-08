@@ -56,9 +56,22 @@
   //
   // Capped hard: this is diagnostic, and a page that answers in JSON for every
   // widget on it should not post forty of them.
+  // Two budgets, not one, and that split is the whole point.
+  //
+  // A single counter is spent in *arrival order*, and a modern job board fires
+  // its analytics, feature flags and session config before it fetches any
+  // jobs. So four probes were reliably gone before the board's own API
+  // answered — which is why the stored evidence was an ad-tech tag, an
+  // analytics config, a status page and a user record, and why Dice sent 9,504
+  // JSON responses and left not one sample behind.
+  //
+  // A URL naming a job, a search or a graphql endpoint gets its own budget,
+  // which telemetry on some other path cannot touch.
   const MAX_PROBES = 4;
+  const MAX_NAMED_PROBES = 10;
   const MAX_PROBE_BYTES = 400_000;
   let probes = 0;
+  let namedProbes = 0;
 
   /**
    * Roughly "same company", for deciding what is worth probing.
@@ -162,7 +175,8 @@
     // no forward, no probe, no sample, and no Learn button. Nothing at all,
     // which is exactly what several boards did. The cap and the structure test
     // are what keep this honest instead.
-    if (probes >= MAX_PROBES || text.length > MAX_PROBE_BYTES) return;
+    const budget = named ? namedProbes < MAX_NAMED_PROBES : probes < MAX_PROBES;
+    if (!budget || text.length > MAX_PROBE_BYTES) return;
 
     // Off the board's own domain, a probe has to earn it with a job-shaped
     // URL. Everything a modern job board loads is on somebody else's domain —
@@ -186,7 +200,11 @@
       (Array.isArray(parsed) && parsed.length) ||
       (parsed && typeof parsed === "object" && Object.keys(parsed).length);
     if (!interesting) return;
-    probes += 1;
+    if (named) {
+      namedProbes += 1;
+    } else {
+      probes += 1;
+    }
     tally.probed += 1;
     offer(parsed, url, true);
   }

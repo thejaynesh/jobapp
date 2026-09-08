@@ -607,3 +607,78 @@ class TestAPayloadThatNamedNothingWeKnow:
         }]}, probe=True)
         assert response.json()["found"] == 1
         assert db.query(Job).filter(Job.company == "Acme").count() == 1
+
+
+class TestTheEvidenceStoreKeepsTheBestFiveNotTheFirstFive:
+    """
+    Refusing once a host held five made the *first five payloads it ever sent*
+    the only five it would ever be judged on — and the first responses a modern
+    board makes are its analytics, its feature flags and its session config,
+    because those are what a page fetches before it fetches any jobs.
+
+    The store proved it: an ad-tech tag of 121 bytes, an analytics config, a
+    status page of 17 bytes, a user account record. Sixteen attempts to learn a
+    recipe for Handshake all said "found no jobs in any sample" — true, and
+    about the samples rather than about the board.
+    """
+
+    def _fill(self, db, host, sizes, found=0):
+        from app.services import harvest_samples
+
+        for size in sizes:
+            harvest_samples.record(
+                db, host, {"pad": "x" * max(0, size - 12)}, found=found)
+        db.commit()
+
+    def _sizes(self, db, host):
+        from app.models.harvest_recipe import HarvestSample
+
+        return sorted(
+            row.bytes for row in
+            db.query(HarvestSample).filter(HarvestSample.host == host).all()
+        )
+
+    def test_a_real_payload_displaces_a_telemetry_ping(self, db):
+        from app.services import harvest_samples
+
+        self._fill(db, "dice.example", [20, 40, 120, 500, 900])
+        assert harvest_samples.record(db, "dice.example", {"pad": "x" * 100_000})
+        db.commit()
+
+        sizes = self._sizes(db, "dice.example")
+        assert len(sizes) == 5
+        assert 20 not in sizes, "the smallest went to make room"
+        assert max(sizes) > 90_000
+
+    def test_a_smaller_payload_does_not_displace_a_bigger_one(self, db):
+        from app.services import harvest_samples
+
+        self._fill(db, "quiet.example", [5_000, 6_000, 7_000, 8_000, 9_000])
+        before = self._sizes(db, "quiet.example")
+        assert not harvest_samples.record(db, "quiet.example", {"pad": "x" * 50})
+        db.commit()
+
+        assert self._sizes(db, "quiet.example") == before
+
+    def test_a_sample_that_yielded_jobs_is_never_displaced(self, db):
+        """
+        Evidence that worked outranks size. A small payload the walker read
+        successfully is the most useful thing in the store, and losing it to a
+        large one nobody has read yet would be a bad trade.
+        """
+        from app.services import harvest_samples
+
+        self._fill(db, "worked.example", [200], found=3)
+        smallest = min(self._sizes(db, "worked.example"))
+        self._fill(db, "worked.example", [9_000, 9_100, 9_200, 9_300])
+        assert not harvest_samples.record(db, "worked.example", {"pad": "x" * 100_000})
+        db.commit()
+
+        assert smallest in self._sizes(db, "worked.example")
+
+    def test_a_host_with_room_still_just_keeps_it(self, db):
+        from app.services import harvest_samples
+
+        assert harvest_samples.record(db, "new.example", {"a": 1})
+        db.commit()
+        assert len(self._sizes(db, "new.example")) == 1

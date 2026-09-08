@@ -97,7 +97,26 @@ def _fits(payload) -> dict | list:
 def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
            note: str = "") -> bool:
     """
-    Keep this payload if the host has room. Returns whether one was stored.
+    Keep this payload, displacing a slighter one if the host is full.
+
+    Displacing, and that is the change that matters. This used to refuse
+    outright once a host held five, which made the *first five payloads a host
+    ever sent* the only five it would ever be judged on — and the first few
+    responses on a modern job board are its analytics, its feature flags and
+    its session config, because those are what a page fetches before it fetches
+    any jobs.
+
+    The evidence store proved it: an ad-tech tag of 121 bytes, an analytics
+    config, a status page of 17 bytes, a user account record. Sixteen attempts
+    to learn a recipe for Handshake all reported "found no jobs in any sample",
+    which was true and was about the samples rather than the board.
+
+    Size is the tiebreak because on this particular question it is a very good
+    one. A job list is kilobytes and a telemetry ping is bytes: every junk
+    sample in the store was under 5KB and the one that turned out to hold jobs
+    was 161KB. It is a heuristic and it is allowed to be — the cost of getting
+    it wrong is one diagnostic sample, and the cost of the old rule was every
+    board whose jobs arrive late.
 
     Never raises. This runs inside the harvest, and a sample that could not be
     written must not cost the jobs that were.
@@ -110,16 +129,29 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
     try:
         from app.models.harvest_recipe import HarvestSample
 
-        held = (
-            db.query(HarvestSample).filter(HarvestSample.host == host).count()
-        )
-        if held >= _keep():
-            return False
-
         try:
             size = len(json.dumps(payload))
         except (TypeError, ValueError):
             size = 0
+
+        held = (
+            db.query(HarvestSample)
+            .filter(HarvestSample.host == host)
+            .order_by(HarvestSample.bytes.asc())
+            .all()
+        )
+        if len(held) >= _keep():
+            weakest = held[0]
+            # A sample that already yielded jobs is evidence that worked, and
+            # is never displaced by one that has not been read yet.
+            if weakest.found or weakest.bytes >= size:
+                return False
+            db.delete(weakest)
+            db.flush()
+            logger.info(
+                "harvest_samples: %s was full; dropped a %d-byte sample for a "
+                "%d-byte one", host, weakest.bytes, size,
+            )
 
         db.add(HarvestSample(
             host=str(host)[:160],
