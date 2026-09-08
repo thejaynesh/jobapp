@@ -30,6 +30,8 @@ import logging
 import re
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
+
 from app.models.job import Job, JobStatus
 from app.services.deduplication import (
     compute_dedupe_hash,
@@ -596,6 +598,61 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
     counts = {"inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
     now = datetime.now(timezone.utc)
 
+    def _store(data, title, company, url, location, description,
+               source_job_id, dedupe_hash) -> str:
+        """One posting, stored or merged. Returns the outcome to count."""
+        source = data.get("source") or HARVEST_SOURCE
+        existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
+        if existing is not None:
+            improved = enrich_from(existing, data)
+            # The harvested copy usually carries a fuller description than the
+            # guest API managed, which is the main reason this path exists.
+            if url in existing.source_urls or (
+                source_job_id
+                and existing.source_job_id == source_job_id
+                and existing.source == source
+            ):
+                if merge_description(existing, description):
+                    improved.append("description")
+            else:
+                improved += merge_or_skip(db, existing, url, description,
+                                          layer=3, data=data)
+            # Counted by whether the row got better, not by which branch it
+            # went down. The panel calls this number "enriched".
+            return "merged" if improved else "skipped"
+
+        # Already seen, judged and retired. Same reasoning as the fetcher's
+        # check: an archived posting is one we have an answer about, and
+        # re-inserting it buys a scoring call to reach that same answer again.
+        if was_archived(db, source, url, source_job_id, dedupe_hash):
+            return "skipped"
+
+        job = Job(
+            source=source,
+            source_job_id=source_job_id,
+            source_urls=[url],
+            title=title,
+            company=company,
+            location=location,
+            is_remote=bool(data.get("is_remote")),
+            url=url,
+            apply_url=data.get("apply_url") or None,
+            description=description or None,
+            experience_level="mid",
+            status=JobStatus.new,
+            fetched_at=now,
+            dedupe_hash=dedupe_hash,
+        )
+        # The same rule a second sighting gets, on a row where every column it
+        # looks at is still null. It is strictly more than the pay band this
+        # used to take: a card naming an employment type or a posting date had
+        # both thrown away on insert and then re-derived from prose by an LLM
+        # call later.
+        enrich_from(job, data)
+        db.add(job)
+        db.flush()
+        return "inserted"
+
     for data in jobs:
         title = (data.get("title") or "").strip()
         company = (data.get("company") or "").strip()
@@ -615,68 +672,40 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         # unique constraint fired at commit and the WHOLE batch was lost.
         # Flushing makes the duplicate visible to find_existing_job; the
         # savepoint contains anything that still slips through.
-        try:
-            with db.begin_nested():
-                source = data.get("source") or HARVEST_SOURCE
-                existing = find_existing_job(
-                    db, source, url, source_job_id, dedupe_hash
-                )
-                if existing is not None:
-                    improved = enrich_from(existing, data)
-                    # The harvested copy usually carries a fuller description than the
-                    # guest API managed, which is the main reason this path exists.
-                    if url in existing.source_urls or (
-                        source_job_id
-                        and existing.source_job_id == source_job_id
-                        and existing.source == source
-                    ):
-                        if merge_description(existing, description):
-                            improved.append("description")
-                    else:
-                        improved += merge_or_skip(db, existing, url, description,
-                                                  layer=3, data=data)
-
-                    # Counted by whether the row got better, not by which branch
-                    # it went down. The panel calls this number "enriched".
-                    counts["merged" if improved else "skipped"] += 1
+        #
+        # Something still does, because this is the one ingest path that runs
+        # concurrently: the extension forwards a payload per response and
+        # several land at once across uvicorn workers, so a posting can be
+        # inserted by *another request* in the window between this one's SELECT
+        # and its INSERT. That is a unique-violation on `dedupe_hash` for a job
+        # neither request did anything wrong with, and it was being counted as
+        # `invalid` and dropped.
+        #
+        # Postgres reads committed, so a second attempt sees the row the other
+        # request committed and resolves it as a merge. One retry is the whole
+        # fix — a second collision would mean the row is gone again, which is
+        # not something retrying harder solves.
+        outcome = ""
+        for attempt in (1, 2):
+            try:
+                with db.begin_nested():
+                    outcome = _store(data, title, company, url, location,
+                                     description, source_job_id, dedupe_hash)
+                break
+            except IntegrityError:
+                if attempt == 1:
                     continue
-
-                # Already seen, judged and retired. Same reasoning as the
-                # fetcher's check: an archived posting is one we have an answer
-                # about, and re-inserting it buys a scoring call to reach that
-                # same answer again.
-                if was_archived(db, source, url, source_job_id, dedupe_hash):
-                    counts["skipped"] += 1
-                    continue
-
-                job = Job(
-                    source=source,
-                    source_job_id=source_job_id,
-                    source_urls=[url],
-                    title=title,
-                    company=company,
-                    location=location,
-                    is_remote=bool(data.get("is_remote")),
-                    url=url,
-                    apply_url=data.get("apply_url") or None,
-                    description=description or None,
-                    experience_level="mid",
-                    status=JobStatus.new,
-                    fetched_at=now,
-                    dedupe_hash=dedupe_hash,
+                logger.warning(
+                    "harvest: %r at %s collided twice and was dropped",
+                    title, company,
                 )
-                # The same rule a second sighting gets, on a row where every
-                # column it looks at is still null. It is strictly more than the
-                # pay band this used to take: a card naming an employment type
-                # or a posting date had both thrown away on insert and then
-                # re-derived from prose by an LLM call later.
-                enrich_from(job, data)
-                db.add(job)
-                db.flush()
-                counts["inserted"] += 1
-        except Exception as exc:
-            logger.warning("harvest: could not store %r at %s: %s", title, company, exc)
-            counts["invalid"] += 1
+                outcome = "invalid"
+            except Exception as exc:
+                logger.warning("harvest: could not store %r at %s: %s",
+                               title, company, exc)
+                outcome = "invalid"
+                break
+        counts[outcome or "invalid"] += 1
 
     counts["boards"] = _mine_ats_boards(db, jobs)
 

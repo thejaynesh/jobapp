@@ -9,6 +9,7 @@ yields zero jobs looks exactly like an idle browser.
 
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from app.models.job import Job
 from app.services.deduplication import compute_dedupe_hash
 from app.services import harvest
@@ -996,3 +997,93 @@ class TestTheWalkReachesThroughABigModernPayload:
             payload = {"node": payload}
 
         assert extract_jobs(payload) == []
+
+
+class TestTwoRequestsStoringTheSamePostingAtOnce:
+    """
+    The harvest is the one ingest path that runs concurrently — the extension
+    forwards a payload per response and several land at once across uvicorn
+    workers. So a posting can be inserted by *another* request in the window
+    between this one's SELECT and its INSERT, and the unique constraint on
+    `dedupe_hash` fires for a job neither request did anything wrong with.
+
+    It was being counted as `invalid` and dropped, five times a minute once the
+    reader started recognising Greenhouse's cards.
+    """
+
+    def _card(self, **extra):
+        return {
+            "source": "greenhouse_harvest",
+            "source_job_id": "4396809009",
+            "url": "https://job-boards.greenhouse.io/centralreach/jobs/4396809009",
+            "title": "Sr. Software Engineer, Ruby on Rails",
+            "company": "CentralReach",
+            "location": "Holmdel Township, NJ",
+            **extra,
+        }
+
+    def _rival(self, db, card):
+        """A row for the same posting, committed by somebody else."""
+        from app.models.job import Job, JobStatus
+        from app.services.deduplication import compute_dedupe_hash
+
+        rival = Job(
+            source="greenhouse", source_job_id="other",
+            source_urls=["https://example.com/rival"],
+            title=card["title"], company=card["company"],
+            location=card["location"], url="https://example.com/rival",
+            status=JobStatus.new, fetched_at=datetime.now(timezone.utc),
+            dedupe_hash=compute_dedupe_hash(
+                card["company"], card["title"], card["location"]),
+        )
+        db.add(rival)
+        db.commit()
+        return rival
+
+    def test_the_loser_of_the_race_merges_instead_of_being_dropped(self, db):
+        from unittest.mock import patch
+
+        from app.services import harvest
+
+        card = self._card()
+        self._rival(db, card)
+
+        real_find = harvest.find_existing_job
+        calls = {"n": 0}
+
+        def racing_find(*args, **kwargs):
+            # The first look misses, which is what a SELECT does when the other
+            # request's INSERT has not committed yet. The second sees it.
+            calls["n"] += 1
+            return None if calls["n"] == 1 else real_find(*args, **kwargs)
+
+        with patch.object(harvest, "find_existing_job", side_effect=racing_find):
+            counts = harvest.save_harvested_jobs(db, [card])
+
+        assert counts["invalid"] == 0, "the job was not dropped"
+        assert counts["inserted"] == 0, "it did not insert a second row"
+        assert counts["merged"] + counts["skipped"] == 1
+        assert calls["n"] == 2, "it looked again rather than giving up"
+
+    def test_a_collision_that_survives_the_retry_is_still_counted(self, db):
+        # Retrying harder does not solve a row that is somehow still invisible,
+        # and the count has to stay honest about the one that was lost.
+        from unittest.mock import patch
+
+        from app.services import harvest
+
+        card = self._card()
+        self._rival(db, card)
+
+        with patch.object(harvest, "find_existing_job", return_value=None):
+            counts = harvest.save_harvested_jobs(db, [card])
+
+        assert counts["invalid"] == 1
+        assert counts["inserted"] == 0
+
+    def test_an_ordinary_insert_is_unaffected(self, db):
+        from app.services import harvest
+
+        counts = harvest.save_harvested_jobs(db, [self._card()])
+        assert counts["inserted"] == 1
+        assert counts["invalid"] == 0
