@@ -309,6 +309,32 @@ def _retry_days() -> int:
     return max(1, int(getattr(settings, "BROWSE_RETRY_DAYS", 30)))
 
 
+def _search_retry_hours() -> int:
+    return max(1, int(getattr(settings, "BROWSE_SEARCH_RETRY_HOURS", 6)))
+
+
+def _cooloff(purpose: str) -> timedelta:
+    """
+    How long before this page is worth opening again.
+
+    Two very different answers, and using one for both is why a board could go
+    a month between crawls.
+
+    A *posting* page is a job description. It does not change, so re-reading it
+    is a visit spent on something already known — thirty days is right, and the
+    cooloff was written for exactly that.
+
+    A board's *search* page is the opposite. Its entire content is which
+    postings exist right now, so the same thirty days means seeing a month of
+    jobs in one go and missing everything that opened and closed in between.
+    Handshake's search page was last opened on 28 August and was not eligible
+    again until late September: ten visits in a week, then none at all.
+    """
+    if purpose == "enrich":
+        return timedelta(days=_retry_days())
+    return timedelta(hours=_search_retry_hours())
+
+
 def paused_hosts() -> tuple[str, ...]:
     """
     Hosts nothing may be queued for, from `BROWSE_PAUSED_HOSTS`.
@@ -855,8 +881,8 @@ def _scroll_pause_seconds(url: str, db=None) -> int:
     return max(0, int(getattr(settings, "BROWSE_SCROLL_PAUSE_SECONDS", 2)))
 
 
-def _already_queued(db, urls: list[str],
-                    respect_cooloff: bool = True) -> set[str]:
+def _already_queued(db, urls: list[str], respect_cooloff: bool = True,
+                    purpose: str = "enrich") -> set[str]:
     """
     URLs not worth queueing again right now.
 
@@ -880,7 +906,7 @@ def _already_queued(db, urls: list[str],
 
     in_flight = BrowserTask.status.in_(("queued", "leased"))
     if respect_cooloff:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_retry_days())
+        cutoff = datetime.now(timezone.utc) - _cooloff(purpose)
         recency = in_flight | (BrowserTask.created_at >= cutoff)
     else:
         recency = in_flight
@@ -917,6 +943,7 @@ def enqueue(db, urls: list[str], limit: int | None = None,
     # "somebody is waiting on this" and "they want it now" are the same fact.
     skip = _already_queued(
         db, urls, respect_cooloff=priority < PRIORITY_REQUESTED,
+        purpose=purpose,
     )
     # One query for the batch, like the cooloff above. A request the user is
     # watching ignores it: they are at the keyboard, which is the entire thing

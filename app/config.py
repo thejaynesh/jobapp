@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     BROWSE_GAP_SECONDS: int = 20
     # Don't re-open a page browsed within this many days.
     BROWSE_RETRY_DAYS: int = 30
+    # And the same for a board's search page, which is a different kind of page
+    # entirely: a posting does not change, while a search page's whole content
+    # is which postings exist right now. Sharing the thirty days meant crawling
+    # a board once a month and missing everything that opened and closed in
+    # between — Handshake's search page was last opened on 28 August and was
+    # not eligible again until late September.
+    BROWSE_SEARCH_RETRY_HOURS: int = 6
     # Result pages to walk per search. One page is about twenty-five cards, so
     # a crawl that stops there discovers almost nothing — depth is what makes
     # it a sweep rather than a peek. Each page is a queued visit like any

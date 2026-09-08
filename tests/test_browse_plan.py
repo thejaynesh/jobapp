@@ -653,3 +653,73 @@ class TestTheButtons:
         monkeypatch.setattr(module, "crawl_postings",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         assert client.post("/runs/agent/browse", data={"plan": "postings"}).status_code == 200
+
+
+class TestABoardsSearchPageIsNotAJobDescription:
+    """
+    The cooloff stops a nightly sweep re-reading the same hundred posting pages
+    forever instead of reaching the ones behind them. That is right for a
+    posting — a job description does not change — and exactly wrong for the
+    page whose entire content is *which postings exist right now*.
+
+    Sharing thirty days between them meant a board was crawled once a month.
+    Handshake's search page was last opened on 28 August and was not eligible
+    again until late September; it got ten visits in a week and then none, and
+    every fix to the reader downstream was invisible because nothing was being
+    read.
+    """
+
+    def _visited(self, db, url, days_ago, purpose):
+        from app.models.browser_task import BrowserTask
+
+        task = BrowserTask(
+            kind="browse_page", status="done",
+            payload={"url": url, "purpose": purpose},
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        db.add(task)
+        db.flush()
+        task.created_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        db.commit()
+
+    def test_a_board_crawled_last_week_is_crawled_again(self, db):
+        url = "https://app.joinhandshake.com/job-search?per_page=25"
+        self._visited(db, url, days_ago=7, purpose="search")
+
+        assert browse_plan.enqueue(db, [url], purpose="search") == 1
+
+    def test_a_board_crawled_an_hour_ago_is_left_alone(self, db):
+        # The cooloff still has a job to do: a top-up every half hour must not
+        # re-queue the same board every time.
+        url = "https://app.joinhandshake.com/job-search?per_page=25"
+        self._visited(db, url, days_ago=0, purpose="search")
+
+        assert browse_plan.enqueue(db, [url], purpose="search") == 0
+
+    def test_a_posting_read_last_week_is_still_left_alone(self, db):
+        # The half that was always right. A description does not change, and a
+        # visit spent re-reading one is a visit not spent on a posting with no
+        # description at all.
+        url = "https://www.linkedin.com/jobs/view/4012345678/"
+        self._visited(db, url, days_ago=7, purpose="enrich")
+
+        assert browse_plan.enqueue(db, [url], purpose="enrich") == 0
+
+    def test_a_posting_read_two_months_ago_is_read_again(self, db):
+        url = "https://www.linkedin.com/jobs/view/4012345678/"
+        self._visited(db, url, days_ago=60, purpose="enrich")
+
+        assert browse_plan.enqueue(db, [url], purpose="enrich") == 1
+
+    def test_one_in_flight_is_never_queued_twice_whatever_it_is(self, db):
+        from app.models.browser_task import BrowserTask
+
+        url = "https://app.joinhandshake.com/job-search?per_page=25"
+        db.add(BrowserTask(
+            kind="browse_page", status="queued",
+            payload={"url": url, "purpose": "search"},
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        ))
+        db.commit()
+
+        assert browse_plan.enqueue(db, [url], purpose="search") == 0
