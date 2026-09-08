@@ -101,6 +101,13 @@ def main():
             "jobs": 0, "over": 0, "depth": 0,
         })
         keys_seen = collections.defaultdict(collections.Counter)
+        # Every key in the payload, for a host where nothing had a title at
+        # all. The "keys beside a title" dump says nothing in that case — there
+        # were no titles to sit beside — and "no titles" is the least
+        # actionable sentence this script can produce. What is actionable is
+        # the field the board calls its title instead.
+        all_keys = collections.defaultdict(collections.Counter)
+        examples: dict = collections.defaultdict(dict)
 
         for sample in samples:
             row = per_host[sample.host]
@@ -126,6 +133,18 @@ def main():
                     # all and has to come from an ancestor.
                     keys_seen[sample.host].update(k for k in node if k != "title")
 
+            stack = [sample.payload]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        if isinstance(value, str) and 3 <= len(value) <= 120:
+                            all_keys[sample.host][key] += 1
+                            examples[sample.host].setdefault(key, value)
+                        stack.append(value)
+                elif isinstance(node, list):
+                    stack.extend(node)
+
             row["jobs"] += len(harvest.extract_jobs(sample.payload))
 
         for host, row in sorted(per_host.items(), key=lambda kv: -kv[1]["titles"]):
@@ -142,6 +161,18 @@ def main():
                   + "-" * max(0, 40 - len(host)))
             for key, count in counter.most_common(SHOW_KEYS):
                 print(f"    {count:>6}  {key}")
+
+        for host, row in sorted(per_host.items()):
+            if row["titles"] or not all_keys[host]:
+                continue
+            print()
+            print(f"--- {host}: no titles at all; every text field it does have "
+                  + "-" * max(0, 20 - len(host)))
+            print("    (values are truncated; redact anything personal before "
+                  "pasting)")
+            for key, count in all_keys[host].most_common(SHOW_KEYS * 2):
+                sample_value = examples[host].get(key, "")[:44]
+                print(f"    {count:>6}  {key:<28} {sample_value!r}")
     finally:
         db.close()
 

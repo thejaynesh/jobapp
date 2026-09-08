@@ -701,15 +701,15 @@ class TestABoardsSearchPageIsNotAJobDescription:
         # visit spent re-reading one is a visit not spent on a posting with no
         # description at all.
         url = "https://www.linkedin.com/jobs/view/4012345678/"
-        self._visited(db, url, days_ago=7, purpose="enrich")
+        self._visited(db, url, days_ago=7, purpose="posting")
 
-        assert browse_plan.enqueue(db, [url], purpose="enrich") == 0
+        assert browse_plan.enqueue(db, [url], purpose="posting") == 0
 
     def test_a_posting_read_two_months_ago_is_read_again(self, db):
         url = "https://www.linkedin.com/jobs/view/4012345678/"
-        self._visited(db, url, days_ago=60, purpose="enrich")
+        self._visited(db, url, days_ago=60, purpose="posting")
 
-        assert browse_plan.enqueue(db, [url], purpose="enrich") == 1
+        assert browse_plan.enqueue(db, [url], purpose="posting") == 1
 
     def test_one_in_flight_is_never_queued_twice_whatever_it_is(self, db):
         from app.models.browser_task import BrowserTask
@@ -723,3 +723,60 @@ class TestABoardsSearchPageIsNotAJobDescription:
         db.commit()
 
         assert browse_plan.enqueue(db, [url], purpose="search") == 0
+
+
+class TestTheTopUpAlwaysLeavesRoomToDiscover:
+    """
+    "Descriptions before discovery" is the right priority and was the wrong
+    rule. The top-up served the posting backlog and searched only once it was
+    empty — and the backlog is tens of thousands of description-less postings,
+    so it is never empty. A single posting queued was enough to skip searching
+    entirely:
+
+        {'kind': 'postings', 'candidates': 239, 'queued': 1, 'skipped': None}
+
+    Handshake and JobRight were not being under-served. They were being served
+    never.
+    """
+
+    def _ready(self, db, monkeypatch):
+        from app.models.profile import Profile
+
+        monkeypatch.setattr(browse_plan, "agent_seen_recently", lambda *a, **k: True)
+        db.add(Profile(data={"target_roles": ["Backend Engineer"],
+                             "target_locations": ["Remote"]}))
+        db.commit()
+
+    def test_searching_happens_even_with_a_backlog_waiting(self, db, monkeypatch):
+        self._ready(db, monkeypatch)
+        for n in range(50):
+            make_job(db, source_job_id=str(4012345678 + n), description="thin")
+
+        outcome = browse_plan.scheduled_crawl(db, {"target_roles": ["Engineer"]})
+
+        assert outcome["searched"] > 0, "discovery got its reserve"
+        assert outcome["queued"] > outcome["searched"], "the backlog still got most"
+
+    def test_the_reserve_is_a_share_and_not_the_whole_budget(self, db, monkeypatch):
+        from app.config import settings
+
+        self._ready(db, monkeypatch)
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_RESERVE", 3)
+        for n in range(50):
+            make_job(db, source_job_id=str(4012345678 + n), description="thin")
+
+        outcome = browse_plan.scheduled_crawl(db, {"target_roles": ["Engineer"]})
+
+        assert outcome["searched"] <= 3
+
+    def test_a_reserve_of_zero_restores_the_old_behaviour(self, db, monkeypatch):
+        from app.config import settings
+
+        self._ready(db, monkeypatch)
+        monkeypatch.setattr(settings, "BROWSE_SEARCH_RESERVE", 0)
+        for n in range(20):
+            make_job(db, source_job_id=str(4012345678 + n), description="thin")
+
+        outcome = browse_plan.scheduled_crawl(db, {"target_roles": ["Engineer"]})
+
+        assert outcome["searched"] == 0

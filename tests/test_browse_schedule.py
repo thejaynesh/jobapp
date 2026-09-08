@@ -77,11 +77,18 @@ class TestItRunsWithoutABeingAsked:
         # A posting already stored with no description is worth more than one
         # nobody has seen: it has been scored on a fragment, and the fragment
         # is why.
+        #
+        # "First" is a share of the budget rather than the whole of it. It used
+        # to be the whole of it, and because the backlog is never empty that
+        # meant boards were never crawled at all — so what is defended here is
+        # that the backlog still gets most, not that it gets everything.
         agent_polled(db)
-        thin_job(db)
+        for n in range(30):
+            thin_job(db, n)
 
         outcome = browse_plan.scheduled_crawl(db, PROFILE)
-        assert outcome["kind"] == "postings"
+        assert "postings" in outcome["kind"]
+        assert outcome["queued"] - outcome["searched"] > outcome["searched"]
 
     def test_it_searches_once_the_backlog_is_drained(self, db):
         agent_polled(db)

@@ -313,6 +313,14 @@ def _search_retry_hours() -> int:
     return max(1, int(getattr(settings, "BROWSE_SEARCH_RETRY_HOURS", 6)))
 
 
+# Purposes whose pages are lists rather than postings. Named explicitly, and
+# anything unrecognised falls to the long cooloff on purpose: a new caller
+# under-crawling a board is the bug being fixed here, but a new caller
+# *re-reading every posting every six hours* would spend the entire browse
+# budget on pages already read, which is worse.
+_LIST_PURPOSES = frozenset({"search", "pasted", "harvest"})
+
+
 def _cooloff(purpose: str) -> timedelta:
     """
     How long before this page is worth opening again.
@@ -330,9 +338,9 @@ def _cooloff(purpose: str) -> timedelta:
     Handshake's search page was last opened on 28 August and was not eligible
     again until late September: ten visits in a week, then none at all.
     """
-    if purpose == "enrich":
-        return timedelta(days=_retry_days())
-    return timedelta(hours=_search_retry_hours())
+    if purpose in _LIST_PURPOSES:
+        return timedelta(hours=_search_retry_hours())
+    return timedelta(days=_retry_days())
 
 
 def paused_hosts() -> tuple[str, ...]:
@@ -923,6 +931,32 @@ def _already_queued(db, urls: list[str], respect_cooloff: bool = True,
     return {row[0] for row in rows if row[0]}
 
 
+def _promote(db, urls: list[str], priority: int) -> int:
+    """
+    Move work somebody is now waiting on to the front. Returns how many moved.
+
+    Only what is still `queued`: a leased task is already being visited, and
+    changing its priority would move nothing while making the numbers lie.
+    """
+    from app.models.browser_task import BrowserTask
+
+    if not urls:
+        return 0
+    moved = (
+        db.query(BrowserTask)
+        .filter(
+            BrowserTask.kind == "browse_page",
+            BrowserTask.status == "queued",
+            BrowserTask.priority < priority,
+            BrowserTask.payload["url"].astext.in_(urls),
+        )
+        .update({"priority": priority}, synchronize_session=False)
+    )
+    if moved:
+        db.commit()
+    return moved
+
+
 def enqueue(db, urls: list[str], limit: int | None = None,
             purpose: str = "harvest",
             priority: int = PRIORITY_SWEEP) -> int:
@@ -956,6 +990,16 @@ def enqueue(db, urls: list[str], limit: int | None = None,
     # again. The caller reports the wait instead — see `runs.queue_browsing`.
     resting = resting_hosts(db)
     queued = 0
+
+    # A URL the sweep already queued is skipped — but if somebody has now asked
+    # for it, "already queued" means "sitting behind sixty postings at sweep
+    # priority", and doing nothing looks exactly like a broken button. So it is
+    # moved to the front instead. This became reachable the moment the top-up
+    # started reserving pages for board searches: the board the button is for
+    # is now routinely already in the queue.
+    promoted = 0
+    if priority >= PRIORITY_REQUESTED and skip:
+        promoted = _promote(db, sorted(skip), priority)
 
     for url in urls:
         if queued >= budget:
@@ -1004,7 +1048,13 @@ def enqueue(db, urls: list[str], limit: int | None = None,
 
     if queued:
         logger.info("browse_plan: queued %d page(s) to browse for %s", queued, purpose)
-    return queued
+    if promoted:
+        logger.info("browse_plan: moved %d already-queued page(s) to the front",
+                    promoted)
+    # Counted together, because from the caller's side both mean "this will
+    # happen soon" and a button reporting zero for work it just moved to the
+    # front of the queue is the same wrong answer as doing nothing.
+    return queued + promoted
 
 
 def crawl_searches(db, profile: dict | None, limit: int | None = None,
@@ -1146,14 +1196,40 @@ def scheduled_crawl(db, profile: dict | None) -> dict:
     if waiting > floor:
         return {"queued": 0, "skipped": "queue still draining", "waiting": waiting}
 
+    # Searches first, and only a few of them.
+    #
+    # This used to serve the whole posting backlog and search only once it was
+    # empty. "Descriptions before discovery" is the right priority and was the
+    # wrong rule: the backlog is tens of thousands of description-less
+    # postings, so it is never empty, and a single posting queued was enough to
+    # skip searching entirely. Handshake and JobRight were not being
+    # under-served, they were being served never — the top-up returned
+    # `{'kind': 'postings', 'candidates': 239, 'queued': 1}` and stopped there.
+    #
+    # A reserve rather than a swap, because the priority itself was sound. Most
+    # of the budget still goes to the backlog; a small guaranteed share keeps
+    # discovery alive, which is what stops the backlog being the only thing
+    # there will ever be.
+    reserve = max(0, int(getattr(settings, "BROWSE_SEARCH_RESERVE", 10)))
+    searched = crawl_searches(db, profile, limit=reserve,
+                              priority=PRIORITY_SWEEP) if reserve else {"queued": 0}
+
     # Behind everything, including a crawl the user asked for an hour ago. A
     # timer has nobody waiting on it.
     outcome = crawl_postings(db, priority=PRIORITY_SWEEP)
-    if outcome["queued"]:
-        return {**outcome, "skipped": None}
-
-    return {**crawl_searches(db, profile, priority=PRIORITY_SWEEP),
-            "skipped": None}
+    postings = outcome["queued"]
+    searches = searched.get("queued", 0)
+    return {
+        **outcome,
+        # Named for what happened rather than for whichever call ran last: the
+        # log line and the panel both read this, and "postings" on a run that
+        # only queued searches is a sentence that sends you to the wrong place.
+        "kind": ("postings and searches" if postings and searches
+                 else "searches" if searches else "postings"),
+        "searched": searches,
+        "queued": postings + searches,
+        "skipped": None,
+    }
 
 
 def drop_queued(db, purpose: str = "") -> int:

@@ -301,3 +301,37 @@ class TestSeeingThatItRan:
         self._visit(db, ok=False)
 
         assert "signed out" in client.get("/runs").text
+
+
+class TestABoardAlreadyQueuedByTheSweep:
+    """
+    The top-up now reserves pages for board searches, so the board a button is
+    for is routinely already in the queue — sitting behind sixty postings at
+    sweep priority. Skipping it as "already queued" makes the button do nothing
+    visible, which is indistinguishable from a broken one.
+    """
+
+    def test_pressing_the_button_moves_it_to_the_front(self, db):
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse",
+                                   priority=browse_plan.PRIORITY_SWEEP)
+        thin_job(db, 1)
+        browse_plan.crawl_postings(db, priority=browse_plan.PRIORITY_SWEEP)
+
+        moved = browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+
+        assert moved["queued"] > 0, "the button reported doing something"
+        first = browser_tasks.lease(db, ["browse_page"], agent_id="a", limit=1)[0]
+        assert "my.greenhouse.io" in first.payload["url"]
+
+    def test_a_page_being_visited_right_now_is_left_alone(self, db):
+        # Its priority decides nothing any more — it is already being opened —
+        # and moving it would only make the number reported a lie.
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse",
+                                   priority=browse_plan.PRIORITY_SWEEP)
+        leased = browser_tasks.lease(db, ["browse_page"], agent_id="a", limit=1)[0]
+        before = leased.priority
+
+        browse_plan.crawl_searches(db, PROFILE, board="greenhouse")
+
+        db.refresh(leased)
+        assert leased.priority == before

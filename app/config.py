@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     # between — Handshake's search page was last opened on 28 August and was
     # not eligible again until late September.
     BROWSE_SEARCH_RETRY_HOURS: int = 6
+    # Pages of each scheduled top-up reserved for crawling boards rather than
+    # draining the description backlog. Small, because descriptions really are
+    # the better spend — but not zero, which is what it effectively was: the
+    # backlog is never empty, so searching never happened at all.
+    BROWSE_SEARCH_RESERVE: int = 10
     # Result pages to walk per search. One page is about twenty-five cards, so
     # a crawl that stops there discovers almost nothing — depth is what makes
     # it a sweep rather than a peek. Each page is a queued visit like any
