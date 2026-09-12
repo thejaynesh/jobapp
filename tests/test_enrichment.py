@@ -954,3 +954,108 @@ class TestALearnedLocationKeepsTheHashHonest:
 
         assert job.location == "Remote"
         assert job.dedupe_hash == before
+
+
+class TestAVerdictLeftStandingOnEvidenceItNoLongerMatches:
+    """
+    `TestRescoringAfterGrowth` above pins the rule. This pins the gap in where
+    it ran.
+
+    The rule only fired inside an enrichment pass, for a description *that
+    pass* had just improved. A description arriving any other way — a second
+    source merging through the dedupe, `job_details.extract_and_apply`, the
+    browser harvest — left the verdict frozen at an answer the evidence no
+    longer supported.
+
+    And the two states were mutually exclusive, which is what made it
+    permanent rather than merely slow: `thin_description_queue` selects on a
+    *short* description, so the moment the real text arrived the job stopped
+    being a candidate for the only pass that could have re-scored it.
+
+    Measured on the live table before the fix: 41,838 jobs under `few_skills`
+    and 18,614 under `low_score`, of which 39,702 and 18,472 were sitting on a
+    full description. Fifty-eight thousand rejected on a teaser, holding the
+    real posting, with no way back.
+    """
+
+    def _parked(self, db, reason, description, **kwargs):
+        job = _job(
+            description=description, status=JobStatus.filtered_out,
+            filter_reason=reason, filter_detail="because",
+            url=f"https://x/{uuid.uuid4()}", **kwargs,
+        )
+        job.source_urls = [job.url]
+        db.add(job)
+        db.commit()
+        return job
+
+    def test_a_job_holding_the_text_it_was_judged_without_goes_back(self, db):
+        job = self._parked(db, "few_skills", LONG)
+        assert enrichment.requeue_settled_verdicts(db) == 1
+        db.refresh(job)
+        assert job.status == JobStatus.new
+        assert job.filter_reason is None
+        assert job.filter_detail is None
+
+    def test_it_needs_no_enrichment_pass_to_notice(self, db):
+        """
+        The whole point. Nothing enriched this job — the text arrived by some
+        other route — and it is still rescued.
+        """
+        job = self._parked(db, "low_score", LONG)
+        assert job.enrichment_attempted_at is None
+        assert enrichment.requeue_settled_verdicts(db) == 1
+        db.refresh(job)
+        assert job.status == JobStatus.new
+
+    def test_a_job_still_on_a_stub_is_left_alone(self, db):
+        """That one is the enrichment queue's job, and it is still thin."""
+        self._parked(db, "low_score", "tiny")
+        assert enrichment.requeue_settled_verdicts(db) == 0
+
+    def test_a_verdict_that_never_read_the_description_is_not_disturbed(self, db):
+        for reason in ("title_mismatch", "location"):
+            self._parked(db, reason, LONG)
+        assert enrichment.requeue_settled_verdicts(db) == 0
+
+    def test_a_verdict_the_user_made_is_never_overruled(self, db):
+        for reason in ("manual", "blocked_title", "excluded_company", "duplicate"):
+            self._parked(db, reason, LONG)
+        assert enrichment.requeue_settled_verdicts(db) == 0
+
+    def test_a_matched_job_is_not_dragged_back(self, db):
+        job = _job(description=LONG, status=JobStatus.matched,
+                   url=f"https://x/{uuid.uuid4()}")
+        db.add(job)
+        db.commit()
+        assert enrichment.requeue_settled_verdicts(db) == 0
+        db.refresh(job)
+        assert job.status == JobStatus.matched
+
+    def test_a_closed_posting_is_not_worth_rescuing(self, db):
+        from datetime import datetime, timezone
+
+        self._parked(db, "few_skills", LONG,
+                     closed_at=datetime.now(timezone.utc))
+        assert enrichment.requeue_settled_verdicts(db) == 0
+
+    def test_the_batch_is_bounded(self, db):
+        """
+        Every row here becomes a `new` job for the matcher, so emptying this
+        queue into that one in a single transaction gains nothing.
+        """
+        for _ in range(5):
+            self._parked(db, "few_skills", LONG)
+        assert enrichment.requeue_settled_verdicts(db, limit=2) == 2
+        assert enrichment.requeue_settled_verdicts(db, limit=99) == 3
+        assert enrichment.requeue_settled_verdicts(db, limit=99) == 0
+
+    def test_it_uses_the_same_rule_as_the_enrichment_path(self, db):
+        """
+        Not a second copy of "which verdicts may be revisited". Two
+        definitions would drift, and the drift would be silent.
+        """
+        import inspect
+
+        source = inspect.getsource(enrichment.requeue_settled_verdicts)
+        assert "_worth_rescoring" in source

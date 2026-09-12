@@ -496,6 +496,14 @@ class Settings(BaseSettings):
     # wait behind it to be scored.
     ENRICH_MAX_PER_RUN: int = 200
     ENRICH_INTERVAL_MINUTES: int = 30
+    # Jobs per pass sent back for scoring because the description they were
+    # rejected without has since arrived. Far higher than the fetch ceiling
+    # above and deliberately so: this costs no request and no model call, only
+    # a verdict being withdrawn, so the ceiling is about how fast the matcher
+    # can absorb the work rather than about politeness to anybody's server.
+    # At 1,000 a pass on a 30-minute schedule a 58,000-job backlog clears in
+    # about a day and a half.
+    RESCORE_MAX_PER_RUN: int = 1000
     # A pass at the end of each fetch cycle, so the jobs that just arrived are
     # scored on their real descriptions rather than on the stub the aggregator
     # sent. Smaller than a scheduled pass: the cycle is already long, and the

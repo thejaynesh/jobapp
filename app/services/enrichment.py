@@ -755,6 +755,75 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     return outcome
 
 
+def requeue_settled_verdicts(db, limit: int = 1000) -> int:
+    """
+    Send back for scoring every job already holding the text it was judged
+    without. Returns how many went.
+
+    `_worth_rescoring` above is the right rule and it runs in the wrong place:
+    inside an enrichment pass, so it only ever fires for a description *this
+    pass* improved. A description that arrived any other way — a second source
+    merging through the dedupe, `job_details.extract_and_apply`, the browser
+    harvest — leaves the verdict frozen at an answer the evidence no longer
+    supports, and nothing downstream notices.
+
+    Worse, the two are mutually exclusive. `thin_description_queue` selects on
+    a *short* description, so the moment the text arrives the job stops being a
+    candidate for the only pass that could have re-scored it. Arriving by the
+    wrong route is not a recoverable state; it is a permanent one.
+
+    Measured on a live table: 41,838 jobs filed under `few_skills` and 18,614
+    under `low_score`, of which 39,702 and 18,472 respectively were sitting on
+    a full description. Fifty-eight thousand jobs rejected on a teaser, holding
+    the real posting, with no path back.
+
+    Bounded per call, because the work this creates lands on the matcher: every
+    row here becomes a `new` job for it to score. Requeueing the whole backlog
+    in one transaction would empty this queue into that one and gain nothing.
+    """
+    from sqlalchemy import func, or_
+
+    from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
+
+    rows = (
+        db.query(Job)
+        .filter(
+            Job.status == JobStatus.filtered_out,
+            Job.filter_reason.in_(sorted(DESCRIPTION_DEPENDENT_REASONS)),
+            Job.description.isnot(None),
+            func.length(Job.description) >= THIN_DESCRIPTION_CHARS,
+            Job.closed_at.is_(None),
+        )
+        # Newest first: a recent posting is likelier to still be open, and the
+        # point of rescuing it is that the user can still apply.
+        .order_by(Job.fetched_at.desc())
+        .limit(max(1, limit))
+        .all()
+    )
+
+    moved = 0
+    for job in rows:
+        # Not a second copy of the rule — the same function the enrichment
+        # path calls, so "which verdicts may be revisited" has one definition
+        # and cannot drift into two. It is also what keeps a job carrying an
+        # application out of this: those documents were written against the
+        # verdict that stands.
+        if not _worth_rescoring(job):
+            continue
+        job.status = JobStatus.new
+        job.filter_reason = None
+        job.filter_detail = None
+        moved += 1
+
+    if moved:
+        db.commit()
+        logger.info(
+            "requeue_settled_verdicts: sent %d job(s) back to be scored on the "
+            "description they now have", moved,
+        )
+    return moved
+
+
 def _worth_rescoring(job: Job) -> bool:
     """
     Whether a fuller description should send this job back to be scored again.

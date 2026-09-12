@@ -65,13 +65,29 @@ def enrich_jobs(limit: int | None = None, match_after: bool = True,
     db = SessionLocal()
     result: dict | None = None
     try:
-        from app.services.enrichment import run
+        from app.services.enrichment import requeue_settled_verdicts, run
+
+        # Before fetching anything, hand back the jobs that already hold the
+        # text they were judged without.
+        #
+        # First because it is free — no request, no model call, just a verdict
+        # that stopped being true — and because those jobs are strictly better
+        # candidates than whatever this pass is about to fetch: the description
+        # is already there, so scoring them is the only step left.
+        #
+        # It sits here rather than on its own schedule because it produces
+        # exactly what the tail-call below dispatches, and a second entry would
+        # mean two things queueing the matcher for the same reason.
+        settled = requeue_settled_verdicts(
+            db, limit=max(1, int(getattr(settings, "RESCORE_MAX_PER_RUN", 1000)))
+        )
 
         result = run(db, limit=limit)
+        result["requeued_settled"] = settled
         # Only when something was actually rescued. A pass that improved
         # nothing has nothing new for the matcher to score, and queueing it
         # anyway would spin a matching pass over the same backlog.
-        if match_after and result.get("requeued_for_matching"):
+        if match_after and (result.get("requeued_for_matching") or settled):
             from app.tasks.match import match_jobs
             match_jobs.delay()
         return result
