@@ -755,6 +755,17 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     return outcome
 
 
+# How many candidates to read for each job actually requeued.
+#
+# The length test cannot be done in SQL without a scan of the whole table (see
+# `requeue_settled_verdicts`), so it happens in Python and some of what is read
+# is discarded. Four is from the live numbers: of ~58,700 jobs parked under a
+# description-dependent verdict, ~29,900 hold a description long enough to be
+# worth re-scoring, so roughly every second row qualifies. Four gives that
+# plenty of room without reading tens of thousands of descriptions per pass.
+_RESCORE_OVERFETCH = 4
+
+
 def requeue_settled_verdicts(db, limit: int = 1000) -> int:
     """
     Send back for scoring every job already holding the text it was judged
@@ -781,28 +792,48 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
     row here becomes a `new` job for it to score. Requeueing the whole backlog
     in one transaction would empty this queue into that one and gain nothing.
     """
-    from sqlalchemy import func, or_
-
     from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
 
+    limit = max(1, limit)
+    # Narrowed on indexed columns only, and the length tested in Python.
+    #
+    # The obvious spelling — `func.length(Job.description) >= THIN_...` — is a
+    # parallel sequential scan that de-TOASTs every description on the table.
+    # Nothing indexes it: the partial index that exists covers the *opposite*
+    # predicate, the thin side, and a `length()` comparison on a Text column
+    # has no other way to be answered. Measured at 117 seconds against 300,941
+    # rows, which this would have paid on every enrichment pass.
+    #
+    # `status` and `filter_reason` are both indexed, and between them they cut
+    # the table to the tens of thousands this could possibly be about. Reading
+    # a description off those rows still de-TOASTs — but a few thousand of
+    # them rather than all of them.
+    #
+    # No ordering, deliberately. Newest-first reads better and risks a wall: a
+    # run of recent rows that all fail the length test would be re-examined
+    # every pass while the rest of the backlog waited behind them, which is
+    # the failure `select_targets` needed `enrichment_attempted_at` to escape.
+    # Unordered, every pass makes progress, and the whole set is a day's work.
     rows = (
         db.query(Job)
         .filter(
             Job.status == JobStatus.filtered_out,
             Job.filter_reason.in_(sorted(DESCRIPTION_DEPENDENT_REASONS)),
             Job.description.isnot(None),
-            func.length(Job.description) >= THIN_DESCRIPTION_CHARS,
             Job.closed_at.is_(None),
         )
-        # Newest first: a recent posting is likelier to still be open, and the
-        # point of rescuing it is that the user can still apply.
-        .order_by(Job.fetched_at.desc())
-        .limit(max(1, limit))
+        .limit(limit * _RESCORE_OVERFETCH)
         .all()
     )
 
     moved = 0
     for job in rows:
+        if moved >= limit:
+            break
+        if len(job.description or "") < THIN_DESCRIPTION_CHARS:
+            # Still thin. That one belongs to the enrichment queue, which is
+            # what the rest of this module is for.
+            continue
         # Not a second copy of the rule — the same function the enrichment
         # path calls, so "which verdicts may be revisited" has one definition
         # and cannot drift into two. It is also what keeps a job carrying an

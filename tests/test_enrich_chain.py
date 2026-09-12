@@ -251,3 +251,79 @@ class TestTheBacklogCountIsNotFreeToAsk:
         except OSError:
             raise AssertionError("a dead cache took the panel down with it")
         assert counts["thin"] == 1
+
+
+class TestTheRequeueSweepDoesNotScanTheWholeTable:
+    """
+    The first version of `requeue_settled_verdicts` selected on
+    `func.length(Job.description) >= 1500`, which is a parallel sequential scan
+    that de-TOASTs every description on the table — the identical 117-second
+    query that had just been cached out of the panel one commit earlier, now
+    paid on every enrichment pass instead.
+
+    Nothing can index it. The partial index that exists covers the thin side of
+    the comparison, and `length()` on a Text column has no other route. So the
+    narrowing has to happen on `status` and `filter_reason`, which are indexed,
+    and the length has to be tested on the rows that come back.
+    """
+
+    def test_the_length_test_never_reaches_sql(self, db):
+        """
+        Asserted against the SQL actually issued, not the source. The first
+        attempt at this test read the function text and tripped over the word
+        `func.length` in the comment explaining why it must not be there.
+        """
+        from sqlalchemy import event
+
+        statements = []
+
+        def record(conn, cursor, statement, params, context, many):
+            statements.append(statement)
+
+        engine = db.get_bind()
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            enrichment.requeue_settled_verdicts(db)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        assert statements, "issued no SQL at all"
+        offenders = [s for s in statements if "length(" in s.lower()]
+        assert not offenders, (
+            "a length() comparison scans and de-TOASTs the whole table: "
+            + offenders[0][:200]
+        )
+
+    def test_it_still_only_takes_jobs_with_a_real_description(self, db):
+        from app.models.job import Job, JobStatus
+
+        for chars in (100, 5000, 200, 6000):
+            job = _job(db)
+            job.status = JobStatus.filtered_out
+            job.filter_reason = "few_skills"
+            job.description = "x" * chars
+        db.commit()
+
+        assert enrichment.requeue_settled_verdicts(db) == 2
+        back = db.query(Job).filter(Job.status == JobStatus.new).all()
+        assert sorted(len(j.description) for j in back) == [5000, 6000]
+
+    def test_the_limit_counts_what_moved_not_what_was_read(self, db):
+        """
+        Over-fetching is how the length test gets done at all, so the ceiling
+        has to apply to jobs actually requeued — otherwise a batch of mostly
+        short descriptions would return almost nothing and the backlog would
+        crawl.
+        """
+        from app.models.job import JobStatus
+
+        for i in range(10):
+            job = _job(db)
+            job.status = JobStatus.filtered_out
+            job.filter_reason = "low_score"
+            # Every other one too short to qualify.
+            job.description = "x" * (5000 if i % 2 else 100)
+        db.commit()
+
+        assert enrichment.requeue_settled_verdicts(db, limit=3) == 3
+        assert enrichment.requeue_settled_verdicts(db, limit=99) == 2
