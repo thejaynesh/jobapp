@@ -135,13 +135,74 @@ def _waiting(db: Session, thin) -> int:
     ).scalar() or 0
 
 
-def backlog(db: Session) -> dict:
+# Where the panel's backlog numbers are kept between page loads, and how long
+# they are allowed to be stale.
+#
+# Not a nicety. Counting them costs a parallel sequential scan that de-TOASTs
+# every description on the table — measured at 117 seconds and five gigabytes
+# of reads against 300,941 rows — because 55% of the table matches the thin
+# predicate and no index is selective enough for the planner to prefer it. It
+# is not a missing index; on that selectivity a seq scan is genuinely cheaper,
+# which is why one exists already (`ix_jobs_enrichment_targets`) and is
+# correctly ignored.
+#
+# Three of those ran concurrently on a live box, each repeating the others'
+# work because three requests arrived while the first was still going. The
+# cache is what stops a page refresh from being a denial of service.
+#
+# Ten minutes because this is a progress indicator on a backlog that drains
+# over days. Nobody watching it can tell a ten-minute-old number from a fresh
+# one, and the honest fix — storing the length so it can be indexed — is a
+# table rewrite that wants its own change.
+BACKLOG_KEY = "jobapp:enrichment:backlog"
+BACKLOG_TTL_SECONDS = 600
+
+
+def _cached_backlog() -> dict | None:
+    try:
+        import json
+
+        import redis
+
+        from app.config import settings
+
+        raw = redis.Redis.from_url(
+            settings.REDIS_URL, socket_timeout=2
+        ).get(BACKLOG_KEY)
+        return json.loads(raw) if raw else None
+    except Exception as exc:
+        # A cache that cannot be reached must not cost the panel its numbers,
+        # and must not cost them slowly either — hence the short timeout.
+        logger.debug("enrichment_history: backlog cache unavailable: %s", exc)
+        return None
+
+
+def _store_backlog(counts: dict) -> None:
+    try:
+        import json
+
+        import redis
+
+        from app.config import settings
+
+        redis.Redis.from_url(settings.REDIS_URL, socket_timeout=2).setex(
+            BACKLOG_KEY, BACKLOG_TTL_SECONDS, json.dumps(counts)
+        )
+    except Exception as exc:
+        logger.debug("enrichment_history: could not cache the backlog: %s", exc)
+
+
+def backlog(db: Session, refresh: bool = False) -> dict:
     """
     How much is left to do, so the panel can say whether it is draining.
 
     Counted rather than estimated: "12,400 thin descriptions, 3,100 of them
     jobs we rejected for having none" is the sentence that makes a run of 200
     legible as progress instead of as a number with no denominator.
+
+    Cached for `BACKLOG_TTL_SECONDS`, because the count is a two-minute
+    sequential scan over every description on the table — see `BACKLOG_KEY`.
+    Pass `refresh` to pay for it deliberately.
     """
     from sqlalchemy import or_
 
@@ -151,12 +212,17 @@ def backlog(db: Session) -> dict:
         THIN_DESCRIPTION_CHARS,
     )
 
+    if not refresh:
+        cached = _cached_backlog()
+        if cached is not None:
+            return cached
+
     thin = or_(
         Job.description.is_(None),
         func.length(Job.description) < THIN_DESCRIPTION_CHARS,
     )
     try:
-        return {
+        counts = {
             "thin": db.query(func.count(Job.id)).filter(
                 thin, Job.closed_at.is_(None)
             ).scalar() or 0,
@@ -172,7 +238,13 @@ def backlog(db: Session) -> dict:
         }
     except Exception as exc:
         logger.warning("enrichment_history: backlog unavailable: %s", exc)
+        # Deliberately not cached. Zeros are the failure, not the answer, and
+        # storing them would show an empty backlog for ten minutes after one
+        # bad query.
         return {"thin": 0, "waiting": 0, "rescuable": 0}
+
+    _store_backlog(counts)
+    return counts
 
 
 def linkedin_state(db: Session) -> dict:

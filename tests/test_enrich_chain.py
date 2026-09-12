@@ -83,7 +83,8 @@ class TestItRemembersWhatItTried:
         _job(db)
         _job(db, attempted_at=NOW - timedelta(hours=2))
 
-        counts = enrichment_history.backlog(db)
+        # `refresh` because this is about the counting, not the cache.
+        counts = enrichment_history.backlog(db, refresh=True)
         assert counts["thin"] == 2
         assert counts["waiting"] == 1
 
@@ -170,3 +171,83 @@ class TestChaining:
         monkeypatch.setattr(settings, "ENRICH_MAX_PER_RUN", 200)
 
         self._run({"attempted": 50, "queued_browser": 0}, limit=50).assert_called_once()
+
+
+class TestTheBacklogCountIsNotFreeToAsk:
+    """
+    Counting the thin-description backlog is a parallel sequential scan that
+    de-TOASTs every description on the table. Measured on a live box: 117
+    seconds, five gigabytes of reads, 300,941 rows — and *three of them running
+    at once*, each repeating the others' work because three requests arrived
+    while the first was still going. Refreshing the panel was a denial of
+    service.
+
+    It is not a missing index. 55% of the table matches the predicate, so no
+    index is selective enough for the planner to prefer one, and the partial
+    index that already exists (`ix_jobs_enrichment_targets`) is correctly
+    ignored. On that selectivity a sequential scan really is cheaper; the only
+    thing to fix is how often it is paid for.
+    """
+
+    def _counts(self, n=3):
+        return {"thin": n, "waiting": 1, "rescuable": 0}
+
+    def test_a_cached_answer_is_used_instead_of_counting(self, db, monkeypatch):
+        monkeypatch.setattr(enrichment_history, "_cached_backlog",
+                            lambda: self._counts(999))
+
+        def explode(*a, **k):
+            raise AssertionError("counted despite a warm cache")
+
+        monkeypatch.setattr(enrichment_history, "_waiting", explode)
+        assert enrichment_history.backlog(db)["thin"] == 999
+
+    def test_refresh_pays_for_the_count_deliberately(self, db, monkeypatch):
+        monkeypatch.setattr(enrichment_history, "_cached_backlog",
+                            lambda: self._counts(999))
+        _job(db)
+        assert enrichment_history.backlog(db, refresh=True)["thin"] == 1
+
+    def test_a_fresh_count_is_stored_for_the_next_caller(self, db, monkeypatch):
+        stored = {}
+        monkeypatch.setattr(enrichment_history, "_cached_backlog", lambda: None)
+        monkeypatch.setattr(enrichment_history, "_store_backlog", stored.update)
+        _job(db)
+
+        assert enrichment_history.backlog(db)["thin"] == 1
+        assert stored["thin"] == 1
+
+    def test_a_failed_count_is_never_cached(self, db, monkeypatch):
+        """
+        Zeros are the failure, not the answer. Caching them would show an empty
+        backlog for ten minutes after one bad query — which reads as "all done"
+        rather than as "something went wrong".
+        """
+        monkeypatch.setattr(enrichment_history, "_cached_backlog", lambda: None)
+
+        def refuse(*a, **k):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(enrichment_history, "_waiting", refuse)
+
+        def must_not_store(*a, **k):
+            raise AssertionError("cached a failure")
+
+        monkeypatch.setattr(enrichment_history, "_store_backlog", must_not_store)
+        assert enrichment_history.backlog(db) == {
+            "thin": 0, "waiting": 0, "rescuable": 0}
+
+    def test_an_unreachable_cache_costs_nothing_but_the_cache(self, db, monkeypatch):
+        """Redis down is not a reason for the panel to lose its numbers."""
+        def unreachable(*a, **k):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(enrichment_history, "_cached_backlog", unreachable)
+        _job(db)
+        # The helper swallows its own errors, so reaching the count at all is
+        # the assertion; this pins that `backlog` does not propagate them.
+        try:
+            counts = enrichment_history.backlog(db, refresh=True)
+        except OSError:
+            raise AssertionError("a dead cache took the panel down with it")
+        assert counts["thin"] == 1

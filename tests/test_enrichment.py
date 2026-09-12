@@ -472,7 +472,7 @@ class TestRunRecording:
                     url="https://x/10", source_urls=["https://x/10"]))
         db.commit()
 
-        counts = enrichment_history.backlog(db)
+        counts = enrichment_history.backlog(db, refresh=True)
         assert counts["thin"] >= 2
         assert counts["rescuable"] >= 1
 
