@@ -5,6 +5,25 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-jobapp}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
       POSTGRES_DB: ${POSTGRES_DB:-jobapp}
+    # Told how much machine it is on. The defaults assume it might be sharing a
+    # laptop with everything else: 128MB of shared_buffers, and a planner that
+    # believes the operating system has almost nothing cached. On a 7.7GB box
+    # holding a 300,000-row table that produced a database using 176MB of RAM
+    # and reading 2.9GB off disk, because nothing it touched ever stayed
+    # resident — every count re-read and re-decompressed the same descriptions.
+    #
+    # `effective_cache_size` is a hint rather than an allocation: it tells the
+    # planner how much of the table it may assume is already in memory, which
+    # is what makes it willing to consider an index scan over a sequential one.
+    #
+    # `work_mem` is per sort or hash *per query*, so it multiplies by
+    # concurrency; 16MB is deliberately modest next to the rest.
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c effective_cache_size=5GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=512MB
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
