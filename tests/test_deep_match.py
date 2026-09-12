@@ -10,7 +10,7 @@ and both numbers are kept.
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -74,7 +74,8 @@ class TestWhenTheSecondPassRuns:
 
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(first_score)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=provider), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=([provider] if provider else [])), \
              patch("app.services.matcher.call_provider",
                    return_value=_deep_reply(deep_score)) as call:
             outcome = match_job(db, job, PROFILE, "k", "u", "m")
@@ -131,7 +132,8 @@ class TestWhatTheSecondPassDecides:
 
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(first_score)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=_STRONG), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[_STRONG]), \
              patch("app.services.matcher.call_provider",
                    return_value=_deep_reply(deep_score)):
             outcome = match_job(db, job, profile, "k", "u", "m")
@@ -177,7 +179,8 @@ class TestWhatTheSecondPassDecides:
                             "missing_skills": [], "seniority_fit": False})
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(62)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=_STRONG), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[_STRONG]), \
              patch("app.services.matcher.call_provider", return_value=reply):
             match_job(db, job, PROFILE, "k", "u", "m")
 
@@ -202,7 +205,8 @@ class TestFailureAndBudget:
         job = self._job_and_profile(db)
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(62)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=_STRONG), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[_STRONG]), \
              patch("app.services.matcher.call_provider",
                    side_effect=RuntimeError("provider down")):
             outcome = match_job(db, job, PROFILE, "k", "u", "m")
@@ -217,7 +221,8 @@ class TestFailureAndBudget:
         job = self._job_and_profile(db)
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(62)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=_STRONG), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[_STRONG]), \
              patch("app.services.matcher.call_provider", return_value="not json"):
             match_job(db, job, PROFILE, "k", "u", "m")
 
@@ -230,7 +235,8 @@ class TestFailureAndBudget:
         budget = {"paid_calls": 0, "deep_calls": settings.DEEP_MATCH_MAX_PER_CYCLE}
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(62)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=_STRONG), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[_STRONG]), \
              patch("app.services.matcher.call_provider") as call:
             match_job(db, job, PROFILE, "k", "u", "m", budget=budget)
 
@@ -248,7 +254,8 @@ class TestFailureAndBudget:
         budget = {"paid_calls": 0, "deep_calls": 0}
         with patch("app.services.matcher.llm_score_job",
                    return_value=_first_pass(62)), \
-             patch("app.llm.providers.deep_matching_provider", return_value=_STRONG), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[_STRONG]), \
              patch("app.services.matcher.call_provider",
                    side_effect=RuntimeError("boom")):
             match_job(db, job, PROFILE, "k", "u", "m", budget=budget)
@@ -323,3 +330,122 @@ class TestTheUiShowsTheDecidingScore:
         assert job.effective_score == 88
         plain = self._scored(db, llm_score=62)
         assert plain.effective_score == 62
+
+
+class TestOneDeadProviderDoesNotEndTheSecondOpinion:
+    """
+    `generation_chat` has always walked its preference order and fallen through
+    on failure. The deep pass took the first name that matched and made a
+    single call with it — same provider set, same outage, and one survived
+    while the other did not.
+
+    Observed live: forty consecutive `match_deep` calls returning "Your credit
+    balance is too low to access the Anthropic API", zero second opinions on
+    record, and `generation_chat served by freeinference` in the same log.
+    Anthropic leads `DEEP_MATCHING_PREFERENCE` on quality, so it was chosen
+    every time and the two providers behind it were never reached.
+    """
+
+    def _providers(self):
+        return [
+            Provider(name="anthropic", api_key="k", model="claude"),
+            Provider(name="gemini", api_key="k", model="gemini-pro"),
+        ]
+
+    def _run(self, db, call_provider_mock):
+        db.add(Profile(data=PROFILE))
+        job = _job()
+        db.add(job)
+        db.commit()
+
+        from app.services.matcher import match_job
+
+        with patch("app.services.matcher.llm_score_job",
+                   return_value=_first_pass(62)), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=self._providers()), \
+             patch("app.services.matcher.call_provider", call_provider_mock):
+            match_job(db, job, PROFILE, "k", "u", "m")
+        return job
+
+    def test_the_second_provider_answers_when_the_first_is_out_of_credit(self, db):
+        calls = []
+
+        def flaky(provider, *a, **k):
+            calls.append(provider.name)
+            if provider.name == "anthropic":
+                raise RuntimeError("Your credit balance is too low")
+            return _deep_reply(88)
+
+        job = self._run(db, MagicMock(side_effect=flaky))
+        assert calls == ["anthropic", "gemini"], "did not fall through"
+        assert job.llm_score_deep == 88
+
+    def test_the_score_is_credited_to_whoever_actually_answered(self, db):
+        """
+        Not to the head of the chain. A second opinion labelled with a provider
+        that refused the request is a lie in the one column that says where the
+        number came from.
+        """
+        def flaky(provider, *a, **k):
+            if provider.name == "anthropic":
+                raise RuntimeError("no credit")
+            return _deep_reply(88)
+
+        job = self._run(db, MagicMock(side_effect=flaky))
+        assert "gemini" in (job.deep_matched_by or "").lower()
+
+    def test_every_provider_failing_keeps_the_first_score(self, db):
+        """The first score is a real answer; losing it would be strictly worse."""
+        job = self._run(db, MagicMock(side_effect=RuntimeError("all down")))
+        assert job.llm_score_deep is None
+        assert job.llm_score == 62
+
+    def test_the_budget_counts_the_attempt_once_not_once_per_provider(self, db):
+        """
+        A failing chain must not spend the cycle's whole deep budget on one
+        job. The counter is about how many jobs got a second look.
+        """
+        from app.services.matcher import _deep_score
+
+        budget = {}
+        with patch("app.llm.providers.deep_matching_chain",
+                   return_value=self._providers()), \
+             patch("app.services.matcher.call_provider",
+                   side_effect=RuntimeError("down")):
+            _deep_score(_job(), PROFILE, 62, budget)
+        assert budget["deep_calls"] == 1
+
+
+class TestTheChainNeverReAsksTheFirstPassModel:
+    """
+    The point the old `None` return was making, kept. Re-asking the same model
+    the same question spends a call to hear the same answer — and now that the
+    chain falls through to whatever is left, the model already serving the
+    first pass is exactly what it would fall through to.
+    """
+
+    def test_a_provider_on_the_first_pass_model_is_dropped(self):
+        from app.llm.providers import deep_matching_chain
+
+        providers = {
+            "anthropic": Provider(name="anthropic", api_key="k", model="claude"),
+            "freeinference": Provider(name="freeinference", api_key="k",
+                                      model="deepseek-v4-flash"),
+        }
+        with patch("app.llm.providers.configured_providers",
+                   return_value=providers):
+            names = [p.name for p in
+                     deep_matching_chain(exclude_model="deepseek-v4-flash")]
+        assert names == ["anthropic"]
+
+    def test_excluding_the_only_provider_leaves_nothing_to_ask(self):
+        from app.llm.providers import deep_matching_chain
+
+        providers = {
+            "freeinference": Provider(name="freeinference", api_key="k",
+                                      model="deepseek-v4-flash"),
+        }
+        with patch("app.llm.providers.configured_providers",
+                   return_value=providers):
+            assert deep_matching_chain(exclude_model="deepseek-v4-flash") == []

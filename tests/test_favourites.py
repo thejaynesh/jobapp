@@ -113,7 +113,7 @@ class TestAStarIsNotAVerdict:
         reply = {"score": 20, "reasoning": "no", "matched_skills": [],
                  "missing_skills": [], "seniority_fit": False, "scored_by": "x"}
         with patch("app.services.matcher.llm_score_job", return_value=reply), \
-             patch("app.llm.providers.deep_matching_provider", return_value=None), \
+             patch("app.llm.providers.deep_matching_chain", return_value=[]), \
              patch("app.services.job_details.needs_extraction", return_value=False):
             client.post(f"/jobs/{job.id}/rematch")
         db.refresh(job)

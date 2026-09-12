@@ -64,7 +64,7 @@ def _no_detail_extraction(monkeypatch):
 
 def _score(client, job, score=82):
     with patch("app.services.matcher.llm_score_job", return_value=_reply(score)), \
-         patch("app.llm.providers.deep_matching_provider", return_value=None):
+         patch("app.llm.providers.deep_matching_chain", return_value=[]):
         return client.post(f"/jobs/{job.id}/rematch")
 
 
@@ -132,8 +132,8 @@ class TestWhatCallingTheRealMatcherBuys:
                            "matched_skills": ["Go"], "missing_skills": [],
                            "seniority_fit": True})
         with patch("app.services.matcher.llm_score_job", return_value=_reply(62)), \
-             patch("app.llm.providers.deep_matching_provider",
-                   return_value=Provider(name="anthropic", api_key="k", model="opus")), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[Provider(name="anthropic", api_key="k", model="opus")]), \
              patch("app.services.matcher.call_provider", return_value=deep):
             client.post(f"/jobs/{job.id}/rematch")
 

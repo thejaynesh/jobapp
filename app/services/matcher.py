@@ -873,7 +873,7 @@ def _deep_band() -> tuple[float, float]:
 
 
 def _deep_score(job, profile_data: dict, score: float,
-                budget: dict | None = None) -> dict | None:
+                budget: dict | None = None, model: str = "") -> dict | None:
     """
     Ask the strongest configured model to score this job again. None when it
     didn't run.
@@ -888,7 +888,7 @@ def _deep_score(job, profile_data: dict, score: float,
     is a real answer, and losing it because a second opinion was unavailable
     would be strictly worse than not asking.
     """
-    from app.llm.providers import deep_matching_provider
+    from app.llm.providers import deep_matching_chain
     from app.services import llm_log
 
     if not getattr(settings, "DEEP_MATCH_ENABLED", True):
@@ -897,8 +897,11 @@ def _deep_score(job, profile_data: dict, score: float,
     if not (low <= score <= high):
         return None
 
-    provider = deep_matching_provider()
-    if provider is None:
+    # Every provider worth asking, not just the best one. The best one being
+    # out of credit is what killed this pass entirely for forty consecutive
+    # jobs while generation, on the same providers, kept working.
+    chain = deep_matching_chain(exclude_model=model or "")
+    if not chain:
         # Nothing configured that is stronger than the primary: re-asking the
         # same model the same question is a call spent to hear the same answer.
         return None
@@ -912,18 +915,28 @@ def _deep_score(job, profile_data: dict, score: float,
         return None
 
     messages = _build_match_prompt(job, profile_data)
+    result = None
+    served_by = None
     try:
-        with llm_log.stage("match_deep", job_id=getattr(job, "id", None)):
-            raw = call_provider(
-                provider, messages, temperature=0.1, max_tokens=_match_max_tokens()
-            )
-        result = _parse_llm_response(raw)
-    except Exception as exc:
-        logger.warning(
-            "match_job: deep scoring failed for %s (%s); keeping the first score",
-            getattr(job, "id", "?"), exc,
-        )
-        return None
+        for candidate in chain:
+            try:
+                with llm_log.stage("match_deep", job_id=getattr(job, "id", None)):
+                    raw = call_provider(
+                        candidate, messages, temperature=0.1,
+                        max_tokens=_match_max_tokens(),
+                    )
+                result = _parse_llm_response(raw)
+                served_by = candidate
+                break
+            except Exception as exc:
+                # On to the next, which is the entire fix. One provider being
+                # out of credit used to end the second opinion for every job,
+                # while document generation — same providers, same outage —
+                # carried on because it had always walked its chain.
+                logger.warning(
+                    "match_job: deep scoring via %s failed for %s (%s)",
+                    candidate.name, getattr(job, "id", "?"), exc,
+                )
     finally:
         # Counted whether or not it worked: a failed paid call can still be a
         # billed one, and a provider erroring on every job would otherwise
@@ -931,7 +944,14 @@ def _deep_score(job, profile_data: dict, score: float,
         if budget is not None:
             budget["deep_calls"] = budget.get("deep_calls", 0) + 1
 
-    result["scored_by"] = provider_label(provider)
+    if result is None:
+        logger.warning(
+            "match_job: no provider could deep-score %s; keeping the first score",
+            getattr(job, "id", "?"),
+        )
+        return None
+
+    result["scored_by"] = provider_label(served_by)
     return result
 
 
@@ -1046,7 +1066,7 @@ def _match_job(
     # A close call gets a second opinion. Everything outside the band is not a
     # close call — a 20 is a 20 and a 95 is a 95 whoever reads them — so the
     # stronger model is spent only where its answer can change the outcome.
-    deep_result = _deep_score(job, profile_data, score, budget)
+    deep_result = _deep_score(job, profile_data, score, budget, model=model)
     if deep_result is not None:
         score = _penalized(deep_result)
         job.llm_score_deep = score

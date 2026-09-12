@@ -310,24 +310,53 @@ _MATCH_MODELS = {
 }
 
 
-def deep_matching_provider() -> Provider | None:
+def deep_matching_chain(exclude_model: str = "") -> list[Provider]:
     """
-    The strongest provider configured for a second opinion, or None.
+    Every provider worth a second opinion, strongest first.
 
-    None means "do not bother": with nothing but the primary NIM endpoint
-    configured, a deep pass would re-ask the same model the same question and
-    spend a call to hear the same answer. Skipping is the honest outcome, and
-    the caller reports it rather than pretending a second pass happened.
+    A list rather than one provider, and that is the whole of this change.
+    `generation_chat` below has always walked its preference order and fallen
+    through on failure; the deep pass took the first name that matched and made
+    a single call with it. Same provider set, same dead endpoint — and
+    generation carried on while second-opinion scoring failed on every job.
+
+    Observed: forty consecutive `match_deep` calls returning "Your credit
+    balance is too low to access the Anthropic API", zero second opinions
+    recorded, and `generation_chat served by freeinference` in the same log.
+    Anthropic leads `DEEP_MATCHING_PREFERENCE` on quality, so it was chosen
+    every time and Gemini and FreeInference behind it were never reached.
+
+    `exclude_model` drops any provider already serving the first pass. That is
+    the point the old `None` return was making and it still holds: re-asking
+    the same model the same question spends a call to hear the same answer. An
+    empty list means exactly what `None` meant, and the caller reports it
+    rather than pretending a second pass happened.
 
     Uses each provider's *generation* model, not its cheap matching sibling —
     a second opinion from the cut-down model would be the same compromise
     twice.
     """
     providers = configured_providers()
+    chain = []
     for name in DEEP_MATCHING_PREFERENCE:
-        if name in providers:
-            return providers[name]
-    return None
+        provider = providers.get(name)
+        if provider is None:
+            continue
+        if exclude_model and provider.model == exclude_model:
+            continue
+        chain.append(provider)
+    return chain
+
+
+def deep_matching_provider() -> Provider | None:
+    """The strongest provider configured for a second opinion, or None.
+
+    Kept for callers that want one name rather than the chain. Prefer
+    `deep_matching_chain`: a single provider cannot survive that provider
+    being down, which is the failure this whole pass spent a week in.
+    """
+    chain = deep_matching_chain()
+    return chain[0] if chain else None
 
 
 def generation_chat(

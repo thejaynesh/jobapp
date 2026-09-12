@@ -66,7 +66,7 @@ def _score(db, job, score, profile=PROFILE, reasoning="because"):
 
     with patch("app.services.matcher.llm_score_job",
                return_value=_reply(score, reasoning)), \
-         patch("app.llm.providers.deep_matching_provider", return_value=None):
+         patch("app.llm.providers.deep_matching_chain", return_value=[]):
         outcome = match_job(db, job, profile, "k", "u", "m")
     db.commit()
     return outcome
@@ -145,8 +145,8 @@ class TestEveryEvaluationIsKept:
                            "matched_skills": ["Go"], "missing_skills": [],
                            "seniority_fit": True})
         with patch("app.services.matcher.llm_score_job", return_value=_reply(62)), \
-             patch("app.llm.providers.deep_matching_provider",
-                   return_value=Provider(name="anthropic", api_key="k", model="opus")), \
+             patch("app.llm.providers.deep_matching_chain",
+                   return_value=[Provider(name="anthropic", api_key="k", model="opus")]), \
              patch("app.services.matcher.call_provider", return_value=deep):
             match_job(db, job, PROFILE, "k", "u", "m")
         db.commit()

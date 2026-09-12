@@ -130,7 +130,7 @@ class TestInsideAMatch:
         with patch("app.services.job_details.needs_extraction", return_value=True), \
              patch("app.services.job_details.extract_and_apply", side_effect=_extract), \
              patch("app.services.matcher.llm_score_job", return_value=reply) as score, \
-             patch("app.llm.providers.deep_matching_provider", return_value=None):
+             patch("app.llm.providers.deep_matching_chain", return_value=[]):
             outcome = matcher.match_job(db, job, PROFILE, "k", "u", "m")
         db.commit()
         return outcome, score
