@@ -1128,6 +1128,63 @@ def _outstanding_browser_work(db) -> set[str]:
     return {row[0] for row in rows if row[0]}
 
 
+def _paused_host_allowance(db, hosts: set[str]) -> dict[str, int]:
+    """
+    How many more postings each paused host may be asked for today.
+
+    A pause and a block are not the same thing and had been treated as one. A
+    *block* means the host answered with a challenge nobody got past: it
+    refuses us, and queueing anything for it is an evening of the browser
+    spent on pages it will never see. A *pause* is our own decision to go
+    gently on a host that complained — and what LinkedIn complained about was
+    volume, `BROWSE_MAX_QUEUED` pages a run on a schedule, which is not what
+    fetching one posting looks like.
+
+    Conflating them cost 15,855 LinkedIn descriptions. Every pass selected
+    them, recognised them as browser-only, and deferred every one, forever.
+
+    So a paused host keeps its crawl ban — `browse_plan.enqueue` is untouched
+    and still refuses outright — and gets a small daily ration here. Counted
+    from the tasks themselves rather than a counter, because the tasks are the
+    record: a worker restart, a redeploy or a lost Redis key must not hand out
+    a second day's worth.
+    """
+    from datetime import timedelta
+
+    from app.models.browser_task import BrowserTask
+
+    cap = max(0, int(getattr(settings, "ENRICH_PAUSED_HOST_DAILY", 40)))
+    if not hosts or not cap:
+        return {host: 0 for host in hosts}
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    rows = (
+        db.query(BrowserTask.payload["url"].astext)
+        .filter(
+            BrowserTask.kind.in_(("resolve_link", "browse_page")),
+            BrowserTask.payload["purpose"].astext == "enrich",
+            BrowserTask.created_at >= since,
+        )
+        .all()
+    )
+    spent: dict[str, int] = {}
+    for (url,) in rows:
+        host = _host(url or "")
+        if host:
+            spent[host] = spent.get(host, 0) + 1
+
+    allowance = {}
+    for host in hosts:
+        # Sum every subdomain's spend against the paused registrable name:
+        # `au.linkedin.com` and `www.linkedin.com` are one site as far as the
+        # site is concerned, and a per-subdomain ration would be twenty
+        # rations wearing a hat.
+        used = sum(n for h, n in spent.items()
+                   if h == host or h.endswith(f".{host}"))
+        allowance[host] = max(0, cap - used)
+    return allowance
+
+
 def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     """
     Hand the walled-off hosts to the extension.
@@ -1173,6 +1230,42 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     # indistinguishable, and only one of them clears on its own in an hour.
     deferred: list[Job] = []
     candidates: list[Job] = []
+    # Today's remaining ration for each paused host this batch touches. Read
+    # once: computing it per job would count a task queued earlier in this very
+    # loop only after it was committed, which is to say never.
+    # Keyed by the *paused* name, not by the job's host. `au.linkedin.com`,
+    # `uk.linkedin.com` and `www.linkedin.com` all match the single entry
+    # `linkedin.com`, and keying by host would hand each subdomain its own
+    # ration — six rations wearing a hat, on the backlog that spans six.
+    # Before the split, so a ration is never spent on a URL already
+    # waiting: it would be skipped in the queue loop below and the
+    # allowance would be gone for nothing. At forty a day that matters.
+    outstanding = _outstanding_browser_work(db)
+
+    paused_names = browse_plan.paused_hosts()
+
+    def _paused_name(host: str) -> str:
+        for name in paused_names:
+            if host == name or host.endswith(f".{name}"):
+                return name
+        return ""
+
+    paused_here = {
+        _paused_name(_host(_target_url(job))) for job in jobs
+        if browse_plan.is_paused(_target_url(job))
+    }
+    allowance = _paused_host_allowance(
+        db, {name for name in paused_here if name}
+    ) if paused_here else {}
+
+    def _ration(host: str) -> bool:
+        """Spend one of this host's daily allowance, if it has any left."""
+        name = _paused_name(host)
+        if not name or allowance.get(name, 0) <= 0:
+            return False
+        allowance[name] -= 1
+        return True
+
     for job in jobs:
         # This path does not go through `browse_plan.enqueue`, so the pause has
         # to be honoured here too — and this is the louder of the two. A crawl
@@ -1183,14 +1276,21 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         # the same host from the same session, and a pause that let those
         # through would be a pause in name only.
         url = _target_url(job)
-        if browse_plan.is_paused(url) or (
-            blocked and browse_plan.is_blocked(_host(url), blocked)
-        ):
+        if blocked and browse_plan.is_blocked(_host(url), blocked):
+            # The host refuses us. Nothing to ration.
             deferred.append(job)
+        elif browse_plan.is_paused(url):
+            # Our own decision to go gently, not the host's refusal. A few a
+            # day is a person reading job adverts; the crawl this pause was
+            # aimed at is still banned outright in `browse_plan.enqueue`.
+            if url in outstanding:
+                # Already waiting. Costs no ration and no request.
+                candidates.append(job)
+            else:
+                (candidates if _ration(_host(url)) else deferred).append(job)
         else:
             candidates.append(job)
 
-    outstanding = _outstanding_browser_work(db)
     room = max(0, int(getattr(settings, "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
                - len(outstanding))
     if room <= 0:

@@ -31,6 +31,8 @@ away the safe half of the feature to fix the risky half.
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.config import settings
 from app.models.browser_task import BrowserTask
 from app.models.job import Job, JobStatus
@@ -156,9 +158,19 @@ class TestEnrichmentHonoursItToo:
     The louder path, and the one that bypasses `browse_plan` entirely. A crawl
     queues sixty pages; this queues from a backlog of tens of thousands on one
     host, which is the volume that gets noticed.
+
+    A pause is a daily ration here rather than a ban — see
+    `TestAPausedHostStillGetsARation`. These pin what happens once it is spent,
+    which is what all but forty of a 15,855-job backlog meet every day, so
+    every guarantee below still has to hold.
     """
 
-    def test_a_paused_posting_is_not_queued(self, db, monkeypatch):
+    @pytest.fixture(autouse=True)
+    def _ration_spent(self, monkeypatch):
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 0)
+
+    def test_a_paused_posting_is_not_queued_once_the_ration_is_spent(
+            self, db, monkeypatch):
         from app.services import enrichment
 
         monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
@@ -1273,3 +1285,114 @@ class TestAHostThatKeepsTurningUsAwayIsLeftAloneForLonger:
         # keeps a host that might relent from being written off forever.
         assert browse_plan._backoff_hours(30) == \
             settings.BROWSE_CHALLENGE_MAX_BACKOFF_HOURS
+
+
+class TestAPausedHostStillGetsARation:
+    """
+    A pause and a block are not the same thing, and treating them as one cost
+    15,855 LinkedIn descriptions.
+
+    A *block* is the host's decision: it answered with a challenge nobody got
+    past, so queueing anything for it buys an evening of the browser looking at
+    pages it will never see. A *pause* is ours, and what LinkedIn actually
+    complained about was volume — `BROWSE_MAX_QUEUED` pages a run, on a
+    schedule, through a logged-in session. Fetching the description of one job
+    the user might apply to is not that.
+
+    Under the old rule every LinkedIn posting was selected, recognised as
+    browser-only, and deferred. Every pass. Forever. The measurement that found
+    it: `plan_browser_queue -> queued 0, deferred 87`.
+
+    So the crawl ban stays absolute — `TestNothingIsQueuedForAPausedHost` above
+    still passes untouched — and enrichment gets a small daily ration.
+    """
+
+    def _jobs(self, db, n, host="www.linkedin.com"):
+        # Unique per call: reusing a URL across passes makes the second pass
+        # skip it as already-outstanding, which measures the dedupe rather
+        # than the ration.
+        return [thin_job(db, f"https://{host}/jobs/view/{uuid.uuid4().hex}/")
+                for _ in range(n)]
+
+    def test_a_few_postings_a_day_get_through(self, db, monkeypatch):
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 3)
+        queued, deferred = enrichment.plan_browser_queue(db, self._jobs(db, 10))
+        assert len(queued) == 3
+        assert len(deferred) == 7
+
+    def test_the_ration_is_spent_across_passes_not_reset_by_them(self, db, monkeypatch):
+        """
+        Counted from the tasks themselves, so a worker restart or a redeploy
+        cannot hand out a second day's worth.
+        """
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 3)
+        assert len(enrichment.plan_browser_queue(db, self._jobs(db, 2))[0]) == 2
+        queued, deferred = enrichment.plan_browser_queue(db, self._jobs(db, 5))
+        assert len(queued) == 1, "the first pass's two already came out of today"
+        assert len(deferred) == 4
+
+    def test_subdomains_share_one_ration(self, db, monkeypatch):
+        """
+        `au.linkedin.com` and `www.linkedin.com` are one site as far as the
+        site is concerned. A ration per subdomain would be twenty rations
+        wearing a hat — and the real backlog spans at least six.
+        """
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 4)
+        jobs = (self._jobs(db, 3, "au.linkedin.com")
+                + self._jobs(db, 3, "uk.linkedin.com")
+                + self._jobs(db, 3, "www.linkedin.com"))
+        queued, deferred = enrichment.plan_browser_queue(db, jobs)
+        assert len(queued) == 4
+        assert len(deferred) == 5
+
+    def test_a_blocked_host_gets_no_ration_at_all(self, db, monkeypatch):
+        """
+        The distinction this whole class exists for. A host refusing us is not
+        a host we are being polite to.
+        """
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 50)
+        monkeypatch.setattr(
+            browse_plan, "blocked_hosts", lambda _db: {"www.linkedin.com"})
+        queued, deferred = enrichment.plan_browser_queue(db, self._jobs(db, 5))
+        assert queued == []
+        assert len(deferred) == 5
+
+    def test_zero_restores_the_old_all_or_nothing_behaviour(self, db, monkeypatch):
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 0)
+        queued, deferred = enrichment.plan_browser_queue(db, self._jobs(db, 5))
+        assert queued == []
+        assert len(deferred) == 5
+
+    def test_an_unpaused_host_is_not_rationed(self, db, monkeypatch):
+        from app.services import enrichment
+
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 2)
+        jobs = [thin_job(db, f"https://www.dice.com/job-detail/r{i}",
+                         source="dice_harvest") for i in range(6)]
+        queued, deferred = enrichment.plan_browser_queue(db, jobs)
+        assert len(queued) == 6
+        assert deferred == []
+
+    def test_the_crawl_ban_is_untouched(self, db, monkeypatch):
+        """A ration for enrichment must not become a ration for crawling."""
+        monkeypatch.setattr(settings, "BROWSE_PAUSED_HOSTS", "linkedin.com")
+        monkeypatch.setattr(settings, "ENRICH_PAUSED_HOST_DAILY", 50)
+        outcome = browse_plan.crawl_urls(
+            db, "https://www.linkedin.com/jobs/search/?keywords=go")
+        assert outcome["queued"] == 0

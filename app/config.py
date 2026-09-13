@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # what gets an account flagged. Opening sixty pages a run through a
     # logged-in session is.
     BROWSE_PAUSED_HOSTS: str = ""
+    # Postings a paused host may still be asked for in a day, for enrichment
+    # only. A pause bans crawling outright — that is the volume a site
+    # notices — but fetching the description of a job the user might apply to
+    # is a different act, and banning both cost 15,855 LinkedIn descriptions
+    # that were selected and deferred on every pass, forever. Forty a day is
+    # roughly a person reading job adverts; set to 0 to restore the old
+    # all-or-nothing behaviour.
+    ENRICH_PAUSED_HOST_DAILY: int = 40
     # How long to leave a host alone after it showed a "confirm you're human"
     # check nobody got past. Jooble puts one in front of its apply redirects,
     # and without a backoff every thin Jooble job queues a visit that cannot
