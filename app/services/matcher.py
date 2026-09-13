@@ -873,7 +873,7 @@ def _deep_band() -> tuple[float, float]:
 
 
 def _deep_score(job, profile_data: dict, score: float,
-                budget: dict | None = None, model: str = "") -> dict | None:
+                budget: dict | None = None) -> dict | None:
     """
     Ask the strongest configured model to score this job again. None when it
     didn't run.
@@ -900,7 +900,14 @@ def _deep_score(job, profile_data: dict, score: float,
     # Every provider worth asking, not just the best one. The best one being
     # out of credit is what killed this pass entirely for forty consecutive
     # jobs while generation, on the same providers, kept working.
-    chain = deep_matching_chain(exclude_model=model or "")
+    #
+    # Excluded by what the first pass *recorded*, not by the configured
+    # primary. Matching runs its own fallback chain, so the configured model
+    # is frequently not the one that answered — and excluding the wrong name
+    # let FreeInference serve as its own second opinion on 117 of 121 jobs,
+    # for an average shift of -2.2 points. `job.matched_by` is set a few lines
+    # above this call and is the only record of who actually replied.
+    chain = deep_matching_chain(exclude_label=getattr(job, "matched_by", "") or "")
     if not chain:
         # Nothing configured that is stronger than the primary: re-asking the
         # same model the same question is a call spent to hear the same answer.
@@ -1066,7 +1073,7 @@ def _match_job(
     # A close call gets a second opinion. Everything outside the band is not a
     # close call — a 20 is a 20 and a 95 is a 95 whoever reads them — so the
     # stronger model is spent only where its answer can change the outcome.
-    deep_result = _deep_score(job, profile_data, score, budget, model=model)
+    deep_result = _deep_score(job, profile_data, score, budget)
     if deep_result is not None:
         score = _penalized(deep_result)
         job.llm_score_deep = score

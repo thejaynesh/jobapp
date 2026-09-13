@@ -310,7 +310,7 @@ _MATCH_MODELS = {
 }
 
 
-def deep_matching_chain(exclude_model: str = "") -> list[Provider]:
+def deep_matching_chain(exclude_label: str = "") -> list[Provider]:
     """
     Every provider worth a second opinion, strongest first.
 
@@ -326,15 +326,27 @@ def deep_matching_chain(exclude_model: str = "") -> list[Provider]:
     Anthropic leads `DEEP_MATCHING_PREFERENCE` on quality, so it was chosen
     every time and Gemini and FreeInference behind it were never reached.
 
-    `exclude_model` drops any provider already serving the first pass. That is
-    the point the old `None` return was making and it still holds: re-asking
-    the same model the same question spends a call to hear the same answer. An
-    empty list means exactly what `None` meant, and the caller reports it
-    rather than pretending a second pass happened.
+    `exclude_label` drops the provider *and model* that already served the
+    first pass — a `provider_label`, matched whole, because "same model" is a
+    question about the pair and not about either half. That is the point the
+    old `None` return was making and it still holds: re-asking the same model
+    the same question spends a call to hear the same answer. An empty list
+    means exactly what `None` meant, and the caller reports it rather than
+    pretending a second pass happened.
+
+    It has to be the label the first pass actually recorded, not the model
+    configured as primary. Those are routinely different — matching runs its
+    own fallback chain, so the configured NIM primary may never be reached and
+    FreeInference answers instead. Comparing against the configured name let
+    FreeInference through as its own second opinion: of 121 deep scores, 117
+    came from the model that had just produced the first one, shifting the
+    result by an average of -2.2 points, while the four served by a genuinely
+    different model moved it by 15.
 
     Uses each provider's *generation* model, not its cheap matching sibling —
     a second opinion from the cut-down model would be the same compromise
-    twice.
+    twice. That also means a provider can legitimately appear on both sides:
+    same company, different model, a real second opinion.
     """
     providers = configured_providers()
     chain = []
@@ -342,7 +354,7 @@ def deep_matching_chain(exclude_model: str = "") -> list[Provider]:
         provider = providers.get(name)
         if provider is None:
             continue
-        if exclude_model and provider.model == exclude_model:
+        if exclude_label and provider_label(provider) == exclude_label:
             continue
         chain.append(provider)
     return chain

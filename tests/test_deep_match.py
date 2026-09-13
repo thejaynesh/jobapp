@@ -425,27 +425,79 @@ class TestTheChainNeverReAsksTheFirstPassModel:
     first pass is exactly what it would fall through to.
     """
 
-    def test_a_provider_on_the_first_pass_model_is_dropped(self):
-        from app.llm.providers import deep_matching_chain
-
-        providers = {
+    def _providers(self):
+        return {
             "anthropic": Provider(name="anthropic", api_key="k", model="claude"),
             "freeinference": Provider(name="freeinference", api_key="k",
                                       model="deepseek-v4-flash"),
         }
+
+    def test_the_model_that_served_the_first_pass_is_dropped(self):
+        from app.llm.providers import deep_matching_chain
+
         with patch("app.llm.providers.configured_providers",
-                   return_value=providers):
-            names = [p.name for p in
-                     deep_matching_chain(exclude_model="deepseek-v4-flash")]
+                   return_value=self._providers()):
+            names = [p.name for p in deep_matching_chain(
+                exclude_label="freeinference/deepseek-v4-flash")]
         assert names == ["anthropic"]
 
     def test_excluding_the_only_provider_leaves_nothing_to_ask(self):
         from app.llm.providers import deep_matching_chain
 
-        providers = {
-            "freeinference": Provider(name="freeinference", api_key="k",
-                                      model="deepseek-v4-flash"),
-        }
         with patch("app.llm.providers.configured_providers",
-                   return_value=providers):
-            assert deep_matching_chain(exclude_model="deepseek-v4-flash") == []
+                   return_value={"freeinference": Provider(
+                       name="freeinference", api_key="k",
+                       model="deepseek-v4-flash")}):
+            assert deep_matching_chain(
+                exclude_label="freeinference/deepseek-v4-flash") == []
+
+    def test_the_same_provider_on_a_different_model_still_counts(self):
+        """
+        The label is matched whole. A provider serving a stronger model for
+        generation than for matching is a real second opinion, and excluding it
+        by company name would throw that away.
+        """
+        from app.llm.providers import deep_matching_chain
+
+        with patch("app.llm.providers.configured_providers",
+                   return_value=self._providers()):
+            names = [p.name for p in deep_matching_chain(
+                exclude_label="freeinference/glm-5-turbo")]
+        assert "freeinference" in names
+
+    def test_it_excludes_by_what_answered_not_by_what_was_configured(self, db):
+        """
+        The bug this replaced. Matching runs its own fallback chain, so the
+        configured primary is frequently not the model that replied — and
+        excluding the configured name let FreeInference serve as its own second
+        opinion on 117 of 121 jobs, shifting the score by an average of -2.2
+        while the four served by a different model moved it by 15.
+        """
+        from app.services.matcher import match_job
+
+        db.add(Profile(data=PROFILE))
+        job = _job()
+        db.add(job)
+        db.commit()
+
+        same = Provider(name="freeinference", api_key="k",
+                        model="deepseek-v4-flash")
+        seen = {}
+
+        def remember(label, **kwargs):
+            seen["label"] = label
+            return []
+
+        with patch("app.services.matcher.llm_score_job",
+                   return_value={**_first_pass(62),
+                                 "scored_by": "freeinference/deepseek-v4-flash"}), \
+             patch("app.llm.providers.deep_matching_chain",
+                   side_effect=lambda exclude_label="": remember(exclude_label)), \
+             patch("app.services.matcher.call_provider") as call:
+            # `model` here is the configured primary, deliberately different
+            # from what actually answered.
+            match_job(db, job, PROFILE, "k", "u", "nim-configured-model")
+
+        assert seen["label"] == "freeinference/deepseek-v4-flash", (
+            "excluded the configured model instead of the one that replied")
+        call.assert_not_called()
