@@ -512,6 +512,22 @@ class Settings(BaseSettings):
     # At 1,000 a pass on a 30-minute schedule a 58,000-job backlog clears in
     # about a day and a half.
     RESCORE_MAX_PER_RUN: int = 1000
+    # How long the server enrichment pass remembers what a host gave it, and
+    # what counts as "not worth asking". See `enrichment.unproductive_hosts`.
+    #
+    # A rate rather than a count, because the failure count alone would switch
+    # off the best source in the system: Adzuna throws the most failures
+    # because it takes the most attempts, and succeeds on 51% of them. Jooble
+    # looks identical by failures and produced 13 descriptions from 2,788
+    # attempts.
+    #
+    # The window is what makes it self-healing: a skipped host records no new
+    # attempts, so its evidence ages out and it is tried again. A host that
+    # fixed itself recovers unaided; one that did not costs
+    # ENRICH_HOST_MIN_ATTEMPTS a fortnight instead of thousands a week.
+    ENRICH_HOST_MEMORY_DAYS: int = 14
+    ENRICH_HOST_MIN_ATTEMPTS: int = 50
+    ENRICH_HOST_MIN_SUCCESS_RATE: float = 0.02
     # A pass at the end of each fetch cycle, so the jobs that just arrived are
     # scored on their real descriptions rather than on the stub the aggregator
     # sent. Smaller than a scheduled pass: the cycle is already long, and the

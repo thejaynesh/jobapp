@@ -327,3 +327,117 @@ class TestTheRequeueSweepDoesNotScanTheWholeTable:
 
         assert enrichment.requeue_settled_verdicts(db, limit=3) == 3
         assert enrichment.requeue_settled_verdicts(db, limit=99) == 2
+
+
+class TestTheServerPassRemembersWhichHostsAnswer:
+    """
+    The browser path has always honoured a paused or challenge-blocked host.
+    `for_server` honoured nothing at all, so a host that has never once
+    produced a description was asked again every seven days for as long as the
+    backlog existed. Jooble: 2,788 attempts, 13 descriptions, and the other
+    2,775 repeated indefinitely.
+
+    A rate, not a count, and that is the whole of it. Adzuna threw 86 failures
+    in a single pass and is the most productive source in the table at 51% — it
+    leads the failure column because it leads the attempt column. Any rule
+    reading `failures_by_host` alone would have switched off the best source in
+    the system, which is why the denominator had to be recorded first.
+    """
+
+    def _runs(self, db, host, attempts, successes, days_ago=0):
+        from datetime import timedelta
+
+        from app.models.enrichment_run import EnrichmentRun
+
+        db.add(EnrichmentRun(
+            started_at=NOW - timedelta(days=days_ago),
+            host_outcomes={host: {"a": attempts, "s": successes}},
+        ))
+        db.commit()
+
+    def test_a_host_that_gives_nothing_is_dropped(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        self._runs(db, "jooble.org", attempts=2788, successes=13)
+        assert "jooble.org" in enrichment.unproductive_hosts(db)
+
+    def test_the_most_productive_source_is_not(self, db, monkeypatch):
+        """
+        Adzuna fails more than anything else because it tries more than
+        anything else. The rule has to see past that or it turns off half the
+        database.
+        """
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        self._runs(db, "www.adzuna.com", attempts=88053, successes=45185)
+        assert enrichment.unproductive_hosts(db) == set()
+
+    def test_a_host_with_too_few_attempts_is_left_alone(self, db, monkeypatch):
+        """Nought out of three is not evidence of anything."""
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        self._runs(db, "new.example", attempts=3, successes=0)
+        assert enrichment.unproductive_hosts(db) == set()
+
+    def test_old_evidence_ages_out_so_the_host_is_retried(self, db, monkeypatch):
+        """
+        What makes this self-healing rather than a permanent ban. A skipped
+        host records no new attempts, so its evidence leaves the window and it
+        is tried again — a host that fixed itself recovers unaided.
+        """
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        monkeypatch.setattr(settings, "ENRICH_HOST_MEMORY_DAYS", 14)
+        self._runs(db, "jooble.org", attempts=2788, successes=13, days_ago=30)
+        assert enrichment.unproductive_hosts(db) == set()
+
+    def test_evidence_adds_up_across_runs(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        for _ in range(6):
+            self._runs(db, "quiet.example", attempts=10, successes=0)
+        assert "quiet.example" in enrichment.unproductive_hosts(db)
+
+    def test_a_subdomain_counts_as_the_host(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        self._runs(db, "jooble.org", attempts=200, successes=0)
+        skipped = enrichment.unproductive_hosts(db)
+        assert enrichment._host_is_unproductive("https://uk.jooble.org/x", skipped)
+        assert not enrichment._host_is_unproductive(
+            "https://notjooble.org/x", skipped)
+
+    def test_a_pass_skips_those_jobs_and_still_stamps_them(self, db, monkeypatch):
+        """
+        Stamped, or they sit at the head of a newest-first ordering and starve
+        the hosts that do work — the failure `enrichment_attempted_at` exists
+        for, and one this codebase has already hit once.
+        """
+        monkeypatch.setattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)
+        self._runs(db, "quiet.example", attempts=200, successes=0)
+        job = _job(db)
+        job.url = "https://quiet.example/jobs/1"
+        job.source_urls = [job.url]
+        db.commit()
+
+        stats = enrichment.enrich_jobs(db, [job])
+        db.refresh(job)
+        assert stats.attempted == 0, "no request was made"
+        assert stats.skipped_unproductive == 1
+        assert job.enrichment_attempted_at is not None
+
+    def test_a_pass_records_the_denominator(self, db, monkeypatch):
+        """Without attempts there is no rate, only a count of failures."""
+        from unittest.mock import patch
+
+        job = _job(db)
+        job.url = "https://fresh.example/jobs/1"
+        job.source_urls = [job.url]
+        db.commit()
+
+        with patch.object(enrichment, "enrich_one",
+                          side_effect=RuntimeError("refused")):
+            stats = enrichment.enrich_jobs(db, [job])
+        assert stats.host_outcomes["fresh.example"] == {"a": 1, "s": 0}
+
+    def test_an_unreadable_history_costs_nothing(self, db, monkeypatch):
+        """Skipping nothing is the old behaviour: wasteful, never wrong."""
+        def boom(*a, **k):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(db, "query", boom)
+        assert enrichment.unproductive_hosts(db) == set()

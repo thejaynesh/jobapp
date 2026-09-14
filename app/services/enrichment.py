@@ -914,6 +914,11 @@ class EnrichStats:
     requeued_for_matching: int = 0
     queued_browser: int = 0
     failures_by_host: dict = field(default_factory=dict)
+    # host -> {"a": attempts, "s": successes}. The denominator
+    # `failures_by_host` never had — see `unproductive_hosts`.
+    host_outcomes: dict = field(default_factory=dict)
+    # Jobs left alone because their host has produced nothing lately.
+    skipped_unproductive: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -926,6 +931,8 @@ class EnrichStats:
             "requeued_for_matching": self.requeued_for_matching,
             "queued_browser": self.queued_browser,
             "failures_by_host": dict(self.failures_by_host),
+            "host_outcomes": {h: dict(v) for h, v in self.host_outcomes.items()},
+            "skipped_unproductive": self.skipped_unproductive,
         }
 
 
@@ -937,6 +944,79 @@ def _host(url: str) -> str:
 # worth a request from here at all — they go straight to the browser tier.
 _BROWSER_ONLY_HOSTS = ("linkedin.com", "indeed.com", "glassdoor.com", "dice.com",
                        "ziprecruiter.com", "wellfound.com")
+
+
+def unproductive_hosts(db) -> set[str]:
+    """
+    Hosts the server pass has been asking for nothing, and should stop.
+
+    The browser path has always honoured a paused or challenge-blocked host.
+    `for_server` honoured nothing at all, so a host that has never once
+    produced a description was asked again every seven days for as long as the
+    backlog existed. Jooble is the case: 2,788 attempts, 13 descriptions, and
+    the other 2,775 repeated indefinitely.
+
+    A rate, not a count, and that distinction is the whole of it. Adzuna threw
+    86 failures in a single pass and is the most productive source in the
+    table at 51% — it leads the failure column because it leads the attempt
+    column, and any rule reading `failures_by_host` alone would have switched
+    off the best source in the system.
+
+    Self-healing by construction. The window only looks back
+    `ENRICH_HOST_MEMORY_DAYS`, and a host that is being skipped records no new
+    attempts — so its evidence ages out and it is tried again. A host that
+    fixed itself recovers on its own; one that did not costs
+    `ENRICH_HOST_MIN_ATTEMPTS` every fortnight instead of thousands a week.
+    """
+    from datetime import timedelta
+
+    from app.models.enrichment_run import EnrichmentRun
+
+    window = max(1, int(getattr(settings, "ENRICH_HOST_MEMORY_DAYS", 14)))
+    min_attempts = max(1, int(getattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)))
+    floor = float(getattr(settings, "ENRICH_HOST_MIN_SUCCESS_RATE", 0.02))
+    since = datetime.now(timezone.utc) - timedelta(days=window)
+
+    totals: dict[str, list[int]] = {}
+    try:
+        rows = (
+            db.query(EnrichmentRun.host_outcomes)
+            .filter(EnrichmentRun.started_at >= since,
+                    EnrichmentRun.host_outcomes.isnot(None))
+            .all()
+        )
+    except Exception as exc:
+        # Never costs a pass. Skipping nothing is the old behaviour, which was
+        # wasteful rather than wrong.
+        logger.warning("enrichment: host history unavailable: %s", exc)
+        return set()
+
+    for (outcomes,) in rows:
+        for host, counts in (outcomes or {}).items():
+            if not isinstance(counts, dict):
+                continue
+            row = totals.setdefault(host, [0, 0])
+            row[0] += int(counts.get("a") or 0)
+            row[1] += int(counts.get("s") or 0)
+
+    skipped = {
+        host for host, (attempts, successes) in totals.items()
+        if attempts >= min_attempts and (successes / attempts) < floor
+    }
+    if skipped:
+        logger.info(
+            "enrichment: not asking %d host(s) that produced almost nothing in "
+            "the last %d days: %s", len(skipped), window,
+            ", ".join(sorted(skipped)[:6]),
+        )
+    return skipped
+
+
+def _host_is_unproductive(url: str, skipped: set[str]) -> bool:
+    host = _host(url)
+    return bool(host) and any(
+        host == s or host.endswith(f".{s}") for s in skipped
+    )
 
 
 def _browser_only(url: str) -> bool:
@@ -989,6 +1069,29 @@ def enrich_jobs(
     browser_ids = {job.id for job in for_browser}
     for_server = [job for job in jobs if job.id not in browser_ids]
 
+    # Hosts that have answered this pass with nothing for a fortnight. The
+    # browser path has always had `blocked`; this is the server path's first
+    # look at whether the host it is about to ask has ever given anything back.
+    #
+    # Dropped rather than deferred, and they are still stamped below: a job on
+    # such a host cannot be improved by this pass or the next fifty, and left
+    # unstamped it sits at the head of a newest-first ordering and starves the
+    # hosts that do work — the same failure `enrichment_attempted_at` exists
+    # for.
+    unproductive = unproductive_hosts(db)
+    if unproductive:
+        skipped_here = [
+            job for job in for_server
+            if _host_is_unproductive(_target_url(job), unproductive)
+        ]
+        if skipped_here:
+            skipped_ids = {job.id for job in skipped_here}
+            for_server = [j for j in for_server if j.id not in skipped_ids]
+            stats.skipped_unproductive = len(skipped_here)
+            stamp_at = datetime.now(timezone.utc)
+            for job in skipped_here:
+                job.enrichment_attempted_at = stamp_at
+
     stats.attempted = len(for_server)
     results: list[tuple[Job, Extraction | None, Exception | None]] = []
 
@@ -1024,6 +1127,15 @@ def enrich_jobs(
                 results = list(pool.map(_work, for_server))
 
     attempted_at = datetime.now(timezone.utc)
+
+    def _seen(job, success: bool) -> None:
+        host = _host(_target_url(job))
+        if not host:
+            return
+        row = stats.host_outcomes.setdefault(host, {"a": 0, "s": 0})
+        row["a"] += 1
+        row["s"] += 1 if success else 0
+
     for job, found, error in results:
         # Stamped whatever happened, before any early exit below. A job that
         # cannot be enriched is otherwise unchanged by the attempt, so it stays
@@ -1035,15 +1147,22 @@ def enrich_jobs(
             stats.failed += 1
             host = _host(_target_url(job))
             stats.failures_by_host[host] = stats.failures_by_host.get(host, 0) + 1
+            _seen(job, False)
             continue
         if not found:
             stats.unchanged += 1
+            # An attempt that reached the page and came back with nothing is a
+            # failure of this host to be worth asking, even though no exception
+            # was raised. `failures_by_host` counts errors; this counts effort.
+            _seen(job, False)
             continue
 
         outcome = apply_extraction(db, job, found)
         if not outcome["improved"]:
             stats.unchanged += 1
+            _seen(job, False)
             continue
+        _seen(job, True)
         stats.enriched += 1
         stats.chars_gained += outcome["chars_gained"]
         stats.requeued_for_matching += 1 if outcome["requeued"] else 0

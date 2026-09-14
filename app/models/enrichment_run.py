@@ -60,4 +60,16 @@ class EnrichmentRun(Base):
     # host → count. Which sites are refusing us is the thing that decides
     # whether a host belongs on the browser tier instead.
     failures_by_host: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # host → {"a": attempts, "s": successes}. The denominator `failures_by_host`
+    # never had.
+    #
+    # A failure count on its own cannot answer "is this host worth asking".
+    # Adzuna produced 86 failures in a single pass and is the best source in the
+    # table at 51% — it dominates the failures because it dominates the
+    # attempts. Jooble looks similar from the failure column alone and is the
+    # opposite case: 2,788 attempts for 13 descriptions, and the other 2,775
+    # were repeated every seven days forever, because nothing on the server
+    # path has ever looked at whether a host answers.
+    host_outcomes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

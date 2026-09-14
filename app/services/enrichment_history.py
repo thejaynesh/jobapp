@@ -68,6 +68,11 @@ def record_run(
                 key=lambda kv: -kv[1],
             )[:20]
         ) or None,
+        # Every host this pass touched, with its denominator. Not trimmed to
+        # the top N like the failures above: this is read back by
+        # `unproductive_hosts` to compute a rate, and a host dropped for being
+        # quiet is exactly one whose attempts must still be counted.
+        host_outcomes=dict(stats.host_outcomes or {}) or None,
         error=error,
     )
     db.add(run)
