@@ -1471,3 +1471,52 @@ class TestSponsorshipTheBoardStatedOutright:
         }]}}
         job = extract_jobs(payload, source="linkedin_harvest")[0]
         assert "sponsorship_note" not in job
+
+
+class TestHarvestStopsAssertingEveryJobIsMidLevel:
+    """
+    The harvest insert wrote the literal `experience_level="mid"` and never
+    called `parse_experience_level` at all, so a harvested "Senior Backend
+    Engineer" was stored as mid-level — in a column the jobs list filters on
+    and the scoring prompt states as a fact about the role.
+    """
+
+    def _job(self, title, description="x"):
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "1", "title": title, "locations": ["NY"],
+            "description": description, "url": "https://x/1",
+        }]}}
+        return extract_jobs(payload, source="handshake_harvest")[0]
+
+    def test_a_senior_title_is_read_as_senior(self):
+        assert self._job("Senior Backend Engineer")["experience_level"] == "senior"
+
+    def test_a_junior_title_is_read_as_entry(self):
+        assert self._job("Junior Developer")["experience_level"] == "entry"
+
+    def test_the_description_counts_too(self):
+        job = self._job("Software Engineer", "This is an entry level position.")
+        assert job["experience_level"] == "entry"
+
+    def test_an_unreadable_title_says_nothing(self):
+        assert self._job("Backend Engineer")["experience_level"] is None
+
+    def test_the_stored_row_gets_it(self, db):
+        from app.models.job import Job
+        from app.services.harvest import save_harvested_jobs
+
+        save_harvested_jobs(db, [self._job("Senior Backend Engineer")])
+        assert db.query(Job).one().experience_level == "senior"
+
+    def test_a_row_nobody_could_classify_is_left_null(self, db):
+        """
+        Null is what makes it mergeable: a later source that does know fills
+        it, where "mid" was a guess no other guess was allowed to overwrite.
+        """
+        from app.models.job import Job
+        from app.services.harvest import save_harvested_jobs
+
+        save_harvested_jobs(db, [self._job("Backend Engineer")])
+        assert db.query(Job).one().experience_level is None

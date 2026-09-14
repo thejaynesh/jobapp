@@ -42,6 +42,7 @@ from app.services.deduplication import (
     merge_or_skip,
 )
 from app.services.descriptions import clean as clean_description
+from app.services.sources.base import parse_experience_level
 
 logger = logging.getLogger(__name__)
 
@@ -741,6 +742,11 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
         "is_remote": _is_remote(node),
         **_annual_salary(node, source),
         **_sponsorship(node),
+        # Inferred, like every source adapter does it. The insert below
+        # wrote the literal "mid" and never called the parser, so a
+        # harvested "Senior Backend Engineer" was filed as mid-level.
+        "experience_level": parse_experience_level(
+            title, _first(node, _DESCRIPTION_KEYS) or ""),
     }
 
 
@@ -841,7 +847,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
             url=url,
             apply_url=data.get("apply_url") or None,
             description=description or None,
-            experience_level="mid",
+            experience_level=data.get("experience_level"),
             status=JobStatus.new,
             fetched_at=now,
             dedupe_hash=dedupe_hash,

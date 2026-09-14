@@ -37,9 +37,27 @@ class TestParseExperienceLevel:
         from app.services.sources.base import parse_experience_level
         assert parse_experience_level("SWE", "0-2 years of experience required") == "entry"
 
-    def test_default_mid(self):
+    def test_no_signal_says_so_rather_than_guessing_mid(self):
+        """
+        This returned "mid" for years, which was never a finding — it was the
+        fallback, reached by matching none of the patterns. Returning it made
+        "the posting says mid-level" and "the posting says nothing"
+        indistinguishable in a column the jobs list filters on, the scoring
+        prompt states as fact, and `enrich_from` therefore refused to merge at
+        all.
+        """
         from app.services.sources.base import parse_experience_level
-        assert parse_experience_level("Software Engineer", "Python experience required") == "mid"
+        assert parse_experience_level(
+            "Software Engineer", "Python experience required") is None
+
+    def test_a_posting_that_does_say_mid_is_still_not_a_guess(self):
+        """
+        None means "nobody could tell", not "mid". The patterns only recognise
+        the two ends, so a posting naming the middle reads the same as silence
+        — which is honest: nothing here ever inferred "mid" from evidence.
+        """
+        from app.services.sources.base import parse_experience_level
+        assert parse_experience_level("Mid-level Engineer", "") is None
 
 
 # ---------------------------------------------------------------------------

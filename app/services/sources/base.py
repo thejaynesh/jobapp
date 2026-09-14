@@ -178,11 +178,28 @@ def _listing_job_id(url: str) -> str | None:
     return max(numbers, key=len) if numbers else None
 
 
-def parse_experience_level(title: str, description: str) -> str:
+def parse_experience_level(title: str, description: str) -> str | None:
     """
     Infer seniority from job title and description text.
 
-    Returns "entry", "mid", or "senior".
+    Returns "entry", "senior", or None when the posting gives no signal.
+
+    None rather than "mid", which is what this returned for years. "mid" was
+    never a finding — it was the fallback, reached by matching none of the
+    patterns — and returning it made two very different states identical:
+    a posting that says "Mid-level Engineer" and one that says nothing at all.
+
+    That cost three things. The jobs list filters on this column, so choosing
+    "Mid" returned every posting nobody could classify. The scoring prompt
+    states "Experience level: mid" as a fact about a job we know nothing about.
+    And `enrich_from` could not merge the column at all — its own comment says
+    why: "both ingest paths default it to 'mid' rather than leaving it null.
+    There is no absence to fill, only a guess to overwrite with another guess."
+    A null is an absence, so the first source that does know now fills it.
+
+    Callers are unchanged: every one puts the result straight into an ingest
+    dict, `Job.experience_level` is nullable, `take()` in `enrich_from` skips
+    None, and the prompt already read `job.experience_level or 'unknown'`.
     """
     text = (title + " " + description).lower()
 
@@ -201,4 +218,5 @@ def parse_experience_level(title: str, description: str) -> str:
     if any(re.search(p, text) for p in entry_patterns):
         return "entry"
 
-    return "mid"
+    # No signal. Said so, rather than guessed at.
+    return None

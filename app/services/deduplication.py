@@ -287,9 +287,11 @@ def note_description_growth(job: Job, old_length: int) -> bool:
 #   location no longer agrees with the hash computed from it is a row that
 #   splits in two the next time the hashes are recomputed. This is the same
 #   reason `url` is not user-editable.
-# * `experience_level`, because both ingest paths default it to "mid" rather
-#   than leaving it null. There is no absence to fill, only a guess to
-#   overwrite with another guess.
+# `experience_level` used to be listed here for a reason that no longer holds:
+# both ingest paths defaulted it to "mid" rather than leaving it null, so there
+# was no absence to fill, only a guess to overwrite with another guess.
+# `parse_experience_level` now returns None when the posting gives no signal,
+# which makes the column mergeable like the rest — see `_FILL_IF_NULL`.
 
 # Fields where a stored null means "no source has told us yet", so the first
 # source that does is strictly better than nothing.
@@ -300,6 +302,9 @@ _FILL_IF_NULL = (
     "education_required",
     "benefits_note",
     "language",
+    # Only ever null now when nothing could be inferred, so the first source
+    # that does know is strictly better than an empty column.
+    "experience_level",
     # Stated by the board rather than inferred from prose — see
     # `harvest._sponsorship`. Filled only when null, like everything else here,
     # so a note quoting the posting's own sentence is never overwritten by a
