@@ -242,6 +242,35 @@ def _ingest_enrichment(db, task: BrowserTask, payload: dict, final_url: str,
                          "landed_on": final_url[:120]})
         return
 
+    # A page that says the posting is gone, read before trying to find a
+    # description in it.
+    #
+    # `liveness.check_url` already knows these phrases and can never see these
+    # pages: it reaches them with httpx, which is precisely what LinkedIn and
+    # Dice refuse. So the hosts whose postings go stale fastest are the ones it
+    # cannot check, and the browser — which does get in — was reading "this job
+    # is no longer available" as merely a page with no description on it.
+    # Nothing closed, nothing learned, and the same dead URL opened again a
+    # week later, which is what a person watching the browser actually sees.
+    #
+    # `candidates` compounds it by only ever checking `matched` and
+    # `docs_generated` jobs, so a posting filtered out for having no
+    # description is never a liveness candidate at all — and those are exactly
+    # the ones being fetched here.
+    from app.services.liveness import closed_marker
+
+    marker = closed_marker(html)
+    if marker and not job.closed_at:
+        job.closed_at = datetime.now(timezone.utc)
+        job.closed_note = f'the browser found: "{marker}"'[:300]
+        job.liveness_checked_at = job.closed_at
+        db.commit()
+        _note(db, task, {"enriched": False, "closed": True, "reason": marker})
+        logger.info(
+            "agent_work: %s is gone — %s", (payload.get("url") or "")[:100], marker,
+        )
+        return
+
     found = extract_from_html(html, job_id=job.id)
     outcome = apply_extraction(db, job, found)
 

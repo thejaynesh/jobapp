@@ -116,11 +116,29 @@ def check_url(url: str, client: httpx.Client) -> LivenessResult:
     if "html" not in content_type and "json" not in content_type:
         return LivenessResult("open")
 
-    body = response.text[:MAX_BODY_CHARS].lower()
+    marker = closed_marker(response.text)
+    if marker:
+        return LivenessResult("closed", f'the page says "{marker}"')
+    return LivenessResult("open")
+
+
+def closed_marker(html: str) -> str:
+    """
+    The phrase on this page that says the posting is finished, or "".
+
+    Pulled out of `check_url` so the browser path can use it too. This checker
+    reaches a page with `httpx`, which is exactly what LinkedIn and Dice refuse
+    — so the postings most likely to be stale are the ones it can never look
+    at. The browser opens them anyway, for enrichment, and was reading "this
+    job is no longer available" as simply a page with no description in it:
+    nothing learned, nothing closed, and the same dead URL opened again a week
+    later.
+    """
+    body = (html or "")[:MAX_BODY_CHARS].lower()
     for marker in CLOSED_MARKERS:
         if marker in body:
-            return LivenessResult("closed", f'the page says "{marker}"')
-    return LivenessResult("open")
+            return marker
+    return ""
 
 
 def _check_target(job) -> str:

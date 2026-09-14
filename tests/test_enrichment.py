@@ -1059,3 +1059,83 @@ class TestAVerdictLeftStandingOnEvidenceItNoLongerMatches:
 
         source = inspect.getsource(enrichment.requeue_settled_verdicts)
         assert "_worth_rescoring" in source
+
+
+class TestAPostingTheBrowserFoundGone:
+    """
+    "Some of the Dice postings that are opened are gone — it just says the
+    posting is not available."
+
+    `liveness.check_url` already knows those phrases and can never see those
+    pages: it reaches them with `httpx`, which is exactly what Dice and
+    LinkedIn refuse. So the hosts whose postings go stale fastest are the ones
+    it cannot check, and the browser — which does get in, for enrichment — read
+    "this job is no longer available" as merely a page with no description on
+    it. Nothing closed, nothing learned, and the same dead URL opened again
+    seven days later.
+
+    `liveness.candidates` compounds it: it only considers `matched` and
+    `docs_generated` jobs, so a posting filtered out for having no description
+    is never a liveness candidate at all — and those are precisely the ones the
+    browser is being sent to fetch.
+    """
+
+    def _fetched(self, db, html, url="https://www.dice.com/job-detail/gone-1"):
+        from app.services import browser_tasks
+        from app.services.agent_work import ingest
+
+        job = _job(source="dice", description=None, url=url, source_urls=[url],
+                   status=JobStatus.filtered_out, filter_reason="no_description")
+        db.add(job)
+        db.commit()
+
+        task = browser_tasks.enqueue(
+            db, "resolve_link",
+            {"url": url, "purpose": "enrich", "job_id": str(job.id)})
+        task.status = "done"
+        task.result = {"final_url": url, "html": html}
+        db.commit()
+
+        ingest(db, task)
+        db.refresh(job)
+        return job
+
+    def test_a_gone_posting_is_closed_rather_than_re_read(self, db):
+        job = self._fetched(
+            db, "<html><body><h1>This job is no longer available</h1></body></html>")
+        assert job.closed_at is not None
+        assert "no longer available" in (job.closed_note or "")
+
+    def test_closing_it_stops_it_being_picked_again(self, db):
+        """
+        The point. `select_targets` and `plan_browser_queue` both filter on
+        `closed_at IS NULL`, so a closed posting leaves the rotation instead of
+        costing a browser visit every week forever.
+        """
+        from app.services import enrichment
+
+        job = self._fetched(
+            db, "<html><body>Sorry, this job was removed</body></html>")
+        assert job.closed_at is not None
+        assert job.id not in {j.id for j in enrichment.select_targets(db, {})}
+
+    def test_a_live_posting_is_still_enriched_normally(self, db):
+        """The marker list is deliberately narrow; a real posting must pass."""
+        body = ('<script type="application/ld+json">'
+                '{"@type":"JobPosting","description":"' + LONG.strip()
+                + '"}</script>')
+        job = self._fetched(db, body, url="https://www.dice.com/job-detail/live-1")
+        assert job.closed_at is None
+        assert len(job.description or "") > 400
+
+    def test_a_page_merely_mentioning_closing_is_not_closed(self, db):
+        """
+        A careers page that talks about roles closing must not close this one.
+        The markers are whole phrases seen on real dead pages for that reason.
+        """
+        body = ('<p>Applications close on 1 March.</p>'
+                '<script type="application/ld+json">'
+                '{"@type":"JobPosting","description":"' + LONG.strip()
+                + '"}</script>')
+        job = self._fetched(db, body, url="https://www.dice.com/job-detail/open-1")
+        assert job.closed_at is None
