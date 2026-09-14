@@ -6,8 +6,12 @@ looks for appear constantly in job descriptions that carry no restriction at
 all, and firing on those would quietly delete good jobs.
 """
 
+import uuid
+from datetime import datetime, timezone
+
 import pytest
 
+from app.models.job import Job, JobStatus
 from app.services.eligibility import scan
 
 
@@ -227,3 +231,73 @@ class TestTiersAreIndependent:
         )
         assert result.blocked
         assert result.sponsorship_direction == "negative"
+
+
+class TestSilenceDoesNotEraseAStatedAnswer:
+    """
+    `_match_job` assigned the scan's sponsorship fields unconditionally, so a
+    description that says nothing about visas wiped whatever was there — and
+    what was there may be the board's own answer, stated on a form rather than
+    in a sentence (`harvest._sponsorship`).
+
+    Silence is not a finding. A quote from the posting still wins when there is
+    one, because it is the employer's words about this role where a form field
+    is a setting on an account.
+    """
+
+    def _scored(self, db, description, **fields):
+        from unittest.mock import patch
+
+        from app.models.profile import Profile
+        from app.services.matcher import match_job
+
+        profile = {"target_roles": ["Python Developer"],
+                   "skills": {"core": ["python", "sql"]},
+                   "target_locations": ["Boston"]}
+        db.add(Profile(data=profile))
+        job = Job(
+            source="handshake_harvest", title="Python Developer",
+            company="Acme", location="Boston",
+            url=f"https://app.joinhandshake.com/jobs/{uuid.uuid4().hex}",
+            description=description, status=JobStatus.new,
+            fetched_at=datetime.now(timezone.utc),
+            dedupe_hash=uuid.uuid4().hex[:32], **fields,
+        )
+        job.source_urls = [job.url]
+        db.add(job)
+        db.commit()
+
+        with patch("app.services.matcher.llm_score_job",
+                   return_value={"score": 80, "reasoning": "fine",
+                                 "matched_skills": [], "missing_skills": [],
+                                 "scored_by": "test/model"}), \
+             patch("app.llm.providers.deep_matching_chain", return_value=[]):
+            match_job(db, job, profile, "k", "u", "m")
+        # `match_job` does not commit — its caller does — so refreshing here
+        # would re-read the row from the database and throw away exactly the
+        # change under test. The first draft of this did, and passed anyway
+        # because the value it expected happened to be the one already stored.
+        db.commit()
+        return job
+
+    def test_a_stated_answer_survives_a_description_that_never_mentions_visas(
+            self, db):
+        job = self._scored(
+            db,
+            "We are hiring a Python developer. " * 40,
+            sponsorship_note="The employer's screening says they will not "
+                             "sponsor a visa.",
+            sponsorship_direction="negative",
+        )
+        assert job.sponsorship_direction == "negative"
+        assert "screening" in (job.sponsorship_note or "")
+
+    def test_a_sentence_in_the_posting_still_wins(self, db):
+        job = self._scored(
+            db,
+            "We are hiring a Python developer. "
+            "We are unable to offer visa sponsorship at this time. " * 20,
+            sponsorship_note="stale", sponsorship_direction="positive",
+        )
+        assert job.sponsorship_direction == "negative"
+        assert "stale" not in (job.sponsorship_note or "")

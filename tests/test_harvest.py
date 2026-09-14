@@ -1397,3 +1397,77 @@ class TestAPayBandStatedInCents:
         }]}}
         job = extract_jobs(payload, source="handshake_harvest")[0]
         assert "salary_min" not in job
+
+
+class TestSponsorshipTheBoardStatedOutright:
+    """
+    `eligibility.scan` derives this by running regexes over prose, which is the
+    only option when prose is all there is. Handshake answers the question on a
+    form:
+
+        studentScreen: {willingToSponsorCandidate: False,
+                        acceptsCptCandidates: True, acceptsOptCandidates: True}
+
+    A field beats an inference. The regex has to decide whether "we are unable
+    to offer sponsorship at this time" is negated, is boilerplate, or is about
+    another role in the same advert; this is the employer ticking a box. On the
+    24 live Handshake postings sampled, 21 carried `workAuthRequired`.
+
+    Advisory only, exactly like the prose version — `sponsorship_direction` is
+    displayed and is never a filter, score or ranking input.
+    """
+
+    def _job(self, screen):
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "1", "title": "Python Developer", "__typename": "Job",
+            "locations": ["McLean, VA"], "description": "x",
+            "studentScreen": screen,
+        }]}}
+        return extract_jobs(payload, source="handshake_harvest")[0]
+
+    def test_a_refusal_to_sponsor_is_recorded(self):
+        job = self._job({"willingToSponsorCandidate": False,
+                         "acceptsCptCandidates": True,
+                         "acceptsOptCandidates": True})
+        assert job["sponsorship_direction"] == "negative"
+        assert "will not sponsor" in job["sponsorship_note"]
+
+    def test_the_cpt_and_opt_answers_ride_along(self):
+        """
+        Finer than the yes/no, and a different answer to "can I apply": an
+        employer that will not sponsor a visa may still take a student on OPT.
+        """
+        job = self._job({"willingToSponsorCandidate": False,
+                         "acceptsCptCandidates": True,
+                         "acceptsOptCandidates": True})
+        assert "CPT and OPT" in job["sponsorship_note"]
+
+    def test_a_willingness_to_sponsor_is_recorded_too(self):
+        job = self._job({"willingToSponsorCandidate": True})
+        assert job["sponsorship_direction"] == "positive"
+        assert "will sponsor" in job["sponsorship_note"]
+
+    def test_an_undisclosed_screen_says_nothing(self):
+        """
+        Recording "will not sponsor" off a form the employer declined to fill
+        in would be worse than leaving the column empty.
+        """
+        job = self._job({"workAuthNotDisclosed": True,
+                         "willingToSponsorCandidate": False})
+        assert "sponsorship_direction" not in job
+
+    def test_a_missing_screen_says_nothing(self):
+        job = self._job({})
+        assert "sponsorship_direction" not in job
+
+    def test_a_board_without_the_field_is_unaffected(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "2", "title": "Engineer", "locations": ["NY"],
+            "description": "x", "url": "https://x/2",
+        }]}}
+        job = extract_jobs(payload, source="linkedin_harvest")[0]
+        assert "sponsorship_note" not in job

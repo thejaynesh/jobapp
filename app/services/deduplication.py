@@ -300,6 +300,12 @@ _FILL_IF_NULL = (
     "education_required",
     "benefits_note",
     "language",
+    # Stated by the board rather than inferred from prose — see
+    # `harvest._sponsorship`. Filled only when null, like everything else here,
+    # so a note quoting the posting's own sentence is never overwritten by a
+    # second sighting's summary of a form.
+    "sponsorship_note",
+    "sponsorship_direction",
 )
 
 # Same rule, for the list columns whose empty state is `[]` rather than null.

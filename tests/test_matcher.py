@@ -41,6 +41,12 @@ def mock_job():
     job.llm_reasoning = None
     job.matched_skills = None
     job.missing_skills = None
+    # A fresh row has these null. Left unset they are MagicMock sentinels, and
+    # the test that a silent posting gets no note would then be passing on the
+    # assignment rather than on the behaviour — which is what it did until the
+    # scan stopped overwriting a stated answer with silence.
+    job.sponsorship_note = None
+    job.sponsorship_direction = None
     return job
 
 

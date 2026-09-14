@@ -996,8 +996,19 @@ def _match_job(
     # that go on to be filtered for an unrelated reason — because the note is a
     # fact about the posting rather than a step in deciding its fate.
     scan = eligibility.scan(job.description)
-    job.sponsorship_note = scan.sponsorship_note
-    job.sponsorship_direction = scan.sponsorship_direction
+    # Only when the prose actually said something. This used to assign
+    # unconditionally, which meant a scan finding nothing erased whatever was
+    # there — including an answer the board stated outright on a form rather
+    # than in a sentence (see `harvest._sponsorship`: Handshake publishes
+    # `willingToSponsorCandidate` and the CPT/OPT flags beside it).
+    #
+    # A quote from the posting still wins when there is one: it is the
+    # employer's own words about this role, where a form field is a setting on
+    # an account. But silence is not a finding, and treating it as one threw
+    # away the better of the two answers every time a job was scored.
+    if scan.sponsorship_note or scan.sponsorship_direction:
+        job.sponsorship_note = scan.sponsorship_note
+        job.sponsorship_direction = scan.sponsorship_direction
 
     outcome = evaluate_keyword_filter(job, profile_data, scan=scan)
 

@@ -491,6 +491,64 @@ def _first_number(node: dict, keys: tuple) -> float | None:
     return None
 
 
+def _sponsorship(node: dict) -> dict:
+    """
+    What the posting's own screening fields say about visa sponsorship.
+
+    `eligibility.scan` derives this by running regexes over prose, which is the
+    only option when prose is all there is. Handshake states it outright:
+
+        studentScreen: {
+            willingToSponsorCandidate: False,
+            acceptsCptCandidates: True,
+            acceptsOptCandidates: True,
+            workAuthNotDisclosed: False,
+        }
+
+    A field beats an inference. The regex has to decide whether "we are unable
+    to offer sponsorship at this time" is negated, is boilerplate, or is about
+    some other role in the same advert; this is the employer answering the
+    question on a form.
+
+    `workAuthNotDisclosed` is honoured rather than read past: a screen the
+    employer declined to fill in says nothing, and recording "will not sponsor"
+    from an unanswered form would be worse than leaving the column empty.
+
+    Advisory only, like the prose version — `sponsorship_direction` is
+    displayed and never filtered or scored on. Returns `{}` when the posting
+    carries no screen, which is every board but this one so far.
+    """
+    screen = node.get("studentScreen")
+    if not isinstance(screen, dict):
+        return {}
+    if screen.get("workAuthNotDisclosed") is True:
+        return {}
+
+    willing = screen.get("willingToSponsorCandidate")
+    if not isinstance(willing, bool):
+        return {}
+
+    # The CPT/OPT answers ride along in the note because they are finer than
+    # the yes/no: an employer that will not sponsor a visa may still take a
+    # student on OPT, and those are very different answers to "can I apply".
+    accepts = [
+        name for name, key in (("CPT", "acceptsCptCandidates"),
+                               ("OPT", "acceptsOptCandidates"))
+        if screen.get(key) is True
+    ]
+    note = (
+        "The employer's screening says they will sponsor a visa."
+        if willing else
+        "The employer's screening says they will not sponsor a visa."
+    )
+    if accepts:
+        note += f" {' and '.join(accepts)} candidates are accepted."
+    return {
+        "sponsorship_note": note,
+        "sponsorship_direction": "positive" if willing else "negative",
+    }
+
+
 def _is_remote(node: dict) -> bool:
     for key in _REMOTE_KEYS:
         value = node.get(key)
@@ -682,6 +740,7 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
         "description": _first(node, _DESCRIPTION_KEYS),
         "is_remote": _is_remote(node),
         **_annual_salary(node, source),
+        **_sponsorship(node),
     }
 
 
