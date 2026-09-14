@@ -1276,3 +1276,124 @@ class TestABoardThatIdentifiesAPostingByIdAlone:
                  "url": "https://app.joinhandshake.com/stu/postings/7"}]}},
             source="handshake_harvest")
         assert jobs[0]["url"] == "https://app.joinhandshake.com/stu/postings/7"
+
+
+class TestAPayBandStatedInCents:
+    """
+    Salary sits at 0-2% on every source in the table, and Handshake is one
+    reason: it publishes a structured band and the reader stored nothing.
+
+    `salaryRange` was listed only under `_PAY_TEXT_KEYS`, where `_text` of a
+    dict is the empty string — so a board sending `{"min": ..., "max": ...}`
+    had it read as prose, found nothing, and dropped it.
+
+    Adding the key alone would have been worse than leaving it. Handshake
+    states minor units: `{"min": 10000000, "max": 13000000}` is a job paying
+    $100,000-$130,000, and read as dollars that is a ten-million-dollar salary
+    — indexed, filtered on and sorted by. A guessed salary is worse than a
+    missing one because the filter acts on it.
+
+    Measured across 21 live bands: the 18 marked `ANNUAL_SALARY` land on
+    $65,000-$110,600 at /100, which is right for the roles. Three marked
+    `HOURLY_WAGE` state $75,000, $100,000 and $100,000 for Full-Time permanent
+    roles — employers leaving the first option in a dropdown — so the board's
+    own `paySchedule` cannot be trusted to say which period a band is in.
+    """
+
+    def _payload(self, band, extra=None):
+        return {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "1", "title": "Python Developer", "__typename": "Job",
+            "locations": ["McLean, VA"], "description": "x",
+            "salaryRange": {**band, **(extra or {})},
+        }]}}
+
+    def test_a_handshake_band_is_read_as_dollars(self):
+        from app.services.harvest import extract_jobs
+
+        payload = self._payload(
+            {"min": 10000000, "max": 13000000, "currency": "USD"})
+        job = extract_jobs(payload, source="handshake_harvest")[0]
+        assert job["salary_min"] == 100000
+        assert job["salary_max"] == 130000
+        assert job["salary_currency"] == "USD"
+
+    def test_a_lying_pay_schedule_does_not_change_the_reading(self):
+        """Three of 21 live bands claim hourly while stating an annual figure."""
+        from app.services.harvest import extract_jobs
+
+        payload = self._payload(
+            {"min": 10000000, "max": 13000000, "currency": "USD"},
+            {"paySchedule": {"name": "Hourly Wage",
+                             "behaviorIdentifier": "HOURLY_WAGE"}})
+        job = extract_jobs(payload, source="handshake_harvest")[0]
+        assert job["salary_min"] == 100000
+
+    def test_a_genuinely_hourly_band_is_dropped_not_stored(self):
+        """
+        2,500 cents is $25 an hour. There is nowhere to record that it is
+        hourly — `jobs` has `salary_min` and no `salary_period` — so storing it
+        would file $25 an hour as a $25 salary. No number beats a wrong one.
+        """
+        from app.services.harvest import extract_jobs
+
+        payload = self._payload({"min": 250000, "max": 300000, "currency": "USD"})
+        job = extract_jobs(payload, source="handshake_harvest")[0]
+        # Absent rather than None: `_salary` has always signalled "no pay"
+        # by returning {}, and a key set to None would read as a stored
+        # answer of "nothing".
+        assert "salary_min" not in job
+        assert "salary_max" not in job
+
+    def test_another_board_stating_dollars_is_untouched(self):
+        """
+        The scale is per source, like `_POSTING_URL`. Judging by magnitude —
+        "that number looks too big, divide it" — is right until a board pays in
+        yen.
+        """
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "3", "title": "Engineer", "locations": ["NY"],
+            "description": "x", "url": "https://x/3",
+            "compensation": {"min": 120000, "max": 150000, "currency": "USD"},
+        }]}}
+        job = extract_jobs(payload, source="linkedin_harvest")[0]
+        assert job["salary_min"] == 120000
+        assert job["salary_max"] == 150000
+
+    def test_a_salary_range_on_an_unscaled_source_still_reads(self):
+        """Adding the key helps every board that sends one, not just Handshake."""
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "4", "title": "Engineer", "locations": ["NY"],
+            "description": "x", "url": "https://x/4",
+            "salaryRange": {"min": 90000, "max": 110000, "currency": "GBP"},
+        }]}}
+        job = extract_jobs(payload, source="linkedin_harvest")[0]
+        assert job["salary_min"] == 90000
+        assert job["salary_currency"] == "GBP"
+
+    def test_a_band_with_no_floor_is_not_half_stored(self):
+        """
+        A filter compares against the floor, so a ceiling on its own would be
+        read as a job paying nothing at all.
+        """
+        from app.services.harvest import extract_jobs
+
+        payload = self._payload({"max": 13000000, "currency": "USD"})
+        job = extract_jobs(payload, source="handshake_harvest")[0]
+        # `_salary` treats a lone figure as the floor, so this is $130,000 —
+        # the point is that it is never stored as a floor of zero.
+        assert job.get("salary_min") in (None, 130000)
+        assert job.get("salary_min") != 0
+
+    def test_no_band_at_all_stays_empty(self):
+        from app.services.harvest import extract_jobs
+
+        payload = {"data": {"employer": {"name": "Acme"}, "jobs": [{
+            "id": "5", "title": "Engineer", "locations": ["NY"],
+            "description": "x", "url": "https://x/5",
+        }]}}
+        job = extract_jobs(payload, source="handshake_harvest")[0]
+        assert "salary_min" not in job

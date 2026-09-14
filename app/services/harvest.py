@@ -205,8 +205,41 @@ _REMOTE_KEYS = (
 # object that has a min or a max and a currency, wherever it is sitting.
 _SALARY_KEYS = (
     "salaryInsights", "compensation", "baseSalary", "payRange", "salary",
+    # Handshake's band. It was listed under `_PAY_TEXT_KEYS` only, where
+    # `_text` of a dict is the empty string — so a board publishing a
+    # structured min and max had it read as prose, found nothing, and stored
+    # no pay at all.
+    "salaryRange",
     "compensationBreakdown",
 )
+
+# Boards that state pay in minor units, and the divisor to get currency out.
+#
+# Handshake sends `{"min": 10000000, "max": 13000000, "currency": "USD"}` for a
+# job paying $100,000-$130,000. Read as dollars that is a ten-million-dollar
+# salary, which would then be indexed, filtered on and sorted by — a guessed
+# salary is worse than a missing one, because the filter acts on it.
+#
+# Per source rather than by magnitude, for the same reason `_POSTING_URL` is:
+# guessing "that number looks too big, divide it" is right until a board pays
+# in yen. This only grows from a band somebody has read against the posting.
+_SALARY_SCALE = {
+    "handshake_harvest": 100,
+}
+
+# Below this, an annual figure is not an annual figure.
+#
+# Handshake's `paySchedule` cannot be trusted to say which: of 21 bands with
+# one, three claimed `HOURLY_WAGE` while stating $75,000, $100,000 and
+# $100,000 for Full-Time permanent roles — employers leaving the first option
+# in a dropdown. And there is nowhere to record the period anyway: `jobs` has
+# `salary_min` and no `salary_period`, so an hourly 25 and an annual 25,000
+# would be stored identically.
+#
+# So only bands that can only be annual are kept. A genuine hourly rate is
+# dropped rather than written down as a salary, which is the same trade the
+# rest of this module makes: no number beats a wrong one.
+_MIN_PLAUSIBLE_ANNUAL = 10_000
 _SALARY_MIN_KEYS = ("minSalary", "min", "minValue", "minAmount", "from")
 _SALARY_MAX_KEYS = ("maxSalary", "max", "maxValue", "maxAmount", "to")
 _CURRENCY_KEYS = ("currencyCode", "currency", "currencyIso")
@@ -410,6 +443,43 @@ def _salary(node: dict) -> dict:
     return {}
 
 
+def _annual_salary(node: dict, source: str) -> dict:
+    """
+    `_salary`, converted out of minor units and kept only when it is annual.
+
+    Two corrections, both measured rather than assumed. The scale comes from
+    `_SALARY_SCALE` and the plausibility floor from `_MIN_PLAUSIBLE_ANNUAL` —
+    see those for why a board's own `paySchedule` is not trusted to say which
+    period a band is in.
+
+    Returns `{}` rather than a partial row: a salary filter reading a floor
+    with no ceiling, or an hourly rate filed as a salary, does more damage than
+    an empty column. Every other source is unaffected — the scale defaults to
+    1 and the floor only ever drops a band we could not have recorded the
+    period of anyway.
+    """
+    found = _salary(node)
+    if not found:
+        return {}
+
+    scale = _SALARY_SCALE.get(source, 1)
+    low = found.get("salary_min")
+    high = found.get("salary_max")
+    if scale != 1:
+        low = low / scale if isinstance(low, (int, float)) else low
+        high = high / scale if isinstance(high, (int, float)) else high
+
+    # Judged on the floor, which is the number a filter compares against.
+    if not isinstance(low, (int, float)) or low < _MIN_PLAUSIBLE_ANNUAL:
+        return {}
+
+    return {
+        "salary_min": low,
+        "salary_max": high,
+        "salary_currency": found.get("salary_currency"),
+    }
+
+
 def _first_number(node: dict, keys: tuple) -> float | None:
     if not isinstance(node, dict):
         return None
@@ -611,7 +681,7 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
         "location": _first(node, _LOCATION_KEYS),
         "description": _first(node, _DESCRIPTION_KEYS),
         "is_remote": _is_remote(node),
-        **_salary(node),
+        **_annual_salary(node, source),
     }
 
 
