@@ -1,84 +1,180 @@
-# Whole-system review — September 2026
+# Consolidated system review — September 2026
 
-A read of the pipeline end to end, looking for logic that is wrong rather than
-work that is missing. `docs/IMPROVING.md` is the design pass; this is the defect
-pass, and it deliberately overlaps as little as possible with it.
+Four independent reviews of this codebase, merged, de-duplicated, and checked
+against the code. Roughly 60 raw claims came in; 38 survive as real findings,
+7 did not reproduce, and several arrived with the mechanism right and the blast
+radius wrong. Those corrections are in §6 rather than quietly dropped, because
+a review that is wrong about severity is worse than one that is silent.
 
-Everything below was checked against the code, and where a claim is measurable
-it was measured — the numbers are from a local Postgres 16 with the schema at
-`head`, not estimates. Where a finding is latent rather than live, it says so.
+`docs/IMPROVING.md` remains the design pass — what this system could reach for.
+This is the defect pass: what it currently gets wrong.
 
-**Suite status at time of writing:** 3,243 tests. Two full `-n auto` runs: one
-green, one with a single failure that passes on its own and passed on the
-re-run. That is a flake, not a regression. See §D.
+## How to read this
 
-One thing worth saying before the list, because it shapes the priorities. The
-mechanics here are in good order: three dedupe layers with a stated invariant, a
-merge rule with one owner, `manual_fields` in front of every automatic writer,
-locks with tokens, savepoints per row, and comments that explain the *reason*
-rather than the code. Almost nothing below is sloppiness. The defects cluster
-into three shapes:
+Every finding says **what breaks**, **why it matters**, and **how to fix it**.
+Each carries a verification marker:
 
-* **Hot-path reads that are subtly wrong** — a filter that fires on the wrong
-  sentence, a region test that admits the wrong country (§A).
-* **Infrastructure that has drifted from the code it deploys** (§B). This is
-  the highest-severity group and the cheapest to fix.
-* **Ceilings that are already close** — index-less scans, one queue, one
-  eager relationship (§C).
+| | meaning |
+|---|---|
+| **REPRODUCED** | ran it and watched it fail; a transcript or measurement is quoted |
+| **CONFIRMED** | read the code path end to end and the defect is unambiguous |
+| **LATENT** | the defect is real but no live code path reaches it yet |
+| **CORRECTED** | reported by a reviewer, but the severity or mechanism was wrong |
+
+Measurements are from Postgres 16 at schema `head`. The suite is 3,243 tests
+and passes (two `-n auto` runs; one flake, see §5.7).
 
 ---
 
-## A. The job-understanding chain
+## 1. Priority 0 — burning money, and one defeated architecture
 
-### A1. Two of the three dedupe layers scan the whole table, once per posting
+### 1.1 Jobs rejected on a full description are re-scored forever · **REPRODUCED**
 
-`deduplication.find_existing_job` runs on every fetched posting:
+**What breaks.** `enrichment.requeue_settled_verdicts` selects on
+`(status = filtered_out, filter_reason ∈ DESCRIPTION_DEPENDENT_REASONS,
+len(description) ≥ 1500)` and resets those rows to `new`. The matcher scores
+them, a genuinely mediocre job lands below `min_match_score`, and it is filed
+back as `filtered_out` / `low_score` — which is **the same set of conditions the
+query selects on**. Nothing anywhere records that this job was already scored on
+this description.
 
-```python
-# app/services/deduplication.py:123
-job = db.query(Job).filter(Job.source_urls.any(url)).first()          # layer 1
-...
-.filter(Job.source == source, Job.source_job_id == source_job_id)     # layer 2
-...
-.filter(Job.dedupe_hash == dedupe_hash)                               # layer 3
+Reproduced with one job holding a stable 3,500-character posting and a matcher
+stubbed only at the LLM boundary — real `match_job`, real
+`evaluate_keyword_filter`, real status writes:
+
+```
+start: status=filtered_out reason=low_score chars=3500
+
+cycle 1: requeued=1 -> status=new | llm_calls_spent=1 -> back to filtered_out/low_score
+cycle 2: requeued=1 -> status=new | llm_calls_spent=1 -> back to filtered_out/low_score
+cycle 3: requeued=1 -> status=new | llm_calls_spent=1 -> back to filtered_out/low_score
+cycle 4: requeued=1 -> status=new | llm_calls_spent=1 -> back to filtered_out/low_score
+cycle 5: requeued=1 -> status=new | llm_calls_spent=1 -> back to filtered_out/low_score
+
+job_scores rows accumulated for this one job: 5
+description never changed; description_updated_at = None
 ```
 
-`jobs` has twelve indexes. None of them covers layer 1 or layer 2:
+**Why it matters.** `requeue_settled_verdicts(limit=RESCORE_MAX_PER_RUN=1000)`
+runs at the top of *every* enrichment pass. Passes come from a 30-minute beat,
+from a tail-call on every fetch cycle, and from self-chaining up to
+`ENRICH_MAX_CHAINED_PASSES = 50`. The eligible population is not small — the
+function's own docstring measures it at 39,702 `few_skills` plus 18,472
+`low_score` rows sitting on full descriptions. That set never shrinks; it
+circulates. Each lap is one scoring call per job, plus a second-opinion call for
+anything landing in the 55–85 deep band, plus a `job_scores` insert and a prune.
 
-| Layer | Predicate | Index | Measured (120k rows, miss) |
+Two costs, and the second is worse than the bill. Paid LLM calls on verdicts
+that cannot change, and a permanently non-empty `new` queue that competes with
+genuinely fresh postings for a matcher that processes 25 jobs a batch. The speed
+lane is the product's whole thesis, and this is what starves it.
+
+**How to fix.** The guard needs no migration and no new logic — the predicate
+already exists. `score_history._trigger` computes exactly "did the description
+grow since the last recorded verdict":
+
+```python
+grew_at = job.description_updated_at
+if grew_at is not None and previous.created_at is not None:
+    if grew_at > previous.created_at:
+        return "description_grew"
+```
+
+Lift that into `_worth_rescoring`: refuse to requeue when a `JobScore` already
+exists and the description has not been updated since it was written. Jobs whose
+text genuinely grows still come back — which is the feature — and jobs that were
+fairly judged stay judged. `JobScore.description_chars` gives a belt-and-braces
+second test if you want one.
+
+This also subsumes a separate finding about the same function: its comment
+argues that leaving the query unordered guarantees progress. It does not, but
+that hardly matters once the set is allowed to drain.
+
+---
+
+### 1.2 The three-way fetch split is cancelled by a shared lock · **CONFIRMED**
+
+**What breaks.** `app/tasks/fetch.py:39`:
+
+```python
+keys = [LOCK_KEY] if group in (None, "all") else [GROUP_LOCK_KEYS[group], LOCK_KEY]
+```
+
+Every group run acquires its own key **and** the global `LOCK_KEY`, and a
+failure on either one skips the run entirely.
+
+**Why it matters.** The module docstring states the goal: "The whole pipeline
+used to be a single 47-minute task, which meant a source that could refresh
+hourly ran on the schedule of the slowest thing beside it: Adzuna waited behind
+a Chromium launch." Because all three groups contend on `LOCK_KEY`, they still
+do. `fetch-browser-tier` holds it for the length of a Playwright run;
+`fetch-api-sources` fires on its two-hour beat, takes `jobapp:fetch:api`, fails
+on `jobapp:fetch:running`, releases, and logs "another fetch holds
+jobapp:fetch:running; skipping". The per-group keys are decoration — they never
+block anything the global key doesn't already block.
+
+The comment explains why the global key is there: so a manual "fetch everything"
+cannot overlap a scheduled group. That invariant is worth keeping; taking the
+global key in group runs is just the wrong way to keep it.
+
+**How to fix.** Invert it. An "all" run takes every group key; a group run takes
+only its own.
+
+```python
+keys = (list(GROUP_LOCK_KEYS.values())
+        if group in (None, "all")
+        else [GROUP_LOCK_KEYS[group]])
+```
+
+Same guarantee — a group run blocks "all", and "all" blocks every group — but
+two different groups no longer exclude each other. Keep writing `LOCK_KEY` as a
+non-blocking presence marker if `/runs` reads it for its "fetch running"
+indicator, or derive that indicator from the group keys.
+
+---
+
+### 1.3 Two of the three dedupe layers, and the whole overlay lookup, scan the table · **REPRODUCED**
+
+**What breaks.** `jobs` carries twelve indexes and none of them covers the
+queries that run most often.
+
+`deduplication.find_existing_job`, once per fetched posting — measured at 120k
+rows, on a miss (the case that matters, since misses are what a fetch is for):
+
+| Layer | Predicate | Index | Measured |
 |---|---|---|---|
 | 1 | `url = ANY(source_urls)` | none | **49.6 ms**, 120,000 rows scanned |
 | 2 | `source = ? AND source_job_id = ?` | none usable | **32.5 ms**, 120,000 rows scanned |
 | 3 | `dedupe_hash = ?` | unique btree | ~0.05 ms |
 
-Layer 2 looks like it has `ix_jobs_source`, but `source` has about twenty
-distinct values, so the planner correctly ignores it and scans.
+Layer 2 appears covered by `ix_jobs_source`, but `source` has about twenty
+distinct values so the planner correctly ignores it.
 
-The *miss* case is the one that matters: a genuinely new posting pays both
-scans before it is inserted, and new postings are what a fetch cycle is for. At
-the ~300k rows this system reports, that is roughly 200 ms per new posting
-before anything is written. A cycle taking in two thousand postings spends
-several minutes deciding "have we seen this?".
+`job_context.find_job`, once per job page the extension overlay renders, runs
+**three** unindexed queries in sequence — `Job.url.in_(variants)`, then
+`Job.apply_url.in_(variants)`, then `Job.source_urls.overlap(variants)`.
 
 **And the index that exists for this has never been used.** Migration 0028 adds
-a GIN index on `archived_jobs.source_urls`, with a comment explaining exactly
-why ("GIN, because the URL layer asks 'is this URL in the array' — which a
-btree cannot answer and which runs once per fetched posting"). But
-`was_archived` queries it with `.any(url)`, which SQLAlchemy emits as
-`= ANY(...)`, and **GIN cannot answer `= ANY`** — only the containment operator
-`@>`. Measured on the same 120k rows with the GIN index present:
+a GIN index on `archived_jobs.source_urls` with a comment explaining exactly why
+("a btree cannot answer" it, "runs once per fetched posting"). But
+`was_archived` queries with `.any(url)`, which SQLAlchemy emits as `= ANY`, and
+**GIN cannot answer `= ANY`** — only `@>` and `&&`. With the GIN index present:
 
 ```
 source_urls @> ARRAY['…']::varchar[]   →  0.065 ms   (Bitmap Index Scan)
 '…' = ANY(source_urls)                 → 48.283 ms   (Seq Scan, 120,000 rows removed)
 ```
 
-So the fix is two lines of DDL *and* a query-shape change; either alone does
-nothing.
+**Why it matters.** At the ~300k rows this codebase measures elsewhere, a new
+posting pays roughly 200 ms before it is written; a cycle taking in two thousand
+postings spends minutes deciding "have we seen this?". The overlay pays three
+scans on every page view, which is the one latency the user feels directly.
+
+**How to fix.** Index *and* query shape — either alone does nothing.
 
 ```python
-# deduplication.py — both call sites
-.filter(Job.source_urls.contains([url]))          # emits @>, uses GIN
+# deduplication.py, both call sites
+.filter(Job.source_urls.contains([url]))          # emits @>
 .filter(ArchivedJob.source_urls.contains([url]))
 ```
 
@@ -87,220 +183,27 @@ nothing.
 op.create_index("ix_jobs_source_urls", "jobs", ["source_urls"],
                 postgresql_using="gin")
 op.create_index("ix_jobs_source_job", "jobs", ["source", "source_job_id"])
+op.create_index("ix_jobs_url", "jobs", ["url"])
+op.create_index("ix_jobs_apply_url", "jobs", ["apply_url"])
 ```
 
-Verified after: layer 2 drops from 32.5 ms to 0.056 ms, layer 1 to 0.065 ms.
+`find_job`'s `overlap()` already emits `&&`, so the GIN index fixes that call
+site with no code change. Verified after: layer 2 drops to 0.056 ms, layer 1 to
+0.065 ms.
 
-Related but not the same problem: `job_fetcher._known_urls` (line 638) answers
-"have we seen this URL" by pulling every URL on the table into a Python set,
-once per cycle. As a bulk membership test that is defensible — one query
-instead of N — but it is a second implementation of the dedupe question with
-its own rules, and at 300k rows it is tens of megabytes held for the length of
-a cycle in each of two worker processes. Worth folding into the indexed lookup
-once one exists.
-
-**Severity: high.** Silent, compounding, and it gets worse every week the table
-grows.
+`job_fetcher._known_urls` (line 638) answers the same question by pulling every
+URL on the table into a Python set once per cycle. Defensible as a bulk test,
+but it is a second implementation of the dedupe rule with its own semantics, and
+tens of megabytes held for the length of a cycle in each of two worker
+processes. Fold it into the indexed lookup once one exists.
 
 ---
 
-### A2. The eligibility scanner blocks jobs on bare mentions
+### 1.4 Every deploy fails, and deploys three times · **REPRODUCED**
 
-`eligibility.scan` is a **blocking** filter — a hit sets `filter_reason =
-"restricted"` and the job leaves the list. Four of its patterns match a phrase
-with no requirement language around it:
-
-```python
-# app/services/eligibility.py:74-81
-(re.compile(r"(?:top[\s-]secret|ts/sci)\b", re.I),      "Security clearance required"),
-(re.compile(r"\bsecret\s+clearance\b", re.I),           "Security clearance required"),
-(re.compile(r"\bu\.?s\.?\s+person(?:s)?\b", re.I),      "ITAR / US Person requirement"),
-(re.compile(r"export[\s-]control(?:led|s)?\b", re.I),   "Export-control restriction"),
-```
-
-Three guards exist (EEO
-boilerplate, negation, cased acronyms) and none of them catches "this sentence
-is about the company, not about you". Run against realistic text:
-
-| Posting text | Verdict |
-|---|---|
-| "Acme builds software that helps manufacturers manage export control and trade compliance at scale." | **blocked** — Export-control restriction |
-| "Our TS/SCI-cleared customers rely on us. This role is fully remote and open to all." | **blocked** — Security clearance required |
-| "Acme collects personal data about U.S. persons and processes it under CCPA." | **blocked** — ITAR / US Person requirement |
-
-The first is every posting at a trade-compliance or GRC vendor. The second is
-every posting at a security company that sells to government. Neither role is
-restricted; both disappear, and product principle 3 ("every automatic decision
-shows its evidence") is technically satisfied by quoting a sentence that is
-about the customer base.
-
-The other patterns already model this correctly — `must (?:be|hold|
-possess|have) .{0,40}?clearance` requires the obligation. The bare-mention
-patterns should do the same: require a requirement verb within the sentence, or
-demote them from blocking to advisory. Blocking is the tier with the
-irreversible consequence, so it should be the tier that demands the most
-evidence.
-
-**Severity: high** for anyone whose target roles touch defence, aerospace,
-fintech compliance, or security vendors. Cheap to fix, and easy to test — the
-module is pure and already has a test file.
-
----
-
-### A3. Sponsorship direction is read from the whole sentence
-
-`_classify_sponsorship` (eligibility.py:238) searches the entire sentence for
-any negation word and calls the result negative. Two verified misreadings:
-
-| Posting text | Recorded | Correct |
-|---|---|---|
-| "Although we cannot offer relocation assistance, visa sponsorship is available for this role." | negative | positive |
-| "Sponsorship is provided at no cost to the candidate." | negative | positive |
-
-The first negation belongs to a different clause; the second is the literal
-words "no cost". The module's own comment defends word boundaries because "as
-bare substrings, 'no' matches 'now'" — the boundary is there, and `no cost` is
-still a whole-word `no`.
-
-This is advisory-only, so it changes no score and loses no job. But the badge is
-shown on the job list, the detail page, the apply queue and the extension
-overlay — four places where the product asserts, in the employer's name, the
-opposite of what the employer wrote. Under principle 4 that is worse than
-showing nothing.
-
-The fix is scope: classify on the clause containing the `sponsor` token (split
-on `,` / `;` / ` but ` / ` although `), not on the sentence; and check the
-positive pattern before the negative one when both match.
-
----
-
-### A4. The region filter admits jobs from the wrong continent
-
-`locations._region_matches` (line 231) tests two things, and both over-match:
-
-* `keywords` are plain substrings with no word boundary.
-* `abbrevs` for `usa` are the 50 two-letter state codes, matched
-  case-sensitively — and **two-letter US state codes collide with ISO-3166
-  country codes.**
-
-Verified against `prefs = {"regions": ["usa"]}`:
-
-| Location text | Matches `usa` via |
-|---|---|
-| `Toronto, CA` / `Vancouver, CA` | `CA` (California / Canada) |
-| `Berlin, DE` / `Munich, DE` | `DE` (Delaware / Germany) |
-| `Bengaluru, IN` | `IN` (Indiana / India) |
-| `Tel Aviv, IL` | `IL` (Illinois / Israel) |
-| `Valletta, MT` | `MT` (Montana / Malta) |
-| `Panama City, PA` | `PA` (Pennsylvania / Panama) |
-| `Jerusalem, Israel` | substring `usa` in **Jer-usa-lem** |
-| `South America` | substring `america` |
-
-`location_allowed` tests the user's own regions *first* and returns `True` on
-the first hit, so all of these pass the gate as "matches your preferences".
-They then cost a full scoring call each and land in the list.
-
-Two contained fixes:
-
-* Require a word boundary on multi-character keywords, or at minimum drop the
-  three-letter ones (`usa`, `u.s.`) to a boundary match.
-* Only accept a two-letter state code when something else in the string already
-  says United States, or when it is preceded by a comma **and** the string has
-  no other country signal. A simpler version that removes most of the damage:
-  check the *other* regions first and return `False` on a match, so
-  `Toronto, CA` loses to `canada`'s explicit `toronto` keyword.
-
-Note `deduplication.normalize_location` does **not** have this bug — it strips
-the same tokens by name and falls back when nothing survives. The two functions
-solve adjacent problems with opposite care.
-
----
-
-### A5. A `low_score` rejection can describe a penalty it did not apply
-
-```python
-# app/services/matcher.py:1126
-penalty = " (after a 15-point seniority penalty)" if not llm_result.get(
-    "seniority_fit", True) else ""
-job.filter_detail = f"AI scored this {score}/100{penalty}, below your minimum of {min_score}."
-```
-
-`score` at this point is the **deep** score when the second pass ran (line
-1089), but `llm_result` is the **first** pass. When the two passes disagree on
-`seniority_fit`, the sentence either claims a penalty that was not applied to
-the number it quotes, or omits one that was.
-
-One-line fix: carry the result that produced `score`.
-
-```python
-verdict = deep_result if deep_result is not None else llm_result
-penalty = " (after a 15-point seniority penalty)" if not verdict.get("seniority_fit", True) else ""
-```
-
-**Severity: low** in effect, but this is the sentence the user reads to decide
-whether to override the filter, and the codebase treats that as load-bearing.
-
----
-
-### A6. The two ingest paths disagree about `experience_level`
-
-`base.parse_experience_level` returns `None` when a posting gives no signal, and
-its docstring spends a paragraph on why: "'mid' was never a finding — it was the
-fallback … a posting that says 'Mid-level Engineer' and one that says nothing at
-all" became identical, the jobs-page filter returned every unclassifiable
-posting under "Mid", and `enrich_from` could not merge the column.
-`harvest._normalize` was fixed to match, with its own comment
-(`harvest.py:745`).
-
-The API fetch path was not:
-
-```python
-# app/services/job_fetcher.py:1193
-experience_level=job_data.get("experience_level", "mid"),
-```
-
-Today this is **latent** — every adapter reachable through `_run_all_adapters`
-sets the key, either directly or through `base.jobs_from_listing`. It bites the
-first adapter that forgets, and it will do so silently: the column fills with
-`"mid"`, the scoring prompt states it as a fact, and `_FILL_IF_NULL` can no
-longer merge a real value in from a second sighting. Change it to
-`job_data.get("experience_level")`.
-
----
-
-### A7. The title gate is far looser than its name
-
-`_title_matches_roles` passes on **any single word overlap** with any target
-role or any LLM-expanded query. With "Software Engineer" among the roles, every
-"Sales Engineer", "Civil Engineer" and "Field Service Engineer" passes the gate
-labelled "Title doesn't match target roles".
-
-This is a deliberate fail-open and it is the right default for the filter. But
-the same predicate is reused as the *priority* function for enrichment
-(`enrichment._title_gate`, used by `select_targets`), where fail-open means
-nearly every candidate ranks in the first bucket and the ordering carries almost
-no information. If the enrichment queue is meant to work the most promising jobs
-first, that ranking needs a stricter test than the filter's — for instance
-requiring overlap on a role's *head noun* plus one qualifier.
-
-**Severity: low.** Worth knowing before trusting the enrichment ordering.
-
----
-
-## B. Infrastructure that has drifted from the code
-
-This group is the highest severity in the review and the cheapest to fix.
-
-### B1. Every deploy fails, and deploys three times
-
-`.github/workflows/deploy.yml` ends each of its three scripts with:
-
-```
-docker compose -f docker-compose.prod.yml restart nginx
-```
-
-There is no `nginx` service in `docker-compose.prod.yml` — the proxy is
-`caddy`. Verified locally:
+**What breaks.** `.github/workflows/deploy.yml` ends each of its three scripts
+with `docker compose -f docker-compose.prod.yml restart nginx`. There is no
+`nginx` service in the prod compose file — the proxy is `caddy`:
 
 ```
 $ docker compose -f docker-compose.prod.yml restart nginx
@@ -308,239 +211,402 @@ no such service: nginx
 EXIT=1
 ```
 
-The step therefore fails *after* a successful build and migration. That trips
-`continue-on-error` → sleep 120 → **full rebuild + `alembic upgrade head`
-again** → fails again → sleep 240 → **third rebuild + migration**, this time
-with no `continue-on-error`, so the workflow ends red.
+**Why it matters.** The step fails *after* a successful build and migration, so
+`continue-on-error` fires → sleep 120 → full rebuild and `alembic upgrade head`
+again → fails again → sleep 240 → a third rebuild, this time without
+`continue-on-error`, and the workflow ends red. Every push to `main` costs three
+image builds, three migration runs, about seven minutes, and a red check that
+says nothing about whether the deploy worked. The retry ladder was built for
+intermittent SSH timeouts and now fires on a certainty.
 
-Every push to `main`: three image builds, three migration runs, ~7 minutes, and
-a red check that says nothing about whether the deploy worked. The retry ladder
-was built for intermittent SSH timeouts and is now firing on a certainty.
-
-**Fix:** `restart caddy`, or delete the line — `up -d --build` already restarts
-what changed, and the Caddyfile is a read-only bind mount that Caddy does not
-need a restart to pick up unless it changed.
+**How to fix.** `restart caddy`, or delete the line — `up -d --build` already
+restarts what changed, and the Caddyfile is a read-only bind mount.
 
 ---
 
-### B2. Nothing runs the tests
+## 2. Priority 1 — wrong answers about jobs
 
-`deploy.yml` is the only workflow in the repository. 3,243 tests, a four-minute
-parallel suite, and no gate between a push and production. Given how much of
-this system's correctness lives in those tests — the eligibility scanner, the
-merge rules, the dedupe invariant — that is the single biggest process gap.
+### 2.1 The eligibility scanner blocks jobs on bare mentions · **REPRODUCED**
 
-A minimal `test.yml` (postgres service container, `pip install -e ".[dev]"`,
-`pytest`) is a dozen lines and would have caught nothing in this review, which
-is exactly the point: it protects the next change, not this one.
-
----
-
-### B3. `make up` starts a broken proxy
-
-```yaml
-# docker-compose.yml
-nginx:
-  volumes:
-    - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
-```
-
-`./nginx/` has never existed in this repository — `git log -- nginx/` is empty,
-and the tree has `caddy/` instead. Docker creates an empty *directory* at that
-path and mounts it, so the container comes up serving the stock nginx page.
-Harmless because port 8000 is published directly, but it means `make up` always
-leaves one container in a wrong state and one stray directory in the working
-tree. Either point it at `caddy/Caddyfile` or drop the service from dev.
-
----
-
-### B4. Two uvicorn workers race the migration at startup
-
-```yaml
-command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
-```
+**What breaks.** Four `_RESTRICTION_PATTERNS` match a phrase with no requirement
+language around it:
 
 ```python
-# app/main.py:105 — inside the lifespan
-result = subprocess.run(["alembic", "upgrade", "head"], ...)
-if result.returncode != 0:
-    _migration_failure = detail          # module-level global
+(re.compile(r"(?:top[\s-]secret|ts/sci)\b", re.I),      "Security clearance required"),
+(re.compile(r"\bsecret\s+clearance\b", re.I),           "Security clearance required"),
+(re.compile(r"\bu\.?s\.?\s+person(?:s)?\b", re.I),      "ITAR / US Person requirement"),
+(re.compile(r"export[\s-]control(?:led|s)?\b", re.I),   "Export-control restriction"),
 ```
 
-With `--workers 2`, uvicorn forks two processes and **each runs the lifespan**,
-so two `alembic upgrade head` run concurrently against the same database. When
-there is anything to apply, one commits and the other fails on an object that
-now exists. The loser sets `_migration_failure`, and the middleware then serves
+A hit sets `filter_reason = "restricted"` and the job leaves the list. Three
+guards exist — EEO boilerplate, negation, cased acronyms — and none of them asks
+whether the sentence is about the *reader* or about the *company*. Run against
+realistic text:
+
+| Posting text | Verdict |
+|---|---|
+| "Acme builds software that helps manufacturers manage export control and trade compliance at scale." | **blocked** — Export-control restriction |
+| "Our TS/SCI-cleared customers rely on us. This role is fully remote and open to all." | **blocked** — Security clearance required |
+| "Acme collects personal data about U.S. persons and processes it under CCPA." | **blocked** — ITAR / US Person requirement |
+
+**Why it matters.** This is the *blocking* tier, with the irreversible
+consequence. The first row is every posting at a trade-compliance or GRC vendor;
+the second is every posting at a security company selling to government. Whole
+employers vanish silently. And standard commercial boilerplate — "this position
+is subject to U.S. export control regulations" — appears at Intel, Qualcomm,
+Cisco and Apple on roles that are lawfully open to non-citizens, since EAR
+"US Person" includes permanent residents and asylees.
+
+Product principle 3 is technically satisfied — evidence is shown — by quoting a
+sentence about the customer base.
+
+**How to fix.** Make these patterns look like the other eleven, which already
+model it correctly (`must (?:be|hold|possess|have) .{0,40}?clearance` requires
+the obligation). Require a requirement verb in the same sentence:
+
+```python
+_REQUIREMENT_NEAR = re.compile(
+    r"\b(?:must|required?|requires|restricted|limited to|eligib|"
+    r"you will need|candidates? must)\b", re.I)
+```
+
+and gate the four bare-mention patterns on it. Or demote them to the advisory
+tier, where a wrong reading costs a badge rather than the job. Blocking should be
+the tier that demands the most evidence, not the least. `eligibility` is a pure
+module with its own test file, so each of the rows above is a one-line test.
+
+---
+
+### 2.2 Sponsorship badges are context-blind and direction-blind · **REPRODUCED**
+
+Two separate defects in the same advisory read.
+
+**Any sentence containing "sponsor" is treated as an immigration statement.**
+`_SPONSORSHIP_TRIGGER = re.compile(r"sponsor(?:s|ed|ing|ship)?\b", re.I)` has no
+immigration context requirement, so:
+
+* "We sponsor attendance at PyCon and regional tech conferences" → matches
+  `_SPONSORSHIP_POSITIVE_RE` on "supports"/"provides" → badged **sponsorship
+  available**.
+* "The executive sponsor will oversee delivery" → no positive keyword →
+  badged **will not sponsor**.
+
+**Direction is read from the whole sentence, not the sponsorship clause:**
+
+| Posting text | Recorded | Correct |
+|---|---|---|
+| "Although we cannot offer relocation assistance, visa sponsorship is available for this role." | negative | positive |
+| "Sponsorship is provided at no cost to the candidate." | negative | positive |
+
+The first negation belongs to a different clause. The second is the literal
+words "no cost" — the module's comment defends word boundaries because "as bare
+substrings, 'no' matches 'now'", and the boundary is there; `no cost` is a
+whole-word `no`.
+
+**Why it matters.** Advisory-only, so no score changes and no job is lost. But
+the badge appears on the job list, the detail page, the apply queue and the
+extension overlay — four places where the product asserts, in the employer's
+name, something the employer did not say. Under principle 4 ("never fabricate")
+that is worse than showing nothing, and it is being asserted about the one topic
+principle 4a says to handle with maximum care.
+
+**How to fix.** Two narrow changes.
+1. Require immigration context in the sentence before treating it as a
+   sponsorship statement: `visa|work authorisation|work authorization|h-1b|
+   h1b|green card|permanent resident|immigration|opt|cpt|tn visa`.
+2. Classify on the clause containing the `sponsor` token, not the sentence —
+   split on `,` `;` ` but ` ` although ` ` however ` — and test the positive
+   pattern before the negative one when both match.
+
+---
+
+### 2.3 The resume writer never sees the job's requirements · **CONFIRMED**
+
+**What breaks.** `matcher.MATCH_DESCRIPTION_CHARS` defaults to 24,000 and the
+docstring explains why it was raised: 4,000 "routinely cut off
+mid-requirements — so the model was scoring seniority and skill fit against the
+marketing half of the posting". The document generator never got that fix:
+
+| Call site | Ceiling |
+|---|---|
+| `doc_generator.py:412` — tailor bullet points | `job_description[:2000]` |
+| `doc_generator.py:797` — tailor summary | `job_description[:2500]` |
+| `doc_generator.py:914` — cover letter | `job_description[:2500]` |
+| `doc_generator.py:244` — extract job insights | `job_description[:4000]` |
+| `self_review.py:~154` — review the draft | `job_description[:6000]` |
+
+**Why it matters.** 2,000 characters is about 300 words, and in a modern
+corporate posting that is the company intro, the mission statement and the
+culture paragraph. Requirements, tech stack and responsibilities live in the
+lower half. So the model rewriting the user's resume bullets to match a job is
+doing it **without having read what the job asks for** — and the self-review
+pass that is supposed to catch that is reading a different, also-truncated
+excerpt. This is the product's core promise ("tailored resume and cover letter
+per role") running on the wrong half of the input.
+
+**How to fix.** Two steps, and the second matters more than the first.
+
+1. Raise the ceilings toward `MATCH_DESCRIPTION_CHARS`, through one shared
+   helper rather than five literals.
+2. Pass the structured facts that already exist. `job_details` extracts
+   `required_skills`, `nice_to_have_skills`, `required_years` and
+   `education_required` into columns precisely so downstream consumers stop
+   re-deriving them from prose. `matcher._stated_facts` already renders them as
+   explicit lines; give the generator the same block. A prompt that opens with
+   "Required skills: Python, Kubernetes, Terraform" beats any amount of raw
+   text.
+
+---
+
+### 2.4 The seniority prefilter never checks the stated number for non-juniors · **CONFIRMED**
+
+**What breaks.** `matcher._blocked_by_seniority`:
+
+```python
+total_years = _total_years(profile_data.get("experience", []))
+if total_years >= tunable(profile_data, "junior_max_years"):
+    return False                      # ← every non-junior exits here
+
+required = getattr(job, "required_years", None)
+if isinstance(required, (int, float)) and not isinstance(required, bool):
+    return float(required) > total_years + SENIORITY_YEARS_TOLERANCE
+```
+
+**Why it matters.** The docstring's thesis is "the number wins" — a title word is
+a guess, a stated `required_years` is a fact. But the numeric branch is
+unreachable for anyone above `junior_max_years` (default 3). A candidate with
+four years is never spared a job that explicitly asks for fifteen: it passes the
+prefilter, costs a scoring call, and the LLM rejects it because the prompt tells
+it to. The cheap deterministic check that exists to avoid that call is skipped
+for exactly the candidates who have outgrown the junior heuristic.
+
+**How to fix.** Hoist the numeric check above the junior gate, so the stated
+number is consulted whenever the posting states one and the title heuristic
+stays the junior-only fallback it was written as:
+
+```python
+required = getattr(job, "required_years", None)
+if isinstance(required, (int, float)) and not isinstance(required, bool):
+    return float(required) > total_years + SENIORITY_YEARS_TOLERANCE
+
+if total_years >= tunable(profile_data, "junior_max_years"):
+    return False
+# title heuristic below, unchanged
+```
+
+Worth stating the consequence: the `filter_senior_titles` toggle then also
+governs a numeric check. That reads as correct given the docstring, but it is a
+behaviour change for senior profiles and the tunable's help text should say so.
+
+---
+
+### 2.5 The region filter admits jobs from the wrong continent · **REPRODUCED**
+
+**What breaks.** `locations._region_matches` tests unbounded substring keywords
+plus case-sensitive two-letter US state codes — and **US state codes collide
+with ISO-3166 country codes.** Verified against `prefs = {"regions": ["usa"]}`:
+
+| Location text | Matches `usa` via |
+|---|---|
+| `Toronto, CA` / `Vancouver, CA` | `CA` — California / Canada |
+| `Berlin, DE` / `Munich, DE` | `DE` — Delaware / Germany |
+| `Bengaluru, IN` | `IN` — Indiana / India |
+| `Tel Aviv, IL` | `IL` — Illinois / Israel |
+| `Valletta, MT` | `MT` — Montana / Malta |
+| `Panama City, PA` | `PA` — Pennsylvania / Panama |
+| `Jerusalem, Israel` | substring `usa` in **Jer-usa-lem** |
+| `South America` | substring `america` |
+
+`location_allowed` tests the user's own regions first and returns `True` on the
+first hit, so every one of these passes as "matches your preferences", costs a
+scoring call, and lands in the list.
+
+**Why it matters.** Wasted scoring calls, and a location filter that quietly
+does not filter. Note `deduplication.normalize_location` solves the adjacent
+problem correctly — it strips the same tokens by name and falls back when
+nothing survives — so the care exists in the codebase, just not here.
+
+**How to fix.** Two contained changes.
+1. Word-boundary the multi-character keywords, or at minimum the three-letter
+   ones (`usa`, `u.s.`).
+2. Check the *other* regions before the user's own and return `False` on a
+   match. `Toronto, CA` then loses to `canada`'s explicit `toronto` keyword, and
+   most of the table above resolves for free. Accept a bare state code only when
+   something else in the string already says United States.
+
+---
+
+### 2.6 Salary loses its period, so the filter hides the best-paying jobs · **CONFIRMED**
+
+Already the first item in `docs/IMPROVING.md` §0 and independently re-raised
+here; confirmed still live, so it belongs on this list.
+
+`job_details._SYSTEM_PROMPT` asks the model for "the annual figure when the
+posting gives one; if it quotes an hourly rate, give the hourly number", and the
+schema has no `salary_period`. So a $65/hr contract role stores
+`salary_min = 65.0`. Consequences, all live:
+
+* `Job.salary_label` renders "$65" rather than "$65/hr".
+* `matcher._stated_facts` writes "Stated salary: $65" into the same prompt as
+  "Minimum salary: $130,000", inviting the model to conclude the job pays $65 a
+  year.
+* `routers/jobs.py:232` filters `coalesce(salary_max, salary_min) >= floor`, so
+  a $100k floor hides a $65/hr posting worth about $135k — and admits a
+  posting stating €100,000 against a floor the user meant in dollars.
+
+The build plan in `IMPROVING.md` §0 is sound and unchanged: add `salary_period`
+and derived `salary_annual_*` columns, ask the model to transcribe rather than
+convert, treat the period as part of the band in `enrich_from`, and read the
+annual columns in the filter and the prompt.
+
+---
+
+## 3. Priority 2 — infrastructure drift
+
+### 3.1 Two uvicorn workers race the migration, and the loser serves 503 forever · **CONFIRMED**
+
+Prod runs `uvicorn app.main:app --workers 2`, and `app/main.py:105` runs
+`subprocess.run(["alembic", "upgrade", "head"])` **inside the lifespan** — which
+executes once per worker process. When there is anything to apply, one commits
+and the other fails on an object that now exists, sets the module-global
+`_migration_failure`, and the middleware then answers every request that process
+receives with
 
 ```
 503 — The database schema is not up to date, so the application is refusing
       to serve against it.
 ```
 
-to every request that process receives, for the life of the process. Both
-workers share the listening socket, so roughly half of all requests 503 after a
-deploy that, from the outside, succeeded. `_migration_failure` is only cleared
-by another lifespan, so it does not heal.
+Both workers share the listening socket, so roughly half of all requests 503
+after a deploy that looked successful, and `_migration_failure` is only cleared
+by another lifespan, so it does not heal. §1.4 makes it worse by running the
+migration three more times during the restart.
 
-B1 makes this worse: the retry ladder runs `alembic upgrade head` three times,
-against a stack that is simultaneously restarting.
+**Fix.** Take the write out of the request path. The deploy script already runs
+`alembic upgrade head` as its own step, so the lifespan should *verify* instead:
+compare `alembic_version` against `ScriptDirectory.get_current_head()` and set
+`_migration_failure` on a mismatch. Same guarantee, no write, no race. If it
+must stay, wrap it in a Postgres advisory lock.
 
-**Fix:** take the migration out of the request path. Run it once as a
-pre-start step (the deploy script already does, line 24), and have the lifespan
-*verify* instead — compare `alembic_version` to `script.get_current_head()` and
-set `_migration_failure` on a mismatch. Same guarantee, no write, no race. If it
-must stay in the lifespan, wrap it in a Postgres advisory lock.
+### 3.2 Nothing runs the tests · **CONFIRMED**
 
----
+`deploy.yml` is the only workflow in the repository. 3,243 tests, a four-minute
+parallel suite, and no gate between a push and production — while much of this
+system's correctness lives in those tests. A `test.yml` with a postgres service
+container, `pip install -e ".[dev]"` and `pytest` is a dozen lines. It would
+have caught nothing in this review, which is the point: it protects the next
+change.
 
-### B5. Generated documents are served without authentication
+### 3.3 A Redis blip on release wedges fetching for an hour · **CONFIRMED**
 
-```
-# caddy/Caddyfile:24
-handle_path /storage/* {
-    root * /storage
-    header Content-Disposition attachment
-    file_server
-}
-```
+`fetch_lock.acquire` writes the token with `ex=DEFAULT_TTL_SECONDS = 3600`.
+`release()` runs a Lua CAS-delete, and on any Redis exception it logs and
+returns — leaving the key to expire. So a transient Redis error during release,
+in a cycle that has already finished, blocks the next fetch for up to an hour.
+The match and enrich locks use 1800s; fetch is the outlier.
 
-Caddy serves this from the shared volume; the request never reaches FastAPI, so
-`require_authentication` never runs. What is in there is
+**Fix.** Size the TTL to a slow cycle rather than an hour, and retry the release
+once or twice before giving up. A lock whose TTL greatly exceeds the work it
+guards converts a network blip into an outage.
+
+### 3.4 A failed final commit loses the whole fetch cycle · **CONFIRMED**
+
+`fetch_and_save_jobs` wraps each job insert in `db.begin_nested()`, which
+correctly isolates one bad row. But all those savepoints live inside one outer
+transaction committed once at line 1237; if that commit fails (connection loss,
+disk pressure) the `except` logs and rolls back, and every insert in the cycle is
+gone. The savepoints protect against a bad row, not against a bad commit.
+
+**Fix.** Commit in chunks — every few hundred rows — so a late failure costs a
+chunk rather than a cycle. `record_run` already commits separately, so the
+pattern is established.
+
+### 3.5 Generated documents are served without authentication · **CONFIRMED**
+
+`caddy/Caddyfile:24` serves `/storage/*` straight off the shared volume with
+`file_server`, so the request never reaches FastAPI and
+`require_authentication` never runs. The files are
 `{application_id}/{application_id}_resume_v1.pdf` — a tailored resume carrying
-the user's full name, address, phone number, email and complete work history.
+the user's full name, address, phone, email and complete work history.
 
-The middleware's own docstring explains why it is middleware and not a
+The middleware's own docstring explains why it is middleware rather than a
 dependency: "the failure mode of forgetting is an endpoint that silently serves
 the user's application history to the internet." This is that endpoint, reached
-from outside the application.
+from outside the application. The UUID makes it unguessable in practice and
+`file_server` will not list the directory, so this is obscurity rather than
+exposure — but any leaked URL is permanently public.
 
-The UUID makes it unguessable in practice and `file_server` will not list the
-directory, so this is obscurity rather than exposure — but it means any leaked
-URL (browser history, a referrer, the extension, a shared link) is permanently
-public, and it is the one place the stated security model is not enforced.
+**Fix.** Serve documents through an authenticated FastAPI route
+(`FileResponse` behind the existing middleware), or add `forward_auth` to the
+`/storage` handler.
 
-**Fix:** either serve documents through an authenticated FastAPI route
-(`FileResponse` behind the existing middleware), or add
-`forward_auth`/`basicauth` to the `/storage` handler in the Caddyfile.
+### 3.6 The login throttle can be stepped over · **CONFIRMED**
 
-`docs/IMPROVING.md` says "There is no security work" — so this is offered as
-information, not as an argument about priorities.
+`routers/auth.py:22` reads the **first** `X-Forwarded-For` entry. `X-Forwarded-For`
+is client-supplied, and Caddy's `reverse_proxy` *appends* the peer address to
+whatever arrived rather than replacing it (this is why `trusted_proxies`
+exists). So a request carrying `X-Forwarded-For: 1.2.3.4` reaches the app as
+`1.2.3.4, <real ip>` and `split(",")[0]` returns the attacker-chosen half.
+Rotate it per request and `MAX_ATTEMPTS = 5` / `LOCKOUT_SECONDS = 300` never
+engage — against a single shared password, which is the exact threat
+`auth.py`'s docstring names.
 
----
+**Fix.** Read the **last** XFF entry — the only one your own hop added — or drop
+XFF and use `request.client.host`; with one tenant a single global throttle
+bucket is not a limitation. The docstring also still says "nginx".
 
-### B6. The login throttle can be stepped over
+### 3.7 `make up` starts a broken proxy · **CONFIRMED**
 
-```python
-# app/routers/auth.py:17
-def _client(request: Request) -> str:
-    """Behind nginx every request arrives from the proxy, so the forwarded
-    address is the only thing that distinguishes callers."""
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-```
-
-`X-Forwarded-For` is a client-supplied header, and Caddy's `reverse_proxy`
-**appends** the peer address to whatever the client sent rather than replacing
-it (this is why `trusted_proxies` exists). So a request carrying
-`X-Forwarded-For: 1.2.3.4` arrives at the app as `1.2.3.4, <real ip>`, and
-`split(",")[0]` returns the attacker-chosen half. Rotating that header per
-request means `MAX_ATTEMPTS = 5` / `LOCKOUT_SECONDS = 300` never engage.
-
-The general rule is the same whatever the proxy does: the only entry in an XFF
-chain you can trust is the **last** one, because that is the one your own hop
-added. Reading the first is reading whatever the client typed.
-
-`auth.py`'s own docstring states the threat this defends against: "One password
-and no user database means an unthrottled login form is a plain offline-speed
-guessing target."
-
-**Fix:** take the **last** XFF entry (the hop Caddy itself added), or drop XFF
-entirely and use `request.client.host` — with one tenant, a single global
-throttle bucket is not a limitation. The docstring also still says "nginx".
+`docker-compose.yml` mounts `./nginx/nginx.conf`, which has never existed in
+this repository (`git log -- nginx/` is empty; the tree has `caddy/`). Docker
+creates an empty *directory* at that path and mounts it, so the container serves
+the stock nginx page and leaves a stray directory in the working tree. Harmless
+— port 8000 is published directly — but `make up` always leaves one container
+wrong. Point it at `caddy/Caddyfile` or drop the service from dev.
 
 ---
 
-### B7. The 500 page renders the traceback
+## 4. Priority 3 — ceilings already close
 
-`main.py:357` passes `traceback` into `errors/error.html`, which renders it in a
-`<pre>` (line 41). It is behind authentication and there is one user, so this is
-a note rather than a finding — but it is on by default with no `DEBUG` gate, and
-a traceback through this codebase carries SQL and connection details.
+### 4.1 One Celery queue, two slots, two self-chaining 25-minute tasks · **CONFIRMED**
 
----
+`celery_app.conf` declares no `task_routes` and no queues, so everything shares
+`celery`; production runs `--concurrency=2`. Both `match_jobs` and `enrich_jobs`
+carry `soft_time_limit=1500` and re-queue themselves while there is work. They
+can hold both slots, and a user clicking "Generate documents" then waits behind
+up to 25 minutes of LLM round trips with nothing but a spinner.
 
-## C. Ceilings that are already close
+**Fix.** Two queues and a second worker container: `batch` (match, enrich, fetch,
+archive, prune, backup) and `interactive` (generate, agent-triggered work,
+manual triggers), routed by task name with `-Q` per worker. A compose change
+plus about ten lines of config.
 
-### C1. One queue, two slots, two self-chaining 25-minute tasks
+### 4.2 Beat publishes regardless of queue depth; most tasks have no lock · **CONFIRMED**
 
-`celery_app.conf` sets no `task_routes` and declares no queues, so everything
-shares `celery`. Production runs `--concurrency=2`. Both `match_jobs` and
-`enrich_jobs` have `soft_time_limit=1500` (25 min) and re-queue themselves while
-there is more to do.
-
-The consequence: the two batch chains can hold both slots, and a user clicking
-"Generate documents" or "Fetch now" waits behind up to 25 minutes of LLM round
-trips with no feedback other than a spinner. `worker_prefetch_multiplier=1` makes
-this fair but not fast.
-
-**Fix:** two queues and a second worker container — `batch` (match, enrich,
-fetch, archive, prune, backup) and `interactive` (generate, agent-triggered
-work, manual triggers) — `task_routes` by task name, `-Q` per worker. It is a
-compose change plus about ten lines of config.
-
-### C2. Beat publishes regardless of queue depth; most tasks have no lock
-
-Four of the thirteen scheduled tasks take a Redis lock and no-op when a pass is
-already running (`fetch`, `match`, `enrich`, `compare_models`). The other nine —
-`poll_mailbox` (every 15 min), `top_up_browsing` (30 min), `sweep_generations`
+Four of thirteen scheduled tasks take a Redis lock and no-op when a pass is
+running (`fetch`, `match`, `enrich`, `compare_models`). The other nine —
+`poll_mailbox` (15 min), `top_up_browsing` (30 min), `sweep_generations`
 (20 min), `check_postings`, `archive_old_jobs`, `refresh_stale_docs`,
 `process_followups`, `prune_llm_log`, `prune_agent_history` — do not. During any
 window where both slots are busy, beat keeps publishing and the copies run
-back-to-back afterwards. For `poll_mailbox` that means several IMAP sessions in
-a row; for `sweep_generations`, several unbounded scans.
+back-to-back afterwards: several IMAP sessions in a row, several unbounded
+scans. `sweep_generations` is unbounded in a second sense too — its
+"never queued" query has no `LIMIT` and touches `app.documents` per row.
 
-`sweep_generations` is also unbounded in another sense: its "never queued" query
-loads every matched application with no `LIMIT`, and touches `app.documents`
-per row.
+### 4.3 `Job.scores` is eagerly loaded everywhere, for one page · **CONFIRMED**
 
-### C3. `Job.scores` is eagerly loaded everywhere, for one page
+`app/models/job.py:164` sets `lazy="selectin"`, justified by the jobs list page
+rendering score history on every card. That is true, and every batch path pays
+for it too — there is no `noload` anywhere in the codebase. Per run:
+`archive.candidates` loads 5,000 Job objects, `requeue_settled_verdicts` 4,000,
+`enrichment.select_targets` up to 1,000, `liveness.candidates` 200. Each fires a
+second query for score rows nobody reads, on top of de-TOASTing descriptions.
 
-```python
-# app/models/job.py:164
-scores: Mapped[list["JobScore"]] = relationship(..., lazy="selectin", ...)
-```
+**Fix.** `lazy="select"` on the relationship plus an explicit
+`.options(selectinload(Job.scores))` on the jobs list route. One line moved;
+identical page behaviour.
 
-The comment justifies it by the jobs list page rendering score history on every
-card. That is true, and every batch path pays for it too — there is no `noload`
-anywhere in the codebase. Per run: `archive.candidates` loads 5,000 Job objects,
-`requeue_settled_verdicts` 4,000, `enrichment.select_targets` up to 1,000,
-`liveness.candidates` 200. Every one of them fires a second query for score rows
-nobody reads, on top of de-TOASTing the descriptions.
-
-**Fix:** `lazy="select"` on the relationship plus an explicit
-`.options(selectinload(Job.scores))` on the jobs list route — one line moved,
-same page behaviour, and the batch paths stop paying.
-
-### C4. `requeue_settled_verdicts` will wall, for the reason it says it avoids
-
-```python
-# app/services/enrichment.py:812
-# No ordering, deliberately. … Unordered, every pass makes progress, and the
-# whole set is a day's work.
-```
-
-The rows that pass the in-Python length test are updated (`status = new`), which
-in Postgres writes a new tuple version elsewhere in the heap and removes them
-from the filter. The rows that *fail* it — still thin — are not written at all,
-so they stay exactly where they are. A sequential scan returns them first again
-next pass, and the proportion of a batch that qualifies falls monotonically.
-
-That is the same starvation `select_targets` needed `enrichment_attempted_at` to
-escape, one function further down the file. The same fix works: stamp a column
-when a row is examined and excluded, and filter on it.
-
-### C5. Archiving and enrichment compete for the same rows, and archiving wins
+### 4.4 Archiving competes with enrichment for the same rows, and wins · **CONFIRMED**
 
 `archive._eligible` takes any `filtered_out` job older than
 `ARCHIVE_AFTER_DAYS` (60) whose reason is not user-made:
@@ -550,97 +616,280 @@ PROTECTED_REASONS = frozenset({"manual", "blocked_title", "excluded_company"})
 ```
 
 `DESCRIPTION_DEPENDENT_REASONS` — `no_description`, `few_skills`, `low_score`,
-`restricted`, `seniority` — is not protected. Those are precisely the rows the
-whole enrichment subsystem exists to rescue, and archiving is irreversible for
-this purpose: the description is what archiving discards, and `was_archived()`
-then makes the fetcher skip the posting on every future cycle.
+`restricted`, `seniority` — is not protected, and those are exactly the rows
+enrichment exists to rescue. Archiving is irreversible for this purpose: the
+description is what it discards, and `was_archived()` then makes the fetcher skip
+the posting on every future cycle. So any job enrichment has not reached within
+60 days leaves the pipeline permanently.
 
-So any job enrichment has not reached within 60 days leaves the pipeline
-permanently, and the module docstring's claim that "a job filtered on a title
-mismatch in June is not going to be reconsidered" is true of `title_mismatch`
-and false of the five reasons above — `enrichment._worth_rescoring` says so
-directly.
+The module docstring's claim that "a job filtered on a title mismatch in June is
+not going to be reconsidered" is true of `title_mismatch` and false of the five
+reasons above — `enrichment._worth_rescoring` says so directly.
 
-Whether this is currently losing jobs depends on whether enrichment drains
-faster than 60 days; with ~58,700 rows parked under description-dependent
-verdicts and `ENRICH_MAX_PER_RUN = 200`, it is worth measuring before assuming
-it does. Cheapest guard: exclude rows that still have `enrichment_attempted_at
-IS NULL` from archiving, so nothing is retired before it has been tried once.
+**Fix.** Cheapest guard: never archive a row with
+`enrichment_attempted_at IS NULL`, so nothing is retired before it has been
+tried once. Better: exclude `DESCRIPTION_DEPENDENT_REASONS` unless the row
+already holds a full description, in which case its verdict is genuinely
+settled — which is the same predicate §1.1 needs.
 
-### C6. Liveness cannot keep up past ~1,200 matched jobs
+### 4.5 Liveness cannot keep up past ~1,200 matched jobs · **CONFIRMED**
 
 `LIVENESS_MAX_PER_CYCLE = 200`, `LIVENESS_INTERVAL_HOURS = 12`,
 `LIVENESS_RECHECK_DAYS = 3` → 400 checks a day, sustaining 1,200 jobs on a
 three-day cycle. `candidates()` orders `liveness_checked_at ASC NULLS FIRST`, so
-newly matched jobs always jump ahead of stale re-checks. Past the ceiling, the
-oldest matched jobs stop being re-checked entirely and keep showing a "still
-open" state that is months old — which is the exact failure the module was
-written to remove, relocated from "never checked" to "checked once".
+new matches always jump ahead of stale re-checks. Past the ceiling the oldest
+matched jobs stop being re-checked and keep showing a months-old "still open" —
+the failure the module was written to remove, relocated from "never checked" to
+"checked once".
 
-Worth surfacing the ratio on `/runs` (matched jobs ÷ daily check budget) rather
-than raising the budget blind.
+**Fix.** Surface the ratio on `/runs` (matched jobs ÷ daily budget) before
+raising the budget blind.
 
----
+### 4.6 `find_duplicate_application_job` scans every application in Python · **CONFIRMED**
 
-## D. Test health
+It pulls `(id, company, title)` for every job ever applied to into memory and
+compares normalised strings, once per matched job. The comment explains why
+normalisation cannot go into SQL, which is fair. For one person's search the
+candidate set is hundreds of rows, so this is a distant problem rather than a
+live one — but it grows monotonically with the user's own success, and it runs
+on the read side of every scoring pass.
 
-* **A flake in the auth tests.** Two full `-n auto` runs on the same commit:
-  the first failed
-  `tests/test_agent_api.py::TestAuthentication::test_rejects_a_missing_token`
-  (`assert 503 == 401`), the second passed everything. The test passes on its
-  own at `-n0`. A 503 from that route means either `_migration_failure` or
-  `auth.misconfiguration()` was set when the request ran, and both are
-  process-global state that `monkeypatch` restores at teardown — so the leak is
-  most likely a fixture ordering or a `TestClient` lifespan running in a worker
-  that had already been left in a bad state. Worth chasing rather than
-  re-running: `-n auto` is the suite's own default, so this will reappear in
-  whatever CI gets added for §B2, and an auth test that sometimes passes for
-  the wrong reason is the worst kind to have flake.
-* `tests/conftest.py:12` derives the test database by string replacement:
-  ```python
-  settings.TEST_DATABASE_URL or settings.DATABASE_URL.replace("/jobapp", "/jobapp_test")
-  ```
-  `str.replace` is global and `postgresql://jobapp:jobapp@host/jobapp` contains
-  `/jobapp` in the **userinfo** as well, so the fallback also renames the role
-  and fails with `role "jobapp_test" does not exist`. Masked today because
-  `.env.example` sets `TEST_DATABASE_URL` explicitly. `make_url(...).set(
-  database=...)` is the version that cannot misfire.
-* `app/main.py` shells out to `alembic` by bare name, so the app's startup
-  depends on PATH. Fine in the container; it is why a venv-based run of the
-  suite returns 503 from every HTTP test until `PATH` includes the venv's
-  `bin`. Worth a line in the README if anyone ever runs the suite outside
-  Docker.
+**Fix when it matters.** Pre-filter in SQL on something normalisation preserves
+— an `ilike` on the target company's first token — before the Python pass. Also
+add the missing index on `applications.job_id`; Postgres does not index foreign
+key columns automatically, and both this join and `sweep_generations` use it.
 
----
+### 4.7 The title gate is far looser than its name · **CONFIRMED**
 
-## E. Already tracked, confirmed still live
+`_title_matches_roles` passes on **any single word overlap** with any target role
+or LLM-expanded query. With "Software Engineer" among the roles, every "Sales
+Engineer", "Civil Engineer" and "Locomotive Engineer" passes a gate labelled
+"Title doesn't match target roles". Those then fail the skill check, land under
+`few_skills` — which is in `DESCRIPTION_DEPENDENT_REASONS` — and enrichment
+spends real requests scraping civil engineering postings so the matcher can
+reject them again.
 
-Not re-argued here, just confirmed against the current tree:
+This is a deliberate fail-open and the right default *for the filter*. The
+problem is that the same predicate is reused as the *priority* function for
+enrichment (`enrichment._title_gate`), where fail-open means nearly every
+candidate ranks in the first bucket and the ordering carries no information.
 
-* **Salary has no period** (`docs/IMPROVING.md` §0). `jobs.salary_min/max` still
-  mix hourly, annual and multiple currencies in one column, and
-  `routers/jobs.py:232` still compares them against a single floor. Still the
-  right thing to do first.
-* **Numerators without denominators** (`IMPROVING.md`, passim). Agreed, and §A1
-  and §C6 above are two more instances: the dedupe cost and the liveness
-  coverage ratio are both invisible today.
+**Fix.** Give enrichment a stricter predicate than the filter: require overlap
+on a role's head noun *plus* one qualifier, or exclude a list of generic nouns
+("engineer", "manager", "specialist", "analyst") from matching in isolation.
+Leave the filter's own behaviour alone — that one should fail open.
 
 ---
 
-## Suggested order
+## 5. Priority 4 — small, cheap, and clearly wrong
 
-Ordered by (damage × certainty) ÷ effort, not by section:
+### 5.1 The overlay shows `0` for every keyword-matched job · **CONFIRMED**
 
-1. **B1** — `restart nginx` → `restart caddy`. One word; every deploy stops
-   failing and stops running three times.
-2. **B4** — take `alembic upgrade head` out of the two-worker lifespan. This is
-   the one that intermittently 503s production.
-3. **A1** — two indexes plus `.any()` → `.contains()`. Measured 500×–750× on the
-   hot path, and it makes an index already in the schema start working.
-4. **B2** — a CI workflow that runs the suite.
-5. **A2 / A3** — eligibility false positives. Pure functions, already have a
-   test file, and A2 is silently deleting whole employers from the list.
-6. **A4** — region matcher. Wasted scoring calls and wrong-continent jobs.
-7. **C5** — stop archiving rows enrichment has never attempted.
-8. **C1 / C3** — queue split and the eager relationship; both are config-shaped.
-9. **A5, A6, A7, C2, C4, C6, B3, B5, B6, D** — as they come up.
+```python
+# app/services/job_context.py:97
+def _score(job: Job) -> int | None:
+    if job.llm_score is not None:
+        return int(job.llm_score)
+    if job.keyword_score is not None:
+        return int(job.keyword_score)      # keyword_score is 0.0–1.0 → always 0
+    return None
+```
+
+Two defects in five lines: `int()` on a 0.0–1.0 float truncates to `0`, so the
+extension overlay displays "0" for a newly keyword-matched posting; and
+`llm_score_deep` is ignored entirely, so a borderline job the deep pass rescued
+shows the first pass's number. `Job.effective_score` exists for exactly this.
+**Fix:** `return round(job.effective_score) if job.effective_score is not None
+else None`, and either scale `keyword_score` to a percentage or drop it from the
+overlay.
+
+### 5.2 A `low_score` rejection can describe a penalty it did not apply · **CONFIRMED**
+
+`matcher.py:1126` reads `llm_result["seniority_fit"]` — the **first** pass —
+while `score` on the same line is the **deep** score when the second pass ran.
+When the two disagree, the sentence either claims a 15-point penalty that was
+not applied to the number it quotes, or omits one that was. This is the sentence
+the user reads to decide whether to override the filter.
+**Fix:** `verdict = deep_result if deep_result is not None else llm_result`.
+
+### 5.3 The seniority explanation quotes the env default, not the user's override · **CONFIRMED**
+
+`matcher.py:315` builds the message with
+`getattr(settings, "JUNIOR_MAX_YEARS", 3.0)` while the *decision* at line 113
+uses `tunable(profile_data, "junior_max_years")`. Change it in the settings UI
+and the filter obeys you while the explanation quotes the old number.
+**Fix:** read the tunable in both places.
+
+### 5.4 The language filter leaves a stale `keyword_score` behind · **CONFIRMED**
+
+The early filter path (line 1017) sets `keyword_score = 0.0` and clears both LLM
+scores, with a comment explaining why a stale score beside "filtered out" is
+wrong. The post-extraction language path (lines 1050–1063) clears the LLM scores
+but not `keyword_score`, which was written one line earlier. The fix was applied
+to one path and not the other. **Fix:** add `job.keyword_score = 0.0`.
+
+### 5.5 A dead `or` branch swallows the reason a refresh token was refused · **CONFIRMED**
+
+```python
+# app/services/linked_auth.py:134
+_note_failure(db, row, f"HTTP {response.status_code}: {detail}"
+                       or f"HTTP {response.status_code}")
+```
+
+The left f-string always contains at least `"HTTP 401: "`, so it is always
+truthy and the right branch is unreachable. When `detail` is empty the stored
+note is `"HTTP 401: "` with a dangling colon. The intent was
+`detail or f"HTTP {response.status_code}"` — the guard belongs on `detail`, not
+on the formatted string. **Fix:**
+
+```python
+_note_failure(db, row, f"HTTP {response.status_code}: {detail}" if detail
+                       else f"HTTP {response.status_code}")
+```
+
+### 5.6 A failing follow-up draft is retried forever · **CONFIRMED**
+
+`outreach.draft_due_follow_ups` promises in its docstring: "The window is
+cleared whether or not drafting succeeded, so one contact whose draft keeps
+failing cannot be retried forever." But the `except` calls `db.rollback()`,
+which undoes the pending `message.follow_up_due_at = None` — so the failing
+message keeps its due window and is picked up on every beat tick, burning one
+generation attempt every six hours indefinitely.
+
+One reviewer also claimed the rollback discards every earlier draft in the
+batch. It does not: `draft_message` commits internally (line 859), so each
+success is already durable. The damage is confined to the failing row — which is
+still precisely the behaviour the docstring says is prevented.
+**Fix:** wrap the attempt in `with db.begin_nested():`, or commit the cleared
+window before attempting the draft.
+
+### 5.7 An auth test flakes under the suite's own default · **CONFIRMED**
+
+Two full `-n auto` runs on the same commit: the first failed
+`test_agent_api.py::TestAuthentication::test_rejects_a_missing_token`
+(`assert 503 == 401`), the second passed everything, and it passes alone at
+`-n0`. A 503 from that route means `_migration_failure` or
+`auth.misconfiguration()` was set when the request ran — both process-global
+state that `monkeypatch` restores at teardown, so the leak is most likely
+fixture ordering or a `TestClient` lifespan in a worker already left in a bad
+state. Worth chasing rather than re-running: `-n auto` is the default, so it will
+reappear in whatever CI lands for §3.2, and an auth test that sometimes passes
+for the wrong reason is the worst kind to have flake.
+
+### 5.8 Smaller items, each a line or two · **CONFIRMED / LATENT**
+
+* **`experience_level` defaults to `"mid"` on the fetch path** —
+  `job_fetcher.py:1193` still has `job_data.get("experience_level", "mid")`,
+  the exact bug `base.parse_experience_level` and `harvest._normalize` document
+  at length as fixed. **LATENT**: every live adapter sets the key. It bites the
+  first one that forgets, silently. Drop the default.
+* **Missing FK `ondelete` policies** — `Application.job_id` and
+  `ApplicationDocument.application_id` have none, while `job_scores`,
+  `fetch_source_runs`, `contacts` and `outreach_messages` all specify one.
+  **LATENT**: nothing in the app deletes an Application or a Job except
+  `archive`, which pre-filters rows that have applications. If that filter ever
+  changes, the whole 5,000-row archive batch fails on a FK violation. Add
+  `ondelete="CASCADE"` for symmetry with the rest of the schema.
+* **`Contact.application_id` contradicts its own comment** — the column says
+  "Nullable so a contact can outlive the application" and the FK says
+  `ondelete="CASCADE"`, which deletes the contact with the application.
+  Nullable is not `SET NULL`. **LATENT** for the same reason. If the comment is
+  the intent, the policy should be `ondelete="SET NULL"`.
+* **`generation_status` has no database-level guard** — a plain `String(20)`
+  with four meaningful values and no CHECK constraint or enum, while
+  `ApplicationStatus` next to it uses `SAEnum`. A typo in any writer is
+  storable. Cosmetic, but inconsistent with its neighbour.
+* **An enrichment crash re-fetches its whole batch** — `enrichment_attempted_at`
+  is stamped for every job in one loop after all HTTP work completes, and
+  committed once. A crash in that window loses up to 200 jobs' worth of requests
+  and the next pass repeats them. Bounded at one batch; stamp in chunks if it
+  ever matters.
+* **`research_company` is dead code** — `app/tasks/interview.py:19` defines a
+  Celery task that nothing ever calls: no `.delay()`, no `beat_schedule` entry.
+  `routers/apps.py` does the search inline and synchronously instead. Either
+  wire the route to dispatch it (which is what a 300-second
+  `soft_time_limit` implies it was for, and would stop a dossier build blocking
+  a web request) or delete it.
+* **`conftest.py`'s test-database fallback mangles the username** —
+  `DATABASE_URL.replace("/jobapp", "/jobapp_test")` is a global replace, and
+  `postgresql://jobapp:jobapp@host/jobapp` contains `/jobapp` in the userinfo
+  too, so the fallback also renames the role and fails with
+  `role "jobapp_test" does not exist`. Masked today because `.env.example` sets
+  `TEST_DATABASE_URL` explicitly. `make_url(...).set(database=...)` cannot
+  misfire.
+* **The 500 page renders the traceback** — `main.py:357` passes it into
+  `errors/error.html`, which prints it in a `<pre>`. Behind authentication with
+  one user, so a note rather than a finding, but it is on by default with no
+  `DEBUG` gate and a traceback here carries SQL and connection details.
+
+---
+
+## 6. Claims that did not reproduce
+
+Recorded because knowing what is *not* broken is worth as much as the list
+above, and because two of these would have cost real work.
+
+1. **"Missing index on `jobs.status`."** Wrong — `ix_jobs_status` has existed
+   since migration 0003. The `jobs` table has twelve indexes; the gaps are
+   `source_urls`, `(source, source_job_id)`, `url` and `apply_url` (§1.3).
+2. **"Liveness marks jobs closed on WAF pages."** Wrong, and the code is
+   explicit about it: `liveness.py:97` returns `unknown` for anything `>= 400`
+   other than 404/410, with the comment "403/429/5xx say something about the
+   server or about us, not about the posting." `CLOSED_MARKERS` are specific
+   phrases none of which appear on a challenge page. Two reviewers reached
+   opposite conclusions here; the conservative one is right.
+3. **"`asyncio.run()` crashes when called from async contexts."** Not a live
+   defect. Both call sites — `job_fetcher.py:585` and `contact_finder.py:509` —
+   are reached only from synchronous Celery tasks; no `async def` route touches
+   either. (There *is* an unawaited-coroutine `RuntimeWarning` visible in the
+   suite around `_run_playwright`, which is worth a look on its own, but it is
+   not this.)
+4. **"`import fcntl` breaks Windows."** True as a fact, irrelevant as a defect.
+   This is a Docker-only Linux deployment — Dockerfile, compose, a Linux VPS,
+   pdflatex and Playwright — and nothing claims Windows support. Worth a
+   `try/except ImportError` only if a native dev path is ever wanted.
+5. **"Mid-cycle commits are not transactional with the job inserts."**
+   By design, and the code says so: the savepoint around the board registry
+   exists specifically so "a registry problem must not discard the query cache
+   or the jobs this cycle is about to save." Committing registry state
+   independently is the intended behaviour.
+6. **"The profile goes stale across batch chains."** Not reproduced. Each
+   chained batch is a separate Celery task that re-reads
+   `db.query(Profile).first()` at the top of `match_all_new_jobs`. Within a
+   25-job batch the profile is read once, which is correct.
+7. **"The rollback in `draft_due_follow_ups` discards the whole batch."**
+   Mechanism right, blast radius wrong — see §5.6. `draft_message` commits
+   internally, so only the failing row is affected.
+
+On the positive side, one reviewer's read of transaction management in
+`job_fetcher` is correct and worth keeping: the per-row savepoints, the
+`db.refresh(profile)` before merging the JSONB blob, and the deliberate
+withholding of the profile write until just before the commit are all sound, and
+the lost-update and lock-hold problems they were written to fix stay fixed. The
+one gap in that area is the final commit (§3.4), not the savepoint design.
+
+---
+
+## 7. Fix order
+
+Ordered by damage × certainty ÷ effort.
+
+| # | Finding | Why first | Effort |
+|---|---|---|---|
+| 1 | §1.4 deploy `restart nginx` → `caddy` | one word; stops every deploy failing and triple-deploying | minutes |
+| 2 | §1.1 re-scoring loop guard | continuous paid LLM spend on verdicts that cannot change, and it starves the speed lane | hours; the predicate already exists in `score_history._trigger` |
+| 3 | §3.1 migration out of the two-worker lifespan | intermittently 503s half of production | hours |
+| 4 | §1.2 fetch group lock inversion | restores an architecture that is already built and paid for | one line |
+| 5 | §1.3 indexes + `.any()` → `.contains()` | measured 500×–750× on the two hottest paths; makes an index already in the schema start working | one migration, two lines |
+| 6 | §3.2 a CI workflow | everything after this is safer to change | ~a dozen lines |
+| 7 | §2.1 / §2.2 eligibility | silently deleting whole employers, and asserting the opposite of what postings say | pure functions, existing test file |
+| 8 | §2.3 document truncation | the core promise runs on the wrong half of the input | small; structured facts already extracted |
+| 9 | §2.4 seniority ordering | wasted paid calls the local prefilter exists to prevent | one block moved |
+| 10 | §2.5 region matcher · §4.4 archive guard | wrong-continent jobs; permanent row loss | small each |
+| 11 | §2.6 salary period | already planned in `IMPROVING.md` §0 | migration + prompt |
+| 12 | §4.1 / §4.3 queue split, eager relationship | both config-shaped | small |
+| 13 | §5.x the one-liners | each is a line or two and several are user-visible | an afternoon together |
+| 14 | §3.3–§3.7, §4.2, §4.5–§4.7, §6.3 | as they come up | — |
+
+Items 1–6 change what is *possible*; everything after is ordinary work and much
+easier to prioritise once CI exists and the loop has stopped.
