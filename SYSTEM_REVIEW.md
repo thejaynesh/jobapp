@@ -1,350 +1,613 @@
-# System Architecture Review
+# System Architecture Review — Consolidated Findings
 
-Comprehensive review of logic errors, architectural issues, and correctness
-problems across the job application automation system.
-
-Findings are grouped by severity. Each one names the file, describes the
-problem, and explains the user-visible consequence.
+Every finding below was verified against the current source tree. Each
+includes what is wrong, why it matters, and how to fix it.
 
 ---
 
-## Bugs (confirmed incorrect behavior)
+## Critical — Resource waste or data loss
 
-### 1. Dead fallback string in `linked_auth.py` (line 134)
+### 1. Infinite re-scoring loop burns LLM tokens every 30 minutes
+
+**Files:** `enrichment.py:769-855`, `tasks/enrich.py`
+
+`requeue_settled_verdicts()` runs on every enrichment pass. It selects
+`filtered_out` jobs with `filter_reason` in `{"low_score", "few_skills",
+"seniority"}` whose description is >= 1500 chars, resets them to
+`status = new`, and triggers `match_jobs.delay()`. The matcher re-scores
+them, the LLM rejects them again as `low_score`, and 30 minutes later the
+same function picks them up and resets them again.
+
+The function never checks whether the description grew *since the last
+score*. `JobScore.description_chars` records how many characters the LLM
+saw, and `job.description_updated_at` records when the description last
+grew. Neither is consulted. Any job scored on its full description and
+rejected will be re-scored indefinitely.
+
+**Impact:** Infinite paid LLM calls on the same rejected jobs every 30
+minutes, crowding out genuinely new postings in the matching queue.
+
+**Fix:** Compare `len(job.description)` against the most recent
+`JobScore.description_chars` for that job, or check that
+`description_updated_at` is newer than the last score's `created_at`.
+Only requeue jobs whose description actually grew since they were last
+evaluated.
+
+---
+
+### 2. Fetch group locks are defeated by the global lock (`tasks/fetch.py:39`)
+
+**File:** `tasks/fetch.py:37-51`
+
+The architecture splits fetching into three groups (`api`, `boards`,
+`browser`) with separate lock keys so fast API adapters don't wait behind
+slow Playwright jobs. But line 39 forces every group to also acquire the
+global `LOCK_KEY`:
 
 ```python
-_note_failure(db, row, f"HTTP {response.status_code}: {detail}"
-                       or f"HTTP {response.status_code}")
+keys = [LOCK_KEY] if group in (None, "all") else [GROUP_LOCK_KEYS[group], LOCK_KEY]
 ```
 
-The `or` operates on two f-string operands. The left one always produces a
-non-empty string (it starts with `"HTTP "`), so the right branch is
-**unreachable**. When `detail` is empty the recorded failure says
-`"HTTP 401: "` with a trailing colon and space, rather than a clean
-`"HTTP 401"`.
+When the slow `browser` tier runs and holds `LOCK_KEY`, the hourly `api`
+tier tries to acquire it, fails, and skips. The group separation is
+completely negated.
 
-**Fix:** `f"HTTP {response.status_code}: {detail}" if detail else f"HTTP {response.status_code}"`
+**Impact:** Fast API sources are blocked by slow browser fetches, defeating
+the entire purpose of the three-tier split.
+
+**Fix:** Individual groups should only acquire their own
+`GROUP_LOCK_KEYS[group]`. Only an `"all"` / manual run should hold the
+global `LOCK_KEY`. Add a check against the global key (non-blocking) so a
+group run yields to a manual full run, but not to other groups.
 
 ---
 
-### 2. `int(keyword_score)` always yields 0 in the browser overlay (`job_context.py:101`)
+### 3. Seniority prefilter bypassed for non-junior candidates (`matcher.py:112-118`)
+
+**File:** `matcher.py:92-128`
+
+```python
+total_years = _total_years(profile_data.get("experience", []))
+if total_years >= tunable(profile_data, "junior_max_years"):
+    return False          # <-- exits immediately for anyone with 3+ years
+required = getattr(job, "required_years", None)
+if isinstance(required, (int, float)):
+    return float(required) > total_years + SENIORITY_YEARS_TOLERANCE
+```
+
+The `junior_max_years` guard (default 3.0) returns `False` for anyone
+above the junior threshold, and the `required_years` check below it is
+never reached. A candidate with 4 years of experience sees a job requiring
+15 years pass through the prefilter and go to the LLM.
+
+**Impact:** Wasted LLM calls on jobs wildly out of range for non-junior
+candidates. The LLM will almost certainly reject them, but each costs a
+scoring call.
+
+**Fix:** Move the explicit `required_years` check above the
+`junior_max_years` check. The years tolerance still applies, but
+`15 > 4 + 1.5` is correctly caught locally.
+
+---
+
+### 4. Document generation truncates descriptions to 2000-2500 chars (`doc_generator.py`)
+
+**File:** `doc_generator.py:244, 412, 797, 914`
+
+The matcher was updated to feed up to 24,000 characters to the LLM for
+scoring. But the document generator still hardcodes severe truncation:
+
+- `tailor_bullet_points`: `job_description[:2000]`
+- `tailor_summary`: `job_description[:2500]`
+- `generate_cover_letter`: `job_description[:2500]`
+- `extract_job_insights`: `job_description[:4000]`
+
+In modern job listings, the first 2000 characters are typically company
+intro and culture copy. The actual tech stack, responsibilities, and
+required qualifications are in the second half.
+
+**Impact:** Resumes and cover letters are tailored against the marketing
+preamble of the posting, not against the technical requirements. The
+enrichment pipeline fetches full descriptions specifically so the system
+can use them — but document generation ignores that work.
+
+**Fix:** Raise the limits to at least 15,000 characters, or pass the
+pre-extracted `required_skills` and `nice_to_have_skills` directly into
+the generation prompts.
+
+---
+
+### 5. Salary has no period — hourly rates break filtering and display
+
+**Files:** `job_details.py:48-51`, `models/job.py:207-217`, `routers/jobs.py:231-233`
+
+The extraction prompt says "if it quotes an hourly rate, give the hourly
+number", but there is no `salary_period` column. A $65/hr contract role
+is stored as `salary_min: 65.0`. The consequences:
+
+1. `salary_label` displays `"$65"` instead of `"$65/hr"`
+2. The matcher passes `"Stated salary: $65"` to the LLM alongside the
+   candidate's `"Minimum salary: $130,000"`, making the LLM think the
+   role pays $65/year
+3. The salary filter in `routers/jobs.py` runs
+   `coalesce(salary_max, salary_min) >= floor` — a $65/hr role (~$135k/yr)
+   is hidden when filtering for $100k+
+
+**Fix:** Add a `salary_period` column (`hourly`, `annual`, `monthly`) to
+the extraction schema and the `Job` model. Annualize rates in query filters
+and append the period in formatting.
+
+---
+
+### 6. Final `db.commit()` failure loses the entire fetch cycle (`job_fetcher.py:1237`)
+
+Individual jobs are inserted with savepoints, but the outer `db.commit()`
+is all-or-nothing. If it fails (connection drop, serialization error), all
+jobs from a 20+ minute cycle are discarded.
+
+**Fix:** Commit in smaller batches (e.g., every N jobs) rather than holding
+the entire cycle in one transaction.
+
+---
+
+## High — Incorrect behavior visible to the user
+
+### 7. Export-control regex drops valid commercial tech jobs (`eligibility.py:80-81`)
+
+The pattern `r"export[\s-]control(?:led|s)?\b"` fires on any sentence
+containing "export control". Standard compliance boilerplate at companies
+like Google, Apple, Datadog, and Intel — "This position is subject to U.S.
+export control regulations" — triggers this and causes the job to be
+filtered as "Restricted to US citizens."
+
+Under US EAR, foreign nationals are hireable for commercial software, and
+"US Person" includes green card holders and asylees. The regex does not
+require an actual restriction like "must be a US citizen due to export
+controls."
+
+**Impact:** Valid commercial software jobs at major employers silently
+dropped.
+
+**Fix:** Require explicit restriction language alongside export-control
+mentions: e.g.,
+`r"(?:requires?|limited to|must be)\s+.*?(?:u\.?s\.?\s+citizen|clearance).*?export[\s-]control"`.
+Or downgrade "export control" from a blocking restriction to an advisory
+sponsorship note.
+
+---
+
+### 8. Sponsorship detection triggers on non-visa "sponsor" (`eligibility.py:91, 238-247`)
+
+`_SPONSORSHIP_TRIGGER = re.compile(r"sponsor(?:s|ed|ing|ship)?\b", re.I)`
+
+Any sentence containing "sponsor" is scanned:
+- "We sponsor attendance at PyCon and tech conferences" — matched by
+  `_SPONSORSHIP_POSITIVE_RE` → flagged as positive visa sponsorship
+- "The executive sponsor will oversee delivery" — no positive keyword →
+  flagged as *negative* visa sponsorship
+
+The function does not check whether the sentence is about immigration.
+
+**Impact:** Incorrect visa sponsorship indicators displayed on job cards.
+
+**Fix:** Require immigration context in the sentence: the word "sponsor"
+must appear near "visa", "work authorization", "H-1B", "green card",
+"immigration", "permanent resident", or similar.
+
+---
+
+### 9. Browser overlay ignores deep score and truncates keyword score to 0 (`job_context.py:97-102`)
 
 ```python
 def _score(job: Job) -> int | None:
     if job.llm_score is not None:
         return int(job.llm_score)
     if job.keyword_score is not None:
-        return int(job.keyword_score)   # keyword_score is 0.0-1.0; int(0.85) == 0
+        return int(job.keyword_score)  # 0.0-1.0 → int = 0
     return None
 ```
 
-`keyword_score` is a ratio in [0.0, 1.0] (set by `matcher.py:374` as
-`matched / len(skills_flat)`). Casting with `int()` truncates everything
-below 1.0 to 0. Any job that has a keyword score but no LLM score shows
-"0" in the extension overlay instead of a meaningful value or no score.
+Two bugs in one function:
+1. It ignores `llm_score_deep` entirely. For borderline jobs that got a
+   second opinion, the overlay shows the first-pass score, not the score
+   that actually decided the job's fate.
+2. `keyword_score` is a ratio in [0, 1). `int(0.85)` is 0. Jobs with only
+   a keyword score show "0" in the extension.
+
+**Fix:** Use `job.effective_score` which already prefers deep score over
+first pass and is the canonical property for this.
 
 ---
 
-### 3. Seniority penalty detail references the wrong result dict after deep scoring (`matcher.py:1126`)
+### 10. Seniority penalty detail checks the wrong result after deep scoring (`matcher.py:1126`)
+
+After a deep score, the `score` variable is updated from `deep_result`,
+but the detail message still checks `llm_result.get("seniority_fit")`.
+If the two passes disagree on seniority fit, the user sees a wrong
+explanation.
+
+**Fix:** Check whichever result determined the final score:
+`deep_result if deep_result else llm_result`.
+
+---
+
+### 11. Language-filtered jobs keep a non-zero keyword_score (`matcher.py:1050-1063`)
+
+When detail extraction discovers a foreign language after the keyword
+filter already set `keyword_score`, the job is filtered with
+`llm_score = None` but `keyword_score` retains its value. The early
+filter path (line 1017) zeros it; this path doesn't. Combined with bug 9,
+these jobs show "0" in the overlay.
+
+**Fix:** Set `job.keyword_score = 0.0` on the language filter path, same
+as the early filter path.
+
+---
+
+### 12. Dead fallback string in `linked_auth.py` (line 134)
 
 ```python
-penalty = " (after a 15-point seniority penalty)" if not llm_result.get(
-    "seniority_fit", True) else ""
+_note_failure(db, row, f"HTTP {response.status_code}: {detail}"
+                       or f"HTTP {response.status_code}")
 ```
 
-When a job gets deep-scored, `score` is updated from `deep_result`
-(line 1089), but the detail message still checks `llm_result` (the first
-pass). If the two passes disagree on `seniority_fit`, the displayed reason
-either omits the penalty note when one was applied, or claims one when it
-was not.
+The `or` operates on two f-strings. The left is always non-empty
+(`"HTTP 401: "`), so the right is unreachable. When `detail` is empty
+the failure is recorded with a dangling `: `.
+
+**Fix:** `f"HTTP {response.status_code}: {detail}" if detail else f"HTTP {response.status_code}"`
 
 ---
 
-### 4. Language-filtered job keeps a non-zero `keyword_score` (`matcher.py:1050-1063`)
+### 13. Outreach follow-up rollback discards the whole batch (`outreach.py:1003-1031`)
 
-When a job passes the keyword filter (line 1030 sets `keyword_score`) and
-then detail extraction discovers a foreign language, the job is filtered
-out with `llm_score = None` but `keyword_score` retains its value. The
-early filter-out path (lines 1015-1028) explicitly zeroes `keyword_score`.
-This inconsistency, combined with bug 2, means language-filtered jobs show
-"0" in the overlay instead of nothing.
+In `draft_due_follow_ups`, if drafting fails for one contact, `db.rollback()`
+undoes `follow_up_due_at = None` for that contact AND discards all previous
+uncommitted drafts in the batch. The failed contact retries every beat tick
+forever; the successfully drafted messages are lost.
 
----
-
-### 5. Seniority detail message reads raw setting instead of tunable override (`matcher.py:315`)
-
-The detail text reads `max_years = getattr(settings, "JUNIOR_MAX_YEARS", 3.0)`,
-but the actual blocking decision at line 113 uses `tunable(profile_data, "junior_max_years")`.
-If a user overrides the threshold in their profile (e.g., to 5.0), the
-blocking fires at the profile value but the message reports the environment
-value. The user sees "under 3 years" when the actual threshold was 5.
+**Fix:** Use `db.begin_nested()` per contact, so a single failure rolls
+back only its own savepoint.
 
 ---
 
-## Medium-Severity Issues
+### 14. Seniority detail reads raw setting, not tunable override (`matcher.py:315`)
 
-### 6. Missing GIN index on `jobs.source_urls`
+The detail message reads `getattr(settings, "JUNIOR_MAX_YEARS", 3.0)` but
+the blocking decision uses `tunable(profile_data, "junior_max_years")`. A
+user who set a custom threshold sees the wrong number in the explanation.
 
-`deduplication.find_existing_job` (line 123) queries `Job.source_urls.any(url)`.
-`ArchivedJob` has a GIN index on `source_urls` (migration 0028), but the
-`jobs` table does not. Every dedup check against the main jobs table does a
-sequential scan on the JSONB/array column. This runs once per job per fetch
-cycle, so with hundreds of thousands of jobs it becomes a meaningful
-bottleneck.
+**Fix:** Read the tunable value for the message, same as the decision.
 
 ---
 
-### 7. Final `db.commit()` failure in `fetch_and_save_jobs` loses the entire cycle (`job_fetcher.py:1237`)
+### 15. Region keyword matching admits wrong countries (`locations.py:233`)
 
-Individual jobs are inserted within savepoints for error isolation, but
-the outer `db.commit()` is all-or-nothing. If it fails (serialization
-error, connection drop), `db.rollback()` at line 1240 discards every job
-from a cycle that may have run for 20+ minutes. There is no partial-save
-mechanism.
+**File:** `locations.py:79, 233`
 
----
+```python
+# line 233
+if any(kw in text_lower for kw in cfg["keywords"]):
+    return True
+```
 
-### 8. Redis blip can block the next scheduled fetch for up to 1 hour (`fetch_lock.py:49-65`)
+The region matcher uses substring containment (`kw in text_lower`) rather
+than word-boundary matching. The Europe region's keyword list includes
+`"austria"` (line 79), which is a substring of `"australia"`. Any job
+located in Sydney, Melbourne, or anywhere in Australia passes
+`_region_matches("europe", ...)` because `"austria" in "sydney, australia"`
+is `True`.
 
-When Redis is unreachable, `acquire()` returns True but stores no token.
-On `release()`, the missing token means nothing is deleted from Redis. If
-Redis comes back with a stale lock still inside its TTL, the next scheduled
-run sees it and skips. The TTL is 3600 seconds — so a brief Redis outage
-can block fetching for up to one hour after recovery.
+The abbreviation check on line 236 already uses `\b` word boundaries
+correctly — the keyword check does not.
 
----
+**Impact:** Australian jobs silently classified as European. A user
+targeting Europe gets Australian results; a user excluding non-European
+locations would still see them admitted.
 
-### 9. `asyncio.run()` inside `_run_all_adapters` crashes in async contexts (`job_fetcher.py:585`)
-
-`asyncio.run(_run_playwright())` raises `RuntimeError` if called from an
-existing event loop. The Celery worker path is fine, but a manual fetch
-trigger from a FastAPI async handler would fail. This limits how the fetch
-can be invoked.
-
----
-
-### 10. Mid-cycle commits for board backfill are not transactional with job inserts (`job_fetcher.py:675-724`)
-
-`_maybe_backfill_boards` calls `db.commit()` at line 723, and the board
-registry update commits at line 916. If the cycle fails after these
-commits but before the final job commit, the backfill is marked done while
-its discovered boards are lost to the rollback. The two pieces of state
-become inconsistent.
+**Fix:** Use word-boundary matching for keywords:
+`re.search(rf"\b{kw}\b", text_lower)` instead of `kw in text_lower`.
 
 ---
 
-### 11. Enrichment stamps all jobs after all fetches; a crash between fetch and commit re-fetches the batch (`enrichment.py:1129-1198`)
+## Medium — Performance, missing indexes, concurrency
 
-All target jobs get `enrichment_attempted_at` set after all HTTP fetches
-complete, but before `db.commit()`. If the commit fails, the rollback
-undoes the stamps and the next pass re-fetches the same URLs — wasting
-bandwidth and potentially triggering rate limits at the job boards.
+### 16. Missing indexes on the `jobs` table
 
----
+The `archived_jobs` table has indexes for all its queried columns. The
+`jobs` table — queried far more heavily — is missing:
 
-### 12. Liveness checks can falsely close jobs on WAF/challenge pages returning HTTP 200 (`liveness.py:88-122`)
+| Index | Where it's needed |
+|-------|------------------|
+| GIN on `source_urls` | `deduplication.find_existing_job` — once per fetched job |
+| `status` | matcher, archive, enrichment, liveness, funnel, job list |
+| `(source, source_job_id)` | dedup layer 2 |
+| `url` | job_context, multiple service paths |
+| `fetched_at` | ORDER BY in 8+ service files |
 
-A Cloudflare or WAF challenge page served with status 200 could contain
-strings like "this job is no longer available" in a generic error template.
-The marker check does not distinguish between a real job page and a
-challenge page, so a live posting behind a WAF could be marked as closed.
-
----
-
-### 13. `_resolve_apply_links` loads all known URLs into memory (`job_fetcher.py:638-647`)
-
-`_known_urls` builds a Python `set` of every URL, source_url, and
-apply_url from the entire jobs table. With hundreds of thousands of jobs,
-each with multiple URLs, this can reach tens of megabytes. A DB-side
-existence check would avoid the memory spike.
+**Fix:** Add an Alembic migration creating these indexes. Copy the pattern
+from the archived_jobs migration (0028).
 
 ---
 
-### 14. No retry for transient adapter failures within a fetch cycle (`job_fetcher.py`)
-
-When a source adapter times out or gets a 500 for one role/country combo,
-`_run_combos` catches the exception and moves on. There is no retry for
-transient network failures. A momentary hiccup during one adapter's call
-silently loses that combo's results for the entire cycle, and the resting
-mechanism only handles sources that fail every run.
-
----
-
-## Low-Severity / Design Concerns
-
-### 15. Title matching is overly permissive with single-word overlap (`matcher.py:48-60`)
-
-`_title_matches_roles` passes if ANY single meaningful word overlaps
-between the title and a target role. "Engineering Manager" matches target
-"Software Engineer" (both contain "engineer"). "Data Analyst" matches
-"Data Engineer" (both contain "data"). This means the title gate lets
-through many irrelevant jobs that each cost an LLM scoring call.
-
-The 0.7 SequenceMatcher fallback is also quite loose. This is a deliberate
-design tradeoff (broad rather than narrow), but it has a real cost in LLM
-spend on irrelevant jobs.
-
----
-
-### 16. Duplicate application check does a full table scan in Python (`deduplication.py:209-223`)
-
-`find_duplicate_application_job` loads ALL (id, company, title) tuples for
-jobs with applications, then checks each one in Python with normalization
-and SequenceMatcher. This runs once per newly-matched job during the
-scoring loop. As the application count grows, this linear scan becomes
-increasingly expensive.
-
----
-
-### 17. Profile is loaded once for the entire batch chain (`matcher.py:1162-1163`)
-
-`match_all_new_jobs` reads the profile once before the loop. Profile
-changes (skills, target roles, min score) made mid-batch don't take
-effect. With the self-chaining mechanism, batches run back-to-back for
-large backlogs — potentially hundreds of jobs scored against a stale
-profile.
-
----
-
-### 18. `_extract_json_object` brace-counting ignores string contents (`matcher.py:584-600`)
-
-The fallback JSON extractor counts raw `{` and `}` characters without
-considering whether they are inside JSON string values. A response with
-unbalanced braces in a reasoning string (e.g., `"skills {Python matched"`)
-would throw off the depth counter. This only matters when the full
-`json.loads` fails and the response has surrounding prose.
-
----
-
-### 19. Profile blob concurrent write risk (`job_fetcher.py:1045-1050, 1222-1234`)
-
-The fetch cycle deep-copies the profile blob, runs for minutes, then
-merges only `_FETCH_CYCLE_KEYS` back. This is careful — but if the fetch
-lock fails (Redis was down), two overlapping cycles could both do the
-refresh-merge-write, and the last writer wins on the shared keys. Mitigated
-by the fetch lock under normal operation.
-
----
-
-### 20. State abbreviations in `_LOCATION_NOISE` collide with English words (`deduplication.py:39-49`)
-
-The noise set includes state abbreviations that are common words: "in"
-(Indiana), "or" (Oregon), "me" (Maine), "co" (Colorado), "id" (Idaho).
-For country-first formats without commas ("IN - Indianapolis"), these would
-be stripped. The fallback at line 102-105 prevents total erasure, but two
-legitimately different locations could normalize to the same string.
-
----
-
-### 21. Harvest `save_harvested_jobs` single retry covers two-way races but not three-way (`harvest.py:886-917`)
-
-When concurrent extension payloads for the same job arrive, the single
-`IntegrityError` retry handles the common two-way race. A three-way race
-(three payloads from the same browsing session) could still drop a job,
-though this is rare in practice.
-
----
-
-### 22. `match_budget.save` uses two separate Redis commands (`match_budget.py:70-77`)
-
-`save()` calls `client.hset()` and `client.expire()` as separate
-operations. If the process dies between them, the key persists with its old
-TTL. Harmless in practice but a Redis pipeline would make this atomic.
-
----
-
-## Data Model & Integrity Issues
-
-### 23. `Contact.application_id` CASCADE contradicts "can outlive the application" intent (`outreach.py:63-66`)
-
-The comment says "Nullable so a contact can outlive the application", but
-the FK uses `ondelete="CASCADE"`. CASCADE deletes the contact when the
-application is deleted — the opposite of outliving it. Should be
-`ondelete="SET NULL"`. As written, deleting an application silently
-destroys all its contacts and their message threads.
-
----
-
-### 24. Missing indexes on the `jobs` table (models/job.py)
-
-The `jobs` table is missing several indexes that its sibling
-`archived_jobs` has:
-
-- **`source_urls` GIN index** (finding 6 above) — the hottest dedup path
-- **`status` index** — the most filtered column in the system, used in
-  matcher, archive, enrichment, liveness, funnel, and job list queries
-- **`(source, source_job_id)` composite index** — dedup layer 2; the
-  archived_jobs table has this as `ix_archived_jobs_source_job`
-- **`url` index** — queried in job_context and multiple service paths;
-  archived_jobs has `ix_archived_jobs_url`
-- **`fetched_at` index** — used in ORDER BY across 8+ service files
-
-These missing indexes mean most queries against the jobs table do
-sequential scans. At scale this is a serious performance problem.
-
----
-
-### 25. Missing indexes on `applications.job_id` and `application_documents.application_id`
+### 17. Missing indexes on `applications.job_id` and `application_documents.application_id`
 
 Neither FK column is indexed. The archive service joins applications to
-jobs on every pass, and loading an application's documents navigates
-`application_documents.application_id`. Without indexes, both require
-full table scans.
+jobs on every pass; loading an application's documents navigates
+`application_documents.application_id`. Both require full table scans.
+
+**Fix:** Add indexes on both FK columns.
 
 ---
 
-### 26. `Application.job_id` and `ApplicationDocument.application_id` FKs missing ondelete policy (`application.py`)
+### 18. `Contact.application_id` CASCADE contradicts stated intent (`outreach.py:63-66`)
 
-Both FKs lack an explicit `ondelete` clause, defaulting to RESTRICT.
-Every other FK in the system explicitly declares its cascade policy. A
-code path that deletes a Job or Application without first checking for
-children will get a database error rather than a cascading cleanup.
+Comment: "Nullable so a contact can outlive the application." FK:
+`ondelete="CASCADE"`. CASCADE deletes contacts when the application is
+deleted — the opposite of outliving.
 
----
-
-### 27. `generation_status` state machine has no DB-level guard
-
-The `generation_status` transitions (idle -> generating -> done/failed) are
-managed purely in application code. No row-level lock or conditional
-update prevents two workers from transitioning the same application
-simultaneously. `doc_refresh.py` sets `generation_status = "generating"`
-without a `WHERE generation_status = 'idle'` guard.
+**Fix:** Change to `ondelete="SET NULL"`.
 
 ---
 
-### 28. Deduplication race condition on layers 1 and 2 (`deduplication.py:115-138`)
+### 19. `Application.job_id` and `ApplicationDocument.application_id` missing ondelete
 
-`find_existing_job` performs three separate SELECT queries with no
-row-level locking. Between these queries and the caller's INSERT, a
-concurrent fetch could insert the same job. Layer 3 (dedupe_hash) is
-protected by a UNIQUE constraint, but layers 1 (URL in source_urls) and 2
-(source + source_job_id) have no unique constraints. Two concurrent
-fetchers could both pass all three checks and both insert duplicates.
+Both FKs lack an explicit `ondelete`, defaulting to RESTRICT. Every other
+FK in the system declares its policy. A deletion of a Job or Application
+without pre-checking children raises a database error.
+
+**Fix:** Add explicit `ondelete="CASCADE"` (or `SET NULL` if orphan
+documents should survive).
 
 ---
 
-## Architecture Notes (not bugs, but worth knowing)
+### 20. `generation_status` state machine has no DB-level guard
 
-- **Auth is middleware-based, not per-route.** This is intentionally
-  fail-closed — adding a new router doesn't accidentally expose it. The
-  design is sound.
+Transitions (idle → generating → done/failed) are managed in application
+code only. `doc_refresh.py` sets `generation_status = "generating"` without
+a `WHERE generation_status = 'idle'` guard. Two workers can transition the
+same application simultaneously.
 
-- **Celery late acks with `task_reject_on_worker_lost=True`** means tasks
-  are redelivered on worker death. Combined with the Redis lock pattern,
-  this prevents most lost-work scenarios. The generation sweeper catches
-  the rest.
+**Fix:** Use a conditional UPDATE (`WHERE generation_status IN ('idle',
+'failed')`) and check the affected row count before proceeding.
 
-- **The two-pass scoring (fast model + deep second opinion)** is
-  well-designed for its purpose. The deep chain now walks all providers
-  instead of just the first, which fixes the "40 consecutive failures"
-  problem documented in the comments.
+---
 
-- **Enrichment's multi-method approach** (ATS API, JSON-LD, LLM, browser)
-  with the re-scoring hook for description growth is thoughtful. The
-  `_worth_rescoring` gate prevents wasted calls on jobs where the new
-  description wouldn't change the verdict.
+### 21. Duplicate application check does O(n) scan in Python (`deduplication.py:209-223`)
 
-- **The deduplication layers** (URL, source+ID, content hash) with the
-  normalization for company suffixes, title abbreviations, and location
-  noise are thorough. The cross-post detection at match time catches
-  near-misses the hash layer can't.
+`find_duplicate_application_job` loads all (id, company, title) tuples for
+every job with an application, then normalizes and compares each in Python.
+Runs once per matched job in the scoring loop.
+
+**Fix:** Add an `ILIKE` filter on the first word of the normalized company
+in SQL to reduce the candidate set before it reaches Python.
+
+---
+
+### 22. Redis blip blocks the next fetch for up to 1 hour (`fetch_lock.py:49-65`)
+
+When Redis is down, `acquire()` returns True but stores no token. On
+recovery, the stale lock persists for its full TTL (3600s).
+
+**Fix:** On `release()` with no token, attempt a plain `DEL` rather than
+silently returning. Or reduce the TTL and accept a shorter worst-case.
+
+---
+
+### 23. `_resolve_apply_links` loads all known URLs into memory (`job_fetcher.py:638-647`)
+
+Builds a Python `set` of every URL from the entire jobs table. At scale
+this is tens of megabytes.
+
+**Fix:** Use a DB-side `EXISTS` check per URL instead of a Python set.
+
+---
+
+### 24. Deduplication race on layers 1 and 2 (`deduplication.py:115-138`)
+
+Three SELECT queries with no row-level locking. Layer 3 (dedupe_hash) has
+a UNIQUE constraint; layers 1 (URL in array) and 2 (source + source_job_id)
+do not. Concurrent fetchers can both pass and both insert.
+
+**Fix:** Add a unique constraint on `(source, source_job_id)` where
+`source_job_id IS NOT NULL`. For layer 1, the GIN index + UNIQUE won't
+work on arrays, so rely on the savepoint retry pattern.
+
+---
+
+### 25. All Celery tasks share a single queue (`celery_app.py`)
+
+**File:** `celery_app.py:6-50`
+
+All 16 task modules — including slow work like `browse` (Playwright,
+seconds per page), `fetch` (network I/O), `match` and `descriptions`
+(LLM calls) — route to the single default `celery` queue. There is no
+`task_routes`, no `task_queues`, and no per-task `queue=` argument.
+
+With `worker_prefetch_multiplier=1` (line 27), each worker pulls one task
+at a time. A burst of LLM scoring tasks blocks fast, latency-sensitive
+work: `liveness` probes, `backup`, `prune_llm_log`, and the beat
+health-check task.
+
+**Impact:** Slow tasks starve fast tasks. A scoring pass of 200 jobs
+blocks liveness checks for the duration. The three-tier fetch split (§2)
+would still run into this even after the lock fix.
+
+**Fix:** Define at least two queues — `default` for fast/short tasks and
+`heavy` for LLM, browser, and fetch tasks. Route tasks via
+`task_routes` in the Celery config.
+
+---
+
+### 26. Eager `selectin` on `Job.scores` loads scores everywhere (`models/job.py:163-166`)
+
+**File:** `models/job.py:163-166`
+
+```python
+scores: Mapped[list["JobScore"]] = relationship(
+    "JobScore", cascade="all, delete-orphan", lazy="selectin", ...
+)
+```
+
+The comment says this is for the list page ("fifty queries per page"), but
+`selectin` applies globally. Every service, task, and background job that
+touches a Job object fires a second SELECT to load all associated
+`JobScore` rows — even when scores are irrelevant (fetching,
+deduplication, archiving, enrichment).
+
+**Impact:** At scale (100k jobs, 2-3 scores each), background bulk-loading
+pulls hundreds of thousands of score rows it never reads, increasing
+memory pressure and database load.
+
+**Fix:** Change to the default `lazy="select"` (lazy load) and use
+`selectinload(Job.scores)` explicitly in the queries that need it (the
+job list endpoint, the overlay, and the score-history view).
+
+---
+
+## Low — Correctness nits, dead code, portability
+
+### 27. Single-word title matching is too permissive (`matcher.py:48-60`)
+
+`_title_matches_roles` matches on ANY single-word overlap. "Civil
+Engineer" passes for target "Software Engineer" because of "engineer".
+These then fail the skill check as `few_skills`, and because `few_skills`
+is in `DESCRIPTION_DEPENDENT_REASONS`, enrichment wastes time trying to
+scrape and re-score them.
+
+**Fix:** Require at least two overlapping words for multi-word titles, or
+require the overlap word to not be a generic noun ("engineer", "manager",
+"specialist", "analyst") unless the full phrase matches.
+
+---
+
+### 28. Windows crash: Unix-only `fcntl` import (`doc_generator.py:3`)
+
+`import fcntl` at module top level. On Windows,
+`ModuleNotFoundError: No module named 'fcntl'`.
+
+**Fix:** Wrap in `try...except ImportError` with a no-op fallback for
+non-Unix platforms.
+
+---
+
+### 29. Dead code: `research_company` Celery task never called (`tasks/interview.py:18-45`)
+
+Defined as a Celery task but never invoked anywhere in the codebase. The
+UI does company research synchronously inline.
+
+**Fix:** Remove the dead task, or wire it up if async research is wanted.
+
+---
+
+### 30. Test DB URL derivation can mangle the username (`tests/conftest.py:12`)
+
+```python
+settings.DATABASE_URL.replace("/jobapp", "/jobapp_test")
+```
+
+`str.replace` is global. `postgresql://jobapp:jobapp@host/jobapp` contains
+`/jobapp` in the userinfo, so the fallback renames the role too.
+
+**Fix:** Use `sqlalchemy.engine.make_url(...).set(database="jobapp_test")`.
+
+---
+
+### 31. Profile loaded once for entire batch chain (`matcher.py:1162-1163`)
+
+Profile changes (skills, target roles, min score) made mid-batch don't
+take effect. With self-chaining, hundreds of jobs can be scored against a
+stale profile.
+
+**Fix:** Reload the profile at the start of each chained batch, not just
+the first.
+
+---
+
+### 32. `_extract_json_object` brace-counting ignores string contents (`matcher.py:584-600`)
+
+The fallback JSON extractor counts raw `{`/`}` without considering string
+interiors. Only matters when `json.loads` fails and the response has
+surrounding prose with unbalanced braces in strings.
+
+**Fix:** Use a proper JSON-extraction regex or skip characters inside
+quoted strings during the depth count.
+
+---
+
+### 33. Mid-cycle commits not transactional with job inserts (`job_fetcher.py:675-724`)
+
+Board backfill and registry updates commit mid-cycle. If the final job
+commit fails, the backfill is marked done but its discovered boards are
+lost.
+
+**Fix:** Move board state commits to the same transaction as the job
+inserts, or accept the inconsistency with a comment documenting it.
+
+---
+
+## Infrastructure drift — config that has diverged from the code
+
+### 34. Dev Docker Compose mounts nonexistent nginx config (`docker-compose.yml:67`)
+
+**File:** `docker-compose.yml:62-67`
+
+The dev compose defines an `nginx` service mounting `./nginx/nginx.conf`.
+No `nginx/` directory exists in the repository. The production compose
+(`docker-compose.prod.yml`) correctly uses Caddy, with `caddy/Caddyfile`
+present. The dev compose was never updated when the reverse proxy was
+switched.
+
+**Fix:** Either remove the nginx service from `docker-compose.yml` (if
+Caddy is used in dev too) or add the missing `nginx/nginx.conf`.
+
+---
+
+### 35. Four tunable settings missing from `.env.example`
+
+**Files:** `celery_app.py:75, 82, 156`, `llm/providers.py:115`,
+`.env.example`
+
+The code reads `FETCH_LINKED_INTERVAL_HOURS`,
+`FETCH_LINKED_DEEP_INTERVAL_HOURS`, `BROWSE_TOPUP_INTERVAL_MINUTES`, and
+`GEMINI_BASE_URL` from settings (with silent defaults in `config.py`).
+None appear in `.env.example`. A deployer reading that file as the
+canonical variable list has no way to discover or tune these schedules, or
+override the Gemini endpoint for a self-hosted proxy.
+
+**Fix:** Add the four variables to `.env.example` with their default
+values and a brief comment.
+
+---
+
+## Architecture — sound design, confirmed working
+
+These areas were reviewed and are correctly implemented:
+
+- **Auth middleware** is fail-closed. New routers are protected by default.
+  HMAC-signed session cookies, constant-time comparisons, placeholder
+  secret detection, login throttle.
+
+- **Celery late acks** with `task_reject_on_worker_lost=True` ensures
+  at-least-once delivery. The generation sweeper catches anything that
+  falls through.
+
+- **Two-pass scoring** (fast model + deep second opinion) with provider
+  chain walking is well-designed. The deep chain walks all providers, fixing
+  the "40 consecutive failures" problem.
+
+- **Deduplication layers** (URL, source+ID, content hash) with
+  normalization are thorough. Cross-post detection at match time catches
+  near-misses.
+
+- **Enrichment multi-method pipeline** (ATS API, JSON-LD, LLM, browser)
+  with re-scoring hooks is well-architected. The `_worth_rescoring` gate
+  correctly prevents wasted calls — except for the missing
+  "already scored on this description" check (finding 1).
+
+- **Concurrency management** — savepoints for per-job isolation,
+  profile blob refresh-merge to avoid lost updates, Redis distributed
+  locks with TTL and compare-and-delete — is carefully implemented.
+
+- **LLM concurrency gate** correctly serializes single-slot providers
+  with a Redis lock, poll-based waiting, and fail-open on Redis outage.
