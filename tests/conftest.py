@@ -119,6 +119,28 @@ def _auth_disabled_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _slug_harvest_off_by_default(monkeypatch):
+    """
+    Community slug lists are five live README downloads from GitHub.
+
+    `ATS_LIST_HARVEST` defaults to on, so any test that runs a fetch cycle was
+    fetching them for real — which is slow, and worse, non-deterministic in a
+    way that reads as an unrelated bug. `TestAtsDiscoveryWiring` asserts that a
+    slug mined from a job description lands in `discovered_ats`; when the
+    download succeeds it brings back hundreds of real slugs, the merge is
+    capped, and the one the test is about is pushed out. When the network is
+    slow or the requests fail the harvest returns nothing and the test passes.
+    So it passed or failed on whether GitHub answered, which is not something
+    this test is about.
+
+    Same reasoning as `_board_validation_off_by_default` below, and the same
+    remedy. `tests/test_slug_mining.py` exercises the harvest directly with the
+    HTTP call stubbed.
+    """
+    monkeypatch.setattr(settings, "ATS_LIST_HARVEST", False)
+
+
+@pytest.fixture(autouse=True)
 def _board_validation_off_by_default(monkeypatch):
     """
     Board validation probes real ATS APIs, one request per unproven board.

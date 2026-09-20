@@ -774,6 +774,18 @@ class TestSlugValidationWiring:
 
 
 class TestSlugHarvestWiring:
+    """
+    The one place that is *about* the harvest, so the one place that turns it
+    back on — conftest disables it for everything else, because it is five live
+    README downloads and every other fetch-cycle test was paying for them.
+    Both tests below stub the download itself; what they need is the branch.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _harvest_on(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "ATS_LIST_HARVEST", True)
+
     def test_harvested_slugs_feed_the_adapters(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
