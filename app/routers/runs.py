@@ -89,7 +89,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
     except Exception as exc:
         logger.warning("runs: board leaderboard unavailable: %s", exc)
 
-    from app.services.fetch_lock import state
+    from app.tasks.fetch import fetch_state as state
 
     return templates.TemplateResponse(
         "runs/index.html",
@@ -730,7 +730,7 @@ def trigger_compare(request: Request, models: list[str] = Form(default=[]),
 @router.get("/status", response_class=HTMLResponse)
 def fetch_status(request: Request):
     """Live fetch state; the page polls this while a run is in flight."""
-    from app.services.fetch_lock import state
+    from app.tasks.fetch import fetch_state as state
     return templates.TemplateResponse(
         "runs/partials/status.html",
         {"request": request, "fetch_state": state(), "triggered": None},
@@ -748,7 +748,7 @@ def trigger_fetch(request: Request, sources: list[str] = Form(default=[]),
     one adapter change unreasonably slow. Two ways to narrow it — a few named
     sources, or one of the groups the schedule itself runs.
     """
-    from app.services.fetch_lock import state
+    from app.tasks.fetch import fetch_state as state
     from app.services.job_fetcher import ALL_GROUPS
 
     wanted = [s for s in sources if s in TRIGGERABLE_SOURCES]

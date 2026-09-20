@@ -24,19 +24,49 @@ logger = logging.getLogger(__name__)
 
 _EMPTY = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0}
 
-# A lock per group, plus the shared one.
+# A lock per group.
 #
 # Groups do not conflict with each other — they touch disjoint sources — so a
 # single key would have the hourly API run blocked by the twice-daily browser
-# tier, which is most of what this split was for. They all take the combined
-# key as well, so a manual "fetch everything" and a scheduled group still
-# cannot overlap.
+# tier, which is most of what this split was for.
+#
+# Which is what used to happen. Every group run took the combined key as well
+# as its own, to keep a manual "fetch everything" from overlapping a scheduled
+# group — and since all three contended on that one key, they excluded each
+# other too. The per-group keys blocked nothing the combined key had not
+# already blocked, and Adzuna went back to waiting behind a Chromium launch.
+#
+# So the exclusion runs the other way now: a combined run takes *every* group
+# key (and the shared one, which is the canonical "a full cycle is happening"
+# marker), and a group run takes only its own. A group still blocks "all" and
+# "all" still blocks every group; two groups no longer block each other.
 GROUP_LOCK_KEYS = {group: f"jobapp:fetch:{group}" for group in ALL_GROUPS}
+
+# Every key that means "some fetch is in flight" — see `fetch_state`.
+ALL_LOCK_KEYS = (LOCK_KEY, *GROUP_LOCK_KEYS.values())
+
+
+def fetch_state() -> dict:
+    """
+    Whether any fetch is running, for the runs page and the manual trigger.
+
+    Reads every key rather than the combined one, because a scheduled group run
+    no longer holds the combined key — and a page that reported "idle" while
+    the browser tier was mid-cycle would be telling the user the opposite of
+    the truth.
+    """
+    from app.services.fetch_lock import any_state
+
+    return any_state(ALL_LOCK_KEYS)
 
 
 def _run(group: str | None, only: list[str] | None, match_after: bool) -> dict:
     """One cycle, under whichever locks this run needs."""
-    keys = [LOCK_KEY] if group in (None, "all") else [GROUP_LOCK_KEYS[group], LOCK_KEY]
+    keys = (
+        [LOCK_KEY, *GROUP_LOCK_KEYS.values()]
+        if group in (None, "all")
+        else [GROUP_LOCK_KEYS[group]]
+    )
 
     held: list[str] = []
     for key in keys:

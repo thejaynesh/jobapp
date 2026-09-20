@@ -89,3 +89,34 @@ def state(key: str = LOCK_KEY) -> dict:
     except Exception as exc:
         logger.warning("fetch_lock: cannot read lock state: %s", exc)
         return {"running": False, "seconds_left": None, "error": str(exc)}
+
+
+def any_state(keys) -> dict:
+    """
+    The same answer as `state`, across several keys: is *anything* running.
+
+    Fetching is no longer one lock. Each group holds its own (see
+    `tasks.fetch.GROUP_LOCK_KEYS`) so that the hourly API tier does not queue
+    behind a twice-daily browser run — which means "is a fetch running?", the
+    question the runs page and the manual trigger both ask, is now a question
+    about a set of keys rather than about one.
+
+    `seconds_left` is the longest of the TTLs still standing, because the
+    honest answer to "how long until fetching is idle" is the slowest of the
+    runs in flight, not the first one to finish.
+    """
+    running = False
+    longest: int | None = None
+    try:
+        client = _client()
+        for key in keys:
+            if not client.exists(key):
+                continue
+            running = True
+            ttl = client.ttl(key)
+            if ttl and ttl > 0 and (longest is None or ttl > longest):
+                longest = ttl
+    except Exception as exc:
+        logger.warning("fetch_lock: cannot read lock state: %s", exc)
+        return {"running": False, "seconds_left": None, "error": str(exc)}
+    return {"running": running, "seconds_left": longest}

@@ -395,7 +395,7 @@ class TestJobListVisibilityAndSorting:
 
 class TestManualFetchTrigger:
     def test_the_runs_page_offers_a_fetch_button_and_source_picker(self, db, client):
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}):
             response = client.get("/runs")
         assert response.status_code == 200
@@ -403,7 +403,7 @@ class TestManualFetchTrigger:
         assert 'name="sources" value="arbeitnow"' in response.text
 
     def test_triggering_queues_the_task_with_the_chosen_sources(self, db, client):
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}), \
              patch("app.tasks.fetch.fetch_jobs") as task:
             response = client.post("/runs/trigger",
@@ -415,7 +415,7 @@ class TestManualFetchTrigger:
     def test_a_narrow_run_skips_matching(self):
         """Matching costs LLM calls; a single-source smoke test shouldn't."""
         from app.routers.runs import trigger_fetch
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}), \
              patch("app.tasks.fetch.fetch_jobs") as task:
             trigger_fetch(MagicMock(), sources=["arbeitnow"])
@@ -423,7 +423,7 @@ class TestManualFetchTrigger:
 
     def test_a_full_run_still_matches(self):
         from app.routers.runs import trigger_fetch
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}), \
              patch("app.tasks.fetch.fetch_jobs") as task:
             trigger_fetch(MagicMock(), sources=[])
@@ -432,14 +432,14 @@ class TestManualFetchTrigger:
 
     def test_unknown_source_names_are_ignored(self):
         from app.routers.runs import trigger_fetch
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}), \
              patch("app.tasks.fetch.fetch_jobs") as task:
             trigger_fetch(MagicMock(), sources=["arbeitnow", "'; drop table jobs"])
         assert task.delay.call_args.kwargs["only"] == ["arbeitnow"]
 
     def test_it_refuses_while_a_fetch_is_already_running(self, db, client):
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": True, "seconds_left": 120}), \
              patch("app.tasks.fetch.fetch_jobs") as task:
             response = client.post("/runs/trigger", data={})
@@ -447,7 +447,7 @@ class TestManualFetchTrigger:
         assert "already running" in response.text
 
     def test_a_broker_failure_is_reported_not_raised(self, db, client):
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}), \
              patch("app.tasks.fetch.fetch_jobs") as task:
             task.delay.side_effect = RuntimeError("redis down")
@@ -456,7 +456,7 @@ class TestManualFetchTrigger:
         assert "Could not queue" in response.text
 
     def test_the_status_endpoint_reports_a_running_fetch(self, db, client):
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": True, "seconds_left": 60}):
             response = client.get("/runs/status")
         assert response.status_code == 200
@@ -464,7 +464,7 @@ class TestManualFetchTrigger:
         assert 'hx-trigger="every 5s"' in response.text
 
     def test_the_status_endpoint_stops_polling_when_idle(self, db, client):
-        with patch("app.services.fetch_lock.state",
+        with patch("app.tasks.fetch.fetch_state",
                    return_value={"running": False, "seconds_left": None}):
             response = client.get("/runs/status")
         assert "No fetch running" in response.text
