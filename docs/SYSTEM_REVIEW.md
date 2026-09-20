@@ -1,10 +1,11 @@
 # Consolidated system review — September 2026
 
-Four independent reviews of this codebase, merged, de-duplicated, and checked
-against the code. Roughly 60 raw claims came in; 38 survive as real findings,
-7 did not reproduce, and several arrived with the mechanism right and the blast
-radius wrong. Those corrections are in §6 rather than quietly dropped, because
-a review that is wrong about severity is worse than one that is silent.
+Five independent reviews of this codebase, merged, de-duplicated, and checked
+against the code. Roughly 95 raw claims came in; 42 survive as real findings,
+11 did not reproduce, and two arrived with fixes that would have made things
+worse. Those corrections are in §6 rather than quietly dropped, because a review
+that is wrong about severity is worse than one that is silent — and a review
+that recommends a harmful fix is worse than both.
 
 `docs/IMPROVING.md` remains the design pass — what this system could reach for.
 This is the defect pass: what it currently gets wrong.
@@ -19,7 +20,7 @@ Each carries a verification marker:
 | **REPRODUCED** | ran it and watched it fail; a transcript or measurement is quoted |
 | **CONFIRMED** | read the code path end to end and the defect is unambiguous |
 | **LATENT** | the defect is real but no live code path reaches it yet |
-| **CORRECTED** | reported by a reviewer, but the severity or mechanism was wrong |
+| **UNMEASURED** | the mechanism is certain; how often it fires needs production data, and the query to find out is given |
 
 Measurements are from Postgres 16 at schema `head`. The suite is 3,243 tests
 and passes (two `-n auto` runs; one flake, see §5.7).
@@ -461,6 +462,73 @@ annual columns in the filter and the prompt.
 
 ---
 
+### 2.7 Dedupe layer 2 rests on a guessed id that can collide · **CONFIRMED (mechanism) / UNMEASURED (incidence)**
+
+**What breaks.** For every board read through `base.jobs_from_listing` — icims,
+jobvite, teamtailor, ycombinator — `source_job_id` is not the board's identifier.
+It is a guess:
+
+```python
+# app/services/sources/base.py:175
+def _listing_job_id(url: str) -> str | None:
+    """The longest number in a posting URL — every ATS puts its id in there."""
+    numbers = re.findall(r"\d{3,}", url or "")
+    return max(numbers, key=len) if numbers else None
+```
+
+"The longest number in the URL" is the posting id only when nothing else in the
+URL is longer. A date segment, a tracking parameter or a tenant id wins whenever
+it has more digits:
+
+```
+    20250131  <-  https://acme.example.com/careers/20250131/1234
+    20250131  <-  https://acme.example.com/careers/20250131/5678
+   987654321  <-  https://apply.example.com/acme/j/A1B2C3?utm_campaign=987654321
+   987654321  <-  https://apply.example.com/acme/j/D4E5F6?utm_campaign=987654321
+```
+
+**Why it matters.** Two distinct postings that collide on this value are not
+stored as two jobs. `find_existing_job` layer 2 matches on
+`(source, source_job_id)` and returns the first row, so the second posting is
+treated as *another sighting of the first*: its URL is appended to
+`source_urls`, its description merged if it happens to be longer, and the job
+itself is never stored. It is counted as `merged` or `skipped`, so the cycle
+reports success. Under "find every job" that is the most expensive failure
+available, and it is completely silent.
+
+**How much this is actually happening is a data question, not a code question.**
+The mechanism is certain; the incidence depends on the URL shapes the four live
+boards emit, and this review had no production data. One query answers it:
+
+```sql
+SELECT source, source_job_id, count(*), array_agg(url)
+FROM jobs
+WHERE source_job_id IS NOT NULL
+GROUP BY 1, 2 HAVING count(*) > 1
+LIMIT 20;
+```
+
+Rows mean collisions already got through — and each one is a job that was
+merged into an unrelated posting. Note the query can only show collisions that
+produced two rows *anyway* (via a different dedupe layer); the ones layer 2
+absorbed cleanly left no second row to count, so this is a floor, not a total.
+
+**How to fix.** Prefer the board's own identifier where the structured data
+carries one (`identifier`, `@id`, or the final path segment) and fall back to
+the heuristic only when there is nothing better. Where the fallback is used,
+qualify it — the URL path without the query string, or `host + path` — so a
+tracking parameter cannot become the id. A `None` is safe: the code already
+guards `if source_job_id:` and skips layer 2 entirely.
+
+**What not to do.** One review proposed a `UNIQUE (source, source_job_id)`
+constraint here. That would convert a silent merge into a hard `IntegrityError`,
+the per-row savepoint would roll the insert back, and the posting would be
+counted as `dropped` — turning a lost job into a lost job *plus* a broken
+insert path. The constraint is only safe once the query above returns nothing,
+and by then the underlying bug is already fixed.
+
+---
+
 ## 3. Priority 2 — infrastructure drift
 
 ### 3.1 Two uvicorn workers race the migration, and the loser serves 503 forever · **CONFIRMED**
@@ -795,10 +863,35 @@ for the wrong reason is the worst kind to have flake.
   `ondelete="CASCADE"`, which deletes the contact with the application.
   Nullable is not `SET NULL`. **LATENT** for the same reason. If the comment is
   the intent, the policy should be `ondelete="SET NULL"`.
-* **`generation_status` has no database-level guard** — a plain `String(20)`
-  with four meaningful values and no CHECK constraint or enum, while
-  `ApplicationStatus` next to it uses `SAEnum`. A typo in any writer is
-  storable. Cosmetic, but inconsistent with its neighbour.
+* **`generation_status` transitions are read-then-write, not atomic** — the
+  column is a plain `String(20)` with four meaningful values, no CHECK
+  constraint and no enum, while `ApplicationStatus` beside it uses `SAEnum`, so
+  a typo in any writer is storable. More usefully: every writer selects rows in
+  one statement and updates them in another. `doc_refresh.stale_applications`
+  *does* filter `Application.generation_status == "idle"` (line 119) — a review
+  that said it had no guard was wrong about that — but the filter runs in the
+  SELECT and the write happens later, so two passes overlapping could both see
+  `idle` and both queue. In practice `refresh_stale_docs` is a single beat task
+  and `sweep_generations` re-checks, so this is theoretical rather than
+  observed. The clean form is a conditional UPDATE
+  (`WHERE generation_status IN ('idle', 'failed')`) with the affected row count
+  checked before queueing, which makes the transition atomic and removes the
+  question.
+* **Four live settings are missing from `.env.example`** —
+  `FETCH_LINKED_INTERVAL_HOURS`, `FETCH_LINKED_DEEP_INTERVAL_HOURS`,
+  `BROWSE_TOPUP_INTERVAL_MINUTES` and `GEMINI_BASE_URL` are all read from
+  `settings` with silent defaults in `config.py`, and none of the four appears
+  in `.env.example`. That file is the canonical variable list for whoever
+  deploys this, so three schedules and the Gemini endpoint are currently
+  untunable-by-discovery. Add them with their defaults and a one-line comment.
+* **`_extract_json_object` counts braces without skipping string interiors** —
+  `matcher.py:584-600` walks the reply tracking `{`/`}` depth with no awareness
+  of quoting, so a model that writes a stray `}` inside its `reasoning` string
+  closes the span early, `json.loads` fails on the fragment, and the whole reply
+  is discarded as unreadable. Narrow, because plain `json.loads` on the full
+  text is tried first and only replies wrapped in prose reach the fallback — but
+  it is exactly the reasoning-model case the fallback exists to serve. Skip
+  characters inside quoted strings during the depth count.
 * **An enrichment crash re-fetches its whole batch** — `enrichment_attempted_at`
   is stamped for every job in one loop after all HTTP work completes, and
   committed once. A crash in that window loses up to 200 jobs' worth of requests
@@ -824,10 +917,40 @@ for the wrong reason is the worst kind to have flake.
 
 ---
 
-## 6. Claims that did not reproduce
+## 6. Claims that did not survive checking
+
+### 6a. Two proposed fixes that would make things worse
+
+These matter more than the false findings, because a false finding costs an hour
+of reading and these cost data.
+
+**"Add a `UNIQUE (source, source_job_id)` constraint."** The value is a guess —
+`base._listing_job_id` returns "the longest number in the URL" — and it demonstrably
+collides when a date or a tracking parameter outruns the posting id (§2.7).
+Today a collision silently merges two postings into one row. Under the proposed
+constraint it becomes an `IntegrityError`, the per-row savepoint rolls the
+insert back, and the posting is counted as `dropped`. That is strictly worse,
+and it runs against this project's own stated rule — `IMPROVING.md`,
+"Deliberately not doing": *"a duplicate is a small cost while a deletion is the
+largest one available."* Fix the id first; the constraint is safe only once the
+collision query in §2.7 returns nothing.
+
+**"On `release()` with no token, attempt a plain `DEL`."** `fetch_lock.py`
+already explains why not, in a comment above the Lua script: *"A plain DELETE
+would let a cycle that outlived its TTL delete the next cycle's lock, quietly
+allowing a third to overlap it."* The compare-and-delete is the whole point of
+storing a token. The diagnosis behind the proposal is also impossible as
+written — it claims Redis being down leaves `acquire()` returning `True` "but
+stores no token" so "the stale lock persists for its full TTL". If no token was
+stored, nothing was written, and there is no lock to persist. The real mechanism
+is the reverse and is in §3.3: acquire succeeds and writes, then Redis fails
+*during release*, and the key survives to its 3600-second TTL. The fix is a
+shorter TTL and a retried release, not a blind delete.
+
+### 6b. Findings that did not reproduce
 
 Recorded because knowing what is *not* broken is worth as much as the list
-above, and because two of these would have cost real work.
+above, and because several of these would have cost real work.
 
 1. **"Missing index on `jobs.status`."** Wrong — `ix_jobs_status` has existed
    since migration 0003. The `jobs` table has twelve indexes; the gaps are
@@ -853,13 +976,37 @@ above, and because two of these would have cost real work.
    exists specifically so "a registry problem must not discard the query cache
    or the jobs this cycle is about to save." Committing registry state
    independently is the intended behaviour.
-6. **"The profile goes stale across batch chains."** Not reproduced. Each
-   chained batch is a separate Celery task that re-reads
-   `db.query(Profile).first()` at the top of `match_all_new_jobs`. Within a
-   25-job batch the profile is read once, which is correct.
+6. **"The profile goes stale across batch chains, so hundreds of jobs are
+   scored against it."** Overstated by roughly ten times. Each chained batch is
+   a separate Celery task that re-reads `db.query(Profile).first()` at the top
+   of `match_all_new_jobs`, so staleness is bounded by one batch —
+   `MATCH_MAX_JOBS_PER_TASK`, which is 25 — not by the chain.
 7. **"The rollback in `draft_due_follow_ups` discards the whole batch."**
    Mechanism right, blast radius wrong — see §5.6. `draft_message` commits
-   internally, so only the failing row is affected.
+   internally (line 859), so only the failing row is affected.
+8. **"`austria` is a substring of `australia`, so Australian jobs are
+   classified as European."** The substring claim is simply false — the two
+   words diverge at the fifth letter (`austr·i·a` versus `austr·a·lia`).
+   Checked against the real Europe keyword list: `Sydney, Australia`,
+   `Melbourne, Australia` and `Perth, Australia` match zero Europe keywords.
+   The *conclusion* — word-bound the keyword test — is right anyway, for the
+   reasons in §2.5: `usa` really is inside **Jer·usa·lem** and `america`
+   inside "South America".
+9. **"`doc_refresh` sets `generation_status = 'generating'` with no guard."**
+   It filters `Application.generation_status == "idle"` at line 119. The
+   residual point — the guard is in the SELECT rather than in an atomic
+   UPDATE — is fair and is folded into §5.8.
+10. **"Board backfill is marked done while its discovered boards are lost."**
+    Cannot happen. `_maybe_backfill_boards` records the boards inside
+    `with db.begin_nested():` and writes the `done` flag into the *same*
+    `db.commit()` a few lines later, so the flag and the boards land together
+    or not at all.
+11. **"GIN on `source_urls`" as a standalone fix.** Correct as far as it goes
+    and inert on its own: the queries use `.any()`, which emits `= ANY`, and
+    GIN cannot answer that operator. Migration 0028 already proves the point —
+    it added exactly this index on `archived_jobs`, with a comment explaining
+    why it was needed, and the index has never once been used. The index and
+    the `.contains()` change have to ship together (§1.3).
 
 On the positive side, one reviewer's read of transaction management in
 `job_fetcher` is correct and worth keeping: the per-row savepoints, the
@@ -885,11 +1032,14 @@ Ordered by damage × certainty ÷ effort.
 | 7 | §2.1 / §2.2 eligibility | silently deleting whole employers, and asserting the opposite of what postings say | pure functions, existing test file |
 | 8 | §2.3 document truncation | the core promise runs on the wrong half of the input | small; structured facts already extracted |
 | 9 | §2.4 seniority ordering | wasted paid calls the local prefilter exists to prevent | one block moved |
-| 10 | §2.5 region matcher · §4.4 archive guard | wrong-continent jobs; permanent row loss | small each |
-| 11 | §2.6 salary period | already planned in `IMPROVING.md` §0 | migration + prompt |
-| 12 | §4.1 / §4.3 queue split, eager relationship | both config-shaped | small |
-| 13 | §5.x the one-liners | each is a line or two and several are user-visible | an afternoon together |
-| 14 | §3.3–§3.7, §4.2, §4.5–§4.7, §6.3 | as they come up | — |
+| 10 | §2.7 run the collision query, then fix the guessed job id | one query; it either clears a suspected silent job-loss path or turns it into a live P0 | minutes to check |
+| 11 | §2.5 region matcher · §4.4 archive guard | wrong-continent jobs; permanent row loss | small each |
+| 12 | §2.6 salary period | already planned in `IMPROVING.md` §0 | migration + prompt |
+| 13 | §4.1 / §4.3 queue split, eager relationship | both config-shaped | small |
+| 14 | §5.x the one-liners, `.env.example` included | each is a line or two and several are user-visible | an afternoon together |
+| 15 | §3.3–§3.7, §4.2, §4.5–§4.7 | as they come up | — |
 
 Items 1–6 change what is *possible*; everything after is ordinary work and much
-easier to prioritise once CI exists and the loop has stopped.
+easier to prioritise once CI exists and the loop has stopped. Item 10 is out of
+severity order on purpose: it is a single read-only query, and its answer moves
+§2.7 either off this list entirely or to the top of it.
