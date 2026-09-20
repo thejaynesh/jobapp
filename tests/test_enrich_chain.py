@@ -267,11 +267,19 @@ class TestTheRequeueSweepDoesNotScanTheWholeTable:
     and the length has to be tested on the rows that come back.
     """
 
-    def test_the_length_test_never_reaches_sql(self, db):
+    def test_no_length_comparison_runs_against_the_whole_table(self, db):
         """
         Asserted against the SQL actually issued, not the source. The first
         attempt at this test read the function text and tripped over the word
         `func.length` in the comment explaining why it must not be there.
+
+        The rule is not "never call length()" — it is "never let length()
+        decide which rows to look at". A `length()` in the outer WHERE is the
+        117-second parallel scan this class is named for. The same call inside
+        a correlated EXISTS is evaluated only on rows the indexed `status` and
+        `filter_reason` predicates already selected, which is what makes the
+        already-judged exclusion affordable: measured against 120k rows with a
+        60k-row backlog, an index scan and an anti-join, 167ms.
         """
         from sqlalchemy import event
 
@@ -288,11 +296,33 @@ class TestTheRequeueSweepDoesNotScanTheWholeTable:
             event.remove(engine, "before_cursor_execute", record)
 
         assert statements, "issued no SQL at all"
-        offenders = [s for s in statements if "length(" in s.lower()]
+        offenders = [
+            s for s in statements
+            if "length(" in s.lower() and "exists" not in s.lower()
+        ]
         assert not offenders, (
-            "a length() comparison scans and de-TOASTs the whole table: "
-            + offenders[0][:200]
+            "a length() comparison outside a correlated subquery scans and "
+            "de-TOASTs the whole table: " + offenders[0][:200]
         )
+
+    def test_the_narrowing_predicates_are_still_the_indexed_ones(self, db):
+        """The length test is only affordable because these run first."""
+        from sqlalchemy import event
+
+        statements = []
+
+        def record(conn, cursor, statement, params, context, many):
+            statements.append(statement)
+
+        engine = db.get_bind()
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            enrichment.requeue_settled_verdicts(db)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        select = next((s for s in statements if "FROM jobs" in s), "")
+        assert "status" in select and "filter_reason" in select
 
     def test_it_still_only_takes_jobs_with_a_real_description(self, db):
         from app.models.job import Job, JobStatus
@@ -327,6 +357,94 @@ class TestTheRequeueSweepDoesNotScanTheWholeTable:
 
         assert enrichment.requeue_settled_verdicts(db, limit=3) == 3
         assert enrichment.requeue_settled_verdicts(db, limit=99) == 2
+
+
+class TestAVerdictIsNotRevisitedOnEvidenceItAlreadySaw:
+    """
+    The re-queue was a treadmill.
+
+    A job rejected on a *complete* description satisfies every condition
+    `requeue_settled_verdicts` selects on, so it went back to `new`, was
+    re-scored, was rejected again for the same reason on the same text, and
+    was picked up by the next pass thirty minutes later. Measured on a stub
+    matcher before the fix: five passes, five scoring calls, one unchanged
+    job — and a `new` queue that never empties, which is what actually hurts,
+    because a posting fetched this morning waits behind a re-run of June.
+
+    `JobScore.description_chars` is what closes it: it records how much text
+    the model saw, so "has the evidence changed?" is answerable without
+    guessing.
+    """
+
+    def _settled(self, db, *, chars, judged_on=None, reason="low_score"):
+        from app.models.job_score import JobScore
+
+        job = _job(db, description="x" * chars)
+        job.status = JobStatus.filtered_out
+        job.filter_reason = reason
+        if judged_on is not None:
+            db.add(JobScore(job_id=job.id, description_chars=judged_on,
+                            status="filtered_out", filter_reason=reason))
+        db.commit()
+        db.refresh(job)
+        return job
+
+    def test_a_job_judged_on_the_text_it_holds_is_left_alone(self, db):
+        self._settled(db, chars=5000, judged_on=5000)
+        assert enrichment.requeue_settled_verdicts(db) == 0
+
+    def test_it_stays_left_alone_pass_after_pass(self, db):
+        """The loop: without the guard this returned 1 every time, forever."""
+        self._settled(db, chars=5000, judged_on=5000)
+        assert [enrichment.requeue_settled_verdicts(db) for _ in range(5)] == [0] * 5
+
+    def test_a_description_that_actually_grew_still_comes_back(self, db):
+        """The feature this whole module exists for must survive the fix."""
+        job = self._settled(db, chars=6000, judged_on=500)
+        assert enrichment.requeue_settled_verdicts(db) == 1
+        db.refresh(job)
+        assert job.status == JobStatus.new
+        assert job.filter_reason is None
+
+    def test_a_job_never_scored_gets_its_one_catch_up_pass(self, db):
+        """
+        Rows predating the score history (migration 0026) carry no evaluation
+        at all. They deserve one look; after it they hold a row like everything
+        else and settle.
+        """
+        self._settled(db, chars=5000, judged_on=None)
+        assert enrichment.requeue_settled_verdicts(db) == 1
+
+    def test_whitespace_is_not_new_evidence(self, db):
+        """Below the bar every other writer in this codebase uses."""
+        self._settled(db, chars=5000, judged_on=5000 - 40)
+        assert enrichment.requeue_settled_verdicts(db) == 0
+
+    def test_the_bar_is_the_same_one_the_writers_use(self, db):
+        self._settled(db, chars=5000,
+                      judged_on=5000 - enrichment.MIN_IMPROVEMENT_CHARS)
+        assert enrichment.requeue_settled_verdicts(db) == 1
+
+    def test_the_rule_has_one_definition(self, db):
+        """
+        `_worth_rescoring` is what the enrichment path calls too, so a
+        description that grew by an enrichment pass and one that grew by a
+        cross-post merge get the same answer.
+        """
+        settled = self._settled(db, chars=5000, judged_on=5000)
+        grown = self._settled(db, chars=5000, judged_on=200)
+        assert enrichment._worth_rescoring(settled) is False
+        assert enrichment._worth_rescoring(grown) is True
+
+    def test_an_applied_job_is_still_never_revisited(self, db):
+        """The older guard has to survive the new one."""
+        from app.models.application import Application
+
+        job = self._settled(db, chars=6000, judged_on=200)
+        db.add(Application(job_id=job.id))
+        db.commit()
+        db.refresh(job)
+        assert enrichment._worth_rescoring(job) is False
 
 
 class TestTheServerPassRemembersWhichHostsAnswer:

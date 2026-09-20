@@ -792,6 +792,8 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
     row here becomes a `new` job for it to score. Requeueing the whole backlog
     in one transaction would empty this queue into that one and gain nothing.
     """
+    from sqlalchemy import func
+
     from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
 
     limit = max(1, limit)
@@ -813,7 +815,34 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
     # run of recent rows that all fail the length test would be re-examined
     # every pass while the rest of the backlog waited behind them, which is
     # the failure `select_targets` needed `enrichment_attempted_at` to escape.
-    # Unordered, every pass makes progress, and the whole set is a day's work.
+    #
+    # The NOT EXISTS is what makes that claim true. The set this reads from is
+    # tens of thousands of rows and almost all of them are *settled* — judged
+    # on the description they already hold — so without it every pass would
+    # read four thousand descriptions off disk to move none of them, forever.
+    # Excluding them in SQL means the query returns candidates rather than
+    # history, and the backlog genuinely drains.
+    #
+    # Against the maximum rather than the latest score on purpose: if any
+    # evaluation ever saw this much text, the answer is known. That is also
+    # the safe direction if a description ever gets shorter.
+    from app.models.job_score import JobScore
+
+    judged_already = (
+        db.query(JobScore.id)
+        .filter(
+            JobScore.job_id == Job.id,
+            # Strictly greater, so that growth of exactly
+            # `MIN_IMPROVEMENT_CHARS` counts as new evidence here as well —
+            # `already_judged_on_this_text` is the authority and it admits
+            # that case, and a pre-filter that excluded a row the Python rule
+            # would have taken is a silently different answer.
+            JobScore.description_chars
+            > func.length(Job.description) - MIN_IMPROVEMENT_CHARS,
+        )
+        .exists()
+    )
+
     rows = (
         db.query(Job)
         .filter(
@@ -821,6 +850,7 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
             Job.filter_reason.in_(sorted(DESCRIPTION_DEPENDENT_REASONS)),
             Job.description.isnot(None),
             Job.closed_at.is_(None),
+            ~judged_already,
         )
         .limit(limit * _RESCORE_OVERFETCH)
         .all()
@@ -855,6 +885,46 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
     return moved
 
 
+def already_judged_on_this_text(job: Job) -> bool:
+    """
+    Whether the verdict this job carries was already reached on the text it
+    holds right now.
+
+    This is the check that keeps the re-queue from being a treadmill. Without
+    it, a job rejected on a *complete* description satisfies every condition
+    `requeue_settled_verdicts` selects on — `filtered_out`, a
+    description-dependent reason, a description over the thin threshold — so
+    it is reset to `new`, re-scored, rejected again for the same reason, and
+    picked up by the next pass thirty minutes later. Measured on a stub
+    matcher: five passes, five scoring calls, one unchanged job. Multiply by
+    the tens of thousands of rows parked under those reasons and the matching
+    queue never empties, which is the part that costs more than the calls —
+    a posting fetched this morning waits behind a re-run of June.
+
+    `JobScore.description_chars` is what makes the question answerable: it
+    records how much text the model actually saw. If the stored description is
+    no meaningfully longer than that, the evidence has not changed and neither
+    will the answer.
+
+    Two deliberate conservatisms. A job with no recorded evaluation is judged
+    once — rows that predate the score history (migration 0026) deserve one
+    pass, and after it they carry a row like everything else. And the bar is
+    `MIN_IMPROVEMENT_CHARS` rather than a single character, matching what the
+    writers already treat as a meaningful change: a description that gained
+    forty characters of whitespace is not new evidence.
+    """
+    scores = getattr(job, "scores", None) or []
+    if not scores:
+        return False
+    # `Job.scores` is ordered newest first by the relationship itself, and it
+    # is eagerly loaded, so this costs no query.
+    seen = getattr(scores[0], "description_chars", None)
+    if not isinstance(seen, int):
+        # A hand-built row, or one written before the column meant anything.
+        return False
+    return len(job.description or "") - seen < MIN_IMPROVEMENT_CHARS
+
+
 def _worth_rescoring(job: Job) -> bool:
     """
     Whether a fuller description should send this job back to be scored again.
@@ -864,13 +934,16 @@ def _worth_rescoring(job: Job) -> bool:
     scored on a teaser, and the real posting routinely tells a different story
     — which is the entire reason enrichment exists.
 
-    Three things are deliberately left alone. A verdict the user made, because
+    Four things are deliberately left alone. A verdict the user made, because
     a fuller description is not grounds for overruling somebody who looked at a
     job and said no. A verdict that never read the description (a title or
     location mismatch), because re-scoring reaches the same answer and costs a
-    call. And anything already carrying an application, because that is the
+    call. Anything already carrying an application, because that is the
     user's pipeline and re-scoring could strand documents already written for
-    it — refreshing those is what roadmap 4.1 is for.
+    it — refreshing those is what roadmap 4.1 is for. And — see
+    `already_judged_on_this_text` — any job whose description has not grown
+    since the verdict it carries, because that is the same question asked
+    twice.
     """
     from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
 
@@ -878,7 +951,9 @@ def _worth_rescoring(job: Job) -> bool:
         return False
     if job.filter_reason not in DESCRIPTION_DEPENDENT_REASONS:
         return False
-    return not job.applications
+    if job.applications:
+        return False
+    return not already_judged_on_this_text(job)
 
 
 def _parse_datetime(raw) -> datetime | None:
