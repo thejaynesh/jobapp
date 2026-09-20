@@ -1,0 +1,79 @@
+# Run the suite before anything reaches the VPS.
+#
+# `deploy.yml` was the only workflow in this repository: three thousand tests
+# and nothing between a push and production. This is the gate. It does not need
+# Redis — every service that touches it fails open by design, and the tests
+# assert that behaviour rather than a live server's — but it does need Postgres,
+# because the models use JSONB, UUID and ARRAY columns that SQLite cannot host.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: jobapp
+          POSTGRES_PASSWORD: jobapp
+          POSTGRES_DB: jobapp
+        ports:
+          - 5432:5432
+        # Without this the job races the database's first start.
+        options: >-
+          --health-cmd "pg_isready -U jobapp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://jobapp:jobapp@localhost:5432/jobapp
+      # Named explicitly rather than left to conftest's fallback, which derives
+      # it by string replacement and would rewrite the username too — the URL
+      # above contains "/jobapp" in the userinfo as well as in the path.
+      TEST_DATABASE_URL: postgresql://jobapp:jobapp@localhost:5432/jobapp_test
+      REDIS_URL: redis://localhost:6379/0
+      # Real-looking but inert. `SECRET_KEY` must not be one of the placeholder
+      # values `auth.misconfiguration()` rejects, or every routed test 503s.
+      SECRET_KEY: ci-only-not-a-placeholder-0000000000000000
+      APP_PASSWORD: ci-only
+      AGENT_TOKEN: ci-only
+      NVIDIA_NIM_API_KEY: ci-only
+      NVIDIA_NIM_BASE_URL: https://integrate.api.nvidia.com/v1
+      STORAGE_PATH: /tmp/jobapp-storage
+      DOCS_OUTPUT_DIR: /tmp/jobapp-storage
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches `requires-python` in pyproject.toml.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Migrate
+        # The app's lifespan migrates too, but only under an advisory lock and
+        # against DATABASE_URL — doing it here first means a broken migration
+        # fails as itself rather than as three thousand 503s.
+        run: alembic upgrade head
+
+      - name: Run the suite
+        run: mkdir -p /tmp/jobapp-storage && pytest -q

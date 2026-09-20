@@ -31,6 +31,11 @@ and passes (two `-n auto` runs; one flake, see §5.7).
 
 ### 1.1 Jobs rejected on a full description are re-scored forever · **REPRODUCED**
 
+> **Fixed.** `_worth_rescoring` now refuses a job whose description has not
+> grown since the `JobScore` it carries, and `requeue_settled_verdicts`
+> excludes those rows in SQL so the pass stops re-reading them. Re-run of the
+> reproduction: one catch-up pass, then `requeued=0` forever.
+
 **What breaks.** `enrichment.requeue_settled_verdicts` selects on
 `(status = filtered_out, filter_reason ∈ DESCRIPTION_DEPENDENT_REASONS,
 len(description) ≥ 1500)` and resets those rows to `new`. The matcher scores
@@ -95,6 +100,10 @@ that hardly matters once the set is allowed to drain.
 
 ### 1.2 The three-way fetch split is cancelled by a shared lock · **CONFIRMED**
 
+> **Fixed.** A combined run now takes every group key; a group run takes only
+> its own. `fetch_state()` reads all of them so the runs page and the manual
+> trigger still see a scheduled group as running.
+
 **What breaks.** `app/tasks/fetch.py:39`:
 
 ```python
@@ -135,6 +144,11 @@ indicator, or derive that indicator from the group keys.
 ---
 
 ### 1.3 Two of the three dedupe layers, and the whole overlay lookup, scan the table · **REPRODUCED**
+
+> **Fixed.** Migration 0038 adds the GIN and btree indexes; both `.any()`
+> call sites became `.contains()` so GIN can serve them. The real
+> `find_existing_job` path measures 3.27 ms per posting, down from ~82 ms,
+> on a Bitmap Index Scan. See the migration for the `&&` caveat.
 
 **What breaks.** `jobs` carries twelve indexes and none of them covers the
 queries that run most often.
@@ -201,6 +215,9 @@ processes. Fold it into the indexed lookup once one exists.
 ---
 
 ### 1.4 Every deploy fails, and deploys three times · **REPRODUCED**
+
+> **Fixed.** `restart caddy`, plus `set -e` and a build/migrate/up ordering so
+> the migration runs with the new image before any worker serves traffic.
 
 **What breaks.** `.github/workflows/deploy.yml` ends each of its three scripts
 with `docker compose -f docker-compose.prod.yml restart nginx`. There is no
@@ -533,6 +550,9 @@ and by then the underlying bug is already fixed.
 
 ### 3.1 Two uvicorn workers race the migration, and the loser serves 503 forever · **CONFIRMED**
 
+> **Fixed.** The migration runs under a Postgres advisory lock. Four concurrent
+> workers against an empty database: 1/4 came up able to serve before, 4/4 after.
+
 Prod runs `uvicorn app.main:app --workers 2`, and `app/main.py:105` runs
 `subprocess.run(["alembic", "upgrade", "head"])` **inside the lifespan** — which
 executes once per worker process. When there is anything to apply, one commits
@@ -557,6 +577,9 @@ compare `alembic_version` against `ScriptDirectory.get_current_head()` and set
 must stay, wrap it in a Postgres advisory lock.
 
 ### 3.2 Nothing runs the tests · **CONFIRMED**
+
+> **Fixed.** `.github/workflows/test.yml` runs the suite on every push and pull
+> request against a Postgres service container.
 
 `deploy.yml` is the only workflow in the repository. 3,243 tests, a four-minute
 parallel suite, and no gate between a push and production — while much of this
@@ -1023,12 +1046,12 @@ Ordered by damage × certainty ÷ effort.
 
 | # | Finding | Why first | Effort |
 |---|---|---|---|
-| 1 | §1.4 deploy `restart nginx` → `caddy` | one word; stops every deploy failing and triple-deploying | minutes |
-| 2 | §1.1 re-scoring loop guard | continuous paid LLM spend on verdicts that cannot change, and it starves the speed lane | hours; the predicate already exists in `score_history._trigger` |
-| 3 | §3.1 migration out of the two-worker lifespan | intermittently 503s half of production | hours |
-| 4 | §1.2 fetch group lock inversion | restores an architecture that is already built and paid for | one line |
-| 5 | §1.3 indexes + `.any()` → `.contains()` | measured 500×–750× on the two hottest paths; makes an index already in the schema start working | one migration, two lines |
-| 6 | §3.2 a CI workflow | everything after this is safer to change | ~a dozen lines |
+| ~~1~~ | ~~§1.4 deploy `restart nginx` → `caddy`~~ | **done** | |
+| ~~2~~ | ~~§1.1 re-scoring loop guard~~ | **done** | |
+| ~~3~~ | ~~§3.1 migration out of the two-worker lifespan~~ | **done** | |
+| ~~4~~ | ~~§1.2 fetch group lock inversion~~ | **done** | |
+| ~~5~~ | ~~§1.3 indexes + `.any()` → `.contains()`~~ | **done** | |
+| ~~6~~ | ~~§3.2 a CI workflow~~ | **done** | |
 | 7 | §2.1 / §2.2 eligibility | silently deleting whole employers, and asserting the opposite of what postings say | pure functions, existing test file |
 | 8 | §2.3 document truncation | the core promise runs on the wrong half of the input | small; structured facts already extracted |
 | 9 | §2.4 seniority ordering | wasted paid calls the local prefilter exists to prevent | one block moved |
@@ -1039,7 +1062,10 @@ Ordered by damage × certainty ÷ effort.
 | 14 | §5.x the one-liners, `.env.example` included | each is a line or two and several are user-visible | an afternoon together |
 | 15 | §3.3–§3.7, §4.2, §4.5–§4.7 | as they come up | — |
 
-Items 1–6 change what is *possible*; everything after is ordinary work and much
-easier to prioritise once CI exists and the loop has stopped. Item 10 is out of
-severity order on purpose: it is a single read-only query, and its answer moves
-§2.7 either off this list entirely or to the top of it.
+Items 1–6 are done: the deploy reaches the proxy that exists, the re-scoring
+treadmill stops, one worker migrates instead of two racing, the fetch groups run
+beside each other, the dedupe path is indexed, and CI runs the suite. What
+follows is where the next work is.
+
+Item 10 is out of severity order on purpose: it is a single read-only query, and
+its answer moves §2.7 either off this list entirely or to the top of it.
