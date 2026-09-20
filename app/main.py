@@ -97,28 +97,84 @@ def migration_failure() -> str | None:
     return _migration_failure
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _migration_failure
-    _migration_failure = None
+# One migration at a time, across every process that starts against this
+# database. The number is arbitrary and only has to be stable.
+_MIGRATION_LOCK_ID = 0x30BA9917
+
+
+def _migrate_under_lock() -> str | None:
+    """
+    Bring the schema up to head, once. Returns why it could not, or None.
+
+    The lock is the whole point. `uvicorn --workers 2` forks two processes and
+    **each runs this lifespan**, so both used to shell out to `alembic upgrade
+    head` against the same database at the same moment. One commits; the other
+    fails on an object that now exists, records the failure, and — because
+    `_migration_failure` is module state cleared only by another lifespan —
+    then answers 503 to every request it receives for the life of the process.
+    Both workers share the listening socket, so roughly half of all traffic
+    503s after a deploy that looked like it worked, and it does not heal.
+
+    A Postgres advisory lock serialises them instead: the first worker
+    migrates, the rest wait, take the lock, find nothing to do, and carry on.
+    It is held on its own connection and released in `finally`, and Postgres
+    drops it if the process dies, so a worker killed mid-migration cannot
+    wedge the next start.
+
+    The deploy script also runs this migration ahead of starting any worker
+    (see `.github/workflows/deploy.yml`), which is where it belongs — this is
+    the safety net for a `docker compose up` that skipped that step, and it
+    should almost always find the schema already current.
+    """
+    from app.database import engine
+
+    lock = None
+    try:
+        lock = engine.connect()
+        lock.exec_driver_sql(f"SELECT pg_advisory_lock({_MIGRATION_LOCK_ID})")
+    except Exception as exc:
+        # A database we cannot reach is a bigger problem than an unmigrated
+        # one, and the request path will say so. Migrating unlocked here would
+        # reintroduce exactly the race this function exists to remove, so it
+        # does not: it reports and leaves the schema alone.
+        if lock is not None:
+            lock.close()
+        return f"could not reach the database to migrate it: {exc}"
+
     try:
         result = subprocess.run(
             ["alembic", "upgrade", "head"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
             # The tail rather than the head: alembic puts the actual cause last,
             # under the banner lines that are the same for every failure.
             detail = (result.stderr or result.stdout or "").strip()[-800:]
-            _migration_failure = detail or "alembic exited non-zero with no output."
-            logger.error(
-                "SCHEMA MIGRATION FAILED — serving 503 until fixed: %s", _migration_failure
-            )
-        else:
-            logger.info("alembic upgrade head: %s", result.stdout.strip() or "up to date")
+            return detail or "alembic exited non-zero with no output."
+        logger.info("alembic upgrade head: %s", result.stdout.strip() or "up to date")
+        return None
     except Exception as exc:
-        _migration_failure = str(exc)
-        logger.error("SCHEMA MIGRATION FAILED — serving 503 until fixed: %s", exc)
+        return str(exc)
+    finally:
+        try:
+            lock.exec_driver_sql(
+                f"SELECT pg_advisory_unlock({_MIGRATION_LOCK_ID})"
+            )
+        except Exception as exc:
+            logger.warning("could not release the migration lock: %s", exc)
+        lock.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _migration_failure
+    _migration_failure = None
+    _migration_failure = _migrate_under_lock()
+    if _migration_failure:
+        logger.error(
+            "SCHEMA MIGRATION FAILED — serving 503 until fixed: %s",
+            _migration_failure,
+        )
     _seed_profile_if_empty()
     problem = auth.misconfiguration()
     if problem:
