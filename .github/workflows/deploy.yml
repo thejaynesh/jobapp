@@ -18,11 +18,19 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
           script: |
+            set -e
             cd /opt/jobapp
             git pull origin main
-            docker compose -f docker-compose.prod.yml up -d --build
-            docker compose -f docker-compose.prod.yml exec -T web alembic upgrade head
-            docker compose -f docker-compose.prod.yml restart nginx
+            # Build, migrate with the new image, then move traffic onto it.
+            # `up -d --build` followed by a migration ran the new code against
+            # the old schema for the length of the migration; a `run` before the
+            # build would have applied the old image's migrations.
+            docker compose -f docker-compose.prod.yml build
+            docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
+            docker compose -f docker-compose.prod.yml up -d
+            # The Caddyfile is a read-only bind mount, so compose cannot see a
+            # change to it and `up -d` leaves the proxy alone.
+            docker compose -f docker-compose.prod.yml restart caddy
 
       # Port 22 on the VPS periodically stops accepting connections for a few
       # minutes at a time — both attempts fail on `dial tcp :22: i/o timeout`,
@@ -45,11 +53,19 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
           script: |
+            set -e
             cd /opt/jobapp
             git pull origin main
-            docker compose -f docker-compose.prod.yml up -d --build
-            docker compose -f docker-compose.prod.yml exec -T web alembic upgrade head
-            docker compose -f docker-compose.prod.yml restart nginx
+            # Build, migrate with the new image, then move traffic onto it.
+            # `up -d --build` followed by a migration ran the new code against
+            # the old schema for the length of the migration; a `run` before the
+            # build would have applied the old image's migrations.
+            docker compose -f docker-compose.prod.yml build
+            docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
+            docker compose -f docker-compose.prod.yml up -d
+            # The Caddyfile is a read-only bind mount, so compose cannot see a
+            # change to it and `up -d` leaves the proxy alone.
+            docker compose -f docker-compose.prod.yml restart caddy
 
       - name: Wait before final retry
         if: steps.deploy_first.outcome == 'failure' && steps.deploy_second.outcome == 'failure'
@@ -66,8 +82,16 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
           script: |
+            set -e
             cd /opt/jobapp
             git pull origin main
-            docker compose -f docker-compose.prod.yml up -d --build
-            docker compose -f docker-compose.prod.yml exec -T web alembic upgrade head
-            docker compose -f docker-compose.prod.yml restart nginx
+            # Build, migrate with the new image, then move traffic onto it.
+            # `up -d --build` followed by a migration ran the new code against
+            # the old schema for the length of the migration; a `run` before the
+            # build would have applied the old image's migrations.
+            docker compose -f docker-compose.prod.yml build
+            docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
+            docker compose -f docker-compose.prod.yml up -d
+            # The Caddyfile is a read-only bind mount, so compose cannot see a
+            # change to it and `up -d` leaves the proxy alone.
+            docker compose -f docker-compose.prod.yml restart caddy
