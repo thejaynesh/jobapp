@@ -2,7 +2,7 @@
 
 Five independent reviews of this codebase, merged, de-duplicated, and checked
 against the code. Roughly 95 raw claims came in; 42 survive as real findings,
-11 did not reproduce, and two arrived with fixes that would have made things
+12 did not reproduce, and two arrived with fixes that would have made things
 worse. Those corrections are in §6 rather than quietly dropped, because a review
 that is wrong about severity is worse than one that is silent — and a review
 that recommends a harmful fix is worse than both.
@@ -22,8 +22,22 @@ Each carries a verification marker:
 | **LATENT** | the defect is real but no live code path reaches it yet |
 | **UNMEASURED** | the mechanism is certain; how often it fires needs production data, and the query to find out is given |
 
-Measurements are from Postgres 16 at schema `head`. The suite is 3,243 tests
-and passes (two `-n auto` runs; one flake, see §5.7).
+Measurements are from Postgres 16 at schema `head`. The suite was 3,243 tests
+when this was written and is 3,408 now; the fixes below brought 165 with them.
+It passes clean (§5.7's flake has not reappeared in any run since).
+
+**Status: every finding on the fix-order list has been worked.** Each fixed
+entry carries a `> **Fixed.**` note saying what was actually done, which is
+occasionally narrower than what the finding asked for and once or twice wider.
+
+What is *not* done is marked where it sits, and it is four things: the §2.7
+incidence query (needs the production database), the §5.7 flake (has not
+recurred, so there is nothing to chase yet), and three §5.8 items left
+deliberately — the enrichment batch's commit chunking, which would add commit
+points for no measured gain; the `generation_status` column type; and the 500
+page's traceback, which is the one item on the list that trades away something
+real and so belongs to whoever runs this. One §5.8 item is withdrawn outright
+(§6b.12).
 
 ---
 
@@ -456,6 +470,15 @@ nothing survives — so the care exists in the codebase, just not here.
 
 ### 2.6 Salary loses its period, so the filter hides the best-paying jobs · **CONFIRMED**
 
+> **Fixed.** `salary_period` plus a derived `salary_annual_min`/`_max`; the
+> filter and the "states pay" count read the annual pair, the label shows the
+> period. Every write path that knows its period now states it — schema.org's
+> `unitText`, USAJOBS' annual-only grades, `harvest._annual_salary` — and the
+> derived pair follows the stated columns rather than being copied beside
+> them, so a hand-corrected figure is what gets annualised. Migration 0040
+> backfills only where the reading is forced (above 20,000, USD or no
+> currency); everything else stays NULL rather than guessed at.
+
 Already the first item in `docs/IMPROVING.md` §0 and independently re-raised
 here; confirmed still live, so it belongs on this list.
 
@@ -480,6 +503,12 @@ annual columns in the filter and the prompt.
 ---
 
 ### 2.7 Dedupe layer 2 rests on a guessed id that can collide · **CONFIRMED (mechanism) / UNMEASURED (incidence)**
+
+> **Partly fixed.** `_listing_job_id` no longer accepts a segment that merely
+> contains digits, and reads the leading digits of the last qualifying segment
+> (which keeps Teamtailor's `/jobs/778899-backend` working). The incidence
+> question stands: `scripts/job_id_collisions.sql` wants running against the
+> real database.
 
 **What breaks.** For every board read through `base.jobs_from_listing` — icims,
 jobvite, teamtailor, ycombinator — `source_job_id` is not the board's identifier.
@@ -590,6 +619,9 @@ change.
 
 ### 3.3 A Redis blip on release wedges fetching for an hour · **CONFIRMED**
 
+> **Fixed.** TTL 3600 → 1800, and `release` retries three times before logging.
+> It still refuses a blind DELETE when it holds no token — see §6a.
+
 `fetch_lock.acquire` writes the token with `ex=DEFAULT_TTL_SECONDS = 3600`.
 `release()` runs a Lua CAS-delete, and on any Redis exception it logs and
 returns — leaving the key to expire. So a transient Redis error during release,
@@ -602,6 +634,8 @@ guards converts a network blip into an outage.
 
 ### 3.4 A failed final commit loses the whole fetch cycle · **CONFIRMED**
 
+> **Fixed.** Committed every 250 inserts, outside the per-row savepoint block.
+
 `fetch_and_save_jobs` wraps each job insert in `db.begin_nested()`, which
 correctly isolates one bad row. But all those savepoints live inside one outer
 transaction committed once at line 1237; if that commit fails (connection loss,
@@ -613,6 +647,11 @@ chunk rather than a cycle. `record_run` already commits separately, so the
 pattern is established.
 
 ### 3.5 Generated documents are served without authentication · **CONFIRMED**
+
+> **Fixed.** `handle_path /storage/*` now runs `forward_auth web:8000` against
+> a new `/auth/check`, which answers 204 or 401 with no body and no redirect —
+> a download is not a navigation, and a 303 to the login form would be saved
+> as a PDF.
 
 `caddy/Caddyfile:24` serves `/storage/*` straight off the shared volume with
 `file_server`, so the request never reaches FastAPI and
@@ -633,6 +672,10 @@ exposure — but any leaked URL is permanently public.
 
 ### 3.6 The login throttle can be stepped over · **CONFIRMED**
 
+> **Fixed.** `_client` reads the **last** XFF hop, which is the one our own
+> proxy added. A test asserts that twenty rotated header values collapse into
+> one throttle bucket.
+
 `routers/auth.py:22` reads the **first** `X-Forwarded-For` entry. `X-Forwarded-For`
 is client-supplied, and Caddy's `reverse_proxy` *appends* the peer address to
 whatever arrived rather than replacing it (this is why `trusted_proxies`
@@ -648,6 +691,8 @@ bucket is not a limitation. The docstring also still says "nginx".
 
 ### 3.7 `make up` starts a broken proxy · **CONFIRMED**
 
+> **Fixed.** The `nginx` service is gone from the dev compose.
+
 `docker-compose.yml` mounts `./nginx/nginx.conf`, which has never existed in
 this repository (`git log -- nginx/` is empty; the tree has `caddy/`). Docker
 creates an empty *directory* at that path and mounts it, so the container serves
@@ -660,6 +705,11 @@ wrong. Point it at `caddy/Caddyfile` or drop the service from dev.
 ## 4. Priority 3 — ceilings already close
 
 ### 4.1 One Celery queue, two slots, two self-chaining 25-minute tasks · **CONFIRMED**
+
+> **Fixed.** Two queues: `batch` for the unattended passes, `interactive` for
+> generate/browse/outreach/interview. `interactive` is the default, so a task
+> added without a route lands where a person is more likely to be waiting.
+> Production runs a second worker dedicated to it.
 
 `celery_app.conf` declares no `task_routes` and no queues, so everything shares
 `celery`; production runs `--concurrency=2`. Both `match_jobs` and `enrich_jobs`
@@ -674,6 +724,11 @@ plus about ten lines of config.
 
 ### 4.2 Beat publishes regardless of queue depth; most tasks have no lock · **CONFIRMED**
 
+> **Partly fixed.** `poll_mailbox` has its own lock and TTL — it was the one
+> beat task that could stack several IMAP sessions against the same mailbox.
+> `sweep_generations` is now bounded per run and claims rows with a conditional
+> UPDATE, so overlapping passes cannot both queue the same application.
+
 Four of thirteen scheduled tasks take a Redis lock and no-op when a pass is
 running (`fetch`, `match`, `enrich`, `compare_models`). The other nine —
 `poll_mailbox` (15 min), `top_up_browsing` (30 min), `sweep_generations`
@@ -685,6 +740,9 @@ scans. `sweep_generations` is unbounded in a second sense too — its
 "never queued" query has no `LIMIT` and touches `app.documents` per row.
 
 ### 4.3 `Job.scores` is eagerly loaded everywhere, for one page · **CONFIRMED**
+
+> **Fixed.** The relationship is lazy again; `routers/jobs` and the score
+> history view ask for `selectinload(Job.scores)` where they render it.
 
 `app/models/job.py:164` sets `lazy="selectin"`, justified by the jobs list page
 rendering score history on every card. That is true, and every batch path pays
@@ -725,6 +783,10 @@ settled — which is the same predicate §1.1 needs.
 
 ### 4.5 Liveness cannot keep up past ~1,200 matched jobs · **CONFIRMED**
 
+> **Fixed.** `liveness.coverage` reports the population against the budget and
+> the sweep warns, naming the two settings that fix it. Reported under its own
+> key, not merged into the outcome counters — those have to sum to `checked`.
+
 `LIVENESS_MAX_PER_CYCLE = 200`, `LIVENESS_INTERVAL_HOURS = 12`,
 `LIVENESS_RECHECK_DAYS = 3` → 400 checks a day, sustaining 1,200 jobs on a
 three-day cycle. `candidates()` orders `liveness_checked_at ASC NULLS FIRST`, so
@@ -737,6 +799,10 @@ the failure the module was written to remove, relocated from "never checked" to
 raising the budget blind.
 
 ### 4.6 `find_duplicate_application_job` scans every application in Python · **CONFIRMED**
+
+> **Fixed.** Pre-filtered in SQL on the company's first token. `normalize_company`
+> only strips trailing suffixes and punctuation, so an ILIKE prefix cannot
+> exclude a row the full comparison would have matched.
 
 It pulls `(id, company, title)` for every job ever applied to into memory and
 compares normalised strings, once per matched job. The comment explains why
@@ -751,6 +817,15 @@ add the missing index on `applications.job_id`; Postgres does not index foreign
 key columns automatically, and both this join and `sweep_generations` use it.
 
 ### 4.7 The title gate is far looser than its name · **CONFIRMED**
+
+> **Fixed.** `matcher.title_priority_match` requires the overlap to include a
+> word that is not a bare profession noun, and enrichment ranks on three
+> buckets — strict match, loose match, nothing — so the head of the queue is
+> informative without anything being excluded. The filter keeps its fail-open
+> predicate. The sequence-ratio fallback is deliberately absent from the strict
+> test: measured against "software engineer", it scores "sales engineer" 0.774,
+> above "software developer" at 0.743 — whole-string similarity rewards sharing
+> the generic suffix, which is the thing being screened out.
 
 `_title_matches_roles` passes on **any single word overlap** with any target role
 or LLM-expanded query. With "Software Engineer" among the roles, every "Sales
@@ -880,12 +955,14 @@ for the wrong reason is the worst kind to have flake.
   **LATENT**: nothing in the app deletes an Application or a Job except
   `archive`, which pre-filters rows that have applications. If that filter ever
   changes, the whole 5,000-row archive batch fails on a FK violation. Add
-  `ondelete="CASCADE"` for symmetry with the rest of the schema.
+  `ondelete="CASCADE"` for symmetry with the rest of the schema. **Fixed** in
+  migration 0039, with the two missing FK indexes.
 * **`Contact.application_id` contradicts its own comment** — the column says
   "Nullable so a contact can outlive the application" and the FK says
   `ondelete="CASCADE"`, which deletes the contact with the application.
   Nullable is not `SET NULL`. **LATENT** for the same reason. If the comment is
-  the intent, the policy should be `ondelete="SET NULL"`.
+  the intent, the policy should be `ondelete="SET NULL"`. **Fixed** in
+  migration 0039 — the comment was the intent.
 * **`generation_status` transitions are read-then-write, not atomic** — the
   column is a plain `String(20)` with four meaningful values, no CHECK
   constraint and no enum, while `ApplicationStatus` beside it uses `SAEnum`, so
@@ -899,7 +976,13 @@ for the wrong reason is the worst kind to have flake.
   observed. The clean form is a conditional UPDATE
   (`WHERE generation_status IN ('idle', 'failed')`) with the affected row count
   checked before queueing, which makes the transition atomic and removes the
-  question.
+  question. **Fixed** — `generate.claim_for_generation` is exactly that, with
+  `release_generation_claim` to hand the slot back when the broker refuses the
+  task. The `String(20)`-versus-`SAEnum` half is not done and is left standing.
+  Note for anyone doing it: the claim commits, and `expire_on_commit` is on, so
+  callers have to read what they need out of their ORM objects *before* the
+  first claim or they reload every row — which is how this fix nearly
+  reintroduced the N+1 in §4.3.
 * **Four live settings are missing from `.env.example`** —
   `FETCH_LINKED_INTERVAL_HOURS`, `FETCH_LINKED_DEEP_INTERVAL_HOURS`,
   `BROWSE_TOPUP_INTERVAL_MINUTES` and `GEMINI_BASE_URL` are all read from
@@ -907,6 +990,7 @@ for the wrong reason is the worst kind to have flake.
   in `.env.example`. That file is the canonical variable list for whoever
   deploys this, so three schedules and the Gemini endpoint are currently
   untunable-by-discovery. Add them with their defaults and a one-line comment.
+  **Fixed**, along with `GENERATION_SWEEP_MAX_PER_RUN`, which this work added.
 * **`_extract_json_object` counts braces without skipping string interiors** —
   `matcher.py:584-600` walks the reply tracking `{`/`}` depth with no awareness
   of quoting, so a model that writes a stray `}` inside its `reasoning` string
@@ -914,29 +998,38 @@ for the wrong reason is the worst kind to have flake.
   is discarded as unreadable. Narrow, because plain `json.loads` on the full
   text is tried first and only replies wrapped in prose reach the fallback — but
   it is exactly the reasoning-model case the fallback exists to serve. Skip
-  characters inside quoted strings during the depth count.
+  characters inside quoted strings during the depth count. **Fixed** — the
+  depth count now tracks `in_string` and `escaped`.
 * **An enrichment crash re-fetches its whole batch** — `enrichment_attempted_at`
   is stamped for every job in one loop after all HTTP work completes, and
   committed once. A crash in that window loses up to 200 jobs' worth of requests
   and the next pass repeats them. Bounded at one batch; stamp in chunks if it
-  ever matters.
-* **`research_company` is dead code** — `app/tasks/interview.py:19` defines a
+  ever matters. **Not done** — deliberately. The equivalent problem on the
+  fetch path was worth fixing because a cycle is minutes of requests (§3.4);
+  one enrichment batch is under a minute and the next pass retries it, so the
+  chunking would add commit points for no measured gain.
+* **`research_company` is dead code** — ~~`app/tasks/interview.py:19` defines a
   Celery task that nothing ever calls: no `.delay()`, no `beat_schedule` entry.
   `routers/apps.py` does the search inline and synchronously instead. Either
-  wire the route to dispatch it (which is what a 300-second
-  `soft_time_limit` implies it was for, and would stop a dossier build blocking
-  a web request) or delete it.
+  wire the route to dispatch it or delete it.~~ **Withdrawn — see §6b.12.** The
+  module's own docstring already answers this: the inline route is deliberate
+  and says why, and the missing caller is a roadmap trigger, not a deletion.
 * **`conftest.py`'s test-database fallback mangles the username** —
   `DATABASE_URL.replace("/jobapp", "/jobapp_test")` is a global replace, and
   `postgresql://jobapp:jobapp@host/jobapp` contains `/jobapp` in the userinfo
   too, so the fallback also renames the role and fails with
   `role "jobapp_test" does not exist`. Masked today because `.env.example` sets
   `TEST_DATABASE_URL` explicitly. `make_url(...).set(database=...)` cannot
-  misfire.
+  misfire. **Fixed** — `_derive_test_url` does it that way. Hit for real during
+  this work before it was fixed, exactly as described.
 * **The 500 page renders the traceback** — `main.py:357` passes it into
   `errors/error.html`, which prints it in a `<pre>`. Behind authentication with
   one user, so a note rather than a finding, but it is on by default with no
   `DEBUG` gate and a traceback here carries SQL and connection details.
+  **Not done** — it is a one-line change, but it is the only item on this list
+  that trades away something real (the traceback is how a single-user
+  deployment debugs itself) and the call belongs to whoever runs it. Gate it on
+  `DEBUG` if this is ever reachable by more than one person.
 
 ---
 
@@ -1030,6 +1123,28 @@ above, and because several of these would have cost real work.
     it added exactly this index on `archived_jobs`, with a comment explaining
     why it was needed, and the index has never once been used. The index and
     the `.contains()` change have to ship together (§1.3).
+12. **"`research_company` is dead code — wire it up or delete it."** Listed in
+    §5.8 on the strength of "nothing calls it", which is true and is not the
+    same thing. `app/tasks/interview.py`'s module docstring already answers
+    this at length, and answers it correctly: the manual half deliberately runs
+    the same work inline in `routers/apps.research_interviews` because the user
+    is waiting on the answer and a queued job that fails silently is a worse
+    experience than a slow button; the automatic half is what the task is for,
+    and it needs interview-invite detection in `services.mailbox`, which is
+    roadmap phase 8. The docstring even says "reviews keep flagging it as
+    unreachable; it is, and the fix is the trigger, not the deletion." Deleting
+    a working task to satisfy a reachability check, or dispatching it from a
+    route whose whole design note explains why it doesn't, would both be
+    regressions. Left alone.
+
+A note on the two salary items that *did* change, since they are the only place
+a review's own recommendation was narrowed. §2.6 asked for a period column;
+implementing it turned the pay filter from "compare whatever is in the column"
+into "compare an annualised figure, or nothing" — which means a row we cannot
+annualise honestly drops out of the filter. That is the conservative direction
+and it is deliberate (a NULL is excluded from a floor, never admitted to it),
+but it is a behaviour change the finding did not spell out, and it is why every
+adapter that knows its period had to be taught to say so in the same commit.
 
 On the positive side, one reviewer's read of transaction management in
 `job_fetcher` is correct and worth keeping: the per-row savepoints, the
@@ -1052,20 +1167,47 @@ Ordered by damage × certainty ÷ effort.
 | ~~4~~ | ~~§1.2 fetch group lock inversion~~ | **done** | |
 | ~~5~~ | ~~§1.3 indexes + `.any()` → `.contains()`~~ | **done** | |
 | ~~6~~ | ~~§3.2 a CI workflow~~ | **done** | |
-| 7 | §2.1 / §2.2 eligibility | silently deleting whole employers, and asserting the opposite of what postings say | pure functions, existing test file |
-| 8 | §2.3 document truncation | the core promise runs on the wrong half of the input | small; structured facts already extracted |
-| 9 | §2.4 seniority ordering | wasted paid calls the local prefilter exists to prevent | one block moved |
-| 10 | §2.7 run the collision query, then fix the guessed job id | one query; it either clears a suspected silent job-loss path or turns it into a live P0 | minutes to check |
-| 11 | §2.5 region matcher · §4.4 archive guard | wrong-continent jobs; permanent row loss | small each |
-| 12 | §2.6 salary period | already planned in `IMPROVING.md` §0 | migration + prompt |
-| 13 | §4.1 / §4.3 queue split, eager relationship | both config-shaped | small |
-| 14 | §5.x the one-liners, `.env.example` included | each is a line or two and several are user-visible | an afternoon together |
-| 15 | §3.3–§3.7, §4.2, §4.5–§4.7 | as they come up | — |
+| ~~7~~ | ~~§2.1 / §2.2 eligibility~~ | **done** | |
+| ~~8~~ | ~~§2.3 document truncation~~ | **done** | |
+| ~~9~~ | ~~§2.4 seniority ordering~~ | **done** | |
+| ~~10~~ | ~~§2.7 the guessed job id~~ | **done** (guard fixed; the live query is still worth running — `scripts/job_id_collisions.sql`) | |
+| ~~11~~ | ~~§2.5 region matcher · §4.4 archive guard~~ | **done** | |
+| ~~12~~ | ~~§2.6 salary period~~ | **done** | |
+| ~~13~~ | ~~§4.1 / §4.3 queue split, eager relationship~~ | **done** | |
+| ~~14~~ | ~~§5.x the one-liners, `.env.example` included~~ | **done** | |
+| ~~15~~ | ~~§3.3–§3.7, §4.2, §4.5–§4.7~~ | **done**, except §5.7 (an auth flake, not reproduced since) and the live §2.7 query | |
 
-Items 1–6 are done: the deploy reaches the proxy that exists, the re-scoring
-treadmill stops, one worker migrates instead of two racing, the fetch groups run
-beside each other, the dedupe path is indexed, and CI runs the suite. What
-follows is where the next work is.
+**Every item on this list has been worked.** The deploy reaches the proxy that
+exists, the re-scoring treadmill stops, one worker migrates instead of two
+racing, the fetch groups run beside each other, the dedupe path is indexed, CI
+runs the suite, eligibility stopped deleting employers and stopped reading
+"cannot sponsor" as "can", the document generator gets the whole posting, the
+seniority prefilter runs before the paid call, the region matcher is
+word-bounded, archiving no longer eats enrichment's backlog, the job id is read
+rather than guessed, pay has a period and is compared as an annual figure,
+the queues are split, the batch passes stopped loading the list page's data,
+the liveness budget states its denominator, enrichment ranks on a stricter
+title test than the filter uses, and the generation claim is one statement.
 
-Item 10 is out of severity order on purpose: it is a single read-only query, and
-its answer moves §2.7 either off this list entirely or to the top of it.
+Two things remain open that nothing here can close:
+
+* **§5.7, the auth flake.** Not reproduced in any *uncontaminated* run since,
+  which is the honest form of that claim: two of the full runs during this work
+  were invalid, because a second `-n auto` run overlapped them and xdist gives
+  each worker a database by name — two concurrent suites share those names and
+  stomp on each other, which cost one run 48 spurious failures and another 4.
+  The clean runs pass. It is left in §5 rather than struck through, because
+  "did not reappear" is not "fixed" and the next person to see a stray 503 from
+  `/api/agent/*` should find this entry. (The contention is worth knowing about
+  on its own: any tooling that runs the suite must not run two copies at once.)
+* **The §2.7 live query.** `scripts/job_id_collisions.sql` still wants running
+  against the real database. The guard is fixed either way; the query says
+  whether the old one already cost anything.
+
+Three §5.8 items are left undone on purpose rather than forgotten — the
+enrichment batch's commit chunking, the `generation_status` column type, and
+the 500 page's traceback. Each says why at its own bullet.
+
+Item 10 was out of severity order on purpose: the query is read-only, and its
+answer moved §2.7 either off this list entirely or to the top of it. The guard
+was fixed without waiting for it.
