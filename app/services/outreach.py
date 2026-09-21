@@ -1013,6 +1013,21 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
         if next_step(contact) > max_sequence_steps():
             db.commit()
             continue
+        # Cleared before the attempt, and committed whether or not it works.
+        #
+        # The docstring's promise — "the window is cleared whether or not
+        # drafting succeeded, so one contact whose draft keeps failing cannot
+        # be retried forever" — was broken by the `db.rollback()` that used to
+        # sit in the `except`: it undid the pending `follow_up_due_at = None`
+        # along with the failed draft, so a contact whose draft always fails
+        # was picked up again on every beat tick, burning a generation attempt
+        # every six hours indefinitely.
+        #
+        # Committing the clear first is what makes the promise true. The draft
+        # itself commits inside `draft_message`, so a success is durable
+        # either way and a failure now costs one attempt rather than all of
+        # them.
+        db.commit()
         try:
             drafted.append(
                 draft_message(

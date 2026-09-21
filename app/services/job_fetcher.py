@@ -1190,7 +1190,13 @@ def fetch_and_save_jobs(
                     # should read the same whether the source sent an empty
                     # field or a Cloudflare page.
                     description=description or None,
-                    experience_level=job_data.get("experience_level", "mid"),
+                    # No default. `"mid"` was never a finding — it was the
+                    # fallback — and writing it made "the posting says
+                    # mid-level" and "no adapter told us" the same value, which
+                    # is the bug `base.parse_experience_level` and
+                    # `harvest._normalize` both document at length as fixed.
+                    # This ingest path was the one they missed.
+                    experience_level=job_data.get("experience_level"),
                     status=JobStatus.new,
                     fetched_at=now,
                     posted_at=posted_at,

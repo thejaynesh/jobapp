@@ -131,8 +131,12 @@ def id_token(db, site: str) -> str | None:
             detail = str((response.json().get("error") or {}).get("message") or "")
         except Exception:
             detail = response.text[:200]
-        _note_failure(db, row, f"HTTP {response.status_code}: {detail}"
-                               or f"HTTP {response.status_code}")
+        # The guard belongs on `detail`, not on the formatted string. As
+        # written, the left operand always contained at least "HTTP 401: " and
+        # was therefore always truthy, so the fallback was unreachable and an
+        # empty `detail` stored a note ending in a dangling colon.
+        _note_failure(db, row, f"HTTP {response.status_code}: {detail}" if detail
+                      else f"HTTP {response.status_code}")
         logger.warning("linked_auth: %s refused the refresh token (%s): %s",
                        site, response.status_code, detail)
         return None

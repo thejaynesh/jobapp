@@ -95,10 +95,27 @@ def find_job(db, url: str) -> Job | None:
 
 
 def _score(job: Job) -> int | None:
-    if job.llm_score is not None:
-        return int(job.llm_score)
+    """
+    The number the overlay shows, which is the number that decided the job.
+
+    Two faults in five lines. It read `llm_score` and ignored `llm_score_deep`,
+    so a borderline job the second pass rescued showed the first pass's
+    verdict — the opposite of what `Job.effective_score` exists to prevent, and
+    the reason that property is a property. And `keyword_score` is a ratio in
+    [0, 1], so `int()` truncated it to 0: every job that had passed the keyword
+    filter and not yet been scored displayed "0" in the extension, which reads
+    as a terrible match rather than as "not scored yet".
+
+    The keyword fallback stays — an overlay on a job that has passed the
+    prefilter but not yet been scored should say something — but it is scaled
+    to the percentage it already is, rather than truncated to zero.
+    """
+    score = job.effective_score
+    if score is not None:
+        return round(score)
     if job.keyword_score is not None:
-        return int(job.keyword_score)
+        # A ratio in [0, 1], which is why `int()` was always 0.
+        return round(job.keyword_score * 100)
     return None
 
 

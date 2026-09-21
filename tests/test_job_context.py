@@ -110,8 +110,24 @@ class TestContext:
         assert data["job"]["matched_by"] == "llm"
 
     def test_falls_back_to_the_keyword_score(self, db):
-        make_job(db, keyword_score=44)
+        # Stored as a ratio in [0, 1] — `matched / len(skills)` — so it has to
+        # be scaled. `int()` on it was always 0, which is the one thing the
+        # next test says the overlay must never show for a job nobody scored.
+        make_job(db, keyword_score=0.44)
         assert job_context.context(db, LINKEDIN)["job"]["score"] == 44
+
+    def test_the_keyword_score_is_not_truncated_to_zero(self, db):
+        make_job(db, keyword_score=0.8)
+        assert job_context.context(db, LINKEDIN)["job"]["score"] == 80
+
+    def test_the_deep_score_is_the_one_shown(self, db):
+        """
+        The second opinion is what decided the job's fate, so showing the first
+        pass contradicts the decision that was actually made. `effective_score`
+        exists for exactly this and the overlay was not using it.
+        """
+        make_job(db, llm_score=61, llm_score_deep=88)
+        assert job_context.context(db, LINKEDIN)["job"]["score"] == 88
 
     def test_an_unscored_job_reports_no_score_rather_than_zero(self, db):
         # Zero would read as "scored badly" rather than "not scored yet".

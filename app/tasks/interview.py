@@ -6,6 +6,15 @@ automatic behaviour in the system: automation decides when this *usually*
 happens, and the user decides when it happens *now*. So this is one task,
 callable from the mailbox poller when an interview invite arrives and from a
 button on an application.
+
+**Nothing calls this yet, and that is a missing feature rather than dead
+code.** The manual half exists but does not use it: `routers/apps
+.research_interviews` runs the same work inline on purpose, and says why —
+the user is waiting on the answer, and a queued job that fails silently is a
+worse experience than a slow button. The automatic half is what this is for,
+and it needs interview-invite detection in `services.mailbox`, which does not
+exist yet (roadmap phase 8). Reviews keep flagging it as unreachable; it is,
+and the fix is the trigger, not the deletion.
 """
 
 import logging

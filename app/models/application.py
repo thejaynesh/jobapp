@@ -34,7 +34,14 @@ class Application(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     job_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("jobs.id"), nullable=False
+        # Explicit, like every other FK in this schema. Without a policy the
+        # database defaults to NO ACTION, so a bulk delete of jobs — which is
+        # exactly what `archive` does — raises rather than cascades. It is
+        # pre-filtered to exclude rows with applications today, so nothing
+        # reaches this; if that filter ever changes, the whole 5,000-row
+        # archive batch fails on a constraint instead of one row.
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"),
+        nullable=False,
     )
     status: Mapped[ApplicationStatus] = mapped_column(
         SAEnum(ApplicationStatus), default=ApplicationStatus.not_applied, nullable=False
@@ -111,7 +118,8 @@ class ApplicationDocument(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     application_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("applications.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
     )
     doc_type: Mapped[DocType] = mapped_column(SAEnum(DocType), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

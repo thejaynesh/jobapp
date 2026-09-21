@@ -62,8 +62,14 @@ class Contact(Base):
     )
     # The application the contact was discovered for. Nullable so a contact can
     # outlive the application, and so contacts can be added company-wide.
+    #
+    # SET NULL, not CASCADE. Nullable is not the same as surviving: CASCADE
+    # deleted the contact along with the application, which is the opposite of
+    # what the line above promises. A contact is a person at a company and
+    # keeps being one after an application is gone.
     application_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     company: Mapped[str] = mapped_column(String, nullable=False)

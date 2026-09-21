@@ -599,13 +599,31 @@ def _extract_json_object(text: str) -> dict:
     except Exception:
         pass
 
+    # Braces inside strings are not structure. A model that writes a stray `}`
+    # in its `reasoning` — and a reasoning model discussing code routinely does
+    # — used to close the span early, `json.loads` failed on the fragment, and
+    # the whole reply was discarded as unreadable. Which is the case this
+    # fallback exists to serve.
     start = text.find("{")
     while start != -1:
         depth = 0
+        in_string = False
+        escaped = False
         for i in range(start, len(text)):
-            if text[i] == "{":
+            char = text[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
                 depth += 1
-            elif text[i] == "}":
+            elif char == "}":
                 depth -= 1
                 if depth == 0:
                     try:

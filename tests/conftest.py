@@ -10,9 +10,25 @@ from app.database import Base
 from app.config import settings
 import app.models  # noqa: F401 — registers all models with Base.metadata before create_all
 
-_BASE_DB_URL = settings.TEST_DATABASE_URL or settings.DATABASE_URL.replace(
-    "/jobapp", "/jobapp_test"
-)
+
+def _derive_test_url(base: str) -> str:
+    """
+    The test database, derived from the app one when nothing names it.
+
+    Not `base.replace("/jobapp", "/jobapp_test")`, which is what this was.
+    `str.replace` is global and a URL like
+    `postgresql://jobapp:jobapp@host/jobapp` contains `/jobapp` in the
+    *userinfo* as well as in the path — so the fallback renamed the role too
+    and failed with `role "jobapp_test" does not exist`. Masked in practice
+    because `.env.example` sets `TEST_DATABASE_URL` explicitly, which is
+    exactly the kind of thing that stays masked until someone runs the suite
+    without it.
+    """
+    url = make_url(base)
+    return str(url.set(database=f"{url.database or 'jobapp'}_test"))
+
+
+_BASE_DB_URL = settings.TEST_DATABASE_URL or _derive_test_url(settings.DATABASE_URL)
 
 # One database per xdist worker.
 #
