@@ -33,7 +33,13 @@ REGIONS: dict[str, dict] = {
         "adzuna": ["us"],
         "jobicy_geo": "usa",
         "keywords": [
-            "united states", "usa", "u.s.", "america", "new york", "nyc",
+            # "america" on its own is not here, and deliberately: it matches
+            # "South America", "Latin America" and "Central America", all of
+            # which are somewhere else. "north america" is unambiguous and is
+            # what location fields actually say. Nothing is lost — the region
+            # is already named three other ways below, plus 25 cities and
+            # every state code.
+            "united states", "usa", "u.s.", "north america", "new york", "nyc",
             "san francisco", "bay area", "seattle", "austin", "boston",
             "chicago", "los angeles", "denver", "atlanta", "miami",
             "washington dc", "california", "texas", "colorado", "georgia",
@@ -229,11 +235,48 @@ def jobicy_geos(prefs: dict) -> list[str | None]:
 
 
 def _region_matches(region: str, text: str, text_lower: str) -> bool:
-    cfg = REGIONS[region]
-    if any(kw in text_lower for kw in cfg["keywords"]):
-        return True
-    # 2-letter codes: case-sensitive word-boundary match ("Austin, TX")
-    return any(re.search(rf"\b{ab}\b", text) for ab in cfg["abbrevs"])
+    """
+    Whether this location text names somewhere in this region.
+
+    Keywords are matched on word boundaries, not as bare substrings. As
+    substrings they were wrong in both directions: "usa" is inside
+    **Jer·usa·lem**, so every job in Israel matched the United States, and
+    "america" is inside "South America". Because `location_allowed` tests the
+    user's own regions first and returns on the first hit, those came back
+    True — the filter admitted them and each one cost a scoring call.
+
+    Multi-word keywords keep a plain containment test. "new york" cannot
+    appear inside a longer word, and `\\b` around a phrase with a space in it
+    buys nothing.
+    """
+    return _region_keyword_match(region, text_lower) or _region_abbrev_match(
+        region, text
+    )
+
+
+def _region_keyword_match(region: str, text_lower: str) -> bool:
+    """A place name from this region, on word boundaries."""
+    for kw in REGIONS[region]["keywords"]:
+        if " " in kw or "." in kw:
+            if kw in text_lower:
+                return True
+        elif re.search(rf"\b{re.escape(kw)}\b", text_lower):
+            return True
+    return False
+
+
+def _region_abbrev_match(region: str, text: str) -> bool:
+    """
+    A 2-letter code from this region: case-sensitive, word-bounded.
+
+    Much weaker evidence than a place name, because US state codes collide
+    with ISO-3166 country codes — CA is California and Canada, DE is Delaware
+    and Germany, IN is Indiana and India, IL is Illinois and Israel, MT is
+    Montana and Malta, PA is Pennsylvania and Panama. So this is only consulted
+    after every region's place names have had their say; see
+    `location_allowed`.
+    """
+    return any(re.search(rf"\b{ab}\b", text) for ab in REGIONS[region]["abbrevs"])
 
 
 def location_allowed(location_text: str, is_remote: bool, prefs: dict) -> bool | None:
@@ -257,13 +300,22 @@ def location_allowed(location_text: str, is_remote: bool, prefs: dict) -> bool |
         return True
     if any(c in text_lower for c in custom):
         return True
-    for region in regions:
-        if _region_matches(region, text, text_lower):
-            return True
-    # Clearly some OTHER known region → drop; otherwise undecidable.
-    for region in REGIONS:
-        if region not in regions and _region_matches(region, text, text_lower):
-            return False
+
+    # Place names before 2-letter codes, across every region, and that
+    # ordering is the fix. A code is ambiguous between a US state and a
+    # country — CA, DE, IN, IL, MT, PA all are — so checking the preferred
+    # regions' codes before the other regions' *names* made "Toronto, CA" and
+    # "Berlin, DE" match the United States and pass the gate. Every unwanted
+    # region's name gets a say before any code does.
+    others = [r for r in REGIONS if r not in regions]
+    if any(_region_keyword_match(r, text_lower) for r in regions):
+        return True
+    if any(_region_keyword_match(r, text_lower) for r in others):
+        return False
+    if any(_region_abbrev_match(r, text) for r in regions):
+        return True
+    if any(_region_abbrev_match(r, text) for r in others):
+        return False
     return None
 
 

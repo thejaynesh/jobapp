@@ -102,6 +102,17 @@ def _blocked_by_seniority(job, profile_data: dict) -> bool:
     The title rule still applies when the posting says nothing, because a title
     is the only evidence left. Words appearing in the candidate's own target
     roles are never blocked either way.
+
+    The stated number is consulted first, and that ordering is the point. The
+    `junior_max_years` gate used to come first and return False for anyone
+    above it, so the numeric branch was unreachable for every non-junior
+    candidate: a profile showing four years was never spared a posting asking
+    for fifteen. It passed the prefilter, cost a scoring call, and the model
+    rejected it because the prompt tells it to — which is exactly the call this
+    deterministic check exists to avoid. The title heuristic stays behind the
+    junior gate, because that is what it was written as: a guess for when the
+    posting gives no number, and only worth making while the candidate is
+    junior enough for a senior title to be decisive.
     """
     from app.services.experience import total_years as _total_years
     from app.services.tunables import value as tunable
@@ -110,12 +121,13 @@ def _blocked_by_seniority(job, profile_data: dict) -> bool:
         return False
 
     total_years = _total_years(profile_data.get("experience", []))
-    if total_years >= tunable(profile_data, "junior_max_years"):
-        return False
 
     required = getattr(job, "required_years", None)
     if isinstance(required, (int, float)) and not isinstance(required, bool):
         return float(required) > total_years + SENIORITY_YEARS_TOLERANCE
+
+    if total_years >= tunable(profile_data, "junior_max_years"):
+        return False
 
     role_words = {
         w for role in profile_data.get("target_roles", [])
@@ -312,7 +324,13 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
                  if re.search(rf"\b{w}\b", (job.title or "").lower())),
                 "senior",
             )
-            max_years = getattr(settings, "JUNIOR_MAX_YEARS", 3.0)
+            # The tunable, not the env default. The decision above reads the
+            # profile override; quoting `settings` here meant a user who
+            # changed the threshold saw the filter obey them and the
+            # explanation cite the old number.
+            from app.services.tunables import value as tunable
+
+            max_years = tunable(profile_data, "junior_max_years")
             detail = (
                 f"Title contains {hit!r} and the posting states no required "
                 f"years, which is filtered while your profile shows under "
@@ -1049,6 +1067,12 @@ def _match_job(
         foreign = _blocked_by_language(job, profile_data)
         if foreign:
             job.status = JobStatus.filtered_out
+            # Zeroed for the reason the early filter path states a few lines
+            # up: a stale score beside "filtered out" is a number this
+            # evaluation never gave the job. `keyword_score` was written one
+            # line before this check and only the LLM scores were being
+            # cleared here.
+            job.keyword_score = 0.0
             job.llm_score = None
             job.llm_score_deep = None
             job.deep_matched_by = None
@@ -1123,7 +1147,14 @@ def _match_job(
 
     job.status = JobStatus.filtered_out
     job.filter_reason = "low_score"
-    penalty = " (after a 15-point seniority penalty)" if not llm_result.get(
+    # Whichever pass produced the number being quoted. `score` is the deep
+    # score when the second pass ran, and reading `llm_result` there described
+    # the first pass's seniority verdict beside the second pass's score — so
+    # the sentence either claimed a penalty that was not applied to the number
+    # it quotes, or omitted one that was. This is the sentence the user reads
+    # to decide whether to override the filter.
+    verdict = deep_result if deep_result is not None else llm_result
+    penalty = " (after a 15-point seniority penalty)" if not verdict.get(
         "seniority_fit", True) else ""
     job.filter_detail = (
         f"AI scored this {score}/100{penalty}, below your minimum of {min_score}."

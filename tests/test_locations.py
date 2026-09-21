@@ -135,3 +135,60 @@ class TestNewRegions:
 
     def test_nz_rejected_when_not_selected(self):
         assert location_allowed("Auckland, New Zealand", False, _prefs(regions=["usa"])) is False
+
+
+class TestACodeIsWeakerEvidenceThanAPlaceName:
+    """
+    US state codes collide with ISO-3166 country codes, and the preferred
+    region's codes used to be consulted before any other region's place names.
+
+    CA is California and Canada. DE is Delaware and Germany. IN is Indiana and
+    India, IL is Illinois and Israel, MT is Montana and Malta, PA is
+    Pennsylvania and Panama. So with the United States selected, "Toronto, CA"
+    and "Berlin, DE" matched on the code, returned True, and passed the
+    location gate — each one then costing a scoring call and landing in the
+    list. Only `False` filters here, so the defect was a missed rejection
+    rather than a wrong one, which is why it was invisible.
+
+    Every region's names now get a say before any region's codes do.
+    """
+
+    US = ["usa"]
+
+    def test_a_us_city_still_passes(self):
+        for loc in ("Austin, TX", "San Francisco, CA", "Boston, MA"):
+            assert location_allowed(loc, False, _prefs(regions=self.US)) is True, loc
+
+    def test_a_city_elsewhere_is_rejected_despite_a_us_state_code(self):
+        for loc in ("Toronto, CA", "Vancouver, CA", "Berlin, DE",
+                    "Munich, DE", "Bengaluru, IN"):
+            assert location_allowed(loc, False, _prefs(regions=self.US)) is False, loc
+
+    def test_a_code_alone_is_still_enough_to_pass(self):
+        """Weak evidence, but the same answer as undecidable downstream."""
+        assert location_allowed("Boise, ID", False, _prefs(regions=self.US)) is True
+
+    def test_a_region_nobody_selected_stays_undecidable(self):
+        """Israel is not a known region, so the honest answer is "don't know"."""
+        assert location_allowed(
+            "Jerusalem, Israel", False, _prefs(regions=self.US)
+        ) is None
+
+
+class TestKeywordsAreWordsNotSubstrings:
+    def test_jerusalem_is_not_the_united_states(self):
+        """`usa` was matched as a bare substring, and it is inside Jer-usa-lem."""
+        assert location_allowed(
+            "Jerusalem, Israel", False, _prefs(regions=["usa"])
+        ) is None
+
+    def test_the_other_americas_are_not_this_one(self):
+        for loc in ("South America", "Latin America", "Central America"):
+            assert location_allowed(
+                loc, False, _prefs(regions=["usa"])
+            ) is None, loc
+
+    def test_north_america_still_reads_as_the_united_states(self):
+        assert location_allowed(
+            "North America", False, _prefs(regions=["usa"])
+        ) is True
