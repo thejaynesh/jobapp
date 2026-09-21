@@ -71,6 +71,10 @@ _RESTRICTION_PATTERNS = [
      "Active security clearance required"),
     (re.compile(r"security clearance (?:is )?(?:required|mandatory)", re.I),
      "Security clearance required"),
+    # The four below name a thing rather than state a rule. They stay in the
+    # blocking tier — "this position involves export-controlled technical data"
+    # is a real constraint — but `_ABOUT_THE_EMPLOYER_RE` now keeps them from
+    # firing on the paragraph describing what the company sells.
     (re.compile(r"(?:top[\s-]secret|ts/sci)\b", re.I),
      "Security clearance required"),
     (re.compile(r"\bsecret\s+clearance\b", re.I),
@@ -81,6 +85,44 @@ _RESTRICTION_PATTERNS = [
      "Export-control restriction"),
 ]
 
+# Sentences that are about the employer rather than about the reader.
+#
+# The last four patterns above name a thing rather than state a rule, and the
+# thing turns up constantly in the paragraph describing what the company
+# sells:
+#
+#   "Acme builds software that helps manufacturers manage export control."
+#   "Our TS/SCI-cleared customers rely on us."
+#   "Acme collects personal data about U.S. persons under CCPA."
+#
+# Every one of those was filtered as "Restricted to US citizens" — the
+# blocking tier, the one with the irreversible consequence. So this did not
+# lose jobs, it lost employers: every posting at a trade-compliance vendor, and
+# every posting at a security company whose customers hold clearances.
+#
+# The discriminator is the subject of the sentence, not the presence of
+# requirement language. "This position involves export-controlled technical
+# data" is about the role and still blocks, which is the behaviour this module
+# has always had and `TestCitizenshipRestriction` asserts. What changes is that
+# a sentence visibly about the company, its product or its customers no longer
+# counts as a statement about who may hold the job.
+#
+# An exclusion list, deliberately, for the same reason as
+# `_NOT_IMMIGRATION_RE` below: it narrows only the demonstrated false
+# positives and leaves every other reading as conservative as it was.
+_ABOUT_THE_EMPLOYER_RE = re.compile(
+    r"\b(?:about\s+us"
+    r"|our\s+(?:product|products|platform|software|tool|tools|customers|"
+    r"clients|mission|company|technology\s+helps|team\s+supports)"
+    r"|we\s+(?:build|built|help|helps|provide|serve|offer|make|sell)"
+    r"|helps?\s+(?:companies|manufacturers|customers|clients|teams|"
+    r"organi[sz]ations|enterprises|businesses)"
+    r"|collects?\s+personal\s+data"
+    r"|under\s+(?:ccpa|gdpr|hipaa)"
+    r"|[\w-]+-cleared\s+(?:customers|clients|users))\b",
+    re.I,
+)
+
 _RESTRICTION_PATTERNS_CASED = [
     (re.compile(r"\bITAR\b"), "ITAR / US Person requirement"),
     (re.compile(r"\bEAR\b"), "Export-control restriction"),
@@ -89,6 +131,55 @@ _RESTRICTION_PATTERNS_CASED = [
 # --- Tier 2: advisory. The posting says something about sponsorship. --------
 
 _SPONSORSHIP_TRIGGER = re.compile(r"sponsor(?:s|ed|ing|ship)?\b", re.I)
+
+# "Sponsor" is not an immigration word on its own, and the two places it turns
+# up in a job posting mean opposite things:
+#
+#   "We sponsor attendance at PyCon and regional tech conferences."
+#   "The executive sponsor will oversee delivery."
+#
+# The first matched the positive pattern on "supports" and was badged
+# *sponsorship available*; the second matched nothing and was badged *will not
+# sponsor*. Both are wrong about something the posting never discussed, and the
+# badge is shown in four places, so it asserted it four times in the
+# employer's name.
+#
+# So a sentence has to plausibly be about immigration before its direction is
+# read. An *exclusion* list rather than a required inclusion list, and that
+# choice is the whole design.
+#
+# In a job posting, "sponsorship" unqualified is immigration — real statements
+# say "Candidates must not require sponsorship" and "Sponsorship provided for
+# the right candidate" with no other immigration word anywhere in the sentence.
+# Requiring one of those words would trade these false positives for false
+# negatives on the actual statements, which is the worse trade: a missing badge
+# is a job the user has to read the posting for, and a wrong badge is the
+# product asserting something the employer did not say.
+#
+# What the false positives have in common instead is a visible non-immigration
+# object: a conference, a project, a person holding a role. Naming those is
+# narrow, checkable, and fails open the right way.
+_NOT_IMMIGRATION_RE = re.compile(
+    r"\b(?:conference|conferences|event|events|meetup|meetups|summit|talk|talks"
+    r"|booth|open[\s-]?source|project|projects|charity|charities|nonprofit"
+    r"|community|bootcamp|hackathon|gym|tuition|course|courses|membership"
+    r"|executive|engineering|product|team|squad|program|programme|initiative"
+    r"|workstream|stakeholder)\s+sponsor"
+    # Up to three intervening words, so "sponsor two open-source projects"
+    # reads the same as "sponsor projects".
+    r"|sponsor(?:s|ed|ing|ship)?\s+(?:\w+[\s-]+){0,3}?"
+    r"(?:attendance|travel|tickets?|conferences?|learning|education"
+    r"|source|projects?|events?|meetups?|charities|hackathons?|booths?)\b",
+    re.I,
+)
+
+# Where a clause ends, for reading direction. A negation belonging to one
+# clause says nothing about the next: "Although we cannot offer relocation
+# assistance, visa sponsorship is available" was read as a refusal because
+# "cannot" appeared somewhere in the sentence.
+_CLAUSE_SPLIT_RE = re.compile(
+    r"(?:[,;:]|\b(?:but|although|though|however|whereas|while)\b)", re.I
+)
 
 # A sponsorship sentence is negative if it is negated, positive otherwise.
 # Reading the negation rather than enumerating every phrasing is what lets
@@ -226,6 +317,10 @@ def _find_restriction(sentences: list[str]) -> tuple[str | None, str | None]:
     for sentence in sentences:
         if _is_boilerplate(sentence) or _is_negated(sentence):
             continue
+        # A sentence about the employer's product or customers is not a
+        # statement about who may hold the job. See `_ABOUT_THE_EMPLOYER_RE`.
+        if _ABOUT_THE_EMPLOYER_RE.search(sentence):
+            continue
         for pattern, label in _RESTRICTION_PATTERNS:
             if pattern.search(sentence):
                 return label, _quote(sentence)
@@ -235,14 +330,41 @@ def _find_restriction(sentences: list[str]) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _sponsorship_clause(sentence: str) -> str:
+    """
+    The part of the sentence that is actually about sponsorship.
+
+    Direction used to be read from the whole sentence, so a negation belonging
+    to a different clause flipped the answer — and "provided at no cost to the
+    candidate" read as a refusal on the strength of the words "no cost".
+    """
+    clauses = [c for c in _CLAUSE_SPLIT_RE.split(sentence) if c and c.strip()]
+    owning = [c for c in clauses if _SPONSORSHIP_TRIGGER.search(c)]
+    return " ".join(owning) if owning else sentence
+
+
 def _classify_sponsorship(sentence: str) -> str:
-    if _SPONSORSHIP_NEGATION_RE.search(sentence):
-        return "negative"
-    if _SPONSORSHIP_POSITIVE_RE.search(sentence):
+    """
+    Which way the sponsorship clause points.
+
+    Both patterns routinely match the same clause, so the question is which one
+    *governs* — and word order answers it. A negation before the offer verb
+    negates it ("we are **unable** to *provide* sponsorship"); a negation after
+    it belongs to something else ("sponsorship is *provided* at **no** cost").
+    Testing either one first in isolation gets one of those two backwards.
+    """
+    clause = _sponsorship_clause(sentence)
+    offer = _SPONSORSHIP_POSITIVE_RE.search(clause)
+    denial = _SPONSORSHIP_NEGATION_RE.search(clause)
+
+    if offer and denial:
+        return "negative" if denial.start() < offer.start() else "positive"
+    if offer:
         return "positive"
     # A bare mention with neither negation nor an offer ("sponsorship policy
     # varies by role") is more likely to be a caveat than an offer, and the
-    # cautious reading is the one worth showing.
+    # cautious reading is the one worth showing. Same default for an explicit
+    # denial.
     return "negative"
 
 
@@ -252,10 +374,16 @@ def _find_sponsorship(sentences: list[str]) -> tuple[str | None, str | None]:
 
     Postings sometimes carry both ("sponsorship available for some roles; this
     one is not eligible"). The constraint is the part worth surfacing.
+
+    A sentence that is visibly about something other than immigration does not
+    count at all — see `_NOT_IMMIGRATION_RE`. Without that test, conference
+    sponsorship and project sponsors were being reported as visa policy.
     """
     positive: tuple[str, str] | None = None
     for sentence in sentences:
         if _is_boilerplate(sentence) or not _SPONSORSHIP_TRIGGER.search(sentence):
+            continue
+        if _NOT_IMMIGRATION_RE.search(sentence):
             continue
         direction = _classify_sponsorship(sentence)
         if direction == "negative":

@@ -124,6 +124,131 @@ class TestRestrictionFalsePositives:
         assert not scan(None).blocked
 
 
+class TestASentenceAboutTheEmployerIsNotAboutTheReader:
+    """
+    "export control", "US person" and "TS/SCI" name a thing rather than state a
+    rule, and the thing turns up constantly in the paragraph describing what
+    the company sells. Every sentence below used to be filtered as "Restricted
+    to US citizens" — the blocking tier, the one with the irreversible
+    consequence. So this did not lose jobs, it lost employers: every posting at
+    a trade-compliance vendor, and every posting at a security company whose
+    customers hold clearances.
+
+    The discriminator is the subject of the sentence. A statement about the
+    *position* still blocks — see `TestCitizenshipRestriction`, which is
+    unchanged — and only a sentence visibly about the employer, its product or
+    its customers is skipped.
+    """
+
+    @pytest.mark.parametrize("sentence", [
+        "Acme builds software that helps manufacturers manage export control "
+        "and trade compliance at scale.",
+        "Our TS/SCI-cleared customers rely on us every day.",
+        "Acme collects personal data about U.S. persons and processes it "
+        "under CCPA.",
+        "Our product, Top-Secret Analytics, helps teams collaborate.",
+        "We build tooling for export-controlled supply chains.",
+        "Our platform serves US persons and international customers alike.",
+    ])
+    def test_a_sentence_about_the_company_does_not_block(self, sentence):
+        assert not scan(BASE + sentence).blocked
+
+    @pytest.mark.parametrize("sentence,label", [
+        ("This position requires access to export-controlled technology, so "
+         "applicants must be a US Person.", "ITAR / US Person requirement"),
+        # "must hold ... clearance" is matched by the obligation pattern, which
+        # comes first and is the more specific claim of the two.
+        ("Candidates must hold an active TS/SCI clearance.",
+         "Security clearance required"),
+        ("Eligibility for this role requires ITAR compliance.",
+         "ITAR / US Person requirement"),
+        ("You must be able to obtain a secret clearance.",
+         "Security clearance required"),
+        # Unchanged behaviour: about the role, so still blocking.
+        ("This position involves export-controlled technical data.",
+         "Export-control restriction"),
+    ])
+    def test_a_sentence_about_the_role_still_blocks(self, sentence, label):
+        result = scan(BASE + sentence)
+        assert result.blocked
+        assert result.restriction_label == label
+
+    def test_the_quote_is_the_sentence_that_stated_the_rule(self):
+        """Principle 3 is only satisfied if the evidence is the right sentence."""
+        result = scan(
+            BASE
+            + "We help customers manage export control. "
+            + "Applicants must be a US Person for this role."
+        )
+        assert result.blocked
+        assert "Applicants must be a US Person" in result.restriction_quote
+        assert "help customers" not in result.restriction_quote
+
+
+class TestSponsorshipIsAboutImmigrationOrItIsNothing:
+    """
+    "Sponsor" is not an immigration word on its own, and the badge is shown in
+    four places — so a wrong reading asserts something in the employer's name
+    four times over.
+
+    Narrowed by an exclusion list rather than by requiring an immigration
+    keyword, because the real statements often have none: "Candidates must not
+    require sponsorship" and "Sponsorship provided for the right candidate" are
+    both unambiguous and both keyword-free. Requiring one would have traded
+    these false positives for false negatives on the statements themselves,
+    which is the worse trade — a missing badge costs a read of the posting, a
+    wrong badge misquotes the employer.
+    """
+
+    @pytest.mark.parametrize("sentence", [
+        "We sponsor attendance at PyCon and regional tech conferences.",
+        "The executive sponsor will oversee delivery.",
+        "Each team has an engineering sponsor on the leadership group.",
+        "We sponsor two open-source projects.",
+    ])
+    def test_a_non_immigration_sponsor_is_not_a_visa_statement(self, sentence):
+        result = scan(BASE + sentence)
+        assert result.sponsorship_direction is None
+        assert result.sponsorship_note is None
+
+    @pytest.mark.parametrize("sentence,direction", [
+        # A negation in another clause says nothing about this one.
+        ("Although we cannot offer relocation assistance, visa sponsorship "
+         "is available for this role.", "positive"),
+        # "no cost" is a whole-word "no" that belongs to the cost, not the offer.
+        ("Visa sponsorship is provided at no cost to the candidate.", "positive"),
+        # A negation *before* the offer verb governs it.
+        ("We are unable to provide visa sponsorship for this position.",
+         "negative"),
+        ("We are unable to offer visa sponsorship at this time.", "negative"),
+        ("We will not sponsor or transfer visas now or in the future.",
+         "negative"),
+        ("Candidates must not require visa sponsorship now or in the future.",
+         "negative"),
+        ("We are happy to provide visa sponsorship for exceptional candidates.",
+         "positive"),
+        ("Visa sponsorship available for the right candidate.", "positive"),
+    ])
+    def test_direction_is_read_from_the_clause_that_owns_it(
+            self, sentence, direction):
+        assert scan(BASE + sentence).sponsorship_direction == direction
+
+    def test_a_bare_immigration_mention_reads_as_the_cautious_answer(self):
+        result = scan(
+            BASE + "Sponsorship policy varies by role; contact recruiting "
+                   "about work authorization."
+        )
+        assert result.sponsorship_direction == "negative"
+
+    def test_a_sponsorship_sentence_never_blocks(self):
+        """Advisory means advisory: the job keeps its place and its score."""
+        for sentence in (
+            "We are unable to provide visa sponsorship for this position.",
+            "Visa sponsorship is available.",
+        ):
+            assert not scan(BASE + sentence).blocked
+
+
 class TestSponsorshipNote:
     @pytest.mark.parametrize("sentence", [
         "We will not sponsor visas for this position.",
