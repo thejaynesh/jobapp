@@ -205,6 +205,16 @@ class Settings(BaseSettings):
     # ceiling against a page that cleaned badly, not against job descriptions.
     MATCH_DESCRIPTION_CHARS: int = 24000
 
+    # The same question for document generation, which never got the fix above.
+    # Its call sites read 2,000 / 2,500 / 2,500 / 4,000 and 6,000 characters —
+    # so the model rewriting a resume to match a job was reading the company
+    # intro and the culture paragraph, and the requirements it was supposed to
+    # match against were below the cut. 16,000 is the ceiling
+    # `job_details.MAX_DESCRIPTION_CHARS` already picked for "enough
+    # description to hold the requirements section", rather than a sixth
+    # independent number.
+    DOC_DESCRIPTION_CHARS: int = 16000
+
     # ---- LLM call log ---------------------------------------------------
     # Every request and reply, stored together. The existing log lines say a
     # call happened and how it ended — which the result already tells you. The

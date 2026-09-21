@@ -34,6 +34,8 @@ draft is already the product, and this is an attempt to improve it.
 import logging
 
 from app.config import settings
+# The same ceiling the writer reads, from the one place that defines it.
+from app.services.doc_generator import _jd
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +154,11 @@ def critique(
         f"Job: {job_title} at {job_company}\n"
         + (f"Top requirements: {'; '.join(requirements)}\n" if requirements else "")
         + (f"Job keywords: {', '.join(keywords)}\n" if keywords else "")
-        + f"\nJob description:\n{(job_description or '')[:6000]}\n"
+        # The same ceiling generation uses. The reviewer reading a different,
+        # shorter excerpt than the writer did is a critique of a job it only
+        # half saw — and this pass exists to catch the writer missing a
+        # requirement, which it cannot do if the requirement is below its cut.
+        + f"\nJob description:\n{_jd(job_description)}\n"
         f"\n--- THE APPLICATION ---\n{draft}\n"
     )
 

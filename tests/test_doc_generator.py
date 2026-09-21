@@ -1060,3 +1060,80 @@ class TestOnePageRetry:
         with stack:
             generate_documents(db, app)
         assert mocks["compile_pages"].call_count == 1
+
+
+class TestTheWriterReadsWhatTheJobAsksFor:
+    """
+    Generation was tailoring resumes against the marketing half of the posting.
+
+    The matcher was raised to 24,000 characters for a documented reason —
+    4,000 "routinely cut off mid-requirements" — and generation never got the
+    fix: 2,000 characters for bullets, 2,500 for the summary and the cover
+    letter, 4,000 for insights, 6,000 for the self-review. 2,000 characters is
+    about 300 words, which in a corporate posting is the company intro and the
+    culture paragraph. So the model rewriting the bullets to match a job had
+    not read the requirements it was matching against.
+    """
+
+    def test_the_requirements_survive_the_ceiling(self):
+        from app.services.doc_generator import _jd
+
+        # A realistic shape: 3,000 characters of preamble, then the part that
+        # matters. Under the old 2,000-character cut this was invisible.
+        jd = ("We are a mission-driven team. " * 100) + "REQUIRED: Kubernetes, Terraform."
+        assert len(jd) > 3000
+        assert "Kubernetes" in _jd(jd)
+
+    def test_a_page_that_cleaned_badly_is_still_capped(self):
+        from app.services.doc_generator import _jd
+
+        assert len(_jd("x" * 500_000)) < 20_000
+
+    def test_the_ceiling_comes_from_one_place(self):
+        """Five literals became one setting; a sixth number is the bug again."""
+        from app.services import doc_generator, self_review
+        import inspect
+
+        for module in (doc_generator, self_review):
+            source = inspect.getsource(module)
+            assert "job_description[:" not in source, module.__name__
+
+    def test_the_stated_facts_lead_the_brief(self):
+        """
+        `job_details` extracts the requirements into columns precisely so
+        downstream consumers stop hunting for them in prose. Generation was
+        still being handed the raw description.
+        """
+        from types import SimpleNamespace
+
+        from app.services.doc_generator import job_brief
+
+        job = SimpleNamespace(
+            description="We are a mission-driven team.",
+            required_years=3.0,
+            required_skills=["Python", "Kubernetes"],
+            nice_to_have_skills=["Terraform"],
+            education_required="Bachelor's in Computer Science",
+            employment_type="full_time",
+            salary_label="$140k–170k",
+        )
+        brief = job_brief(job)
+        assert "Required skills: Python, Kubernetes" in brief
+        assert "Required experience (stated in the posting): 3 years" in brief
+        assert brief.index("Required skills") < brief.index("mission-driven")
+
+    def test_a_job_that_states_nothing_is_just_its_description(self):
+        from types import SimpleNamespace
+
+        from app.services.doc_generator import job_brief
+
+        job = SimpleNamespace(description="We are hiring.", required_skills=[])
+        assert job_brief(job) == "We are hiring."
+
+    def test_a_brief_never_raises_on_an_odd_row(self):
+        """Rows predate these columns, and the settings page previews a stub."""
+        from types import SimpleNamespace
+
+        from app.services.doc_generator import job_brief
+
+        assert job_brief(SimpleNamespace(description=None)) == ""

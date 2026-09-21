@@ -192,6 +192,61 @@ def _profile_terms(profile_data: dict) -> set[str]:
     return {t for t in terms if t}
 
 
+def _jd(job_description: str) -> str:
+    """
+    As much of the posting as a generation call should see.
+
+    One function instead of five literals, and a much higher ceiling than any
+    of them. The call sites read `[:2000]`, `[:2500]`, `[:2500]` and `[:4000]`
+    while the matcher had already been raised to 24,000 for a documented
+    reason: 4,000 characters "routinely cut off mid-requirements — so the model
+    was scoring seniority and skill fit against the marketing half of the
+    posting". Generation never got that fix, and 2,000 characters is about 300
+    words, which in a modern corporate posting is the company intro, the
+    mission statement and the culture paragraph. The tech stack,
+    responsibilities and qualifications are in the lower half.
+
+    So the model rewriting a resume to match a job had not read what the job
+    asks for — which is the one thing the tailoring is for.
+
+    16,000 is the same ceiling `job_details.MAX_DESCRIPTION_CHARS` picked for
+    the same question ("enough description to hold the requirements section"),
+    rather than a sixth independent number.
+    """
+    limit = max(2000, int(getattr(settings, "DOC_DESCRIPTION_CHARS", 16000)))
+    text = job_description or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n[description truncated]"
+
+
+def job_brief(job) -> str:
+    """
+    The posting as generation should read it: its stated facts, then its prose.
+
+    Raising the ceiling above is necessary and not sufficient. `job_details`
+    already extracts `required_skills`, `nice_to_have_skills`,
+    `required_years` and `education_required` into columns *precisely* so
+    downstream consumers stop re-deriving them from prose, and
+    `matcher._stated_facts` already renders them as explicit lines for the
+    scoring prompt. Generation was left to find them in the text — so it is
+    handed the same block, from the same function, rather than a second
+    rendering of the same columns that could disagree with the first.
+
+    A prompt that opens with "Required skills: Python, Kubernetes, Terraform"
+    beats any amount of raw description.
+    """
+    from app.services.matcher import _stated_facts
+
+    try:
+        facts = _stated_facts(job)
+    except Exception as exc:  # a fact that cannot be rendered costs the line
+        logger.warning("doc_generator: could not render stated facts: %s", exc)
+        facts = ""
+    description = job.description or ""
+    return f"{facts}{description}" if facts else description
+
+
 def _fallback_insights(profile_data: dict, job_description: str) -> dict:
     """Keyword-only insights: profile terms that literally appear in the JD."""
     jd_lower = (job_description or "").lower()
@@ -241,7 +296,7 @@ def extract_job_insights(
             "content": (
                 f"Job title: {job_title}\n"
                 f"Company: {job_company}\n"
-                f"Description:\n{job_description[:4000]}"
+                f"Description:\n{_jd(job_description)}"
             ),
         },
     ]
@@ -409,7 +464,7 @@ def tailor_resume_selection(
             "role": "user",
             "content": (
                 f"Job title: {job_title}\n"
-                f"Job description (excerpt):\n{job_description[:2000]}\n\n"
+                f"Job description:\n{_jd(job_description)}\n\n"
                 f"Experiences:\n{json.dumps(exp_summary, indent=2)}\n\n"
                 f"Projects:\n{json.dumps(proj_summary, indent=2)}\n\n"
                 f"Skills:\n{json.dumps(skills, indent=2)}"
@@ -794,7 +849,7 @@ def generate_cover_letter_body(
         f"Job: {job_title} at {job_company}\n"
         + (f"Top job requirements: {'; '.join(requirements)}\n" if requirements else "")
         + (f"Company signals from the JD: {'; '.join(company_signals)}\n" if company_signals else "")
-        + f"Job description (excerpt):\n{job_description[:2500]}\n"
+        + f"Job description:\n{_jd(job_description)}\n"
         + (f"\nUser feedback on the previous version (must address): {feedback}\n" if feedback else "")
     )
 
@@ -911,7 +966,7 @@ def tailor_resume_bullets(
         {
             "role": "user",
             "content": (
-                f"Job title: {job_title}\nDescription:\n{job_description[:2500]}\n\n"
+                f"Job title: {job_title}\nDescription:\n{_jd(job_description)}\n\n"
                 + (f"Job keywords (use exact spelling where truthful): {', '.join(keywords)}\n\n" if keywords else "")
                 + f"Experience entries:\n{json.dumps(exp_json, indent=2)}"
                 + (f"\n\nUser feedback on the previous version (must address): {feedback}" if feedback else "")
@@ -992,11 +1047,18 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     def phase(name: str):
         return llm_log.stage(name, job_id=job.id, application_id=application.id)
 
+    # The posting's stated facts above its prose, once, for every call below.
+    # `job_details` extracts required skills, years and education into columns
+    # so downstream consumers stop hunting for them in paragraphs, and the
+    # scoring prompt has read them for a while — generation was still being
+    # handed the raw description and left to find them.
+    brief = job_brief(job)
+
     # One analysis pass over the JD grounds everything downstream: ATS keywords,
     # ranked requirements, and company specifics for the cover letter.
     with phase("job_insights"):
         insights = extract_job_insights(
-            profile_data, job.title, job.company, job.description or "",
+            profile_data, job.title, job.company, brief,
             api_key, base_url, model,
         )
 
@@ -1004,7 +1066,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # stays focused (ideally one page) and relevant to this specific job.
     with phase("resume_selection"):
         selection = tailor_resume_selection(
-            profile_data, job.title, job.description or "", api_key, base_url, model
+            profile_data, job.title, brief, api_key, base_url, model
         )
     selected_experience = selection["experience"]
     selected_projects = selection["projects"]
@@ -1014,7 +1076,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     bullet_profile = {**profile_data, "experience": selected_experience}
     with phase("resume_bullets"):
         tailored_bullets = tailor_resume_bullets(
-            bullet_profile, job.title, job.description or "", api_key, base_url, model,
+            bullet_profile, job.title, brief, api_key, base_url, model,
             insights=insights, feedback=feedback,
         )
     with phase("resume_summary"):
@@ -1024,7 +1086,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         )
     with phase("cover_letter"):
         cover_body = generate_cover_letter_body(
-            profile_data, job.company, job.title, job.description or "",
+            profile_data, job.company, job.title, brief,
             api_key, base_url, model,
             insights=insights, feedback=feedback,
             selected_experience=selected_experience, selected_projects=selected_projects,
@@ -1040,7 +1102,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     if self_review.enabled():
         with phase("doc_critique"):
             notes = self_review.critique(
-                job.title, job.company, job.description or "",
+                job.title, job.company, brief,
                 tailored_bullets, tailored_summary, cover_body,
                 api_key, base_url, model, insights=insights,
             )
@@ -1049,7 +1111,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         if resume_notes and tailored_bullets:
             with phase("doc_revise_bullets"):
                 revised = tailor_resume_bullets(
-                    bullet_profile, job.title, job.description or "",
+                    bullet_profile, job.title, brief,
                     api_key, base_url, model, insights=insights,
                     feedback=self_review.as_feedback(resume_notes, feedback),
                 )
@@ -1069,7 +1131,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         if cover_notes and cover_body:
             with phase("doc_revise_cover"):
                 revised_cover = generate_cover_letter_body(
-                    profile_data, job.company, job.title, job.description or "",
+                    profile_data, job.company, job.title, brief,
                     api_key, base_url, model,
                     insights=insights,
                     feedback=self_review.as_feedback(cover_notes, feedback),
@@ -1119,7 +1181,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
             retry_feedback = f"{feedback}\n{retry_note}" if feedback else retry_note
             with phase("resume_bullets_retry"):
                 retried = tailor_resume_bullets(
-                    bullet_profile, job.title, job.description or "",
+                    bullet_profile, job.title, brief,
                     api_key, base_url, model,
                     insights=insights, feedback=retry_feedback,
                 )
