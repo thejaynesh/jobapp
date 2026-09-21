@@ -189,13 +189,22 @@ class TestTheFavouritesView:
 
 class TestFavouritesAreNeverArchived:
     def _old_rejection(self, db, **overrides):
-        return make_job(
-            db,
-            status=JobStatus.filtered_out,
-            filter_reason="low_score",
-            fetched_at=datetime.now(timezone.utc) - timedelta(days=120),
-            **overrides,
-        )
+        # `enrichment_attempted_at` and a description past THIN_DESCRIPTION_CHARS
+        # are what make a `low_score` verdict archivable at all: it is one of
+        # `DESCRIPTION_DEPENDENT_REASONS`, so a row enrichment never reached is
+        # held back regardless of age. Without them these rows are ineligible
+        # for a reason that has nothing to do with the star, and the two tests
+        # that assert an *unstarred* rejection is still taken would pass on the
+        # wrong guard — or, as happened, fail while the star logic was correct.
+        fields = {
+            "status": JobStatus.filtered_out,
+            "filter_reason": "low_score",
+            "fetched_at": datetime.now(timezone.utc) - timedelta(days=120),
+            "enrichment_attempted_at": datetime.now(timezone.utc) - timedelta(days=119),
+            "description": "d" * 2000,
+        }
+        fields.update(overrides)
+        return make_job(db, **fields)
 
     def test_a_starred_rejection_is_not_a_candidate(self, db):
         from app.services import archive
