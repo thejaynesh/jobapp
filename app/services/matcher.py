@@ -60,6 +60,66 @@ def _title_matches_roles(title: str, target_roles: list[str]) -> bool:
     return False
 
 
+# Words that name a profession rather than a job. An overlap on one of these
+# alone says nothing: with "Software Engineer" among the target roles, every
+# "Sales Engineer", "Civil Engineer" and "Locomotive Engineer" shares a word.
+#
+# Seniority markers are in here for the same reason — "Senior" overlapping
+# with "Senior" is not evidence the two are the same role — and the numeral
+# suffixes because "Engineer II" and "Analyst II" would otherwise match on the
+# "ii".
+_GENERIC_TITLE_WORDS = frozenset({
+    "engineer", "engineering", "developer", "development", "programmer",
+    "manager", "management", "specialist", "analyst", "consultant",
+    "architect", "administrator", "associate", "assistant", "coordinator",
+    "director", "officer", "technician", "professional", "practitioner",
+    "senior", "junior", "staff", "principal", "lead", "head", "chief",
+    "entry", "level", "graduate", "intern", "internship", "trainee",
+    "i", "ii", "iii", "iv",
+})
+
+
+def title_priority_match(title: str, target_roles: list[str]) -> bool:
+    """
+    A stricter reading of `_title_matches_roles`, for *ranking* rather than
+    filtering.
+
+    `_title_matches_roles` passes on any single meaningful word overlap, and
+    that is the right default for the filter — a gate that guesses wrong
+    discards a job forever, so it should fail open. But enrichment reuses it
+    as a priority function, where failing open means nearly every candidate
+    lands in the first bucket and the ordering carries no information. The
+    cost is real: "Civil Engineer" postings get enriched ahead of the backlog
+    this feature exists to rescue, then fail the skill check and land under
+    `few_skills` — a description fetched over the network so the matcher could
+    reject the job twice.
+
+    So: the overlap has to include at least one word that is not in
+    `_GENERIC_TITLE_WORDS`.
+
+    No sequence-ratio fallback, unlike `_title_matches_roles`. Measured
+    against "software engineer", `SequenceMatcher` scores "sales engineer" at
+    0.774 — above "software developer" (0.743) and "backend engineer" (0.667),
+    both of which are genuine matches. Whole-string similarity rewards sharing
+    the generic suffix, which is the exact thing being screened out here, so
+    the fallback is worse than nothing for this question. It stays in the
+    filter, where a false pass is cheap and a false reject is not.
+
+    This narrows what ranks *first*; it never excludes anything. A title only
+    `_title_matches_roles` agrees with still ranks ahead of one neither
+    accepts — see `enrichment.select_targets`.
+    """
+    title_words = set(re.findall(r"\b[a-z]+\b", _normalize(title))) - _STOP
+    if not title_words:
+        return False
+    for role in target_roles:
+        role_words = set(re.findall(r"\b[a-z]+\b", _normalize(role))) - _STOP
+        shared = role_words & title_words
+        if shared - _GENERIC_TITLE_WORDS:
+            return True
+    return False
+
+
 def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
     desc_lower = description.lower()
     count = 0

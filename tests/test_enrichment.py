@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.models.job import Job, JobStatus
 from app.services import enrichment
 
@@ -365,6 +367,133 @@ class TestTargetSelection:
             db, {"target_roles": ["Backend Engineer"]}, limit=50
         )
         assert targets[0].id == wanted.id
+
+    def test_a_shared_profession_word_does_not_buy_the_front_of_the_queue(
+            self, db):
+        """
+        The failure this ordering had. `_title_matches_roles` passes on any
+        single word overlap — right for a filter whose false rejects are
+        permanent, useless as a ranking — so with "Software Engineer" among the
+        roles, every "Civil Engineer" ranked level with every "Backend
+        Engineer" and enrichment spent requests scraping civil engineering
+        postings. They then fail the skill check, land under `few_skills`, and
+        come back to this same queue.
+        """
+        now = datetime.now(timezone.utc)
+        # Again the unwanted one is newer, so only the ranking can reorder.
+        wanted = _job(title="Backend Engineer", description=None,
+                      fetched_at=now - timedelta(hours=1),
+                      url="https://x/71", source_urls=["https://x/71"])
+        generic = _job(title="Civil Engineer", description=None,
+                       fetched_at=now,
+                       url="https://x/72", source_urls=["https://x/72"])
+        db.add_all([wanted, generic])
+        db.commit()
+
+        targets = enrichment.select_targets(
+            db, {"target_roles": ["Software Engineer", "Backend Engineer"]},
+            limit=50,
+        )
+
+        assert targets[0].id == wanted.id
+        # Narrowed, not excluded: it still gets enriched if the budget reaches
+        # it, because the strict test is a guess too and this is only ordering.
+        assert generic.id in {j.id for j in targets}
+
+    def test_a_title_nothing_matches_sorts_behind_one_that_shares_a_word(
+            self, db):
+        """The middle bucket. `Civil Engineer` is a worse bet than `Backend
+        Engineer` and a better one than `Dental Hygienist`."""
+        now = datetime.now(timezone.utc)
+        generic = _job(title="Civil Engineer", description=None,
+                       fetched_at=now - timedelta(hours=1),
+                       url="https://x/73", source_urls=["https://x/73"])
+        unrelated = _job(title="Dental Hygienist", description=None,
+                         fetched_at=now,
+                         url="https://x/74", source_urls=["https://x/74"])
+        db.add_all([generic, unrelated])
+        db.commit()
+
+        targets = enrichment.select_targets(
+            db, {"target_roles": ["Software Engineer"]}, limit=50
+        )
+        order = [j.id for j in targets]
+
+        assert order.index(generic.id) < order.index(unrelated.id)
+
+    def test_with_no_target_roles_nothing_is_reordered(self, db):
+        """Falls open: an empty profile must not turn the queue upside down."""
+        now = datetime.now(timezone.utc)
+        older = _job(title="Backend Engineer", description=None,
+                     fetched_at=now - timedelta(hours=1),
+                     url="https://x/75", source_urls=["https://x/75"])
+        newer = _job(title="Dental Hygienist", description=None,
+                     fetched_at=now,
+                     url="https://x/76", source_urls=["https://x/76"])
+        db.add_all([older, newer])
+        db.commit()
+
+        targets = enrichment.select_targets(db, {}, limit=50)
+        order = [j.id for j in targets]
+
+        # Newest first, which is the query's own order.
+        assert order.index(newer.id) < order.index(older.id)
+
+
+class TestTheStrictTitleTest:
+    """
+    `matcher.title_priority_match` — stricter than the filter's predicate, and
+    used only for ranking. See its docstring for why it has no sequence-ratio
+    fallback.
+    """
+
+    ROLES = ["Software Engineer"]
+
+    @pytest.mark.parametrize("title", [
+        "Software Engineer",
+        "Software Engineer II",
+        "Software Developer",     # "software" is the signal, not "engineer"
+        "Senior Software Engineer",
+        "Sr Software Eng",
+    ])
+    def test_a_real_match_passes(self, title):
+        from app.services.matcher import title_priority_match
+
+        assert title_priority_match(title, self.ROLES) is True
+
+    @pytest.mark.parametrize("title", [
+        "Sales Engineer",
+        "Civil Engineer",
+        "Locomotive Engineer",
+        "Network Engineer",
+        "Solutions Engineer",
+        "Dental Hygienist",
+    ])
+    def test_a_shared_profession_word_alone_does_not(self, title):
+        from app.services.matcher import title_priority_match
+
+        assert title_priority_match(title, self.ROLES) is False
+
+    def test_the_filter_still_passes_what_this_rejects(self):
+        """
+        The two are deliberately different. A gate that discards a job forever
+        should fail open; a ranking should not.
+        """
+        from app.services.matcher import _title_matches_roles
+
+        assert _title_matches_roles("Sales Engineer", self.ROLES) is True
+
+    def test_seniority_alone_is_not_a_match(self):
+        from app.services.matcher import title_priority_match
+
+        assert title_priority_match("Senior Dental Hygienist",
+                                    ["Senior Software Engineer"]) is False
+
+    def test_an_empty_title_matches_nothing(self):
+        from app.services.matcher import title_priority_match
+
+        assert title_priority_match("", self.ROLES) is False
+        assert title_priority_match("   ", self.ROLES) is False
 
 
 class TestEnrichJobs:

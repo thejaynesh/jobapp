@@ -604,21 +604,48 @@ def enrich_one(
 # Choosing what to work on
 # ---------------------------------------------------------------------------
 
-def _title_gate(profile_data: dict):
+def _title_rank(profile_data: dict):
     """
-    A predicate that says whether a title is worth spending a request on.
+    How strongly a title looks like one of the target roles: 0, 1 or 2.
 
     Enrichment's backlog is bigger than any one pass, so the order matters more
     than the budget: a job whose title the matcher would reject anyway gains
-    nothing from a fuller description. Falls open — if the profile has no roles
-    yet, everything is a candidate rather than nothing.
+    nothing from a fuller description.
+
+    Three buckets rather than the two this used to have. It called the filter's
+    own `_title_matches_roles`, which is deliberately fail-open — any single
+    word overlap passes — and that is right for a gate whose false rejects are
+    permanent, but as an *ordering* it put nearly everything in the first
+    bucket. With "Software Engineer" among the roles, "Sales Engineer" and
+    "Locomotive Engineer" ranked level with "Backend Engineer", so enrichment
+    spent real requests scraping them; they then failed the skill check and
+    landed under `few_skills`, which is description-dependent, which puts them
+    back in this same queue.
+
+        0  a non-generic word overlaps — `matcher.title_priority_match`
+        1  only a generic word does, or only the whole string looks similar
+        2  no overlap at all
+
+    Bucket 1 is why this narrows the head of the queue without excluding
+    anything: an abbreviation the strict test cannot read ("SWE") still sorts
+    ahead of a title nothing matches, and a pass with budget left over reaches
+    it. Falls open the same way — no roles on the profile means one bucket.
     """
-    from app.services.matcher import _title_match_roles, _title_matches_roles
+    from app.services.matcher import (
+        _title_match_roles, _title_matches_roles, title_priority_match,
+    )
 
     roles = _title_match_roles(profile_data or {})
     if not roles:
-        return lambda title: True
-    return lambda title: _title_matches_roles(title or "", roles)
+        return lambda title: 0
+
+    def rank(title: str | None) -> int:
+        text = title or ""
+        if title_priority_match(text, roles):
+            return 0
+        return 1 if _title_matches_roles(text, roles) else 2
+
+    return rank
 
 
 def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> list[Job]:
@@ -679,8 +706,10 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
         .all()
     )
 
-    passes_title = _title_gate(profile_data or {})
-    ranked = sorted(rows, key=lambda job: (0 if passes_title(job.title) else 1))
+    # `sorted` is stable, so the newest-first order the query established
+    # survives inside each bucket — see `_title_rank` for what the three are.
+    title_rank = _title_rank(profile_data or {})
+    ranked = sorted(rows, key=lambda job: title_rank(job.title))
     return ranked[:limit]
 
 
