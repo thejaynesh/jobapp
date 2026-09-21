@@ -61,7 +61,7 @@ services:
 
   worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=25
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=25 -Q batch -n batch@%h
     volumes:
       - storage_data:/storage
     env_file: .env
@@ -76,6 +76,25 @@ services:
     # thirty-minute TTL. So a deploy mid-pass bought half an hour of enrichment
     # logging "already running" and doing nothing, which reads exactly like a
     # broken deploy.
+    stop_grace_period: 120s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # The queue a person is waiting on: document generation, the browser
+  # agent's work, the mailbox. Its own container because the batch worker
+  # above can hold both its slots for twenty-five minutes at a time — a
+  # matching pass and an enrichment pass both re-queue themselves — and a
+  # "Generate documents" click should not wait behind a backlog.
+  worker-interactive:
+    build: .
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q interactive -n interactive@%h
+    volumes:
+      - storage_data:/storage
+    env_file: .env
+    restart: unless-stopped
     stop_grace_period: 120s
     depends_on:
       postgres:

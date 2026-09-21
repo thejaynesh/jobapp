@@ -38,7 +38,9 @@ services:
 
   worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    # Both queues in one worker for dev; production splits them so a
+    # long batch pass cannot starve an interactive one.
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q batch,interactive
     volumes:
       - .:/app
       - storage_data:/storage
@@ -59,14 +61,6 @@ services:
       redis:
         condition: service_healthy
 
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
-    depends_on:
-      - web
 
 volumes:
   postgres_data:

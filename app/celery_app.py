@@ -47,6 +47,43 @@ celery_app.conf.update(
     # noticing sooner rather than giving up.
     broker_transport_options={"socket_connect_timeout": 3, "socket_timeout": 3},
     redis_socket_connect_timeout=3,
+    # Two queues, because two kinds of work share this broker and only one of
+    # them has somebody waiting on it.
+    #
+    # Everything used to land in the default queue, and production runs
+    # `--concurrency=2`. `match_jobs` and `enrich_jobs` both carry a
+    # `soft_time_limit` of 1,500 seconds and both re-queue themselves while
+    # there is work, so the two of them can hold both slots for twenty-five
+    # minutes at a stretch. A user clicking "Generate documents" then waited
+    # behind a backlog pass with nothing but a spinner, and `poll_mailbox` —
+    # published every fifteen minutes whether or not the last one ran — piled
+    # up behind it.
+    #
+    # `batch` is the work that is allowed to take half an hour. `interactive`
+    # is the work a person is looking at: document generation, the browser
+    # agent's queue, and the mailbox. Each gets its own worker (see
+    # docker-compose.prod.yml), so a long pass cannot starve a button.
+    task_default_queue="interactive",
+    task_routes={
+        "app.tasks.fetch.*": {"queue": "batch"},
+        "app.tasks.match.*": {"queue": "batch"},
+        "app.tasks.enrich.*": {"queue": "batch"},
+        "app.tasks.archive.*": {"queue": "batch"},
+        "app.tasks.backfill.*": {"queue": "batch"},
+        "app.tasks.backup.*": {"queue": "batch"},
+        "app.tasks.descriptions.*": {"queue": "batch"},
+        "app.tasks.liveness.*": {"queue": "batch"},
+        "app.tasks.links.*": {"queue": "batch"},
+        "app.tasks.compare_models.*": {"queue": "batch"},
+        "app.tasks.match_eval.*": {"queue": "batch"},
+        "app.tasks.providers.*": {"queue": "batch"},
+        # Deliberately interactive: the user pressed something, or the laptop
+        # is waiting for work to do.
+        "app.tasks.generate.*": {"queue": "interactive"},
+        "app.tasks.browse.*": {"queue": "interactive"},
+        "app.tasks.outreach.*": {"queue": "interactive"},
+        "app.tasks.interview.*": {"queue": "interactive"},
+    },
 )
 
 celery_app.conf.beat_schedule = {
