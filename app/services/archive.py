@@ -69,16 +69,48 @@ def _eligible(db, days: int | None):
     make the count on the page disagree with what the run actually does, which
     is the kind of drift nobody notices until rows are already gone.
     """
+    from sqlalchemy import and_, func, or_
+
     from app.models.application import Application
     from app.models.job import Job, JobStatus
+    from app.services.enrichment import THIN_DESCRIPTION_CHARS
+    from app.services.matcher import DESCRIPTION_DEPENDENT_REASONS
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=_days() if days is None else days)
+
+    # A verdict reached on data we did not have is not settled news.
+    #
+    # `DESCRIPTION_DEPENDENT_REASONS` — no_description, few_skills, low_score,
+    # restricted, seniority — are the verdicts `enrichment._worth_rescoring`
+    # exists to revisit, and archiving is irreversible for that purpose twice
+    # over: the description is exactly what it discards, and `was_archived`
+    # then makes the fetcher skip the posting on every future cycle. So any job
+    # enrichment had not reached within `ARCHIVE_AFTER_DAYS` left the pipeline
+    # permanently, while the module docstring claimed these rows were "old
+    # news". That is true of `title_mismatch`, which never read a description,
+    # and false of these five.
+    #
+    # Two conditions make a description-dependent verdict genuinely settled:
+    # enrichment has *tried* this row at least once, and the row now holds a
+    # description long enough to have been judged on. Anything else is still
+    # the enrichment queue's work, however old it is.
+    settled_enough = or_(
+        Job.filter_reason.is_(None),
+        Job.filter_reason.notin_(sorted(DESCRIPTION_DEPENDENT_REASONS)),
+        and_(
+            Job.enrichment_attempted_at.isnot(None),
+            Job.description.isnot(None),
+            func.length(Job.description) >= THIN_DESCRIPTION_CHARS,
+        ),
+    )
+
     return (
         db.query(Job)
         .outerjoin(Application, Application.job_id == Job.id)
         .filter(
             Job.status == JobStatus.filtered_out,
             Job.fetched_at < cutoff,
+            settled_enough,
             # Never a job the user acted on: the row is attached to documents
             # on disk and to their own pipeline.
             Application.id.is_(None),

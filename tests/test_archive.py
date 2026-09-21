@@ -32,13 +32,24 @@ RECENT = datetime.now(timezone.utc) - timedelta(days=3)
 def _job(db, *, fetched_at=OLD, status=JobStatus.filtered_out,
          filter_reason="low_score", url=None, source_job_id="req-1",
          company="Acme", title="Backend Engineer", location="Remote",
-         **kwargs) -> Job:
+         description="A long description. " * 120,
+         enrichment_attempted_at=OLD, **kwargs) -> Job:
+    """
+    A job that is genuinely finished with, which is what these tests are about.
+
+    The description is over `THIN_DESCRIPTION_CHARS` and
+    `enrichment_attempted_at` is set, because a `low_score` verdict is only
+    settled once enrichment has tried the row and the row holds enough text to
+    have been judged on. `TestAVerdictOnMissingDataIsNotSettled` covers the
+    other side.
+    """
     url = url or f"https://boards.example/{uuid.uuid4()}"
     job = Job(
         source="greenhouse", source_job_id=source_job_id, source_urls=[url],
         title=title, company=company, location=location, url=url,
-        description="A long description. " * 50,
+        description=description,
         status=status, filter_reason=filter_reason, fetched_at=fetched_at,
+        enrichment_attempted_at=enrichment_attempted_at,
         dedupe_hash=compute_dedupe_hash(company, title, location), **kwargs,
     )
     db.add(job)
@@ -310,3 +321,63 @@ class TestReporting:
         state = archive.status(db)
         assert state["total"] == 1
         assert state["eligible"] == 0
+
+
+class TestAVerdictOnMissingDataIsNotSettled:
+    """
+    Archiving and enrichment were competing for the same rows, and archiving
+    won permanently.
+
+    `DESCRIPTION_DEPENDENT_REASONS` — no_description, few_skills, low_score,
+    restricted, seniority — are exactly the verdicts
+    `enrichment._worth_rescoring` exists to revisit once the description
+    arrives. Archiving is irreversible for that purpose twice over: the
+    description is what it discards, and `was_archived` then makes the fetcher
+    skip the posting on every future cycle. So a job enrichment had not reached
+    within 60 days left the pipeline for good.
+
+    The module docstring called these rows "old news". That is true of
+    `title_mismatch`, which never read a description, and false of these five.
+    """
+
+    def test_a_thin_rejection_is_left_for_enrichment(self, db):
+        _job(db, filter_reason="few_skills", description="Short teaser.")
+        assert archive.remaining(db) == 0
+        assert archive.archive(db)["archived"] == 0
+
+    def test_a_row_enrichment_has_never_tried_is_left_alone(self, db):
+        _job(db, filter_reason="low_score", enrichment_attempted_at=None)
+        assert archive.archive(db)["archived"] == 0
+
+    def test_a_tried_row_holding_the_real_posting_still_goes(self, db):
+        """Once both are true the verdict is settled and this is old news."""
+        _job(db, filter_reason="low_score")
+        assert archive.archive(db)["archived"] == 1
+
+    @pytest.mark.parametrize("reason", [
+        "no_description", "few_skills", "low_score", "restricted", "seniority",
+    ])
+    def test_every_description_dependent_reason_is_guarded(self, db, reason):
+        _job(db, filter_reason=reason, description="Short.",
+             enrichment_attempted_at=None)
+        assert archive.archive(db)["archived"] == 0
+
+    @pytest.mark.parametrize("reason", ["title_mismatch", "location", "language"])
+    def test_a_verdict_that_never_read_the_description_still_goes(
+            self, db, reason):
+        """These reach the same answer however much text arrives."""
+        _job(db, filter_reason=reason, description="Short.",
+             enrichment_attempted_at=None)
+        assert archive.archive(db)["archived"] == 1
+
+    def test_the_count_on_the_page_agrees_with_what_a_run_takes(self, db):
+        """
+        `remaining` and `candidates` share one query precisely so a protection
+        added to one cannot drift from the other.
+        """
+        _job(db, filter_reason="few_skills", description="Short.")
+        _job(db, filter_reason="title_mismatch", description="Short.",
+             source_job_id="req-2", title="Frontend Engineer")
+        assert archive.remaining(db) == 1
+        assert archive.archive(db)["archived"] == 1
+        assert archive.remaining(db) == 0
