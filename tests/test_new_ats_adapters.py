@@ -475,3 +475,88 @@ class TestTheyAreActuallyWiredUp:
 
         found = extract_slugs("https://click.jobvite.com/e/abc?u=1")
         assert not found.get("jobvite")
+
+
+class TestAGuessedJobIdCanLoseAJob:
+    """
+    `source_job_id` for every board read through `jobs_from_listing` was "the
+    longest number anywhere in the URL", which is the posting id only until
+    something else in the URL has more digits.
+
+    A collision there is not a duplicate that gets skipped — it is a job that
+    is never stored. `find_existing_job` layer 2 matches on
+    `(source, source_job_id)`, returns the first row, and treats the second
+    posting as another sighting of it: appends its URL, maybe merges its
+    description, and counts it as `merged`. The cycle reports success.
+    """
+
+    def test_a_date_in_the_path_no_longer_swallows_the_id(self):
+        from app.services.sources.base import _listing_job_id
+
+        first = _listing_job_id("https://acme.example.com/careers/20250131/1234")
+        second = _listing_job_id("https://acme.example.com/careers/20250131/5678")
+        assert first == "1234" and second == "5678"
+        assert first != second
+
+    def test_a_tracking_parameter_is_never_the_id(self):
+        from app.services.sources.base import _listing_job_id
+
+        urls = [
+            "https://apply.example.com/acme/j/A1B2C3?utm_campaign=987654321",
+            "https://apply.example.com/acme/j/D4E5F6?utm_campaign=987654321",
+        ]
+        # None is the safe answer: layer 2 is skipped, layers 1 and 3 still run.
+        assert [_listing_job_id(u) for u in urls] == [None, None]
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://boards.greenhouse.io/acme/jobs/4567890123?gh_src=abc",
+         "4567890123"),
+        ("https://careers-acme.icims.com/jobs/12345/software-engineer/job",
+         "12345"),
+        ("https://acme.example.com/en-US/job/2024001/senior-engineer",
+         "2024001"),
+        # A year that trails a slug does not lead its segment.
+        ("https://jobs.example.com/jobs/12345/engineer-2024", "12345"),
+        # Teamtailor's shape: the id leads the segment, a slug follows it.
+        ("https://acme.teamtailor.com/jobs/778899-backend", "778899"),
+        # Alphanumeric ids yield nothing rather than a wrong something.
+        ("https://www.ycombinator.com/companies/acme/jobs/XyZ-engineer", None),
+        ("", None),
+        (None, None),
+    ])
+    def test_real_ats_shapes_still_resolve(self, url, expected):
+        from app.services.sources.base import _listing_job_id
+
+        assert _listing_job_id(url) == expected
+
+    def test_the_board_s_own_identifier_wins_over_the_guess(self):
+        from app.services.sources.base import jobs_from_listing
+
+        html = """
+        <script type="application/ld+json">
+        {"@type": "JobPosting", "title": "Backend Engineer",
+         "url": "https://acme.example.com/careers/20250131/1234",
+         "identifier": {"@type": "PropertyValue", "value": "REQ-8891"},
+         "hiringOrganization": "Acme", "description": "Work here."}
+        </script>
+        """
+        with patch("httpx.get", return_value=_resp(text=html)):
+            jobs = jobs_from_listing("https://acme.example.com/careers",
+                                     "teamtailor", "acme")
+        assert jobs[0]["source_job_id"] == "REQ-8891"
+
+    def test_a_bare_string_identifier_is_taken_too(self):
+        from app.services.sources.base import jobs_from_listing
+
+        html = """
+        <script type="application/ld+json">
+        {"@type": "JobPosting", "title": "Backend Engineer",
+         "url": "https://acme.example.com/careers/1/2",
+         "identifier": "REQ-7", "hiringOrganization": "Acme",
+         "description": "Work here."}
+        </script>
+        """
+        with patch("httpx.get", return_value=_resp(text=html)):
+            jobs = jobs_from_listing("https://acme.example.com/careers",
+                                     "teamtailor", "acme")
+        assert jobs[0]["source_job_id"] == "REQ-7"

@@ -137,7 +137,11 @@ def jobs_from_listing(
         location = posting["location"]
         jobs.append({
             "source": source,
-            "source_job_id": _listing_job_id(posting["url"]),
+            # The board's own id where it published one; the URL heuristic only
+            # as a fallback. Both can be None, which layer 2 handles.
+            "source_job_id": (
+                posting.get("identifier") or _listing_job_id(posting["url"])
+            ),
             "title": title,
             "company": company or posting["company"] or slug,
             "location": location,
@@ -173,9 +177,50 @@ def _employment_type(raw) -> str | None:
 
 
 def _listing_job_id(url: str) -> str | None:
-    """The longest number in a posting URL — every ATS puts its id in there."""
-    numbers = re.findall(r"\d{3,}", url or "")
-    return max(numbers, key=len) if numbers else None
+    """
+    The posting id out of a URL, when the board did not publish one.
+
+    This used to be "the longest number anywhere in the URL", which is the
+    posting id only until something else in the URL has more digits. A date
+    segment or a tracking parameter wins, and then two different postings get
+    the *same* `source_job_id`:
+
+        20250131  <-  /careers/20250131/1234
+        20250131  <-  /careers/20250131/5678
+       987654321  <-  /acme/j/A1B2C3?utm_campaign=987654321
+       987654321  <-  /acme/j/D4E5F6?utm_campaign=987654321
+
+    A collision there is not a duplicate that gets skipped, it is a job that is
+    never stored: `find_existing_job` layer 2 matches on
+    `(source, source_job_id)`, returns the first row, and treats the second
+    posting as another sighting of it — appending its URL and counting it as
+    `merged`. The cycle reports success.
+
+    So: the digits a path segment *starts* with, taking the last such segment.
+    Three things fall out of that.
+
+    The query string is dropped entirely, because nothing in it identifies the
+    posting. A segment has to lead with the digits, which covers both the bare
+    `/jobs/778899` and Teamtailor's `/jobs/778899-backend` while rejecting a
+    year that trails a slug (`/jobs/12345/engineer-2024` is 12345). And "last"
+    rather than "longest", because where a date and an id are both in the path
+    the id comes after it in every shape observed.
+
+    `None` is a safe answer and the caller already guards for it: layer 2 is
+    skipped and layers 1 and 3 still run.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        path = urlsplit(url or "").path
+    except ValueError:
+        return None
+    found = [
+        match.group(1)
+        for match in (re.match(r"(\d{3,})", seg) for seg in path.split("/") if seg)
+        if match
+    ]
+    return found[-1] if found else None
 
 
 def parse_experience_level(title: str, description: str) -> str | None:

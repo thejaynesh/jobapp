@@ -319,6 +319,27 @@ def _ld_text(value) -> str:
     return ""
 
 
+def _ld_identifier(node: dict) -> str | None:
+    """
+    The `identifier` a JobPosting block carries, if any.
+
+    schema.org allows a bare string or a `PropertyValue`, and boards use both.
+    This is the id the employer's own system assigned, which is what dedupe
+    layer 2 should be matching on — the alternative is reading digits out of
+    the URL and hoping.
+    """
+    raw = node.get("identifier")
+    if isinstance(raw, dict):
+        raw = raw.get("value") or raw.get("propertyID") or raw.get("name")
+    if isinstance(raw, (int, float)):
+        raw = str(raw)
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    # A long "identifier" is a description of one, not one.
+    return value[:120] or None
+
+
 def json_ld_postings(html: str) -> list[dict]:
     """
     Every `JobPosting` on a listing page, shaped like a source adapter's output.
@@ -345,6 +366,11 @@ def json_ld_postings(html: str) -> list[dict]:
                 "company": _ld_text(node.get("hiringOrganization")),
                 "location": details.get("location", ""),
                 "url": url,
+                # The board's own id for this posting, when it publishes one.
+                # `base.jobs_from_listing` used to guess it out of the URL, and
+                # a guess that collides makes dedupe layer 2 merge two
+                # different jobs into one row. See `_ld_identifier`.
+                "identifier": _ld_identifier(node),
                 "description": clean(node.get("description") or ""),
                 "posted_at": node.get("datePosted"),
                 "employment_type": details.get("employment_type"),
