@@ -183,9 +183,33 @@ class TestWellfoundRolePages:
 
     @pytest.fixture(autouse=True)
     def _clear(self):
+        """
+        Reset the role cache, and make the plain-HTTP attempt find nothing.
+
+        `fetch_roles` tries `httpx.get` on the role page *before* it launches a
+        browser and returns early if that yields jobs. Every test below mocks
+        the browser and left the HTTP call alone — so each one made a real
+        request to wellfound.com, and passed only because it failed.
+
+        On CI, where the network is open, the request succeeded: the early
+        return fired, the mocked browser was never touched, and thirteen tests
+        in this class asserted against about twenty live job postings scraped
+        off the real site. Nothing here should depend on a third party being
+        up, let alone on it being *down*.
+
+        So plain HTTP finds nothing by default, which is the precondition all
+        the browser tests already assume. The three tests that are actually
+        about this path patch `httpx.get` themselves; those patches nest inside
+        this one and win.
+        """
         from app.services.sources import wellfound
+
         wellfound.reset_cache()
-        yield
+        blocked = MagicMock()
+        blocked.status_code = 200
+        blocked.text = "<html></html>"
+        with patch("httpx.get", return_value=blocked):
+            yield
         wellfound.reset_cache()
 
     _ROW = {

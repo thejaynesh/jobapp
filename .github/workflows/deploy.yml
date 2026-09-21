@@ -1,3 +1,24 @@
+# Push to main, build on the VPS, migrate, move traffic onto the new image.
+#
+# **`command_timeout` is the setting that matters here.** `appleboy/ssh-action`
+# defaults it to 10 minutes, and this deploy takes longer than that: a cold
+# `docker compose build` spends over twelve minutes in the apt layer alone,
+# installing the texlive fonts pdflatex needs. Every run from the moment the
+# migration step was added died the same way —
+#
+#     out: #6 712.0 Unpacking fonts-texgyre (20180621-6) ...
+#     2026/09/21 23:09:13 Run Command Timeout
+#
+# — three times per run, because a layer killed part-way through is not
+# cached, so each retry restarted it from scratch and hit the same wall. The
+# retries below are for a *connect* failure and cannot help with this; only a
+# bigger `command_timeout` can. Keep it comfortably above the cold-build time.
+#
+# The two failure modes are worth telling apart when this goes red:
+#
+#   `dial tcp :22: i/o timeout` after ~90s  → the connect problem, retries fix it
+#   `Run Command Timeout` after command_timeout → the script needs longer
+
 name: Deploy to VPS
 
 on:
@@ -17,6 +38,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
+          # See the header: the action's 10-minute default killed the build.
+          command_timeout: 30m
           script: |
             set -e
             cd /opt/jobapp
@@ -35,9 +58,13 @@ jobs:
       # Port 22 on the VPS periodically stops accepting connections for a few
       # minutes at a time — both attempts fail on `dial tcp :22: i/o timeout`,
       # then a manual re-run moments later connects in under 30 seconds. A
-      # longer timeout doesn't help (a connect that never establishes just burns
-      # a bigger window); more attempts spread further apart do. Three tries
-      # across ~7 minutes have covered every outage observed so far.
+      # longer connect timeout doesn't help (a connect that never establishes
+      # just burns a bigger window); more attempts spread further apart do.
+      #
+      # That is the only thing these retries are for. They are useless against
+      # a script that runs out of time — see the header — and were masking it:
+      # three identical 10-minute timeouts read like a flaky host rather than a
+      # deploy that had outgrown its budget.
       - name: Wait before retry
         if: steps.deploy_first.outcome == 'failure'
         run: sleep 120
@@ -52,6 +79,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
+          # See the header: the action's 10-minute default killed the build.
+          command_timeout: 30m
           script: |
             set -e
             cd /opt/jobapp
@@ -81,6 +110,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
+          # See the header: the action's 10-minute default killed the build.
+          command_timeout: 30m
           script: |
             set -e
             cd /opt/jobapp
