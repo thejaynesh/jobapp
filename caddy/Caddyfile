@@ -21,7 +21,23 @@
 	# Downloads. handle_path strips the /storage prefix, so /storage/x.pdf reads
 	# /storage/x.pdf from the volume. Content-Disposition forces a download
 	# rather than letting the browser render a stored file inline.
+	#
+	# Behind the app's own session check, and that is not belt-and-braces.
+	# Serving these from Caddy meant the request never reached FastAPI, so
+	# `require_authentication` — which is middleware precisely so that nobody
+	# has to remember to protect a route — never ran. What is in here is a
+	# tailored resume: full name, address, phone, email, complete work history.
+	# The UUID in the path made it unguessable rather than private, so any
+	# leaked URL was permanently public.
+	#
+	# `/auth/check` answers 204 for a valid session and 401 otherwise, and
+	# copies nothing back into the response, so this costs one cheap internal
+	# request per download.
 	handle_path /storage/* {
+		forward_auth web:8000 {
+			uri /auth/check
+			copy_headers Cookie
+		}
 		root * /storage
 		header Content-Disposition attachment
 		file_server

@@ -3,7 +3,7 @@
 import logging
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from app.templating import build as build_templates
 
 from app.services import auth
@@ -16,12 +16,26 @@ templates = build_templates()
 
 def _client(request: Request) -> str:
     """
-    Who to throttle. Behind nginx every request arrives from the proxy, so the
+    Who to throttle. Behind Caddy every request arrives from the proxy, so the
     forwarded address is the only thing that distinguishes callers.
+
+    The **last** entry, not the first. `X-Forwarded-For` is a client-supplied
+    header and Caddy *appends* the peer address to whatever arrived rather than
+    replacing it — which is why `trusted_proxies` exists — so a request
+    carrying `X-Forwarded-For: 1.2.3.4` reaches us as `1.2.3.4, <real ip>` and
+    reading the first entry returns whatever the caller typed. Rotating it per
+    request then meant `MAX_ATTEMPTS` and `LOCKOUT_SECONDS` never engaged, on
+    a form whose whole threat model is that there is one password and no user
+    database.
+
+    The only entry in an XFF chain worth trusting is the one your own hop
+    added, and that is the last one.
     """
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+        if hops:
+            return hops[-1]
     return request.client.host if request.client else "unknown"
 
 
@@ -79,6 +93,28 @@ def login(request: Request, password: str = Form(""), next: str = Form("/apps"))
     response.set_cookie(auth.SESSION_COOKIE, auth.issue_session(), **auth.cookie_kwargs())
     logger.info("login: session issued to %s", client)
     return response
+
+
+@router.get("/auth/check")
+def auth_check(request: Request):
+    """
+    Whether this request carries a valid session. For the proxy, not for people.
+
+    Caddy serves `/storage/*` off the shared volume, so those requests never
+    reach this application and the middleware that protects every other route
+    never ran — which put every generated resume, with the user's full name,
+    address, phone and work history, behind nothing but an unguessable path.
+    `forward_auth` asks here first.
+
+    204 and 401 rather than a body, because the proxy reads the status and
+    discards the rest; and no redirect, because a download is not a navigation
+    and a 303 to the login form would be saved as a PDF.
+    """
+    if not auth.auth_enabled():
+        return Response(status_code=204)
+    if auth.session_valid(request.cookies.get(auth.SESSION_COOKIE)):
+        return Response(status_code=204)
+    return Response(status_code=401)
 
 
 @router.post("/logout")

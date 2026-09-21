@@ -291,3 +291,76 @@ class TestPasswordComparison:
     ])
     def test_bearer_parsing(self, header, expected):
         assert auth.bearer_token(header) == expected
+
+
+class TestTheProxyCanAskWhetherThereIsASession:
+    """
+    Caddy serves `/storage/*` straight off the shared volume, so those requests
+    never reached FastAPI and `require_authentication` — middleware precisely
+    so that nobody has to remember to protect a route — never ran. What is in
+    there is a tailored resume: full name, address, phone, complete work
+    history. The UUID in the path made it unguessable, not private.
+
+    `forward_auth` in the Caddyfile asks here first.
+    """
+
+    def test_a_valid_session_is_allowed(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+        client.cookies.set(auth.SESSION_COOKIE, auth.issue_session())
+        response = client.get("/auth/check")
+        assert response.status_code == 204
+
+    def test_no_session_is_refused(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+        client.cookies.clear()
+        assert client.get("/auth/check").status_code == 401
+
+    def test_a_forged_session_is_refused(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+        client.cookies.set(auth.SESSION_COOKIE, "9999999999.notavalidsignature")
+        assert client.get("/auth/check").status_code == 401
+
+    def test_it_answers_rather_than_redirecting(self, client, monkeypatch):
+        """
+        A download is not a navigation. A 303 to the login form would be saved
+        to disk as the PDF the user asked for.
+        """
+        monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+        client.cookies.clear()
+        response = client.get("/auth/check", follow_redirects=False)
+        assert response.status_code == 401
+        assert not response.content
+
+
+class TestOnlyTheHopWeAddedIsTrusted:
+    """
+    `X-Forwarded-For` is client-supplied, and Caddy *appends* the peer address
+    rather than replacing it. Reading the first entry returned whatever the
+    caller typed, so rotating the header meant the lockout never engaged — on a
+    form whose whole threat model is one password and no user database.
+    """
+
+    def _client_for(self, header):
+        from app.routers.auth import _client
+
+        request = type("R", (), {
+            "headers": {"X-Forwarded-For": header} if header else {},
+            "client": type("C", (), {"host": "10.0.0.9"})(),
+        })()
+        return _client(request)
+
+    def test_the_last_hop_wins(self):
+        assert self._client_for("1.2.3.4, 203.0.113.7") == "203.0.113.7"
+
+    def test_a_spoofed_single_value_does_not_become_the_identity(self):
+        # Caddy would have appended the real address; a header with only the
+        # attacker's value means no proxy touched it.
+        assert self._client_for("1.2.3.4") == "1.2.3.4"
+
+    def test_rotating_the_header_no_longer_resets_the_throttle(self):
+        """The point of the fix: many spoofed values, one throttle bucket."""
+        seen = {self._client_for(f"10.0.0.{n}, 203.0.113.7") for n in range(20)}
+        assert seen == {"203.0.113.7"}
+
+    def test_no_header_falls_back_to_the_peer(self):
+        assert self._client_for(None) == "10.0.0.9"

@@ -230,7 +230,11 @@ def _is_htmx(request: Request) -> bool:
 
 # Reachable without a session. /health is here so container health checks and
 # uptime monitors keep working; it reports liveness and nothing about the user.
-_PUBLIC_PATHS = frozenset({"/health", "/login"})
+# `/auth/check` answers the proxy's `forward_auth` for `/storage/*` (see
+# caddy/Caddyfile). It is public in the sense that it is reachable without a
+# session — it exists to *report* whether there is one — and it returns a bare
+# 204 or 401 with no body.
+_PUBLIC_PATHS = frozenset({"/health", "/login", "/auth/check"})
 _PUBLIC_PREFIXES = ("/static/",)
 
 # Served with a bearer token instead of a session — there is no browser here to
