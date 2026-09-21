@@ -170,7 +170,9 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
     """
     Check one budget's worth of jobs and record what was learned.
 
-    Returns {"checked": n, "closed": n, "still_open": n, "unknown": n}.
+    Returns {"checked": n, "closed": n, "still_open": n, "unknown": n} plus
+    "coverage" — see `coverage` for what that answers and why it is not one of
+    the counters.
     """
     limit = limit if limit is not None else settings.LIVENESS_MAX_PER_CYCLE
     workers = workers if workers is not None else settings.LIVENESS_WORKERS
@@ -179,6 +181,9 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
     jobs = candidates(db, limit, recheck_days)
     counts = {"checked": 0, "closed": 0, "still_open": 0, "unknown": 0}
     if not jobs:
+        # Reported on the empty run too, so the key is always there for a
+        # caller to read rather than present only on the runs that did work.
+        counts["coverage"] = coverage(db)
         return counts
 
     targets = [(job.id, _check_target(job)) for job in jobs]
@@ -219,4 +224,63 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
             "liveness: %d of %d checked postings are closed",
             counts["closed"], counts["checked"],
         )
+    # Nested rather than merged into `counts`. The four outcome counters are
+    # what this sweep did; coverage is whether the schedule can keep up, which
+    # is a property of the configuration and true between runs as well. Folding
+    # them together made "checked 2, closed 1" and "1,200 sustainable" the same
+    # kind of number, and broke the test that says those four keys are the
+    # whole result.
+    counts["coverage"] = coverage(db)
+    if counts["coverage"]["sustainable"] is False:
+        # Said out loud, because the failure is silent otherwise. `candidates`
+        # orders never-checked first, so past the budget the oldest matched
+        # jobs simply stop being re-checked and keep showing a months-old
+        # "still open" — which is the state this module exists to remove,
+        # moved from "never checked" to "checked once".
+        logger.warning(
+            "liveness: %d jobs worth checking against a budget of %d a day "
+            "(%d per sweep, every %dh) on a %d-day recheck — the oldest "
+            "verdicts will go stale. Raise LIVENESS_MAX_PER_CYCLE or shorten "
+            "LIVENESS_INTERVAL_HOURS.",
+            counts["worth_checking"], counts["daily_budget"],
+            settings.LIVENESS_MAX_PER_CYCLE, settings.LIVENESS_INTERVAL_HOURS,
+            settings.LIVENESS_RECHECK_DAYS,
+        )
     return counts
+
+
+def coverage(db) -> dict:
+    """
+    Whether the configured budget can actually keep every verdict fresh.
+
+    `LIVENESS_MAX_PER_CYCLE` checks per sweep, one sweep every
+    `LIVENESS_INTERVAL_HOURS`, each verdict standing for
+    `LIVENESS_RECHECK_DAYS` — multiply those out and you get the number of
+    jobs this can sustain. At the defaults that is 200 x 2 x 3 = 1,200. Above
+    it the arithmetic does not work and no error is raised; the oldest rows
+    just stop being reached.
+
+    A numerator with a denominator, which is the shape `docs/IMPROVING.md`
+    says most of this system's numbers are missing.
+    """
+    from sqlalchemy import func
+
+    per_day = (
+        settings.LIVENESS_MAX_PER_CYCLE
+        * max(1.0, 24.0 / max(1, settings.LIVENESS_INTERVAL_HOURS))
+    )
+    sustainable_population = per_day * max(1, settings.LIVENESS_RECHECK_DAYS)
+    worth_checking = (
+        db.query(func.count(Job.id))
+        .filter(
+            Job.status.in_([JobStatus.matched, JobStatus.docs_generated]),
+            Job.closed_at.is_(None),
+        )
+        .scalar()
+    ) or 0
+    return {
+        "worth_checking": int(worth_checking),
+        "daily_budget": int(per_day),
+        "sustains": int(sustainable_population),
+        "sustainable": worth_checking <= sustainable_population,
+    }

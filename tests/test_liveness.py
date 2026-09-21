@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.config import settings
 from app.models.job import Job, JobStatus
 from app.services import liveness
 
@@ -145,7 +146,13 @@ class TestSweep:
         monkeypatch.setattr(liveness, "check_url", fake_check)
         counts = liveness.sweep(db, limit=10, workers=1)
 
-        assert counts == {"checked": 2, "closed": 1, "still_open": 1, "unknown": 0}
+        # Still exact on the outcome counters — the four of them have to sum to
+        # `checked`, and a fifth appearing among them would mean a job got an
+        # outcome nobody accounted for. Coverage is a separate key because it
+        # reports on the schedule, not on this run.
+        outcomes = {k: v for k, v in counts.items() if k != "coverage"}
+        assert outcomes == {"checked": 2, "closed": 1, "still_open": 1,
+                            "unknown": 0}
         assert dead.closed_at is not None
         assert "404" in dead.closed_note
         assert alive.closed_at is None
@@ -163,6 +170,64 @@ class TestSweep:
         assert job.liveness_checked_at is not None
 
     def test_an_empty_queue_is_a_quiet_no_op(self, db):
-        assert liveness.sweep(db, limit=10, workers=1) == {
+        result = liveness.sweep(db, limit=10, workers=1)
+        outcomes = {k: v for k, v in result.items() if k != "coverage"}
+
+        assert outcomes == {
             "checked": 0, "closed": 0, "still_open": 0, "unknown": 0,
         }
+        # Present even on a run that did nothing, so a caller can read it
+        # without first checking whether the sweep found work.
+        assert "coverage" in result
+
+
+class TestWhetherTheBudgetCanKeepUp:
+    """
+    The schedule's arithmetic, said out loud.
+
+    `LIVENESS_MAX_PER_CYCLE` per sweep x sweeps per day x `RECHECK_DAYS` is the
+    number of jobs the configuration can keep fresh. Above it nothing errors —
+    `candidates` orders never-checked first, so the oldest verdicts simply stop
+    being reached and keep showing a months-old "still open". A numerator with
+    no denominator, which was the complaint.
+    """
+
+    def test_the_defaults_multiply_out(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "LIVENESS_MAX_PER_CYCLE", 200)
+        monkeypatch.setattr(settings, "LIVENESS_INTERVAL_HOURS", 12)
+        monkeypatch.setattr(settings, "LIVENESS_RECHECK_DAYS", 3)
+
+        out = liveness.coverage(db)
+
+        assert out["daily_budget"] == 400    # 200 x (24/12)
+        assert out["sustains"] == 1200       # x 3 days
+
+    def test_a_backlog_past_the_budget_is_reported_unsustainable(
+            self, db, monkeypatch):
+        monkeypatch.setattr(settings, "LIVENESS_MAX_PER_CYCLE", 1)
+        monkeypatch.setattr(settings, "LIVENESS_INTERVAL_HOURS", 24)
+        monkeypatch.setattr(settings, "LIVENESS_RECHECK_DAYS", 1)
+        for n in range(3):
+            _make_job(db, f"cov-{n}")
+
+        out = liveness.coverage(db)
+
+        assert out["worth_checking"] == 3
+        assert out["sustains"] == 1
+        assert out["sustainable"] is False
+
+    def test_a_closed_posting_is_no_longer_worth_checking(self, db, monkeypatch):
+        monkeypatch.setattr(settings, "LIVENESS_MAX_PER_CYCLE", 200)
+        _make_job(db, "cov-open")
+        _make_job(db, "cov-shut", closed_at=_NOW)
+
+        assert liveness.coverage(db)["worth_checking"] == 1
+
+    def test_a_job_the_sweep_never_looks_at_is_not_counted_against_it(
+            self, db, monkeypatch):
+        # `candidates` only ever considers matched and docs_generated, so
+        # counting anything else would invent a backlog that does not exist.
+        _make_job(db, "cov-new", status=JobStatus.new)
+        _make_job(db, "cov-filtered", status=JobStatus.filtered_out)
+
+        assert liveness.coverage(db)["worth_checking"] == 0
