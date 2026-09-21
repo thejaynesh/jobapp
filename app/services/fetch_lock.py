@@ -14,6 +14,7 @@ conflict with a fetch, so sharing one key would have each block the other.
 """
 
 import logging
+import time
 import uuid
 
 from app.config import settings
@@ -24,7 +25,14 @@ LOCK_KEY = "jobapp:fetch:running"
 COMPARE_LOCK_KEY = "jobapp:compare:running"
 # Comfortably longer than a slow cycle, short enough that a crashed worker
 # doesn't block the next scheduled run for long.
-DEFAULT_TTL_SECONDS = 3600
+#
+# Was an hour, which is far longer than anything it guards — and the TTL is
+# not only the crash window. `release` runs a compare-and-delete, and on a
+# Redis error it logs and leaves the key to expire; so a blip during release,
+# on a cycle that had already finished, blocked the next fetch for up to a
+# full hour. Sized to a slow cycle now (the match and enrich locks next door
+# use 1,800 for the same reason), and `release` retries before giving up.
+DEFAULT_TTL_SECONDS = 1800
 
 # Only the holder's own token may release the lock (same script as llm_gate).
 # A plain DELETE would let a cycle that outlived its TTL delete the *next*
@@ -67,15 +75,27 @@ def acquire(ttl: int = DEFAULT_TTL_SECONDS, token: str | None = None,
 
 def release(key: str = LOCK_KEY) -> None:
     token = _held_tokens.pop(key, None)
-    try:
-        if token is None:
-            # Acquired while Redis was unreachable (or never acquired here):
-            # there is no token to compare, and deleting blind could release
-            # somebody else's lock — the TTL clears it instead.
+    if token is None:
+        # Acquired while Redis was unreachable (or never acquired here): there
+        # is no token to compare, and deleting blind could release somebody
+        # else's lock — the TTL clears it instead. A review suggested a plain
+        # DELETE here; the comment above `_RELEASE` is why not.
+        return
+    # Retried, because a single transient error used to cost the next cycle its
+    # whole window: the key survives to its TTL, and the next run finds the
+    # lock held by a cycle that finished minutes ago.
+    for attempt in range(3):
+        try:
+            _client().eval(_RELEASE, 1, key, token)
             return
-        _client().eval(_RELEASE, 1, key, token)
-    except Exception as exc:
-        logger.warning("fetch_lock: could not release lock: %s", exc)
+        except Exception as exc:
+            if attempt == 2:
+                logger.warning(
+                    "fetch_lock: could not release %s after 3 attempts (%s); "
+                    "it expires in at most %ds", key, exc, DEFAULT_TTL_SECONDS,
+                )
+            else:
+                time.sleep(0.5)
 
 
 def state(key: str = LOCK_KEY) -> dict:

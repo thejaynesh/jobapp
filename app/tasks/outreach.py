@@ -10,6 +10,12 @@ from app.models.application import Application
 
 logger = logging.getLogger(__name__)
 
+# Its own key: a mailbox poll conflicts with nothing but another mailbox poll.
+MAILBOX_LOCK_KEY = "jobapp:mailbox:running"
+# Longer than a poll takes, short enough that a killed worker does not hold
+# the mailbox closed for a shift.
+MAILBOX_LOCK_TTL_SECONDS = 600
+
 
 @celery_app.task(
     name="app.tasks.outreach.discover_contacts_task",
@@ -119,10 +125,20 @@ def poll_mailbox() -> dict:
     on is noise that trains you to ignore the log.
     """
     from app.database import SessionLocal
+    from app.services.fetch_lock import acquire, release
     from app.services.mailbox import MailboxError, mailbox_configured, poll
 
     if not mailbox_configured():
         return {"skipped": "not configured"}
+
+    # Beat publishes this every fifteen minutes whether or not the last one
+    # ran, and nothing here was stopping them from stacking: during any window
+    # where the workers were busy, the copies queued and then ran back to back,
+    # several IMAP sessions in a row against the same mailbox. The lock makes a
+    # queued duplicate a no-op instead.
+    if not acquire(ttl=MAILBOX_LOCK_TTL_SECONDS, key=MAILBOX_LOCK_KEY):
+        logger.info("poll_mailbox: another poll is already running; skipping")
+        return {"skipped": "already running"}
 
     db = SessionLocal()
     try:
@@ -135,6 +151,7 @@ def poll_mailbox() -> dict:
         return {"error": str(exc)}
     finally:
         db.close()
+        release(key=MAILBOX_LOCK_KEY)
 
 
 @celery_app.task(name="app.tasks.outreach.send_message_task", soft_time_limit=120)
