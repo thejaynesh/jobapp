@@ -125,7 +125,10 @@ def _priced_count(db: Session) -> int:
             db.query(func.count(Job.id))
             .filter(
                 Job.status.in_(_FILTERABLE_STATUSES),
-                func.coalesce(Job.salary_max, Job.salary_min).isnot(None),
+                # Counted on the annualised pair, because that is what the
+                # filter beside this label actually compares — a count of rows
+                # the filter cannot match would be worse than no count.
+                func.coalesce(Job.salary_annual_max, Job.salary_annual_min).isnot(None),
             )
             .scalar()
             or 0
@@ -225,11 +228,20 @@ def get_jobs(
             floor = None
         if floor is not None:
             # Against the top of the band, not the bottom: "$120k–$180k" clears
-            # a $150k floor, and filtering on salary_min would hide it. Jobs
+            # a $150k floor, and filtering on the minimum would hide it. Jobs
             # that state no salary are excluded rather than assumed to pay
             # nothing — but that is most of them, so the UI says so.
+            #
+            # And against the *annualised* band, which is the whole point of
+            # having one. The stated figures are whatever the posting wrote:
+            # comparing them to a floor put an hourly rate, a monthly rate and
+            # a euro figure on the same axis, so a $100k floor hid a $65/hour
+            # posting worth about $135k and admitted a €100,000 one. A row we
+            # could not annualise honestly — no stated period, or a currency
+            # with no rate — has NULL here and is excluded, which is the same
+            # treatment a row stating no pay at all already got.
             query = query.filter(
-                func.coalesce(Job.salary_max, Job.salary_min) >= floor
+                func.coalesce(Job.salary_annual_max, Job.salary_annual_min) >= floor
             )
     if filter_reason:
         query = query.filter(Job.filter_reason == filter_reason)

@@ -155,6 +155,10 @@ def jobs_from_listing(
             "salary_min": posting["salary_min"],
             "salary_max": posting["salary_max"],
             "salary_currency": posting["salary_currency"],
+            # schema.org's `unitText`, which the block states outright. Without
+            # it the band cannot be annualised and the salary floor cannot see
+            # it.
+            "salary_period": posting.get("salary_period"),
             "employment_type": _employment_type(posting["employment_type"]),
         })
     return jobs

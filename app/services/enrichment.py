@@ -377,6 +377,7 @@ def json_ld_postings(html: str) -> list[dict]:
                 "salary_min": details.get("salary_min"),
                 "salary_max": details.get("salary_max"),
                 "salary_currency": details.get("salary_currency"),
+                "salary_period": details.get("salary_period"),
             }
             # Keep the richest copy: a page often carries the same posting in a
             # summary block and again in a fuller one.
@@ -437,6 +438,14 @@ def _details_from_ld(node: dict) -> dict:
                 details["salary_min"] = details["salary_max"] = single
             if salary.get("currency"):
                 details["salary_currency"] = str(salary["currency"])[:8]
+            # schema.org states the period right here as HOUR / DAY / WEEK /
+            # MONTH / YEAR, and it was being dropped — which left the band
+            # unannualisable and so invisible to the salary floor. It is the
+            # most reliable source of a period anywhere in the pipeline: the
+            # board published it rather than a model reading it off prose.
+            unit = value.get("unitText") or salary.get("unitText")
+            if unit:
+                details["salary_period"] = str(unit)
 
     location = node.get("jobLocation")
     if isinstance(location, list):

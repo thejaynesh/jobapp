@@ -142,6 +142,18 @@ def _required(raw):
 EMPLOYMENT_TYPES = ("full_time", "part_time", "contract", "internship")
 EXPERIENCE_LEVELS = ("entry", "mid", "senior")
 
+# The five `job_details.SALARY_PERIODS` knows how to annualise, in the order a
+# dropdown should offer them. Read off that dict rather than retyped, so a
+# period the form can accept is always one the conversion can act on.
+SALARY_PERIOD_OPTIONS = ("hour", "day", "week", "month", "year")
+
+# Editing any one of these re-derives the annualised pair, since that is what
+# the pay filter reads. Kept next to the options for the same reason they are:
+# the form and the conversion have to agree.
+_SALARY_EDIT_FIELDS = frozenset(
+    {"salary_min", "salary_max", "salary_currency", "salary_period"}
+)
+
 # What the form offers, in the order it offers it. `parse` turns whatever the
 # form posted into what the column holds, and raises `EditError` with a
 # sentence the user can act on when it cannot.
@@ -185,6 +197,17 @@ EDITABLE: dict[str, dict] = {
         "label": "Currency",
         "kind": "text",
         "parse": lambda raw: (_text(raw, 8).upper() or None),
+    },
+    # Editable because the user is the one person here who can read the
+    # posting. Without it, a hand-typed "65" for an hourly contract role has
+    # no period, so it cannot be annualised and the pay filter never sees it —
+    # a field the user filled in deliberately, ignored. Blank stays meaningful:
+    # it is "the posting does not say", not "per year".
+    "salary_period": {
+        "label": "Pay per",
+        "kind": "choice",
+        "options": SALARY_PERIOD_OPTIONS,
+        "parse": _choice(SALARY_PERIOD_OPTIONS),
     },
 }
 
@@ -280,6 +303,23 @@ def apply(db, job: Job, values: dict, release_fields=()) -> dict:
     if not changed and not released:
         return {"changed": [], "released": [], "requeued": False,
                 "description_changed": False, "chars_gained": 0}
+
+    # The annualised pair is derived, not entered, so it has to be recomputed
+    # whenever any part of the band moves. Otherwise a user who corrects a
+    # posting's pay leaves the old figure in the column the filter reads, and
+    # their correction is invisible to the one place it matters.
+    #
+    # Not in `EDITABLE`, and so never locked: locking a derived column would
+    # freeze it against the very figures it is derived from.
+    if set(changed) & _SALARY_EDIT_FIELDS:
+        from app.services.job_details import annualise
+
+        job.salary_annual_min = annualise(
+            job.salary_min, job.salary_period, job.salary_currency
+        )
+        job.salary_annual_max = annualise(
+            job.salary_max, job.salary_period, job.salary_currency
+        )
 
     now = datetime.now(timezone.utc)
     job.edited_at = now

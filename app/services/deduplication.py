@@ -361,6 +361,26 @@ def enrich_from(job: Job, data: dict) -> list[str]:
         job.salary_min = incoming_min
         job.salary_max = incoming_max
         job.salary_currency = data.get("salary_currency")
+        # The period is part of the unit. Figures from one source under a
+        # period from another is not a band anybody stated — the same
+        # objection this block already makes about a min and a max — and it is
+        # the worse version of it, because an hourly rate read as annual is
+        # wrong by three orders of magnitude rather than by a range.
+        #
+        # Annualised from what we just wrote rather than read out of `data`:
+        # ingest dicts carry a period (every `jobs_from_listing` board states
+        # `unitText`) and never the annual pair, so trusting the key would
+        # store NULLs and leave a posting that states its pay invisible to the
+        # pay filter — the failure this whole change is about.
+        from app.services.job_details import annualise, normalise_period
+
+        job.salary_period = normalise_period(data.get("salary_period"))
+        job.salary_annual_min = annualise(
+            incoming_min, job.salary_period, job.salary_currency
+        )
+        job.salary_annual_max = annualise(
+            incoming_max, job.salary_period, job.salary_currency
+        )
         filled.append("salary")
 
     # A resolved apply URL is the end of a redirect chain we followed once and

@@ -478,6 +478,13 @@ def _annual_salary(node: dict, source: str) -> dict:
         "salary_min": low,
         "salary_max": high,
         "salary_currency": found.get("salary_currency"),
+        # This function's whole job is to keep only the bands that are annual —
+        # `_SALARY_SCALE` un-scales minor units and `_MIN_PLAUSIBLE_ANNUAL`
+        # drops anything that reads as a rate. Having decided that, it has to
+        # say so: the pay filter reads `salary_annual_*`, those are derived
+        # from the period, and a NULL period means this band is excluded from
+        # the filter despite the posting stating pay.
+        "salary_period": "year",
     }
 
 

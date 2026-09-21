@@ -101,9 +101,25 @@ class Job(Base):
     # "the posting doesn't say" — never a guess. A guessed salary is worse than
     # a missing one, because the salary filter would then drop jobs on a number
     # nobody ever wrote down.
+    # The figures exactly as the posting states them, and what they are per.
+    # `salary_period` is hour | day | week | month | year, and NULL means the
+    # posting did not say — which is emphatically not the same as "year". That
+    # conflation is what made a $65/hour contract role read as a $65 salary.
     salary_min: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     salary_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     salary_currency: Mapped[str | None] = mapped_column(String, nullable=True)
+    salary_period: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The same band annualised once, on write, so that comparing two postings
+    # is comparing two numbers of the same kind. This is what the salary floor
+    # filters on; the stated pair above is what gets displayed.
+    #
+    # NULL whenever the conversion cannot be made honestly — no stated period,
+    # or a currency with no configured rate — and a NULL is excluded from a
+    # floor rather than admitted to it. See `services.job_details.annualise`.
+    salary_annual_min: Mapped[float | None] = mapped_column(
+        Float, nullable=True, index=True
+    )
+    salary_annual_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     # full_time | part_time | contract | internship
     employment_type: Mapped[str | None] = mapped_column(String, nullable=True)
     required_years: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -211,9 +227,18 @@ class Job(Base):
                 return f"{symbol}{amount / 1000:g}k"
             return f"{symbol}{amount:g}"
 
+        # The period, where the posting stated one. "$65" and "$65/hr" are a
+        # factor of two thousand apart and the column used to render both the
+        # same way — which is the display half of the bug that made the salary
+        # filter hide the best-paying jobs in the table.
+        per = {
+            "hour": "/hr", "day": "/day", "week": "/wk", "month": "/mo",
+            "year": "",
+        }.get(self.salary_period or "", "")
+
         if low is not None and high is not None and low != high:
-            return f"{_short(low)}–{_short(high)}{suffix}"
-        return f"{_short(low if low is not None else high)}{suffix}"
+            return f"{_short(low)}–{_short(high)}{suffix}{per}"
+        return f"{_short(low if low is not None else high)}{suffix}{per}"
 
     @property
     def employment_type_label(self) -> str | None:

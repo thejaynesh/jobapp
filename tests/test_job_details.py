@@ -7,6 +7,8 @@ drop jobs on a number nobody ever wrote down, and the matcher would weigh
 "required years" against a figure the model invented.
 """
 
+import pytest
+
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -283,9 +285,25 @@ class TestMatcherIntegration:
 
 
 class TestJobsPageSalaryFilter:
-    def _priced(self, db, low, high, **kwargs):
-        job = _job(salary_min=low, salary_max=high, status=JobStatus.matched,
-                   llm_score=80, url=f"https://x/{uuid.uuid4()}", **kwargs)
+    def _priced(self, db, low, high, period="year", currency="USD", **kwargs):
+        """
+        A job whose pay the filter can actually compare.
+
+        The filter reads the annualised columns, not the stated ones — an
+        hourly rate, a monthly rate and a euro figure are not on the same axis,
+        and comparing the stated figure to a floor is what hid a $65/hour
+        posting from a $100k floor. Production derives these on write (see
+        `job_details.with_annual`); a test building a row by hand has to do the
+        same.
+        """
+        from app.services.job_details import with_annual
+
+        annual = with_annual({
+            "salary_min": low, "salary_max": high,
+            "salary_period": period, "salary_currency": currency,
+        })
+        job = _job(status=JobStatus.matched, llm_score=80,
+                   url=f"https://x/{uuid.uuid4()}", **annual, **kwargs)
         job.source_urls = [job.url]
         db.add(job)
         return job
@@ -532,3 +550,311 @@ class TestASilentDescriptionDoesNotDeleteAStatedFact:
         job_details.apply(job, job_details.normalize({"salary_min": 150000}))
 
         assert job.salary_min == 99000.0
+
+
+class TestPayHasAPeriodOrItIsNotComparable:
+    """
+    `salary_min`/`salary_max` were floats with a currency and nothing recording
+    *per what*. The prompt asked the model to pick a convention, so an hourly
+    rate and an annual salary landed in the same column — `Job.salary_label`
+    said so out loud in a comment.
+
+    The display coped. The filter compared the stated figure to a floor, so a
+    $100k floor hid a $65/hour posting worth about $135k a year, and admitted a
+    €100,000 one against a floor the user meant in dollars. Three incompatible
+    kinds of number on one axis, in the one place this project keeps saying a
+    wrong number is worse than a missing one.
+    """
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("/hr", "hour"), ("hourly", "hour"), ("Hour", "hour"),
+        ("per year", "year"), ("annually", "year"), ("yr", "year"),
+        ("mo", "month"), ("weekly", "week"), ("day", "day"),
+        ("fortnightly", None), ("", None), (None, None), (7, None),
+    ])
+    def test_the_period_is_read_from_what_boards_actually_write(
+            self, raw, expected):
+        from app.services.job_details import normalise_period
+
+        assert normalise_period(raw) == expected
+
+    def test_an_hourly_rate_becomes_a_comparable_number(self):
+        from app.services.job_details import annualise
+
+        # 40 hours x 52 weeks. The exact figure matters less than the fact that
+        # it is now on the same axis as a stated salary.
+        assert annualise(65, "hour", "USD") == 135_200.0
+
+    @pytest.mark.parametrize("period,expected", [
+        ("hour", 135_200.0), ("day", 16_900.0), ("week", 3_380.0),
+        ("month", 780.0), ("year", 65.0),
+    ])
+    def test_every_period_converts(self, period, expected):
+        from app.services.job_details import annualise
+
+        assert annualise(65, period, "USD") == expected
+
+    def test_no_stated_period_yields_no_annual_figure(self):
+        """
+        Guessing "year" is how a $65 rate became a $65 salary. A NULL here is
+        excluded from a floor rather than admitted to it, which is the same
+        treatment a posting stating no pay already gets.
+        """
+        from app.services.job_details import annualise
+
+        assert annualise(65, None, "USD") is None
+
+    def test_a_currency_we_cannot_convert_yields_no_annual_figure(self):
+        """€100,000 is not 100,000 dollars, and the floor is in dollars."""
+        from app.services.job_details import annualise
+
+        assert annualise(100_000, "year", "EUR") is None
+        assert annualise(100_000, "year", "USD") == 100_000.0
+
+    def test_normalize_carries_the_period_and_the_derived_band(self):
+        from app.services.job_details import normalize
+
+        details = normalize({
+            "salary_min": "65", "salary_max": "80",
+            "salary_period": "/hr", "salary_currency": "usd",
+        })
+        assert details["salary_period"] == "hour"
+        assert details["salary_min"] == 65.0
+        assert details["salary_annual_min"] == 135_200.0
+        assert details["salary_annual_max"] == 166_400.0
+
+    def test_a_posting_stating_no_pay_states_no_period(self):
+        from app.services.job_details import normalize
+
+        details = normalize({"salary_period": "hour"})
+        assert details["salary_min"] is None
+        assert details["salary_period"] is None
+        assert details["salary_annual_min"] is None
+
+    @pytest.mark.parametrize("amount,period,expected", [
+        (65, "hour", "$65/hr"),
+        (9000, "month", "$9k/mo"),
+        (135000, "year", "$135k"),
+        # No stated period reads as a bare figure rather than a wrong unit.
+        (65, None, "$65"),
+    ])
+    def test_the_label_says_what_the_figure_is_per(
+            self, amount, period, expected):
+        job = _job(salary_min=amount, salary_currency="USD",
+                   salary_period=period)
+        assert job.salary_label == expected
+
+
+class TestTheSalaryFloorComparesLikeWithLike:
+    """
+    The filter compared `coalesce(salary_max, salary_min)` to the floor, and
+    those columns hold whatever the posting wrote. So a $100k floor hid a
+    $65/hour posting worth about $135k a year — one of the best-paying things
+    in the table — and admitted a €100,000 one against a floor the user meant
+    in dollars.
+    """
+
+    def _job_at(self, db, title, low, period, currency="USD"):
+        from app.services.job_details import with_annual
+
+        annual = with_annual({
+            "salary_min": low, "salary_max": None,
+            "salary_period": period, "salary_currency": currency,
+        })
+        job = _job(title=title, status=JobStatus.matched, llm_score=80,
+                   url=f"https://x/{uuid.uuid4()}", **annual)
+        job.source_urls = [job.url]
+        db.add(job)
+        return job
+
+    def test_an_hourly_rate_clears_a_floor_it_actually_clears(self, client, db):
+        self._job_at(db, "Hourly Contractor", 65, "hour")
+        db.commit()
+        assert "Hourly Contractor" in client.get("/jobs?min_salary=100000").text
+
+    def test_an_hourly_rate_below_the_floor_is_still_hidden(self, client, db):
+        self._job_at(db, "Cheap Contractor", 20, "hour")   # ~$41.6k
+        db.commit()
+        assert "Cheap Contractor" not in client.get("/jobs?min_salary=100000").text
+
+    def test_a_currency_we_cannot_convert_is_excluded_not_admitted(
+            self, client, db):
+        """€100,000 is not 100,000 dollars, and the floor is in dollars."""
+        self._job_at(db, "Euro Engineer", 100_000, "year", currency="EUR")
+        db.commit()
+        body = client.get("/jobs?min_salary=90000").text
+        assert "Euro Engineer" not in body
+        # Still visible with no floor applied — excluded from the filter, not
+        # hidden from the list.
+        assert "Euro Engineer" in client.get("/jobs").text
+
+    def test_a_band_with_no_stated_period_is_excluded(self, client, db):
+        """Same treatment as a posting that states no pay at all."""
+        self._job_at(db, "Unitless Engineer", 150_000, None)
+        db.commit()
+        assert "Unitless Engineer" not in client.get("/jobs?min_salary=100000").text
+
+
+class TestEveryPathThatWritesAPayBandStatesItsPeriod:
+    """
+    The filter reads `salary_annual_*`, which is derived from the period. So a
+    write path that knows its period and does not record it takes every row it
+    inserts off the pay filter — a posting that states its pay, missing from a
+    pay search. These are the paths that know.
+    """
+
+    def test_usajobs_states_year_because_it_only_keeps_annual_grades(self):
+        from app.services.sources.usajobs import _salary
+
+        found = _salary({
+            "PositionRemuneration": [
+                {"RateIntervalCode": "PA", "MinimumRange": "120000",
+                 "MaximumRange": "150000"},
+            ],
+        })
+
+        assert found["salary_period"] == "year"
+
+    def test_usajobs_still_drops_an_hourly_grade_entirely(self):
+        # The period is stated *because* the filter above it already ran, not
+        # instead of it: an hourly grade is skipped, not relabelled annual.
+        from app.services.sources.usajobs import _salary
+
+        assert _salary({
+            "PositionRemuneration": [
+                {"RateIntervalCode": "PH", "MinimumRange": "60",
+                 "MaximumRange": "80"},
+            ],
+        }) == {}
+
+    def test_harvest_states_year_on_the_bands_it_keeps(self):
+        from app.services.harvest import _annual_salary
+
+        found = _annual_salary(
+            {"compensation": {"min": 130000, "max": 160000,
+                              "currencyCode": "USD"}},
+            "greenhouse",
+        )
+
+        assert found["salary_min"] == 130000
+        assert found["salary_period"] == "year"
+
+    def test_harvest_still_drops_an_implausible_annual_figure(self):
+        # `_MIN_PLAUSIBLE_ANNUAL` is what decides the band is annual in the
+        # first place, so a rate that fails it must not come back labelled.
+        from app.services.harvest import _annual_salary
+
+        assert _annual_salary({"compensation": {"min": 65, "max": 80}},
+                              "greenhouse") == {}
+
+    def test_the_fetch_insert_path_derives_the_annual_pair(self):
+        # `_adapter_details` goes straight into `Job(**...)`, so if it does not
+        # carry the derived columns nothing else will fill them for that row.
+        from app.services.job_fetcher import _adapter_details
+
+        details = _adapter_details({
+            "salary_min": 65.0, "salary_max": 75.0,
+            "salary_currency": "USD", "salary_period": "hourly",
+        })
+
+        assert details["salary_period"] == "hour"
+        assert details["salary_annual_min"] == 65.0 * 2080
+        assert details["salary_annual_max"] == 75.0 * 2080
+
+    def test_a_period_with_no_figures_is_dropped_not_stored(self):
+        from app.services.job_fetcher import _adapter_details
+
+        details = _adapter_details({"salary_period": "hour",
+                                    "salary_currency": "USD"})
+
+        assert "salary_period" not in details
+        assert "salary_currency" not in details
+
+
+class TestTheMergeDerivesRatherThanTrustsAKey:
+    def test_a_cross_source_sighting_gets_a_usable_annual_band(self):
+        """
+        Ingest dicts carry a period and never the annual pair, so reading
+        `data["salary_annual_min"]` stored a NULL and left the posting off the
+        pay filter. It is derived from the figures being written instead.
+        """
+        from app.services.deduplication import enrich_from
+
+        job = _job(salary_min=None, salary_max=None)
+        filled = enrich_from(job, {
+            "salary_min": 65.0, "salary_max": 80.0,
+            "salary_currency": "USD", "salary_period": "HOUR",
+        })
+
+        assert "salary" in filled
+        assert job.salary_period == "hour"          # normalised, not raw
+        assert job.salary_annual_min == 65.0 * 2080
+
+    def test_a_period_it_cannot_read_leaves_the_band_unannualised(self):
+        from app.services.deduplication import enrich_from
+
+        job = _job(salary_min=None, salary_max=None)
+        enrich_from(job, {"salary_min": 1000.0, "salary_currency": "USD",
+                          "salary_period": "per fortnight"})
+
+        assert job.salary_period is None
+        assert job.salary_annual_min is None
+
+
+class TestTheDerivedColumnsFollowTheStatedOnes:
+    def test_a_hand_edited_figure_is_what_gets_annualised(self):
+        """
+        `apply` writes field by field and skips manual ones, so copying the
+        annual pair across from the extraction left the stated band showing the
+        user's number and the filtered band showing the model's.
+        """
+        from app.services import job_details
+
+        job = _job(salary_min=200_000.0, salary_max=200_000.0,
+                   salary_currency="USD", salary_period="year")
+        job.manual_fields = ["salary_min", "salary_max"]
+
+        job_details.apply(job, job_details.normalize({
+            "salary_min": 90_000, "salary_max": 90_000,
+            "salary_currency": "USD", "salary_period": "year",
+        }))
+
+        assert job.salary_min == 200_000.0        # the lock held
+        assert job.salary_annual_min == 200_000.0  # and the filter agrees
+
+    def test_editing_the_period_re_derives_the_annual_band(self, db):
+        from app.services import job_edits
+
+        job = _job(salary_min=65.0, salary_max=80.0,
+                   salary_currency="USD", salary_period="year")
+
+        job_edits.apply(db, job, {"salary_period": "hour"})
+
+        assert job.salary_period == "hour"
+        assert job.salary_annual_min == 65.0 * 2080
+
+    def test_editing_a_figure_re_derives_it_too(self, db):
+        from app.services import job_edits
+
+        job = _job(salary_min=100_000.0, salary_max=100_000.0,
+                   salary_currency="USD", salary_period="year")
+
+        job_edits.apply(db, job, {"salary_min": "150000"})
+
+        assert job.salary_annual_min == 150_000.0
+
+    def test_the_form_will_not_take_a_period_the_conversion_cannot_use(self):
+        from app.services.job_edits import parse
+
+        _, errors = parse({"salary_period": "fortnight"})
+
+        assert "salary_period" in errors
+
+    def test_a_blank_period_stays_blank_rather_than_becoming_a_year(self):
+        """"The posting does not say" is a fact, and not the same as "annual"."""
+        from app.services.job_edits import parse
+
+        parsed, errors = parse({"salary_period": ""})
+
+        assert errors == {}
+        assert parsed["salary_period"] is None

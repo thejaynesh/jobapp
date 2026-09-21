@@ -37,6 +37,98 @@ MIN_DESCRIPTION_CHARS = 200
 
 EMPLOYMENT_TYPES = ("full_time", "part_time", "contract", "internship")
 
+# What a stated figure is per, and how many of them make a year.
+#
+# Fixed multipliers, not a calendar: 2,080 hours is the US convention for a
+# full-time year (40 × 52) and every other figure follows from it. The point is
+# not precision — it is that a $65/hour posting and a $135,000/year posting
+# become comparable numbers, so a salary floor stops hiding the first one.
+SALARY_PERIODS: dict[str, float] = {
+    "hour": 2080.0,
+    "day": 260.0,
+    "week": 52.0,
+    "month": 12.0,
+    "year": 1.0,
+}
+
+# Spellings models and boards actually emit, mapped onto the five above.
+_PERIOD_ALIASES = {
+    "hourly": "hour", "hour": "hour", "hr": "hour", "per hour": "hour",
+    "h": "hour",
+    "daily": "day", "day": "day", "per day": "day",
+    "weekly": "week", "week": "week", "per week": "week", "wk": "week",
+    "monthly": "month", "month": "month", "per month": "month", "mo": "month",
+    "annual": "year", "annually": "year", "yearly": "year", "year": "year",
+    "per year": "year", "yr": "year", "pa": "year", "p.a.": "year",
+}
+
+# Currencies we will annualise without a conversion rate — which is to say,
+# the one the salary floor is expressed in. Anything else gets a period and no
+# annual figure, so €100,000 is excluded from a dollar floor rather than
+# admitted to it. A stale static rate table would be a smaller error than the
+# 2,000x one this replaces, but no table is a smaller error still, and the
+# honest answer to "how much is this in dollars" is that we do not know.
+_ANNUALISABLE_CURRENCIES = frozenset({"USD", None, ""})
+
+
+def with_annual(details: dict) -> dict:
+    """
+    Fill the annualised pair from a stated band, in place. Returns `details`.
+
+    Called by every path that writes a pay band, not just the extraction:
+    adapters supply `salary_min`/`salary_max` out of band (USAJOBS states a
+    grade, every `base.jobs_from_listing` board carries one in its JSON-LD,
+    hiring.cafe ships a structured block), and a row whose annual columns were
+    never derived is a row the salary floor cannot see. Leaving those to a
+    later enrichment pass would mean a posting that states its pay is missing
+    from a pay filter, which is the failure this whole change is about.
+    """
+    period = normalise_period(details.get("salary_period"))
+    details["salary_period"] = period
+    currency = details.get("salary_currency")
+    details["salary_annual_min"] = annualise(
+        details.get("salary_min"), period, currency
+    )
+    details["salary_annual_max"] = annualise(
+        details.get("salary_max"), period, currency
+    )
+    return details
+
+
+def normalise_period(value) -> str | None:
+    """One of `SALARY_PERIODS`, or None when the posting did not say."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower().lstrip("/").strip()
+    if text in SALARY_PERIODS:
+        return text
+    return _PERIOD_ALIASES.get(text)
+
+
+def annualise(amount, period: str | None, currency: str | None) -> float | None:
+    """
+    A stated figure as a yearly one, or None when that cannot be said honestly.
+
+    Two ways it returns None, and both are the conservative direction because
+    a NULL is *excluded* from a salary floor rather than admitted to it:
+
+    * **No period.** Guessing "year" is precisely how a $65 hourly rate became
+      a $65 salary, and the filter then hid the best-paying job in the table.
+    * **A currency we have no rate for.** €100,000 is not 100,000 dollars, and
+      a floor the user typed in dollars should not admit it.
+    """
+    if amount is None or period is None:
+        return None
+    multiplier = SALARY_PERIODS.get(period)
+    if multiplier is None:
+        return None
+    if (currency or "").upper() not in _ANNUALISABLE_CURRENCIES:
+        return None
+    try:
+        return float(amount) * multiplier
+    except (TypeError, ValueError):
+        return None
+
 # Long enough to be a real note, short enough not to become a second copy of
 # the description in a column meant for a summary.
 _MAX_BENEFITS_CHARS = 400
@@ -45,10 +137,12 @@ _MAX_SKILLS = 25
 _SYSTEM_PROMPT = (
     "You extract structured facts from a job posting. Return ONLY a JSON "
     "object, no prose and no markdown, with exactly these keys:\n"
-    '  "salary_min", "salary_max": numbers the posting states, or null. Use the '
-    "annual figure when the posting gives one; if it quotes an hourly rate, "
-    "give the hourly number. Never convert, never estimate, never infer from "
-    "the seniority or the location.\n"
+    '  "salary_min", "salary_max": the pay figures the posting states, exactly '
+    "as written, or null. Do not convert between periods, do not annualise, do "
+    "not estimate, and do not infer from the seniority or the location.\n"
+    '  "salary_period": what those figures are per — exactly one of hour, day, '
+    "week, month, year — or null if the posting does not say. A rate quoted "
+    '"$65/hr" is hour; "$135,000 per year" is year.\n'
     '  "salary_currency": ISO 4217 code (USD, EUR, GBP...), or null.\n'
     '  "employment_type": exactly one of full_time, part_time, contract, '
     "internship — or null if the posting does not say.\n"
@@ -138,6 +232,17 @@ def normalize(parsed: dict) -> dict:
         currency.upper() if currency and low is not None else None
     )
 
+    # What the figures are per, and the same band annualised so that two
+    # postings can be compared. Only when there is a figure to describe.
+    period = normalise_period(parsed.get("salary_period")) if low is not None else None
+    details["salary_period"] = period
+    details["salary_annual_min"] = annualise(
+        low, period, details["salary_currency"]
+    )
+    details["salary_annual_max"] = annualise(
+        high, period, details["salary_currency"]
+    )
+
     employment = _to_text(parsed.get("employment_type"), 32)
     employment = (employment or "").lower().replace("-", "_").replace(" ", "_")
     details["employment_type"] = employment if employment in EMPLOYMENT_TYPES else None
@@ -220,6 +325,16 @@ def needs_extraction(job) -> bool:
     return stamped is not None and stamped > job.details_extracted_at
 
 
+# Everything that has to arrive together for a pay band to mean anything.
+_SALARY_STATED_FIELDS = ("salary_min", "salary_max", "salary_currency",
+                         "salary_period")
+
+# The derived pair. Never written through `write()` — see `apply`.
+_SALARY_DERIVED_FIELDS = ("salary_annual_min", "salary_annual_max")
+
+_SALARY_FIELDS = _SALARY_STATED_FIELDS + _SALARY_DERIVED_FIELDS
+
+
 def apply(job, details: dict) -> None:
     """
     Write extracted details onto the job, stamping when it was read.
@@ -252,13 +367,39 @@ def apply(job, details: dict) -> None:
         if hasattr(job, field) and not is_manual(job, field):
             setattr(job, field, value)
 
+    # Pay moves as one unit, and the period is part of it. A period from one
+    # read over figures from another describes a band nobody stated, which is
+    # the same objection the cross-source merge makes.
     if details.get("salary_min") is not None or details.get("salary_max") is not None:
-        write("salary_min", details.get("salary_min"))
-        write("salary_max", details.get("salary_max"))
-        write("salary_currency", details.get("salary_currency"))
+        for field in _SALARY_STATED_FIELDS:
+            write(field, details.get(field))
+
+    # The annualised pair is derived from whatever the stated columns now hold,
+    # rather than copied from `details` through `write()`.
+    #
+    # `write()` checks `is_manual` field by field, and the derived columns are
+    # not editable, so they are never locked. Copying them across would take
+    # the extraction's figures onto a row where the user had hand-corrected
+    # `salary_min` — the stated band showing their number and the band the pay
+    # filter reads showing the model's. Deriving it here means the two always
+    # describe the same posting, whoever supplied which half.
+    #
+    # Unconditional, outside the block above: an extraction that clears a
+    # period, or a manual lock that held the figures back, both have to be
+    # reflected here too.
+    job.salary_annual_min = annualise(
+        getattr(job, "salary_min", None),
+        getattr(job, "salary_period", None),
+        getattr(job, "salary_currency", None),
+    )
+    job.salary_annual_max = annualise(
+        getattr(job, "salary_max", None),
+        getattr(job, "salary_period", None),
+        getattr(job, "salary_currency", None),
+    )
 
     for field, value in details.items():
-        if field in ("salary_min", "salary_max", "salary_currency"):
+        if field in _SALARY_FIELDS:
             continue
         # `[]` is the list columns' spelling of "the posting does not say", and
         # gets the same treatment as a null for the same reason.

@@ -456,7 +456,17 @@ def _stated_facts(job) -> str:
         lines.append(f"Required experience (stated in the posting): {years:g} years")
     label = getattr(job, "salary_label", None)
     if isinstance(label, str) and label:
+        # `salary_label` now carries the period, so the model sees "$65/hr"
+        # rather than "$65" beside a candidate minimum of "$130,000" — which
+        # invited it to read a well-paid contract role as paying $65 a year.
         lines.append(f"Stated salary: {label}")
+        annual = getattr(job, "salary_annual_min", None)
+        if isinstance(annual, (int, float)) and not isinstance(annual, bool) \
+                and (getattr(job, "salary_period", None) or "year") != "year":
+            # Spelled out as well, because comparing a rate to a yearly
+            # expectation is arithmetic, and arithmetic is the thing to hand a
+            # model rather than ask of it.
+            lines.append(f"Stated salary annualised: ${annual:,.0f}/year")
     employment = _string("employment_type")
     if employment:
         lines.append(f"Employment type: {employment.replace('_', ' ')}")

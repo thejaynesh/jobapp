@@ -35,6 +35,10 @@ _FETCH_CYCLE_KEYS = (
 # says nothing leaves the column null, which is what null means here.
 _ADAPTER_DETAIL_FIELDS = (
     "salary_min", "salary_max", "salary_currency", "employment_type",
+    # What the figures are per. Without it the band cannot be annualised, and
+    # an un-annualised band is invisible to the salary floor — so a posting
+    # that states its pay would be missing from a pay filter.
+    "salary_period",
 )
 
 
@@ -44,11 +48,17 @@ def _adapter_details(job_data: dict) -> dict:
         for field in _ADAPTER_DETAIL_FIELDS
         if job_data.get(field) is not None
     }
-    # A currency without an amount says nothing, and would read as a stated
-    # salary to the "does this job state pay?" count.
+    # A currency or a period without an amount says nothing, and would read as
+    # a stated salary to the "does this job state pay?" count.
     if details.get("salary_min") is None and details.get("salary_max") is None:
         details.pop("salary_currency", None)
-    return details
+        details.pop("salary_period", None)
+        return details
+    # Derived here rather than left to a later enrichment pass, for the reason
+    # `job_details.with_annual` gives: the filter reads the annual columns.
+    from app.services.job_details import with_annual
+
+    return with_annual(details)
 
 
 # The pipeline in three slices, so each can run on the schedule it deserves.

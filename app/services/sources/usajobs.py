@@ -88,6 +88,14 @@ def _salary(descriptor: dict) -> dict:
             "salary_min": low or high,
             "salary_max": high or low,
             "salary_currency": "USD",
+            # Stated outright, because this function has already established
+            # it: the loop above skips every entry whose `RateIntervalCode` is
+            # not annual. Leaving it off would be the one omission that hurts
+            # here — the pay filter reads `salary_annual_*`, which is derived
+            # from the period, and this is the only source that quotes pay on
+            # every posting. A NULL period would take all of it off that
+            # filter.
+            "salary_period": "year",
         }
     return {}
 
