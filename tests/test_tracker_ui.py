@@ -88,9 +88,20 @@ class TestJobsRouter:
 
     @staticmethod
     def _mock_jobs_query(mock_db, jobs):
-        """Self-chaining query mock supporting filter/count/order_by/offset/limit."""
+        """
+        Self-chaining query mock supporting filter/options/count/order_by/
+        offset/limit.
+
+        `options` is in there because the router asks for `selectinload(
+        Job.scores)` explicitly now that the relationship is lazy by default.
+        A mock that does not self-chain on it returns a fresh MagicMock from
+        that call, and the page then renders zero jobs while still answering
+        200 — so the status-code tests passed and only the ones that read the
+        body noticed.
+        """
         query = MagicMock()
         query.filter.return_value = query
+        query.options.return_value = query
         query.count.return_value = len(jobs)
         query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = jobs
         mock_db.query.return_value = query

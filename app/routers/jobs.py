@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.database import get_db
@@ -255,7 +255,17 @@ def get_jobs(
 
     order = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["score_desc"])
     total = query.count()
-    jobs = query.order_by(order).offset(page * _PAGE_SIZE).limit(_PAGE_SIZE).all()
+    # Asked for here rather than declared on the relationship. Every card
+    # renders its score history, so without this the page is fifty queries —
+    # but as a relationship-level `selectin` it was also loaded by every batch
+    # pass that touches a Job, which is thousands of rows of nobody's business.
+    jobs = (
+        query.options(selectinload(Job.scores))
+        .order_by(order)
+        .offset(page * _PAGE_SIZE)
+        .limit(_PAGE_SIZE)
+        .all()
+    )
 
     return templates.TemplateResponse(
         "jobs/index.html",

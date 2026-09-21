@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 # Give the one-time board backfill a few shots at a flaky network, then stop.
 _MAX_BACKFILL_ATTEMPTS = 3
 
+# Rows to insert before committing. A cycle used to hold every insert in one
+# transaction and commit once at the end, so a single failure there discarded
+# the whole cycle's work — minutes of requests, thrown away with a log line.
+_COMMIT_EVERY = 250
+
 # The profile-blob keys a fetch cycle owns. Only these are written back at the
 # end of a cycle; everything else on the blob belongs to other writers (agent
 # presence, mailbox state, settings) and must survive a cycle that overlaps
@@ -1217,6 +1222,24 @@ def fetch_and_save_jobs(
                 db.flush()
                 counts["inserted"] += 1
                 _tally(source, "inserted")
+
+            # Committed in chunks rather than once at the end.
+            #
+            # The per-row savepoints isolate a bad row, which is what they were
+            # for — but every one of them lived inside a single outer
+            # transaction committed once, minutes later. If that commit failed
+            # (a dropped connection, disk pressure) the `except` logged, rolled
+            # back, and every insert in the cycle was gone. The savepoints
+            # protect against a bad row, not against a bad commit.
+            #
+            # Outside the savepoint block, so a commit failure cannot poison a
+            # flush that has already succeeded.
+            if counts["inserted"] and counts["inserted"] % _COMMIT_EVERY == 0:
+                try:
+                    db.commit()
+                except Exception as exc:
+                    logger.error("job_fetcher: chunk commit failed: %s", exc)
+                    db.rollback()
 
         except Exception as exc:
             # A job that fell out here is a job we fetched and then lost, and

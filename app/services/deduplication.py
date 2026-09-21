@@ -215,10 +215,20 @@ def find_duplicate_application_job(db: Session, job) -> Job | None:
     # the pipeline's own backlog on the read side of a scoring pass, growing for
     # as long as the user keeps applying to things. The match is re-fetched
     # below, which is one row.
+    # Narrowed in SQL on the one thing normalisation preserves: the company's
+    # first token. `normalize_company` only strips trailing suffixes ("Inc",
+    # "GmbH") and punctuation, so whatever "Acme" normalises to still starts
+    # with "acme" — which makes an ILIKE prefix a safe pre-filter even though
+    # the full comparison cannot be expressed in a query.
+    #
+    # Without it this read every job ever applied to, on every matched job, and
+    # grew with the user's own success. The candidate set is now the handful at
+    # one employer.
+    first_token = norm_company.split(" ")[0]
     rows = (
         db.query(Job.id, Job.company, Job.title)
         .join(Application, Application.job_id == Job.id)
-        .filter(Job.id != job.id)
+        .filter(Job.id != job.id, Job.company.ilike(f"{first_token}%"))
         .distinct()
         .all()
     )

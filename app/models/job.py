@@ -173,11 +173,21 @@ class Job(Base):
     # hold only the latest one, and a job re-scored on a fuller description
     # would otherwise show no sign that it was ever judged differently.
     #
-    # Eagerly loaded because the list page renders it on every card, and the
-    # alternative is fifty queries per page; it is a handful of narrow rows per
-    # job, capped (see `services.score_history`).
+    # `lazy="selectin"` was tempting and wrong. The list page renders this on
+    # every card and the alternative there is fifty queries per page — but
+    # `selectin` is not a property of that page, it is a property of the
+    # relationship, so every batch path that loads Job objects paid for it too.
+    # Per run: `archive.candidates` 5,000 rows, `requeue_settled_verdicts`
+    # 4,000, `enrichment.select_targets` up to 1,000, `liveness.candidates`
+    # 200 — each firing a second query for score rows nobody reads, on top of
+    # de-TOASTing descriptions.
+    #
+    # So the page asks for what the page needs. `routers/jobs` and the score
+    # history view use `selectinload(Job.scores)` explicitly; everything else
+    # gets the default and touches `job.scores` only when it means to —
+    # `enrichment.already_judged_on_this_text` does, once, per candidate.
     scores: Mapped[list["JobScore"]] = relationship(  # noqa: F821
-        "JobScore", cascade="all, delete-orphan", lazy="selectin",
+        "JobScore", cascade="all, delete-orphan",
         order_by="desc(JobScore.created_at)", passive_deletes=True,
     )
 
