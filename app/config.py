@@ -620,6 +620,11 @@ class Settings(BaseSettings):
     # worker killed — Celery lost the task, and nothing was ever going to
     # retry it. The sweeper re-queues those.
     GENERATION_STUCK_MINUTES: int = 20
+    # How many never-queued generations one sweep will pick up. Unbounded, this
+    # read every matched application every twenty minutes and touched each
+    # one's documents — and on a large matched backlog it would queue all of
+    # them at once, which is the pile-up the sweep exists to prevent.
+    GENERATION_SWEEP_MAX_PER_RUN: int = 100
 
     # Documents written before enrichment brought the real posting in were
     # tailored to a teaser. This rewrites them on a clock instead of waiting

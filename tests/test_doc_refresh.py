@@ -196,6 +196,75 @@ class TestItDoesNotQueueTheSameThingTwice:
         assert result["skipped"] == 1
         assert application.generation_status == "idle"
 
+    def test_the_claim_is_the_check(self, db, queued):
+        """
+        The transition used to be read-then-write: the row was selected on
+        `generation_status == 'idle'` and set to 'generating' later in the
+        loop, committed at the end. Two overlapping passes could both see the
+        same idle row and both queue a task, and two workers writing one
+        application's documents is two resumes racing to the same rows.
+
+        `claim_for_generation` is a conditional UPDATE, so the second caller
+        gets nothing back and queues nothing.
+        """
+        from app.tasks.generate import claim_for_generation
+
+        application = _setup(db)
+
+        assert claim_for_generation(db, application.id, allowed=("idle",))
+        # The second attempt on the same row — what a concurrent pass does.
+        assert not claim_for_generation(db, application.id, allowed=("idle",))
+
+        db.refresh(application)
+        assert application.generation_status == "generating"
+
+    def test_a_pass_will_not_claim_what_another_already_did(self, db, queued):
+        """The same thing end to end: a row already in flight is not queued."""
+        application = _setup(db)
+        application.generation_status = "generating"
+        application.generation_started_at = NOW
+        db.commit()
+
+        result = doc_refresh.refresh_stale_documents(db)
+
+        assert result["queued"] == 0
+        assert queued.call_count == 0
+
+    def test_a_released_claim_can_be_taken_again(self, db):
+        """
+        A broker blip must not leave the row reading 'generating' with no task
+        behind it — nothing would touch it until GENERATION_STUCK_MINUTES.
+        """
+        from app.tasks.generate import (
+            claim_for_generation, release_generation_claim,
+        )
+
+        application = _setup(db)
+        claim_for_generation(db, application.id, allowed=("idle",))
+
+        release_generation_claim(db, application.id)
+
+        db.refresh(application)
+        assert application.generation_status == "idle"
+        assert application.generation_started_at is None
+        assert claim_for_generation(db, application.id, allowed=("idle",))
+
+    def test_a_failed_generation_is_not_claimed_by_the_automatic_pass(self, db):
+        """
+        'failed' has an error the user can read and a Rewrite button, so the
+        automatic pass passes `allowed=("idle",)` and leaves it. Re-queueing it
+        on a timer would burn LLM calls on the same failure.
+        """
+        from app.tasks.generate import claim_for_generation
+
+        application = _setup(db)
+        application.generation_status = "failed"
+        db.commit()
+
+        assert not claim_for_generation(db, application.id, allowed=("idle",))
+        # The retry button, which is allowed to.
+        assert claim_for_generation(db, application.id)
+
 
 class TestItStaysBounded:
     def test_a_pass_is_capped(self, db, queued, monkeypatch):

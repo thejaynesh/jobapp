@@ -136,9 +136,9 @@ def refresh_stale_documents(db, limit: int | None = None) -> dict:
     means the documents for a job the user is looking at right now sit behind
     a backlog of refreshes for jobs they are not.
     """
-    from datetime import datetime, timezone
-
-    from app.tasks.generate import queue_generation
+    from app.tasks.generate import (
+        claim_for_generation, queue_generation, release_generation_claim,
+    )
 
     if not _enabled():
         return {"eligible": 0, "queued": 0, "skipped": 0, "enabled": False}
@@ -148,23 +148,33 @@ def refresh_stale_documents(db, limit: int | None = None) -> dict:
         return {"eligible": 0, "queued": 0, "skipped": 0, "enabled": True}
 
     candidates = stale_applications(db, limit=limit)
+    # Read out in full before anything commits. `claim_for_generation` commits
+    # and `expire_on_commit` is on, so calling `carried_feedback` — which walks
+    # `application.documents` — inside the claim loop would reload every row's
+    # documents after the first claim. The eager load in `stale_applications`
+    # is there precisely so this costs one query.
+    work = [(app.id, carried_feedback(app)) for app in candidates]
     queued = 0
-    now = datetime.now(timezone.utc)
-    for application in candidates:
-        feedback = carried_feedback(application)
-        if not queue_generation(application.id, feedback=feedback):
+    for application_id, feedback in work:
+        # Claimed before the task is dispatched, and in one statement. Marking
+        # the row in flight matters for the reason `sweep_generations` gives —
+        # an 'idle' row is re-selected by the next pass until a worker picks
+        # the first copy up, so one stale application becomes a pile of
+        # duplicate tasks — but doing it *after* the dispatch, and committing
+        # at the end of the loop, left a window in which a second pass saw the
+        # same 'idle' row. `claim_for_generation` closes it.
+        #
+        # Only 'idle', not `NEEDS_GENERATION`: 'failed' has an error to read
+        # and a button to retry, and this pass is automatic.
+        if not claim_for_generation(db, application_id, allowed=("idle",)):
             continue
-        # Marked in flight with a clock, for the same reason `sweep_generations`
-        # does it: an 'idle' row is re-selected by the next pass until a worker
-        # picks the first copy up, and one stale application becomes a pile of
-        # duplicate tasks. If the queued task is lost, the stale sweep recovers
-        # it after the window.
-        application.generation_status = "generating"
-        application.generation_started_at = now
+        if not queue_generation(application_id, feedback=feedback):
+            # The claim is only real if a task is behind it.
+            release_generation_claim(db, application_id)
+            continue
         queued += 1
 
     if queued:
-        db.commit()
         logger.info(
             "refresh_stale_documents — queued %d rewrite(s) for documents that "
             "predate a fuller description", queued,
