@@ -52,8 +52,10 @@ jobs:
       AGENT_TOKEN: ci-only
       NVIDIA_NIM_API_KEY: ci-only
       NVIDIA_NIM_BASE_URL: https://integrate.api.nvidia.com/v1
-      STORAGE_PATH: /tmp/jobapp-storage
-      DOCS_OUTPUT_DIR: /tmp/jobapp-storage
+      # `STORAGE_PATH` is deliberately NOT set. `test_config.py` asserts the
+      # default is `/storage`, so exporting one here fails that test on the
+      # environment rather than on the code — and nothing else needs it,
+      # because the tests that write files patch it themselves.
 
     steps:
       - uses: actions/checkout@v4
@@ -76,4 +78,4 @@ jobs:
         run: alembic upgrade head
 
       - name: Run the suite
-        run: mkdir -p /tmp/jobapp-storage && pytest -q
+        run: pytest -q

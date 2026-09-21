@@ -25,7 +25,27 @@ def _derive_test_url(base: str) -> str:
     without it.
     """
     url = make_url(base)
-    return str(url.set(database=f"{url.database or 'jobapp'}_test"))
+    return _render(url.set(database=f"{url.database or 'jobapp'}_test"))
+
+
+def _render(url) -> str:
+    """
+    A URL back to a string **with its password intact**.
+
+    `str(url)` does not do this. SQLAlchemy's `URL.__str__` renders the
+    password as `***`, so every helper here that round-tripped a URL through
+    `str()` handed `create_engine` the literal password `***` — and the engine
+    then failed with `password authentication failed for user "jobapp"`,
+    naming the user, which reads like a missing role rather than a mangled
+    secret.
+
+    It stayed hidden because it only shows up against a Postgres that checks
+    passwords. A local server with `trust` in `pg_hba.conf`, or a connection
+    over the unix socket, accepts `***` as happily as the real thing — so the
+    suite passed on a dev machine and on CI's first run failed twenty workers
+    deep with an auth error.
+    """
+    return url.render_as_string(hide_password=False)
 
 
 _BASE_DB_URL = settings.TEST_DATABASE_URL or _derive_test_url(settings.DATABASE_URL)
@@ -48,7 +68,7 @@ def _worker_db_url(base: str, worker: str) -> str:
     if not worker:
         return base
     url = make_url(base)
-    return str(url.set(database=f"{url.database}_{worker}"))
+    return _render(url.set(database=f"{url.database}_{worker}"))
 
 
 TEST_DB_URL = _worker_db_url(_BASE_DB_URL, _WORKER)
@@ -69,7 +89,7 @@ def _ensure_database(url: str) -> None:
         return
 
     admin = create_engine(
-        str(target.set(database="postgres")), isolation_level="AUTOCOMMIT",
+        _render(target.set(database="postgres")), isolation_level="AUTOCOMMIT",
     )
     try:
         with admin.connect() as conn:
