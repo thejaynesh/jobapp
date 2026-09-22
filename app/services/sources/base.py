@@ -24,8 +24,38 @@ class SourceUnavailable(Exception):
 BLOCKING_STATUSES = frozenset({401, 402, 403, 429})
 
 
+def is_bot_challenge(resp) -> bool:
+    """
+    Whether this is an anti-bot interstitial rather than the site's answer.
+
+    Worth telling apart because the fix is completely different. A 403 from a
+    key is fixed in the provider's dashboard; a Cloudflare "Just a moment…"
+    page is a verdict on the server's IP, which no key, header or retry
+    changes — the browser extension, on a residential connection, is the
+    route that works.
+    """
+    try:
+        if resp.headers.get("cf-mitigated") == "challenge":
+            return True
+        if resp.status_code not in (403, 429, 503):
+            return False
+        head = (resp.text or "")[:4000].lower()
+    except Exception:
+        return False
+    return any(marker in head for marker in (
+        "just a moment", "cf-challenge", "challenge-platform",
+        "attention required", "verify you are human",
+    ))
+
+
 def raise_if_blocked(resp, source: str) -> None:
     """Turn an auth/quota/rate-limit response into SourceUnavailable."""
+    if is_bot_challenge(resp):
+        raise SourceUnavailable(
+            f"{source} answered with a bot challenge (HTTP {resp.status_code}) — "
+            f"it refuses server IPs outright; the browser extension collects "
+            f"it instead"
+        )
     if resp.status_code in BLOCKING_STATUSES:
         raise SourceUnavailable(
             f"{source} returned HTTP {resp.status_code}; skipping the rest of "

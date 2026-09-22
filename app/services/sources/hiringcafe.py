@@ -30,7 +30,11 @@ from app.services.sources.base import (
 
 logger = logging.getLogger(__name__)
 
-_SEARCH = "https://hiring.cafe/api/search-jobs"
+# hiring.cafe moved to hiringcafe.com and 308-redirects every request there.
+# Asked directly, so a POST is not left to redirect handling — that was the
+# 405s — though from a server IP the answer is now a Cloudflare challenge
+# either way (see `base.is_bot_challenge`). The extension reads it instead.
+_SEARCH = "https://hiringcafe.com/api/search-jobs"
 
 # Enough to be worth the request, small enough that one bad query cannot own
 # the cycle.

@@ -1923,3 +1923,35 @@ class TestWellfoundReadsTheEmbeddedData:
             _, stats = _run_all_adapters(["SWE"], ["NYC"], cfg, ats_slugs={},
                                          only={"wellfound"})
         assert stats["wellfound"]["enabled"] is False
+
+
+class TestABotChallengeSaysSo:
+    """
+    HiringCafe, Indeed and others answer a server IP with Cloudflare's "Just a
+    moment…" page. Reported as a bare HTTP 403 it read like a bad key.
+    """
+
+    def _resp(self, status, body="", headers=None):
+        resp = MagicMock(status_code=status, text=body)
+        resp.headers = headers or {}
+        return resp
+
+    def test_a_challenge_page_is_named_as_one(self):
+        from app.services.sources.base import SourceUnavailable, raise_if_blocked
+        resp = self._resp(403, "<title>Just a moment...</title>")
+        with pytest.raises(SourceUnavailable, match="bot challenge"):
+            raise_if_blocked(resp, "hiring.cafe")
+
+    def test_a_plain_forbidden_is_still_a_block(self):
+        from app.services.sources.base import SourceUnavailable, raise_if_blocked
+        with pytest.raises(SourceUnavailable, match="HTTP 403"):
+            raise_if_blocked(self._resp(403, '{"message": "invalid key"}'), "JSearch")
+
+    def test_hiringcafe_asks_the_new_domain(self):
+        from app.services.sources import hiringcafe
+        resp = self._resp(200)
+        resp.json.return_value = {"results": []}
+        resp.raise_for_status = MagicMock()
+        with patch("httpx.post", return_value=resp) as post:
+            hiringcafe.fetch("software engineer")
+        assert post.call_args.args[0].startswith("https://hiringcafe.com/")
