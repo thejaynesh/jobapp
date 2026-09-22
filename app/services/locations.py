@@ -26,6 +26,19 @@ _US_STATE_ABBREVS = (
     "WI WY DC"
 ).split()
 
+# State names in full. Two-word names are matched as phrases; the rest on word
+# boundaries (see `_region_keyword_match`).
+_US_STATE_NAMES = (
+    "alabama", "alaska", "arizona", "arkansas", "connecticut", "delaware",
+    "florida", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas",
+    "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+    "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "north dakota", "ohio",
+    "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
+    "south dakota", "tennessee", "utah", "vermont", "west virginia",
+    "wisconsin", "wyoming", "washington state", "washington, dc",
+)
+
 REGIONS: dict[str, dict] = {
     "usa": {
         "label": "United States",
@@ -45,8 +58,14 @@ REGIONS: dict[str, dict] = {
             "washington dc", "california", "texas", "colorado", "georgia",
             "virginia", "north carolina", "silicon valley", "palo alto",
             "mountain view", "san jose", "sunnyvale", "redmond", "bellevue",
+            # Every state by name. Five used to be listed, so "Cambridge,
+            # Massachusetts" had no US evidence but a UK city name, and was
+            # rejected for a US-only profile. "washington" and "georgia" stay
+            # out as bare words — see above for the DC and state entries.
+            *_US_STATE_NAMES,
         ],
         "abbrevs": _US_STATE_ABBREVS,
+        "country_codes": ["US", "USA"],
     },
     "canada": {
         "label": "Canada",
@@ -56,9 +75,14 @@ REGIONS: dict[str, dict] = {
         "keywords": [
             "canada", "toronto", "vancouver", "montreal", "ottawa", "calgary",
             "waterloo", "ontario", "quebec", "british columbia", "alberta",
-            "mississauga", "edmonton",
+            "mississauga", "edmonton", "winnipeg", "halifax", "victoria, bc",
+            "manitoba", "saskatchewan", "nova scotia", "new brunswick",
+            "newfoundland",
         ],
-        "abbrevs": [],
+        # Province codes, so "London, ON" reads as Canada rather than as the
+        # UK city it shares a name with.
+        "abbrevs": ["ON", "QC", "BC", "AB", "MB", "SK", "NS", "NB", "NL", "PE"],
+        "country_codes": ["CA"],
     },
     "uk": {
         "label": "United Kingdom",
@@ -70,6 +94,7 @@ REGIONS: dict[str, dict] = {
             "cambridge", "oxford", "edinburgh", "bristol", "glasgow", "leeds",
         ],
         "abbrevs": ["UK"],
+        "country_codes": ["UK", "GB"],
     },
     "europe": {
         "label": "Europe",
@@ -88,6 +113,7 @@ REGIONS: dict[str, dict] = {
             "greece", "athens", "estonia", "tallinn", "luxembourg",
         ],
         "abbrevs": ["EU", "EMEA"],
+        "country_codes": ["DE", "NL", "FR", "ES", "IT", "PL", "IE", "PT", "SE", "DK", "CH", "AT", "BE", "CZ", "FI", "NO", "RO", "HU", "GR", "EE", "LU", "EU"],
     },
     "india": {
         "label": "India",
@@ -99,6 +125,7 @@ REGIONS: dict[str, dict] = {
             "delhi", "chennai", "gurgaon", "gurugram", "noida", "kolkata",
         ],
         "abbrevs": [],
+        "country_codes": ["IN"],
     },
     "australia": {
         "label": "Australia",
@@ -110,6 +137,7 @@ REGIONS: dict[str, dict] = {
             "canberra", "adelaide",
         ],
         "abbrevs": [],
+        "country_codes": ["AU"],
     },
     "new_zealand": {
         "label": "New Zealand",
@@ -118,6 +146,7 @@ REGIONS: dict[str, dict] = {
         "jobicy_geo": "new-zealand",
         "keywords": ["new zealand", "auckland", "wellington", "christchurch"],
         "abbrevs": ["NZ"],
+        "country_codes": ["NZ"],
     },
 }
 
@@ -289,34 +318,76 @@ def location_allowed(location_text: str, is_remote: bool, prefs: dict) -> bool |
     custom = [c.lower() for c in prefs.get("custom") or []]
     if not regions and not custom:
         return None  # no location restriction configured
-    if is_remote and prefs.get("remote_ok"):
+    has_text = isinstance(location_text, str) and location_text.strip()
+    if is_remote and prefs.get("remote_ok") and not has_text:
         return True
-    if not isinstance(location_text, str) or not location_text.strip():
+    if not has_text:
         return None
     text = location_text.strip()
     text_lower = text.lower()
 
-    if "remote" in text_lower and prefs.get("remote_ok"):
-        return True
     if any(c in text_lower for c in custom):
         return True
 
-    # Place names before 2-letter codes, across every region, and that
-    # ordering is the fix. A code is ambiguous between a US state and a
-    # country — CA, DE, IN, IL, MT, PA all are — so checking the preferred
-    # regions' codes before the other regions' *names* made "Toronto, CA" and
-    # "Berlin, DE" match the United States and pass the gate. Every unwanted
-    # region's name gets a say before any code does.
+    named_pref = [r for r in regions if _region_keyword_match(r, text_lower)]
     others = [r for r in REGIONS if r not in regions]
-    if any(_region_keyword_match(r, text_lower) for r in regions):
+    named_other = [r for r in others if _region_keyword_match(r, text_lower)]
+
+    if (is_remote or "remote" in text_lower) and prefs.get("remote_ok"):
+        # "Remote – India" is remote for somebody in India. Rejected only when
+        # the text names somewhere else and nowhere wanted, and does not say it
+        # is open to everyone; anything less certain still passes.
+        if (named_other and not named_pref
+                and not _WORLDWIDE_RE.search(text_lower)
+                and not any(_region_abbrev_match(r, text) or _country_code_match(r, text)
+                            for r in regions)):
+            return False
         return True
-    if any(_region_keyword_match(r, text_lower) for r in others):
+
+    # A place name beats a code, but city names are not unique: Cambridge,
+    # Vienna, Dublin, Melbourne, Paris and Athens are all also in the United
+    # States. A code the named region cannot account for is the tiebreak —
+    # "Cambridge, MA" names a UK city, but MA is not a UK code, so it is the
+    # Massachusetts one. "Toronto, CA" and "Berlin, DE" stay rejected, because
+    # CA and DE are Canada's and Germany's own codes.
+    #
+    # Only `False` filters, so any doubt resolves to None: a wrongly-rejected
+    # job is never seen, and a wrongly-admitted one costs one scoring call.
+    if named_pref:
+        if _unexplained_code(others, named_pref, text):
+            return None
+        return True
+    if named_other:
+        if _unexplained_code(regions, named_other, text):
+            return True
         return False
     if any(_region_abbrev_match(r, text) for r in regions):
         return True
     if any(_region_abbrev_match(r, text) for r in others):
         return False
     return None
+
+
+_WORLDWIDE_RE = re.compile(r"worldwide|anywhere|global|any location|all locations", re.I)
+
+
+def _country_code_match(region: str, text: str) -> bool:
+    """The region's own ISO code, as a word: "Remote - US", "Berlin, DE"."""
+    return any(re.search(rf"\b{code}\b", text)
+               for code in REGIONS[region].get("country_codes", []))
+
+
+def _unexplained_code(candidates: list[str], named: list[str], text: str) -> bool:
+    """
+    Whether one of `candidates`' codes appears and is not simply the country
+    code of a region the text already names.
+    """
+    explained = {code for r in named for code in REGIONS[r].get("country_codes", [])}
+    for region in candidates:
+        for code in REGIONS[region]["abbrevs"]:
+            if code not in explained and re.search(rf"\b{code}\b", text):
+                return True
+    return False
 
 
 def describe_prefs(prefs: dict) -> str:

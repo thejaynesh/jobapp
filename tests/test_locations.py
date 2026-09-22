@@ -192,3 +192,54 @@ class TestKeywordsAreWordsNotSubstrings:
         assert location_allowed(
             "North America", False, _prefs(regions=["usa"])
         ) is True
+
+
+class TestCitiesThatShareANameAcrossRegions:
+    """
+    Cambridge, Vienna, Dublin, Melbourne, Paris, Athens and Manchester are all
+    in the United States as well as abroad. The foreign name used to win, so a
+    US-only profile silently lost every job in Cambridge MA and Vienna VA — a
+    rejection, which is the one outcome of this gate nobody ever sees.
+    """
+
+    US = ["usa"]
+
+    def test_a_us_state_code_places_a_shared_city_name(self):
+        for loc in ("Cambridge, MA", "Vienna, VA", "Dublin, OH", "Dublin, CA",
+                    "Melbourne, FL", "Athens, GA", "Manchester, NH", "Paris, TX"):
+            assert location_allowed(loc, False, _prefs(regions=self.US)) is True, loc
+
+    def test_a_state_named_in_full_is_us_evidence(self):
+        assert location_allowed(
+            "Cambridge, Massachusetts", False, _prefs(regions=self.US)
+        ) is True
+
+    def test_a_country_code_is_still_its_country(self):
+        for loc in ("Toronto, CA", "Berlin, DE", "Bengaluru, IN"):
+            assert location_allowed(loc, False, _prefs(regions=self.US)) is False, loc
+
+    def test_the_uk_profile_is_not_handed_massachusetts_as_certain(self):
+        assert location_allowed("Cambridge, MA", False, _prefs(regions=["uk"])) is None
+        assert location_allowed("London, UK", False, _prefs(regions=["uk"])) is True
+
+    def test_a_province_code_places_london_in_canada(self):
+        assert location_allowed("London, ON", False, _prefs(regions=["canada"])) is True
+        assert location_allowed("London, ON", False, _prefs(regions=["uk"])) is None
+
+
+class TestRemoteSomewhereElse:
+    def _us(self):
+        return _prefs(regions=["usa"], remote_ok=True)
+
+    def test_remote_in_a_region_not_chosen_is_rejected(self):
+        assert location_allowed("Remote - India", False, self._us()) is False
+        assert location_allowed("Bengaluru, India", True, self._us()) is False
+
+    def test_remote_that_includes_a_chosen_region_passes(self):
+        for loc in ("Remote - US or India", "Remote, USA", "Remote (Worldwide)",
+                    "Remote - Anywhere"):
+            assert location_allowed(loc, False, self._us()) is True, loc
+
+    def test_remote_with_no_place_named_passes(self):
+        assert location_allowed("Remote", False, self._us()) is True
+        assert location_allowed("", True, self._us()) is True
