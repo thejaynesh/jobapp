@@ -241,7 +241,7 @@ def extract_job_insights(
             "content": (
                 f"Job title: {job_title}\n"
                 f"Company: {job_company}\n"
-                f"Description:\n{job_description[:4000]}"
+                f"Description:\n{job_description[:15000]}"
             ),
         },
     ]
@@ -409,7 +409,7 @@ def tailor_resume_selection(
             "role": "user",
             "content": (
                 f"Job title: {job_title}\n"
-                f"Job description (excerpt):\n{job_description[:2000]}\n\n"
+                f"Job description:\n{job_description[:15000]}\n\n"
                 f"Experiences:\n{json.dumps(exp_summary, indent=2)}\n\n"
                 f"Projects:\n{json.dumps(proj_summary, indent=2)}\n\n"
                 f"Skills:\n{json.dumps(skills, indent=2)}"
@@ -794,7 +794,7 @@ def generate_cover_letter_body(
         f"Job: {job_title} at {job_company}\n"
         + (f"Top job requirements: {'; '.join(requirements)}\n" if requirements else "")
         + (f"Company signals from the JD: {'; '.join(company_signals)}\n" if company_signals else "")
-        + f"Job description (excerpt):\n{job_description[:2500]}\n"
+        + f"Job description:\n{job_description[:15000]}\n"
         + (f"\nUser feedback on the previous version (must address): {feedback}\n" if feedback else "")
     )
 
@@ -911,7 +911,7 @@ def tailor_resume_bullets(
         {
             "role": "user",
             "content": (
-                f"Job title: {job_title}\nDescription:\n{job_description[:2500]}\n\n"
+                f"Job title: {job_title}\nDescription:\n{job_description[:15000]}\n\n"
                 + (f"Job keywords (use exact spelling where truthful): {', '.join(keywords)}\n\n" if keywords else "")
                 + f"Experience entries:\n{json.dumps(exp_json, indent=2)}"
                 + (f"\n\nUser feedback on the previous version (must address): {feedback}" if feedback else "")

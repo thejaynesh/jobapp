@@ -95,10 +95,11 @@ def find_job(db, url: str) -> Job | None:
 
 
 def _score(job: Job) -> int | None:
-    if job.llm_score is not None:
-        return int(job.llm_score)
+    effective = job.effective_score
+    if effective is not None:
+        return int(effective)
     if job.keyword_score is not None:
-        return int(job.keyword_score)
+        return round(job.keyword_score * 100)
     return None
 
 

@@ -132,7 +132,7 @@ def id_token(db, site: str) -> str | None:
         except Exception:
             detail = response.text[:200]
         _note_failure(db, row, f"HTTP {response.status_code}: {detail}"
-                               or f"HTTP {response.status_code}")
+                               if detail else f"HTTP {response.status_code}")
         logger.warning("linked_auth: %s refused the refresh token (%s): %s",
                        site, response.status_code, detail)
         return None

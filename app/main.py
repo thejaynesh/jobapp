@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import fcntl
 import logging
 import subprocess
 import traceback
@@ -102,13 +103,13 @@ async def lifespan(app: FastAPI):
     global _migration_failure
     _migration_failure = None
     try:
-        result = subprocess.run(
-            ["alembic", "upgrade", "head"],
-            capture_output=True, text=True, timeout=60,
-        )
+        with open("/tmp/jobapp_migrate.lock", "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            result = subprocess.run(
+                ["alembic", "upgrade", "head"],
+                capture_output=True, text=True, timeout=60,
+            )
         if result.returncode != 0:
-            # The tail rather than the head: alembic puts the actual cause last,
-            # under the banner lines that are the same for every failure.
             detail = (result.stderr or result.stdout or "").strip()[-800:]
             _migration_failure = detail or "alembic exited non-zero with no output."
             logger.error(

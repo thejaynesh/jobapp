@@ -161,7 +161,7 @@ class Job(Base):
     # alternative is fifty queries per page; it is a handful of narrow rows per
     # job, capped (see `services.score_history`).
     scores: Mapped[list["JobScore"]] = relationship(  # noqa: F821
-        "JobScore", cascade="all, delete-orphan", lazy="selectin",
+        "JobScore", cascade="all, delete-orphan", lazy="select",
         order_by="desc(JobScore.created_at)", passive_deletes=True,
     )
 

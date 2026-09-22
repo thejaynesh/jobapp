@@ -63,7 +63,7 @@ class Contact(Base):
     # The application the contact was discovered for. Nullable so a contact can
     # outlive the application, and so contacts can be added company-wide.
     application_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"), nullable=True
     )
 
     company: Mapped[str] = mapped_column(String, nullable=False)

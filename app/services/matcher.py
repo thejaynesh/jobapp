@@ -110,12 +110,13 @@ def _blocked_by_seniority(job, profile_data: dict) -> bool:
         return False
 
     total_years = _total_years(profile_data.get("experience", []))
-    if total_years >= tunable(profile_data, "junior_max_years"):
-        return False
 
     required = getattr(job, "required_years", None)
     if isinstance(required, (int, float)) and not isinstance(required, bool):
         return float(required) > total_years + SENIORITY_YEARS_TOLERANCE
+
+    if total_years >= tunable(profile_data, "junior_max_years"):
+        return False
 
     role_words = {
         w for role in profile_data.get("target_roles", [])
@@ -296,6 +297,7 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
 
     if _blocked_by_seniority(job, profile_data):
         from app.services.experience import total_years as _total_years
+        from app.services.tunables import value as tunable
 
         required = getattr(job, "required_years", None)
         if isinstance(required, (int, float)) and not isinstance(required, bool):
@@ -312,7 +314,7 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
                  if re.search(rf"\b{w}\b", (job.title or "").lower())),
                 "senior",
             )
-            max_years = getattr(settings, "JUNIOR_MAX_YEARS", 3.0)
+            max_years = tunable(profile_data, "junior_max_years")
             detail = (
                 f"Title contains {hit!r} and the posting states no required "
                 f"years, which is filtered while your profile shows under "
@@ -1049,6 +1051,7 @@ def _match_job(
         foreign = _blocked_by_language(job, profile_data)
         if foreign:
             job.status = JobStatus.filtered_out
+            job.keyword_score = None
             job.llm_score = None
             job.llm_score_deep = None
             job.deep_matched_by = None
@@ -1123,7 +1126,8 @@ def _match_job(
 
     job.status = JobStatus.filtered_out
     job.filter_reason = "low_score"
-    penalty = " (after a 15-point seniority penalty)" if not llm_result.get(
+    final_result = deep_result if deep_result is not None else llm_result
+    penalty = " (after a 15-point seniority penalty)" if not final_result.get(
         "seniority_fit", True) else ""
     job.filter_detail = (
         f"AI scored this {score}/100{penalty}, below your minimum of {min_score}."

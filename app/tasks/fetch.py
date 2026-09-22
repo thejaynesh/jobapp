@@ -36,7 +36,7 @@ GROUP_LOCK_KEYS = {group: f"jobapp:fetch:{group}" for group in ALL_GROUPS}
 
 def _run(group: str | None, only: list[str] | None, match_after: bool) -> dict:
     """One cycle, under whichever locks this run needs."""
-    keys = [LOCK_KEY] if group in (None, "all") else [GROUP_LOCK_KEYS[group], LOCK_KEY]
+    keys = list(GROUP_LOCK_KEYS.values()) if group in (None, "all") else [GROUP_LOCK_KEYS[group]]
 
     held: list[str] = []
     for key in keys:

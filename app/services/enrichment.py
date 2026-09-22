@@ -43,6 +43,8 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import settings
+from sqlalchemy.orm import selectinload
+
 from app.models.job import Job, JobStatus
 from app.services.descriptions import clean
 from app.services.link_resolver import _HEADERS, _HostLimiter
@@ -816,6 +818,7 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
     # Unordered, every pass makes progress, and the whole set is a day's work.
     rows = (
         db.query(Job)
+        .options(selectinload(Job.scores))
         .filter(
             Job.status == JobStatus.filtered_out,
             Job.filter_reason.in_(sorted(DESCRIPTION_DEPENDENT_REASONS)),
@@ -840,6 +843,10 @@ def requeue_settled_verdicts(db, limit: int = 1000) -> int:
         # application out of this: those documents were written against the
         # verdict that stands.
         if not _worth_rescoring(job):
+            continue
+        desc_len = len(job.description or "")
+        latest = job.scores[0] if job.scores else None
+        if latest and latest.description_chars >= desc_len:
             continue
         job.status = JobStatus.new
         job.filter_reason = None

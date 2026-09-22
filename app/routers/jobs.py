@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.database import get_db
@@ -171,7 +171,7 @@ def get_jobs(
     page: int = 0,
     db: Session = Depends(get_db),
 ):
-    query = db.query(Job).filter(Job.status.in_(_FILTERABLE_STATUSES))
+    query = db.query(Job).options(selectinload(Job.scores)).filter(Job.status.in_(_FILTERABLE_STATUSES))
 
     # Checked before anything else so the shortlist is the shortlist: a starred
     # job that the matcher filtered out must still appear here, and a status or

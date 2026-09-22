@@ -10,8 +10,8 @@ from app.database import Base
 from app.config import settings
 import app.models  # noqa: F401 — registers all models with Base.metadata before create_all
 
-_BASE_DB_URL = settings.TEST_DATABASE_URL or settings.DATABASE_URL.replace(
-    "/jobapp", "/jobapp_test"
+_BASE_DB_URL = settings.TEST_DATABASE_URL or str(
+    make_url(settings.DATABASE_URL).set(database="jobapp_test")
 )
 
 # One database per xdist worker.

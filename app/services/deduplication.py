@@ -120,7 +120,7 @@ def find_existing_job(
     dedupe_hash: str,
 ) -> Job | None:
     # Layer 1: URL already in source_urls array
-    job = db.query(Job).filter(Job.source_urls.any(url)).first()
+    job = db.query(Job).filter(Job.source_urls.contains([url])).first()
     if job:
         return job
 
@@ -161,7 +161,7 @@ def was_archived(
     """
     from app.models.archived_job import ArchivedJob
 
-    query = db.query(ArchivedJob.id).filter(ArchivedJob.source_urls.any(url))
+    query = db.query(ArchivedJob.id).filter(ArchivedJob.source_urls.contains([url]))
     if query.first():
         return True
 

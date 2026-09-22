@@ -230,9 +230,8 @@ def jobicy_geos(prefs: dict) -> list[str | None]:
 
 def _region_matches(region: str, text: str, text_lower: str) -> bool:
     cfg = REGIONS[region]
-    if any(kw in text_lower for kw in cfg["keywords"]):
+    if any(re.search(rf"\b{re.escape(kw)}\b", text_lower) for kw in cfg["keywords"]):
         return True
-    # 2-letter codes: case-sensitive word-boundary match ("Austin, TX")
     return any(re.search(rf"\b{ab}\b", text) for ab in cfg["abbrevs"])
 
 

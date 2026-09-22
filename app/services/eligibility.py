@@ -77,7 +77,9 @@ _RESTRICTION_PATTERNS = [
      "Security clearance required"),
     (re.compile(r"\bu\.?s\.?\s+person(?:s)?\b", re.I),
      "ITAR / US Person requirement"),
-    (re.compile(r"export[\s-]control(?:led|s)?\b", re.I),
+    (re.compile(r"(?:due\s+to|under|per)\s+export[\s-]control.*?(?:must|require|only|restrict|citizen|clearance|u\.?s\.?\s+person)", re.I),
+     "Export-control restriction"),
+    (re.compile(r"(?:must|require[ds]?|only|restrict\w*)\s+.*?export[\s-]control", re.I),
      "Export-control restriction"),
 ]
 
@@ -89,6 +91,12 @@ _RESTRICTION_PATTERNS_CASED = [
 # --- Tier 2: advisory. The posting says something about sponsorship. --------
 
 _SPONSORSHIP_TRIGGER = re.compile(r"sponsor(?:s|ed|ing|ship)?\b", re.I)
+_IMMIGRATION_CONTEXT = re.compile(
+    r"\b(?:visa|h-?1b|green\s+card|immigration|work\s+(?:permit|authorization)"
+    r"|permanent\s+residen|employment\s+(?:authorization|eligibility)"
+    r"|sponsorship)\b",
+    re.I,
+)
 
 # A sponsorship sentence is negative if it is negated, positive otherwise.
 # Reading the negation rather than enumerating every phrasing is what lets
@@ -256,6 +264,8 @@ def _find_sponsorship(sentences: list[str]) -> tuple[str | None, str | None]:
     positive: tuple[str, str] | None = None
     for sentence in sentences:
         if _is_boilerplate(sentence) or not _SPONSORSHIP_TRIGGER.search(sentence):
+            continue
+        if not _IMMIGRATION_CONTEXT.search(sentence):
             continue
         direction = _classify_sponsorship(sentence)
         if direction == "negative":
