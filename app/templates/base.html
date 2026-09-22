@@ -137,8 +137,11 @@
           '<svg class="w-5 h-5 shrink-0 mt-0.5 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">' +
             (icons[level] || icons.error) +
           '</svg>' +
-          '<span class="flex-1 break-words">' + msg + '</span>' +
+          '<span class="flex-1 break-words"></span>' +
           '<button onclick="dismissToast(\'' + id + '\')" class="shrink-0 opacity-70 hover:opacity-100 font-bold leading-none text-lg">&times;</button>';
+        // As text, never as markup: the message is an error `detail`, and
+        // details quote job titles, company names and URLs from the postings.
+        el.querySelector("span").textContent = msg;
         stack.appendChild(el);
         if (stack.children.length > 5) {
           stack.removeChild(stack.firstChild);

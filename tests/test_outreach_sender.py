@@ -139,6 +139,40 @@ class TestSendMessage:
         with pytest.raises(SendError, match="already been sent"):
             send_message(db, message)
 
+    def test_an_interrupted_send_is_not_repeated_silently(self, db, smtp_on):
+        """
+        A Message-ID with no outcome is an attempt that got as far as delivery
+        and was cut off. With late acks the task comes back; sending again
+        would mail the same person twice.
+        """
+        _, _, message = _fixtures(db)
+        message.message_id = "<earlier@jobapp>"
+        with patch("app.services.outreach_sender._deliver") as deliver:
+            with pytest.raises(SendError, match="may already have gone"):
+                send_message(db, message)
+        deliver.assert_not_called()
+        assert message.status != "sent"
+
+    def test_a_deliberate_second_press_sends_it(self, db, smtp_on):
+        _, _, message = _fixtures(db)
+        message.message_id = "<earlier@jobapp>"
+        with patch("app.services.outreach_sender._deliver") as deliver:
+            with pytest.raises(SendError):
+                send_message(db, message)
+            send_message(db, message)
+        deliver.assert_called_once()
+        assert message.status == "sent"
+
+    def test_a_failed_delivery_can_be_retried_straight_away(self, db, smtp_on):
+        _, _, message = _fixtures(db)
+        with patch("app.services.outreach_sender._deliver",
+                   side_effect=[SendError("mailbox full"), None]) as deliver:
+            with pytest.raises(SendError, match="mailbox full"):
+                send_message(db, message)
+            send_message(db, message)
+        assert deliver.call_count == 2
+        assert message.status == "sent"
+
     def test_respects_the_daily_cap(self, db, smtp_on):
         _, contact, message = _fixtures(db)
         db.add(OutreachMessage(contact_id=contact.id, channel="email", body="x",

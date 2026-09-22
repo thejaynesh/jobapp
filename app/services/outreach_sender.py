@@ -167,6 +167,19 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
         )
     if message.status in ("sent", "replied"):
         raise SendError("That message has already been sent.")
+    # A Message-ID with no recorded outcome means an earlier attempt got as far
+    # as delivering and was then cut off — a worker restart between the SMTP
+    # handoff and `mark_sent`. With late acks that task comes back, and sending
+    # again would mail the same person twice. Refuse once, and say why; the
+    # refusal is recorded as the outcome, so a deliberate second press goes.
+    if message.message_id and not message.send_error:
+        message.send_error = (
+            "An earlier attempt to send this was interrupted after delivery had "
+            "started, so it may already have gone. Check your Sent folder — mark "
+            "it sent if it is there, or press send again to send it."
+        )
+        db.commit()
+        raise SendError(message.send_error)
 
     contact = message.contact
     if not contact or not contact.email:
@@ -195,6 +208,7 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
     # never recognize. A stored id for a message that never left is harmless —
     # nothing will ever quote it.
     message.message_id = mail["Message-ID"]
+    message.send_error = None
     db.commit()
     try:
         _deliver(mail)

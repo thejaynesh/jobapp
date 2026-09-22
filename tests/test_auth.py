@@ -304,6 +304,14 @@ class TestTheProxyCanAskWhetherThereIsASession:
     `forward_auth` in the Caddyfile asks here first.
     """
 
+    @pytest.fixture(autouse=True)
+    def _configured(self, monkeypatch):
+        # Configured here rather than inherited from `.env`: without a password
+        # and a real signing key the app serves 503 to everything, so these
+        # passed only on a machine whose .env happened to set both.
+        monkeypatch.setattr(settings, "APP_PASSWORD", PASSWORD)
+        monkeypatch.setattr(settings, "SECRET_KEY", SIGNING_KEY)
+
     def test_a_valid_session_is_allowed(self, client, monkeypatch):
         monkeypatch.setattr(settings, "AUTH_ENABLED", True)
         client.cookies.set(auth.SESSION_COOKIE, auth.issue_session())
