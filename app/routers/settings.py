@@ -89,6 +89,9 @@ def _integrations_status() -> dict:
             {"label": "Arbeitnow", "ok": True, "builtin": True},
             {"label": "Indeed RSS", "ok": cfg.INDEED_RSS_ENABLED, "builtin": True},
             {"label": "Wellfound", "ok": cfg.WELLFOUND_ENABLED, "builtin": True},
+            {"label": "Working Nomads", "ok": True, "builtin": True},
+            {"label": "Built In", "ok": getattr(cfg, "BUILTIN_ENABLED", True), "builtin": True},
+            {"label": "Jobspresso", "ok": True, "builtin": True},
         ],
         "outreach": [
             {"label": "Hunter.io", "ok": _has(cfg.HUNTER_IO_API_KEY)},

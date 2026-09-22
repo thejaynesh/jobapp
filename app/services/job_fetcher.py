@@ -64,7 +64,7 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "adzuna", "jsearch", "jooble", "careerjet", "findwork", "usajobs",
         "hiringcafe", "ycombinator", "linkedin", "indeed", "remotive",
         "arbeitnow", "remoteok", "weworkremotely", "themuse", "himalayas",
-        "jobicy", "hnhiring",
+        "jobicy", "hnhiring", "workingnomads", "builtin", "jobspresso",
     }),
     # The company board registry: hundreds of slugs, one request each.
     "boards": frozenset({
@@ -519,6 +519,24 @@ def _run_all_adapters(
             all_jobs.extend(jobs)
         except Exception as exc:
             _record(stats, "hnhiring", [], str(exc))
+
+    # --- Working Nomads: free public API for remote jobs ---
+    from app.services.sources.workingnomads import fetch as wn_fetch
+    _run_combos(stats, all_jobs, "workingnomads",
+                lambda role: wn_fetch(query=role), [(r,) for r in roles], _skip)
+
+    # --- Built In: tech-focused job board with city hubs ---
+    if getattr(cfg, "BUILTIN_ENABLED", True) and not _skip("builtin"):
+        from app.services.sources.builtin import fetch as builtin_fetch
+        _run_combos(stats, all_jobs, "builtin",
+                    lambda role: builtin_fetch(query=role), [(r,) for r in roles], _skip)
+    else:
+        _disable("builtin")
+
+    # --- Jobspresso: curated remote jobs RSS feed ---
+    from app.services.sources.jobspresso import fetch as jobspresso_fetch
+    _run_combos(stats, all_jobs, "jobspresso",
+                lambda role: jobspresso_fetch(query=role), [(r,) for r in roles], _skip)
 
     # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
     # Launching a browser is the most expensive thing here, so don't do it at
