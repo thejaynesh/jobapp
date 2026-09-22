@@ -25,6 +25,17 @@ on:
   push:
     branches: [main]
 
+# One deploy at a time, and never cancel one that has started.
+#
+# There is a single VPS behind this, so two runs mean two `docker compose
+# build` and two `up -d` against the same daemon, interleaving a container
+# swap with somebody else's build. `cancel-in-progress: false` queues the
+# newer run instead: cancelling is worse than waiting when the thing being
+# cancelled might be half way through `alembic upgrade head`.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -39,7 +50,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
           # See the header: the action's 10-minute default killed the build.
-          command_timeout: 30m
+          command_timeout: 60m
           script: |
             set -e
             cd /opt/jobapp
@@ -80,7 +91,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
           # See the header: the action's 10-minute default killed the build.
-          command_timeout: 30m
+          command_timeout: 60m
           script: |
             set -e
             cd /opt/jobapp
@@ -111,7 +122,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
           # See the header: the action's 10-minute default killed the build.
-          command_timeout: 30m
+          command_timeout: 60m
           script: |
             set -e
             cd /opt/jobapp
