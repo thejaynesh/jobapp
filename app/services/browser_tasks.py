@@ -140,6 +140,41 @@ def reap(db) -> tuple[int, int]:
     return recovered, expired
 
 
+# How many candidates to consider per task handed out. Rows read but not chosen
+# are locked only until this transaction commits a moment later.
+_LEASE_WINDOW = 4
+
+
+def _site_of(task: BrowserTask) -> str:
+    from urllib.parse import urlparse
+
+    url = str((task.payload or {}).get("url") or "")
+    host = (urlparse(url).hostname or "").lower()
+    return ".".join(host.split(".")[-2:]) or "_"
+
+
+def _interleave_sites(candidates: list[BrowserTask], limit: int) -> list[BrowserTask]:
+    """
+    Up to `limit` tasks, taken round-robin across sites.
+
+    Candidates arrive in priority order, and that order is kept within each
+    site; the rounds decide which site's next task comes next. The top task
+    overall is always in the batch, and a requested crawl on one board still
+    goes ahead of that board's sweep — it just no longer holds every other
+    board's pages behind it.
+    """
+    by_site: dict[str, list[BrowserTask]] = {}
+    for task in candidates:
+        by_site.setdefault(_site_of(task), []).append(task)
+    lanes = list(by_site.values())
+    chosen: list[BrowserTask] = []
+    while len(chosen) < limit and any(lanes):
+        for lane in lanes:
+            if lane and len(chosen) < limit:
+                chosen.append(lane.pop(0))
+    return chosen
+
+
 def lease(
     db,
     kinds: list[str] | None = None,
@@ -160,11 +195,14 @@ def lease(
     limit = max(1, min(int(limit), int(getattr(settings, "AGENT_MAX_LEASE_BATCH", 10))))
     now = _now()
 
+    # A wider window than we will hand out, so the batch can mix sites: the
+    # extension works one page per site at a time, and a batch of ten pages all
+    # on one board would leave its other lanes idle behind them.
     stmt = (
         select(BrowserTask)
         .where(BrowserTask.status == "queued", BrowserTask.expires_at > now)
         .order_by(BrowserTask.priority.desc(), BrowserTask.created_at.asc())
-        .limit(limit)
+        .limit(limit * _LEASE_WINDOW)
         # The claim is atomic because of these two: FOR UPDATE takes the rows,
         # SKIP LOCKED means a second agent asking at the same moment walks past
         # them to the next available work instead of waiting or duplicating.
@@ -176,7 +214,7 @@ def lease(
             raise TaskError(f"Unknown task kind(s): {', '.join(sorted(unknown))}")
         stmt = stmt.where(BrowserTask.kind.in_(kinds))
 
-    tasks = list(db.execute(stmt).scalars().all())
+    tasks = _interleave_sites(list(db.execute(stmt).scalars().all()), limit)
     for task in tasks:
         task.status = "leased"
         task.agent_id = agent_id or None

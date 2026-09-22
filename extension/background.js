@@ -137,14 +137,72 @@ const TAB_SETTLE_MS = 1800;
 // only ever paid once per host per session.
 const CHALLENGE_WAIT_MS = 90000;
 
-// One at a time. Escalating a backlog of link resolutions in parallel would
-// open a dozen windows at once, which is not a thing to do to someone's screen.
-let tabQueue = Promise.resolve();
+// One window per site at a time, and a small number of sites at once.
+//
+// It used to be one window, full stop, which made a crawl across five boards
+// take five times as long as it needed to. The single-file rule was protecting
+// two things and only one of them needed it: a site's own rhythm — two pages of
+// LinkedIn at once is what a script does, and per-site pacing is exactly what
+// anti-automation systems measure — and the user's screen, which should not
+// sprout a dozen windows. So each site keeps its own queue, and a shared cap
+// (`parallelSites`, set by the server) bounds how many run side by side. LinkedIn
+// next to Indeed is what a person with two tabs looks like.
+const siteQueues = new Map();
+let parallelSites = 1;
+let running = 0;
+const waitingForSlot = [];
 
-function withTabLock(fn) {
-  const run = tabQueue.then(fn, fn);
+function setParallelSites(n) {
+  const value = Math.max(1, Math.min(4, Number(n) || 1));
+  parallelSites = value;
+  // Raising the cap should free waiters now, not at the next release.
+  while (running < parallelSites && waitingForSlot.length) {
+    running += 1;
+    waitingForSlot.shift()();
+  }
+}
+
+function acquireSlot() {
+  if (running < parallelSites) {
+    running += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waitingForSlot.push(resolve));
+}
+
+function releaseSlot() {
+  const next = waitingForSlot.shift();
+  if (next) {
+    next(); // hand the slot straight over
+  } else {
+    running = Math.max(0, running - 1);
+  }
+}
+
+function siteKey(url) {
+  const host = hostOf(url) || "";
+  // The registrable part, so www.indeed.com and indeed.com share a queue.
+  return host.split(".").slice(-2).join(".") || "_";
+}
+
+function withTabLock(fn, url) {
+  const key = siteKey(url);
+  const previous = siteQueues.get(key) || Promise.resolve();
+  const guarded = async () => {
+    await acquireSlot();
+    try {
+      return await fn();
+    } finally {
+      releaseSlot();
+    }
+  };
+  const run = previous.then(guarded, guarded);
   // Keep the chain alive whichever way this settles.
-  tabQueue = run.then(() => {}, () => {});
+  const tail = run.then(() => {}, () => {});
+  siteQueues.set(key, tail);
+  tail.then(() => {
+    if (siteQueues.get(key) === tail) siteQueues.delete(key);
+  });
   return run;
 }
 
@@ -785,7 +843,7 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
     }
-  });
+  }, url);
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,7 +1082,7 @@ async function openInTab(url) {
     } finally {
       await chrome.windows.remove(win.id).catch(() => {});
     }
-  });
+  }, url);
 }
 
 /** Whether a failed fetch is worth reopening as a real page. */
@@ -1556,7 +1614,8 @@ async function pollOnce() {
     const lease = await api("/api/agent/lease", {
       kinds,
       agent_id: id,
-      max: 5,
+      // Enough for every lane to have a couple of pages queued.
+      max: Math.max(5, parallelSites * 3),
       wait: 25,
       harvest_sites: reading,
     });
@@ -1577,15 +1636,28 @@ async function pollOnce() {
     const pending = new Set(tasks.map((task) => task.id));
     const stopHeartbeat = keepLeasesAlive(pending, id, lease.lease_seconds);
 
-    try {
-      for (const task of tasks) {
+    // How many sites may run side by side, from the server's setting.
+    if (lease.parallel_sites) setParallelSites(lease.parallel_sites);
+
+    // One lane per site: a site's pages stay in order, one after another, with
+    // its own pause between them; different sites run concurrently, up to the
+    // cap `withTabLock` enforces. A batch of five LinkedIn pages behaves exactly
+    // as before; LinkedIn, Indeed and ZipRecruiter no longer wait on each other.
+    const lanes = new Map();
+    for (const task of tasks) {
+      const key = siteKey((task.payload && task.payload.url) || "");
+      if (!lanes.has(key)) lanes.set(key, []);
+      lanes.get(key).push(task);
+    }
+
+    const work = async (task) => {
         let result;
         try {
           result = await runTask(task);
         } catch (error) {
           pending.delete(task.id);
           await reportFailure(task, error, id);
-          continue;
+          return;
         }
 
         // Reported separately from the work, because the two fail for
@@ -1604,7 +1676,14 @@ async function pollOnce() {
         } catch (error) {
           console.warn("jobapp: could not report a finished task", task.id, error);
         }
-      }
+    };
+
+    try {
+      await Promise.all(
+        Array.from(lanes.values()).map(async (lane) => {
+          for (const task of lane) await work(task);
+        }),
+      );
     } finally {
       stopHeartbeat();
     }

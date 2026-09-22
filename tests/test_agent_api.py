@@ -6,6 +6,8 @@ actually closed to unauthenticated callers, and that the long poll returns
 rather than hanging when the queue is empty.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from app.config import settings
@@ -115,6 +117,19 @@ class TestLease:
             "/api/agent/lease", json={"kinds": ["nope"]}, headers=auth_header()
         )
         assert response.status_code == 400
+
+    def test_the_lease_says_how_many_sites_at_once(self, agent, db):
+        """The settings-page value, so it can be changed without an extension release."""
+        from app.models.profile import Profile
+        from app.services import tunables
+
+        db.add(Profile(data={tunables.STORE_KEY: {"browse_parallel_sites": 3}}))
+        db.commit()
+        with patch("app.database.SessionLocal", return_value=db), \
+                patch.object(db, "close"):
+            body = agent.post("/api/agent/lease", json={"wait": 0},
+                              headers=auth_header()).json()
+        assert body["parallel_sites"] == 3
 
     def test_a_missing_body_is_tolerated(self, agent):
         assert agent.post("/api/agent/lease", headers=auth_header()).status_code == 200

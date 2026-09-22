@@ -164,10 +164,22 @@ async def lease(request: Request, db: Session = Depends(get_db)):
             logger.info(
                 "agent: leased %d task(s) to %s", len(tasks), agent_id or "anonymous"
             )
-            return {"tasks": tasks, "lease_seconds": browser_tasks._lease_seconds()}
+            return {"tasks": tasks, "lease_seconds": browser_tasks._lease_seconds(),
+                    "parallel_sites": _parallel_sites()}
         if time.monotonic() >= deadline:
-            return {"tasks": [], "lease_seconds": browser_tasks._lease_seconds()}
+            return {"tasks": [], "lease_seconds": browser_tasks._lease_seconds(),
+                    "parallel_sites": _parallel_sites()}
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+
+def _parallel_sites() -> int:
+    """How many sites the extension may work on at once (settings page)."""
+    from app.services.tunables import current
+
+    try:
+        return int(current("browse_parallel_sites"))
+    except Exception:
+        return 1
 
 
 def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",

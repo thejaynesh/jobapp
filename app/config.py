@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # what gets an account flagged. Opening sixty pages a run through a
     # logged-in session is.
     BROWSE_PAUSED_HOSTS: str = ""
+    # How many sites the extension may have a page open on at once. Each site
+    # still gets one page at a time with its own pause between them — that is
+    # what per-site anti-automation measures — so this is breadth, not speed on
+    # any one board. 1 is the old one-window-at-a-time behaviour.
+    BROWSE_PARALLEL_SITES: int = 2
     # Postings a paused host may still be asked for in a day, for enrichment
     # only. A pause bans crawling outright — that is the volume a site
     # notices — but fetching the description of a job the user might apply to

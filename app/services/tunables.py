@@ -173,6 +173,16 @@ TUNABLES: list[Tunable] = [
              "role and location you search — so 2 doubles the spend.",
     ),
     Tunable(
+        key="browse_parallel_sites", env="BROWSE_PARALLEL_SITES", kind="int",
+        minimum=1, maximum=4, group="Browser agent",
+        label="Sites at once",
+        help="How many different sites the extension works on side by side. "
+             "Each site still gets one page at a time with its usual pause, so "
+             "raising this crawls more boards per hour without visiting any one "
+             "board faster. 1 is one window at a time; each extra site is one "
+             "more minimized window.",
+    ),
+    Tunable(
         key="browse_paused_hosts", env="BROWSE_PAUSED_HOSTS", kind="text",
         group="Browser agent", label="Paused sites",
         help="Sites the browser extension must not open pages on, comma-"

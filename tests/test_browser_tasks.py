@@ -351,3 +351,42 @@ class TestSerialization:
         # The agent has no use for these and no business seeing which other
         # engine last held the task.
         assert not {"agent_id", "error", "result"} & set(task.as_dict())
+
+
+class TestABatchMixesSites:
+    """
+    The extension now works one page per site at a time, several sites at
+    once. A batch of pages all on one board would leave its other lanes idle,
+    so a lease is taken round-robin across sites — keeping each site's order.
+    """
+
+    def _page(self, db, url, priority=0):
+        # Distinct timestamps, as separate transactions would give them in
+        # production (see the FIFO test above for why the fixture does not).
+        task = browser_tasks.enqueue(db, "browse_page", {"url": url}, priority=priority)
+        self._n = getattr(self, "_n", 0) + 1
+        task.created_at = _now() - timedelta(seconds=100 - self._n)
+        db.commit()
+        return task
+
+    def test_a_batch_alternates_between_sites(self, db):
+        for n in range(4):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}")
+        self._page(db, "https://www.indeed.com/jobs?q=a")
+        self._page(db, "https://www.ziprecruiter.com/jobs-search?search=a")
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=3)
+        hosts = [t.payload["url"].split("/")[2] for t in batch]
+        assert sorted(hosts) == ["www.indeed.com", "www.linkedin.com", "www.ziprecruiter.com"]
+
+    def test_each_sites_own_order_is_kept(self, db):
+        for n in range(3):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}")
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=3)
+        assert [t.payload["url"][-1] for t in batch] == ["0", "1", "2"]
+
+    def test_the_most_urgent_task_is_always_in_the_batch(self, db):
+        for n in range(5):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}")
+        urgent = self._page(db, "https://www.indeed.com/jobs?q=now", priority=10)
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=1)
+        assert [t.id for t in batch] == [urgent.id]
