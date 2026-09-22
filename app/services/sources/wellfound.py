@@ -48,11 +48,11 @@ def role_slug(query: str) -> str:
     return slug or "software-engineer"
 
 
-def configured_roles() -> list[str]:
+def configured_roles(cfg=None) -> list[str]:
     """Role slugs to scrape, from settings, falling back to the defaults."""
     from app.config import settings
 
-    raw = getattr(settings, "WELLFOUND_ROLES", "") or ""
+    raw = getattr(cfg if cfg is not None else settings, "WELLFOUND_ROLES", "") or ""
     slugs = [role_slug(s) for s in raw.split(",") if s.strip()]
     return slugs or list(DEFAULT_ROLES)
 
@@ -135,9 +135,10 @@ def _to_jobs(rows: list[dict], fallback_location: str) -> list[dict]:
             continue
         loc = (row.get("location") or "").strip() or fallback_location
         desc = (row.get("description") or "").strip()
-        jobs.append({
+        listing = re.search(r"/jobs/(\d+)", url)
+        job = {
             "source": "wellfound",
-            "source_job_id": None,
+            "source_job_id": row.get("id") or (listing.group(1) if listing else None),
             "title": title,
             "company": (row.get("company") or "").strip(),
             "location": loc,
@@ -145,7 +146,12 @@ def _to_jobs(rows: list[dict], fallback_location: str) -> list[dict]:
             "url": url,
             "description": desc,
             "experience_level": parse_experience_level(title, desc),
-        })
+        }
+        for key in ("posted_at", "employment_type", "salary_min", "salary_max",
+                    "salary_currency", "salary_period"):
+            if row.get(key) is not None:
+                job[key] = row[key]
+        jobs.append(job)
     return jobs
 
 
@@ -226,9 +232,103 @@ _HTTP_HEADERS = {
 }
 
 
+_NEXT_DATA_RE = re.compile(
+    r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S,
+)
+_PAY_RE = re.compile(
+    r"\$\s*([\d.,]+)\s*(k)?\s*(?:[-–]\s*\$?\s*([\d.,]+)\s*(k)?)?", re.I,
+)
+
+
+def _pay(text: str | None) -> dict:
+    """"$120k – $200k • 0.01% – 0.15%" as a salary band (equity ignored)."""
+    match = _PAY_RE.search(text or "")
+    if not match:
+        return {}
+
+    def amount(digits, k):
+        try:
+            value = float(digits.replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return value * 1000 if k else value
+
+    low = amount(match.group(1), match.group(2))
+    high = amount(match.group(3), match.group(4)) if match.group(3) else low
+    if not low or low < 1000:
+        return {}
+    return {"salary_min": low, "salary_max": max(low, high or low),
+            "salary_currency": "USD", "salary_period": "year"}
+
+
+def _rows_from_apollo(html: str) -> list[dict]:
+    """
+    Listings from the page's embedded Apollo cache.
+
+    The role page ships its GraphQL results in `__NEXT_DATA__`: every listing
+    with its full description, locations, remote flag, pay and go-live time,
+    and every company with the listings that belong to it. The anchor scrape
+    below read only the link text — so every Wellfound job arrived with no
+    employer, no location and no description, and was scored on a title.
+    """
+    match = _NEXT_DATA_RE.search(html or "")
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group(1))
+        state = data["props"]["pageProps"]["apolloState"]["data"]
+    except (ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(state, dict):
+        return []
+
+    # Which company each listing belongs to, from the company's side: a
+    # listing does not name its startup, the startup lists its listings.
+    owner: dict[str, dict] = {}
+    for node in state.values():
+        if not isinstance(node, dict) or node.get("__typename") != "StartupResult":
+            continue
+        for key, value in node.items():
+            if not isinstance(value, list) or "istings" not in key:
+                continue
+            for ref in value:
+                if isinstance(ref, dict) and isinstance(ref.get("__ref"), str):
+                    owner[ref["__ref"]] = node
+
+    rows = []
+    for key, node in state.items():
+        if not isinstance(node, dict) or node.get("__typename") != "JobListingSearchResult":
+            continue
+        listing_id = str(node.get("id") or "").strip()
+        title = (node.get("title") or "").strip()
+        if not listing_id or not title:
+            continue
+        slug = (node.get("slug") or "").strip()
+        startup = owner.get(key) or {}
+        places = [p for p in (node.get("locationNames") or []) if isinstance(p, str)]
+        remote = bool(node.get("remote"))
+        if remote:
+            places = places or [p for p in (node.get("acceptedRemoteLocationNames") or [])
+                                if isinstance(p, str)]
+        live = node.get("liveStartAt")
+        rows.append({
+            "id": listing_id,
+            "title": title,
+            "company": (startup.get("name") or "").strip(),
+            "location": "; ".join(places) or ("Remote" if remote else ""),
+            "url": f"https://wellfound.com/jobs/{listing_id}" + (f"-{slug}" if slug else ""),
+            "description": (node.get("description") or "").strip(),
+            "remote": remote,
+            "posted_at": live if isinstance(live, (int, float)) else None,
+            "employment_type": (node.get("jobType") or "").strip() or None,
+            **_pay(node.get("compensation")),
+        })
+    return rows
+
+
 def _jobs_from_html(html: str, location: str) -> list[dict]:
     """Pull postings out of server-rendered HTML, no browser involved."""
-    rows: list[dict] = []
+    rows: list[dict] = _rows_from_apollo(html)
 
     for blob in _LD_JSON_RE.findall(html or ""):
         try:
@@ -258,19 +358,27 @@ def _jobs_from_html(html: str, location: str) -> list[dict]:
                     "remote": bool(node.get("jobLocationType")),
                 })
 
-    if not rows:
-        seen = set()
-        for href, inner in _JOB_ANCHOR_RE.findall(html or ""):
-            title = _TAG_RE.sub(" ", inner).strip()
-            title = " ".join(title.split())
-            if not title or len(title) < 3 or title in seen:
-                continue
-            seen.add(title)
-            rows.append({
-                "title": title, "company": "", "location": "",
-                "url": f"https://wellfound.com{href}",
-                "description": "", "remote": False,
-            })
+    # The links as well, for listings the embedded cache does not carry: the
+    # page renders more cards than it embeds data for. A listing already read
+    # from the cache is skipped by its id, so it is not added twice with less.
+    known_ids = {row["id"] for row in rows if row.get("id")}
+    seen = set()
+    for href, inner in _JOB_ANCHOR_RE.findall(html or ""):
+        title = _TAG_RE.sub(" ", inner).strip()
+        title = " ".join(title.split())
+        # By link, not title: "Software Engineer" is a title at a dozen
+        # startups on the same page, and deduping on it kept only the first.
+        if not title or len(title) < 3 or href in seen:
+            continue
+        listing = re.match(r"/jobs/(\d+)", href)
+        if listing and listing.group(1) in known_ids:
+            continue
+        seen.add(href)
+        rows.append({
+            "title": title, "company": "", "location": "",
+            "url": f"https://wellfound.com{href}",
+            "description": "", "remote": False,
+        })
 
     return _to_jobs(rows, location)
 

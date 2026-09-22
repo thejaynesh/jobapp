@@ -31,7 +31,7 @@ STORE_KEY = "settings"
 class Tunable:
     key: str                        # form field and storage key
     env: str                        # the matching app.config attribute
-    kind: str                       # int | float | bool | choice
+    kind: str                       # int | float | bool | choice | text
     label: str
     help: str
     minimum: float | None = None
@@ -137,6 +137,25 @@ TUNABLES: list[Tunable] = [
         label="LinkedIn pages per search",
         help="10 results a page. Deeper pages return looser matches and more "
              "undated postings, so more isn't always better.",
+    ),
+    Tunable(
+        key="dice_enabled", env="DICE_ENABLED", kind="bool", group="Sources",
+        label="Dice",
+        help="Dice through its public search API (the browser scrape only if "
+             "the API refuses). Off skips it entirely.",
+    ),
+    Tunable(
+        key="wellfound_enabled", env="WELLFOUND_ENABLED", kind="bool",
+        group="Sources", label="Wellfound",
+        help="Startup jobs from Wellfound's role pages, read over plain HTTP "
+             "with employer, pay and full descriptions. Off skips it.",
+    ),
+    Tunable(
+        key="wellfound_roles", env="WELLFOUND_ROLES", kind="text",
+        group="Sources", label="Wellfound: role pages",
+        help="Comma-separated Wellfound role slugs, as in wellfound.com/role/"
+             "<slug> — e.g. software-engineer, data-engineer. Each is one "
+             "page of about fifty listings per run.",
     ),
     Tunable(
         key="jsearch_date_posted", env="JSEARCH_DATE_POSTED", kind="choice",
@@ -259,6 +278,15 @@ def coerce(tunable: Tunable, raw):
             if isinstance(raw, bool):
                 return raw
             return str(raw).strip().lower() in {"1", "true", "on", "yes"}
+        if tunable.kind == "text":
+            # A comma-separated list, as the env variable behind it is. Kept
+            # as text rather than parsed, so the consumer that already splits
+            # the env value reads the override the same way.
+            text = ",".join(
+                part.strip() for part in str(raw).replace("\n", ",").split(",")
+                if part.strip()
+            )
+            return text[:2000]
         if tunable.kind == "choice":
             text = str(raw).strip()
             if tunable.dynamic:

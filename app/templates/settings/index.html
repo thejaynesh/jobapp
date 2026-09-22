@@ -114,6 +114,10 @@
               <option value="{{ choice }}" {% if item.value == choice %}selected{% endif %}>{{ choice }}</option>
               {% endfor %}
             </select>
+            {% elif item.spec.kind == "text" %}
+            <input type="text" name="{{ item.spec.key }}" value="{{ item.value or '' }}"
+                   data-default="{{ item.default or '' }}" data-kind="text" spellcheck="false"
+                   class="mt-1.5 w-full border border-gray-300 rounded px-3 py-1.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
             {% else %}
             <input type="number" name="{{ item.spec.key }}" value="{{ item.value }}"
                    data-default="{{ item.default }}" data-kind="{{ item.spec.kind }}"

@@ -1861,3 +1861,65 @@ class TestDiceSearchApi:
             assert out == {}
         else:
             assert (out["salary_min"], out["salary_max"], out.get("salary_period")) == expected
+
+
+class TestWellfoundReadsTheEmbeddedData:
+    """
+    The role page ships its GraphQL results in __NEXT_DATA__. The link scrape
+    read only anchor text, so every Wellfound job arrived with no employer, no
+    location and no description — and each listing twice, once per anchor.
+    """
+
+    _PAGE = """<html><body>
+    <a href="/jobs/4716782-software-engineer">Software Engineer</a>
+    <a href="/jobs/4716782-software-engineer">Software Engineer at Boom</a>
+    <a href="/jobs/555-software-engineer">Software Engineer</a>
+    <script id="__NEXT_DATA__" type="application/json">%s</script>
+    </body></html>"""
+
+    def _state(self):
+        import json
+        return json.dumps({"props": {"pageProps": {"apolloState": {"data": {
+            "StartupResult:1": {"__typename": "StartupResult", "name": "Boom",
+                                "highlightedJobListings": [
+                                    {"__ref": "JobListingSearchResult:4716782"}]},
+            "JobListingSearchResult:4716782": {
+                "__typename": "JobListingSearchResult", "id": "4716782",
+                "slug": "software-engineer", "title": "Software Engineer",
+                "description": "Build rental financial services.",
+                "locationNames": ["Austin"], "remote": False,
+                "compensation": "$120k – $200k • 0.01% – 0.15%",
+                "liveStartAt": 1789430452, "jobType": "full-time",
+            },
+        }}}}})
+
+    def test_the_listing_carries_its_employer_and_details(self):
+        from app.services.sources.wellfound import _jobs_from_html
+        jobs = _jobs_from_html(self._PAGE % self._state(), "")
+        boom = next(j for j in jobs if j["source_job_id"] == "4716782")
+        assert boom["company"] == "Boom"
+        assert boom["location"] == "Austin"
+        assert boom["description"] == "Build rental financial services."
+        assert (boom["salary_min"], boom["salary_max"]) == (120000.0, 200000.0)
+        assert boom["posted_at"] == 1789430452
+
+    def test_each_listing_once_and_same_titles_kept_apart(self):
+        from app.services.sources.wellfound import _jobs_from_html
+        jobs = _jobs_from_html(self._PAGE % self._state(), "")
+        assert sorted(j["source_job_id"] for j in jobs) == ["4716782", "555"]
+
+    def test_the_role_list_comes_from_the_settings_page(self):
+        from app.services import tunables
+        from app.services.sources.wellfound import configured_roles
+        cfg = tunables.effective_settings({tunables.STORE_KEY: {
+            "wellfound_roles": "data-engineer,\nml-engineer"}})
+        assert configured_roles(cfg) == ["data-engineer", "ml-engineer"]
+
+    def test_switching_wellfound_off_on_the_settings_page_skips_it(self):
+        from app.services import tunables
+        from app.services.job_fetcher import _run_all_adapters
+        cfg = tunables.effective_settings({tunables.STORE_KEY: {"wellfound_enabled": False}})
+        with patch("asyncio.run", return_value=([], {})) as browser:
+            _, stats = _run_all_adapters(["SWE"], ["NYC"], cfg, ats_slugs={},
+                                         only={"wellfound"})
+        assert stats["wellfound"]["enabled"] is False

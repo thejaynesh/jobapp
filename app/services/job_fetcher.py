@@ -650,6 +650,12 @@ def _run_all_adapters(
     # Resting applies here too; these branches never went through `_skip`.
     pw_rested = {src for src in pw_sources if _rests(src)}
     wanted_pw = (pw_sources if only is None else pw_sources & only) - pw_rested
+    # Nor for one that is switched off or unconfigured: launching Chromium to
+    # find that out inside the tier is the most expensive way to learn it.
+    if not getattr(cfg, "WELLFOUND_ENABLED", True):
+        wanted_pw.discard("wellfound")
+    if not getattr(cfg, "HANDSHAKE_SESSION_COOKIE", ""):
+        wanted_pw.discard("handshake")
     run_browser_tier = bool(wanted_pw)
 
     async def _run_playwright() -> tuple[list[dict], dict]:
@@ -662,10 +668,14 @@ def _run_all_adapters(
             # Wellfound is scraped by role page, not by search query: the
             # pages are a fixed taxonomy and carry no location, so one pass over
             # the configured roles covers every query/location combination.
+            from app.services.sources.wellfound import configured_roles as wf_configured_roles
             from app.services.sources.wellfound import fetch_roles as wf_fetch_roles
             pw_stats.setdefault("wellfound", {"count": 0, "errors": [], "enabled": True})
             try:
-                jobs = await wf_fetch_roles(location=locations[0] if locations else "")
+                jobs = await wf_fetch_roles(
+                    slugs=wf_configured_roles(cfg),
+                    location=locations[0] if locations else "",
+                )
                 _record(pw_stats, "wellfound", jobs)
                 pw_jobs.extend(jobs)
             except Exception as exc:
