@@ -6,7 +6,8 @@ from app.services.sources.base import parse_experience_level
 
 logger = logging.getLogger(__name__)
 
-_BASE = "https://himalayas.app/jobs/api"
+_BASE = "https://himalayas.app/jobs/api/search"
+_MAX_PAGES = 3
 
 # The company arrives as a plain string on some records and as an object on
 # others (`{"name": "Doist", "logo": ...}`). Reading one shape and trusting it
@@ -70,23 +71,35 @@ def _location(item: dict) -> str:
 
 def fetch(query: str) -> list[dict]:
     """Fetch remote tech jobs from Himalayas' free public API (no key required)."""
-    try:
-        resp = httpx.get(_BASE, params={"limit": 100}, timeout=15, follow_redirects=True)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.error("Himalayas fetch error: %s", exc)
-        return []
+    raw_jobs = []
+    page_ids = set()
+    for page in range(1, _MAX_PAGES + 1):
+        try:
+            resp = httpx.get(_BASE, params={"q": query, "sort": "recent", "page": page},
+                             timeout=15, follow_redirects=True)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.error("Himalayas fetch error (page %d): %s", page, exc)
+            break
+        rows = data.get("jobs")
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        if not isinstance(rows, list) or not rows:
+            break
+        rows = [item for item in rows if isinstance(item, dict)]
+        ids = {_text(item.get("guid")) or _text(item.get("applicationLink")) for item in rows}
+        ids.discard("")
+        if not ids - page_ids:
+            break
+        page_ids.update(ids)
+        raw_jobs.extend(rows)
+        # Search pages can contain fewer than 20 results and still have a next
+        # page. Stop on an empty/repeated page or the explicit request budget.
 
     q_words = set(query.lower().split())
     jobs: list[dict] = []
     seen: set[str] = set()
-
-    raw_jobs = data.get("jobs")
-    if isinstance(raw_jobs, dict):  # keyed by id rather than listed
-        raw_jobs = list(raw_jobs.values())
-    if not isinstance(raw_jobs, list):
-        raw_jobs = []
 
     for item in raw_jobs:
         if not isinstance(item, dict):

@@ -1,10 +1,8 @@
 """
 Y Combinator's public jobs board.
 
-Work at a Startup's own search needs an account; the ycombinator.com job pages
-do not, and they publish `JobPosting` structured data because YC wants those
-roles in Google's job results. Same read as the iCIMS/Teamtailor adapters, for
-the same reason.
+The public role pages carry listings in an embedded `data-page` payload.
+The shared listing reader accepts that format as well as JobPosting JSON-LD.
 
 Scraped by role page rather than by search query, like Wellfound: the pages are
 a fixed taxonomy, and a query that does not map to one returns YC's marketing

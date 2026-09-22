@@ -1,9 +1,8 @@
 """
 Jobvite-hosted career sites.
 
-Jobvite serves customer boards from `jobs.jobvite.com/<slug>`, and publishes
-`JobPosting` structured data on them. Read the same way as iCIMS and
-Teamtailor.
+Jobvite serves customer boards from `jobs.jobvite.com/<slug>`. The shared
+listing reader accepts its HTML job table and JobPosting JSON-LD when present.
 
 Note the neighbouring hazard: `click.jobvite.com` is Jobvite's *click tracker*,
 not a board, and the link resolver treats it as a middleman to follow through

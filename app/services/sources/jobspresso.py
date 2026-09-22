@@ -9,6 +9,7 @@ aggregator, but almost all of them are real, current, and genuinely remote.
 
 import logging
 import re
+from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -18,8 +19,7 @@ from app.services.sources.base import parse_experience_level
 
 logger = logging.getLogger(__name__)
 
-_FEED = "https://jobspresso.co/jm-ajax/get_listings/"
-_RSS = "https://jobspresso.co/feed/"
+_RSS = "https://jobspresso.co/?feed=job_feed"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) "
@@ -30,7 +30,7 @@ _HEADERS = {
 }
 
 _STRIP_RE = re.compile(r"<[^>]+>")
-_GUID_RE = re.compile(r"\?p=(\d+)")
+_GUID_RE = re.compile(r"[?&]p=(\d+)")
 
 
 def _strip(html: str) -> str:
@@ -53,7 +53,7 @@ def fetch(query: str) -> list[dict]:
         return []
 
     channel = root.find("channel")
-    if not channel:
+    if channel is None:
         return []
 
     q_words = set(query.lower().split())
@@ -68,12 +68,13 @@ def fetch(query: str) -> list[dict]:
         desc_raw = item.findtext("description") or ""
         content = item.findtext("{http://purl.org/rss/1.0/modules/content/}encoded") or ""
         desc = clean_description(content or desc_raw)
-        company = ""
+        company = (item.findtext("{https://jobspresso.co}company") or "").strip()
+        location = (item.findtext("{https://jobspresso.co}location") or "").strip()
 
-        if " at " in title:
+        if not company and " at " in title:
             parts = title.rsplit(" at ", 1)
             title, company = parts[0].strip(), parts[1].strip()
-        elif " - " in title:
+        elif not company and " - " in title:
             parts = title.rsplit(" - ", 1)
             title, company = parts[0].strip(), parts[1].strip()
 
@@ -86,13 +87,17 @@ def fetch(query: str) -> list[dict]:
         source_job_id = id_match.group(1) if id_match else None
 
         pub_date = (item.findtext("pubDate") or "").strip() or None
+        try:
+            pub_date = parsedate_to_datetime(pub_date).isoformat() if pub_date else None
+        except (TypeError, ValueError, OverflowError):
+            pub_date = None
 
         jobs.append({
             "source": "jobspresso",
             "source_job_id": source_job_id,
             "title": title,
             "company": company,
-            "location": "Remote",
+            "location": location or "Remote",
             "is_remote": True,
             "url": link,
             "description": desc,

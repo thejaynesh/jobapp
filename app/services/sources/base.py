@@ -96,13 +96,9 @@ def jobs_from_listing(
     timeout: int = 15,
 ) -> list[dict]:
     """
-    Read a careers listing page through the structured data it publishes.
+    Read JSON-LD, then supported public listing-card or embedded-data formats.
 
-    Every ATS that wants its customers' jobs in Google's job results emits
-    `JobPosting` blocks, whether or not it also documents a JSON API. Reading
-    those is more durable than reading an undocumented endpoint: the endpoint
-    moves and the structured data cannot, because the customer's search
-    ranking depends on it.
+    A listing may omit JSON-LD even when individual detail pages publish it.
 
     Listing pages routinely omit the description from those blocks. That used
     to make this approach useless; it doesn't now, because enrichment fetches
@@ -118,6 +114,14 @@ def jobs_from_listing(
 
     postings = json_ld_postings(resp.text)
     if not postings:
+        from app.services.sources.listing_fallbacks import extract_listing_jobs
+
+        found = extract_listing_jobs(
+            resp.text, str(resp.url) if isinstance(resp.url, httpx.URL) else url,
+            source, slug,
+        )
+        if found:
+            return found
         # Distinguish "this board has no openings" from "we cannot read this
         # board any more" — they look identical from the job count alone, and
         # the second one is the failure that goes unnoticed for months.

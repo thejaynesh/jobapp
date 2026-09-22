@@ -307,9 +307,9 @@ def build_ats_slugs(
 ) -> dict[str, list[str]]:
     """
     Assemble the final slug list per ATS for one fetch cycle:
-    configured (validated when available) → verified seed companies → registry
-    boards (ranked by what they've actually yielded) → legacy discovered blob,
-    deduplicated and capped.
+    Configured boards take priority. An available registry owns all other
+    selection, including seeds already imported there. Without a registry,
+    fall back to seed and legacy discovery lists. Deduplicated and capped.
     """
     from app.services.ats_seeds import SEED_ATS_SLUGS
 
@@ -324,12 +324,17 @@ def build_ats_slugs(
         cap = _total_cap(ats)
         seen: set[str] = set()
         merged: list[str] = []
-        layers = [
-            configured.get(ats, []),
-            SEED_ATS_SLUGS.get(ats, []) if use_seeds else [],
-            (registry or {}).get(ats, []) or [],
-            (discovered or {}).get(ats, []) or [],
-        ]
+        if registry is not None:
+            # Empty is authoritative too: appending legacy discoveries would
+            # re-poll rejected/retired boards, and prepending seeds would pin
+            # the same Workday companies into every slot forever.
+            layers = [configured.get(ats, []), registry.get(ats, []) or []]
+        else:
+            layers = [
+                configured.get(ats, []),
+                SEED_ATS_SLUGS.get(ats, []) if use_seeds else [],
+                (discovered or {}).get(ats, []) or [],
+            ]
         for layer in layers:
             for slug in layer:
                 if slug and slug.lower() not in seen and len(merged) < cap:

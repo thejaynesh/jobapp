@@ -1,19 +1,7 @@
-"""
-iCIMS-hosted career portals.
+"""iCIMS career portals: read structured data or cards from the inner listing.
 
-iCIMS has the largest enterprise footprint of any ATS here and the least
-public API surface: its portals are per-customer, its endpoints are
-undocumented, and the query parameters differ between installations. What every
-portal does have is `JobPosting` structured data on its search page, because
-its customers' openings appearing in Google's job results is the point of the
-product.
-
-So this reads that rather than an endpoint. It is the more durable of the two
-reads: the endpoint can move, and the structured data cannot without costing
-the customer their search ranking.
-
-Search pages carry no descriptions. Enrichment fetches them from the posting
-URLs afterwards, which is exactly the case it was built for.
+The outer search page can be an iframe wrapper. Listings without descriptions
+are enriched from their posting URLs later.
 """
 
 import logging
@@ -28,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Two host shapes in the wild: `<slug>.icims.com` and `careers-<slug>.icims.com`.
 # A slug may be configured either way; both are tried.
-_SEARCH_URL = "https://{host}/jobs/search?ss=1&searchRelation=keyword_all"
+_SEARCH_URL = "https://{host}/jobs/search?ss=1&searchRelation=keyword_all&in_iframe=1"
 
 
 def _hosts(slug: str) -> list[str]:
@@ -38,7 +26,7 @@ def _hosts(slug: str) -> list[str]:
 
 
 def fetch(company_slugs: list[str]) -> list[dict]:
-    """Fetch jobs from iCIMS portals via their published structured data."""
+    """Fetch jobs from the readable iCIMS listing."""
 
     def _fetch_one(slug: str) -> list[dict]:
         last_error: Exception | None = None

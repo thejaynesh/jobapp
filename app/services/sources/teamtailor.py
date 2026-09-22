@@ -3,9 +3,8 @@ Teamtailor career sites.
 
 Teamtailor's documented API needs a per-customer key, which we will never have.
 Its public career sites do not: `<company>.teamtailor.com/jobs` lists the
-openings and publishes `JobPosting` structured data for them, which is the same
-read the iCIMS adapter makes and for the same reason — the endpoint is private,
-the structured data cannot be.
+openings as HTML cards. The shared listing reader supports those cards and
+JobPosting structured data when available.
 """
 
 import logging

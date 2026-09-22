@@ -1,5 +1,6 @@
 import logging
 import re
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -20,7 +21,9 @@ _DETAIL_URL = "https://{tenant}.{host}.myworkdayjobs.com/wday/cxs/{tenant}/{site
 
 _PAGE_SIZE = 20
 _MAX_DETAILS_PER_TENANT = 20  # each description is one extra request
-_MAX_QUERIES_PER_TENANT = 5   # one search POST per query per tenant
+_MAX_QUERIES_PER_TENANT = 10
+_MAX_LIST_REQUESTS_PER_TENANT = 20
+_MAX_PAGES_PER_QUERY = 3
 
 _STRIP_TAGS = re.compile(r"<[^>]+>")
 _RELATIVE_POSTED = re.compile(r"posted\s+(today|yesterday|(\d+)\+?\s+days?\s+ago)", re.I)
@@ -67,8 +70,8 @@ def _fetch_detail(tenant: str, host: str, site: str, path: str) -> dict:
 
 def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
     """
-    Fetch jobs from Workday-hosted career sites. One search per (tenant, query),
-    deduped by posting path; full descriptions come from capped per-job detail
+    Fetch bounded pages from Workday sites, trying each role before deeper pages.
+    Deduped by posting path; full descriptions come from capped per-job detail
     calls (which also carry the real posted date and public URL).
     """
     def _fetch_one(spec: str) -> list[dict]:
@@ -80,11 +83,18 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
         jobs: list[dict] = []
         seen_paths: set[str] = set()
         postings: list[dict] = []
-        for query in queries[:_MAX_QUERIES_PER_TENANT]:
+        pending = deque((query, 0) for query in dict.fromkeys(queries)
+                        if query.strip())
+        pending = deque(list(pending)[:_MAX_QUERIES_PER_TENANT])
+        query_paths: dict[str, set[str]] = {}
+        requests = 0
+        while pending and requests < _MAX_LIST_REQUESTS_PER_TENANT:
+            query, offset = pending.popleft()
+            requests += 1
             try:
                 resp = httpx.post(
                     _LIST_URL.format(tenant=tenant, host=host, site=site),
-                    json={"limit": _PAGE_SIZE, "offset": 0,
+                    json={"limit": _PAGE_SIZE, "offset": offset,
                           "searchText": query, "appliedFacets": {}},
                     timeout=15,
                 )
@@ -93,11 +103,24 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
             except Exception as exc:
                 logger.error("Workday fetch error (%s / %r): %s", spec, query, exc)
                 continue
-            for item in data.get("jobPostings", []):
+            rows = data.get("jobPostings") or []
+            paths = {item.get("externalPath") for item in rows if item.get("externalPath")}
+            previous = query_paths.setdefault(query, set())
+            has_new = bool(paths - previous)
+            previous.update(paths)
+            for item in rows:
                 path = item.get("externalPath") or ""
                 if path and path not in seen_paths:
                     seen_paths.add(path)
                     postings.append(item)
+            next_offset = offset + len(rows)
+            try:
+                total = int(data.get("total"))
+            except (TypeError, ValueError):
+                total = next_offset + 1
+            if (has_new and len(rows) == _PAGE_SIZE and next_offset < total
+                    and offset // _PAGE_SIZE + 1 < _MAX_PAGES_PER_QUERY):
+                pending.append((query, next_offset))
 
         details_fetched = 0
         for item in postings:

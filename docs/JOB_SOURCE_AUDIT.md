@@ -4,9 +4,50 @@
 
 Only increase useful job intake from existing sources, especially broken or zero-yield sources. User requested code review and database diagnostic commands before implementation. Do not change production behavior yet. Update this document as findings are established so a session interruption does not lose the investigation.
 
-Status: initial code review complete; awaiting production reports before implementation. Reviewed checkout: `514fdf6`. No production database access or live provider tests performed. Local code is evidence of behavior, not proof of which sources are failing in production. Only this audit and diagnostic scripts have been added.
+Status: production reports received; two targeted intake batches implemented and locally verified. Original audit checkout: `514fdf6`; implementation starts from `e679515`. Production deployment and measurement remain pending. See Git history for the implementation commit and the checkpoints below for current evidence; the original findings table records the original issues and must be read together with these checkpoints.
 
 ## Evidence already established
+
+### Production baseline received (2026-09-22 15:26 UTC)
+
+Reports completed successfully at schema 0043, host checkout e679515. Container image revision is not established merely by host Git HEAD. Inputs: `source-intake-db.txt`, `source-intake-settings.txt`, `source-intake-version.txt` (user-provided; do not commit raw reports).
+
+- **First implementation priority: board coverage.** 2,680 active boards have never been polled: Greenhouse 1,102, Workday 1,126, SmartRecruiters 190, Ashby 132, BambooHR 130. Use bounded rotation within existing request caps; avoid simply multiplying requests on overloaded workers.
+- API: 91 retained runs, average 11,065.9 seconds; boards: 107 runs, average 14,883 seconds. All exceeded the 1,800-second lock TTL. Recent API run intervals overlap their recorded durations. Board poll timestamps reach Sep 22 although latest completed board history starts Sep 20; do not conclude scheduling stopped from completed-history timestamps alone.
+- JSearch failed all 91 attempts with 403. A present key does not establish subscription/quota validity; paging changes cannot repair this.
+- HiringCafe server failed all 91 attempts (405 historically, now 403), but browser recipe intake inserted 386 jobs in 7 days. Preserve that working path.
+- iCIMS, Jobvite, Teamtailor failed all 107 attempts; error messages show listing HTML without JobPosting JSON-LD. Jobvite has 0 active boards out of 76; Teamtailor 0/19. Their validators assume the same structured-data format as their parsers, so a parser gap can incorrectly reject a real board. Fixing selection alone must not be represented as repairing these adapters.
+- YC failed all 91 attempts despite returning substantial HTML. Requires actual HTML/embedded-data investigation, not more polling.
+- Built In and Jobspresso have only 3 observed empty runs, insufficient to establish a long-standing outage.
+- Careerjet, Findwork, USAJOBS lack credentials. Server Handshake has no cookie, but browser Handshake inserted 1,442 jobs/7d. LinkedIn browser hosts include empty payloads while a separate null-host intake inserted 644; don't treat all LinkedIn intake as dead. LinkedIn browsing is explicitly paused in runtime settings; preserve that setting.
+- API sources currently producing include Adzuna and LinkedIn. Preserve matching criteria; this task remains source intake only despite many stored rows being filtered.
+
+First implementation checkpoint: 116 focused checks passed. Follow-up batch and expanded checks are recorded below. No deployment performed. Production reports supersede provisional priorities below.
+
+Implemented locally:
+
+- Reserve one quarter of each capped ATS selection for never/oldest-polled active boards. Remaining slots retain yield ranking; configured boards still take priority. Caps stay unchanged. Workday's 30-board cap now has 7 rotating slots instead of seeds occupying its entire budget.
+- Treat a present registry (even an empty one) as authoritative; do not append retired/rejected legacy slugs or prepend seeds already imported into the registry.
+- Renew owned fetch-group locks every minute during a cycle. Renewal compares the ownership token; stopping/crashing the process still leaves the existing TTL fallback. Redis outages or process suspension can still lose ownership; this is logged, not a claim of perfect exclusion during outages.
+- Added observed non-JSON-LD formats for YC's `data-page` jobPostings and Jobvite/Teamtailor listing cards. Same-host posting URLs are required; missing descriptions/dates remain missing for enrichment to resolve.
+- Updated Jobvite/Teamtailor validation to recognize the same card formats. Old exact JSON-LD-only rejections are re-probed once within the existing validation batch limit. New rejections use a distinct reason; no migration or blanket reactivation is needed.
+
+Public evidence read Sep 22: [YC role page](https://www.ycombinator.com/jobs/role/software-engineer), [Virtasant Teamtailor](https://virtasant.teamtailor.com/jobs), [Tyler Technologies Jobvite](https://jobs.jobvite.com/tylertech/search). All three returned HTTP 200 to a plain HTTP client; saved HTML was replayed locally. Teamtailor/Jobvite had posting links, and YC had embedded listing data. Raw HTML is in ignored `.venv-test/evidence/`, not committed. This proves parser behavior against these responses, not access from the production server or coverage of every tenant.
+
+Still pending after both batches: JSearch account/access diagnosis, HiringCafe server endpoint (retain working browser intake), source cooldown/retry defects, partial-error telemetry, other source pagination and deeper board coverage, DB commit accounting, runtime reduction, and false-dedupe sample analysis. Do not claim these are repaired.
+
+Verification completed:
+
+- 94 checks across the new intake regression module and existing ATS discovery, validation, and adapter tests, plus 22 existing fetch lock/task/group/state checks. Tests imported actual application modules with mocked provider requests; board selection/revalidation tests used an isolated SQLite board table. They ran from copies in ignored `.venv-test/checks` to avoid the repository's globally required PostgreSQL fixture. No full PostgreSQL integration suite or real Redis renewal test was run; Redis interactions were mocked.
+- Captured public HTML replay through `jobs_from_listing()` recovered 41 distinct YC posting URLs, 16 Teamtailor URLs, and 50 Jobvite URLs. Both corrected ATS probes accepted their observed listing cards. These are extracted listings, not guaranteed new/relevant production inserts.
+- `git diff --check` passed. Test packages are confined to ignored `.venv-test`; raw user reports remain untracked.
+
+After a normal deployment (no new migration):
+
+1. Trigger a boards fetch and targeted runs for YC, Built In, Jobspresso, Himalayas and The Muse using the existing Runs page. The next registry validation automatically rechecks old Jobvite/Teamtailor/iCIMS format rejections within its cap.
+2. Re-run `scripts/db_source_intake.sql` after completed runs. Expect previously unpolled boards to acquire `last_fetched_at`; restored sources should show nonzero fetched counts when accessible. Judge improvement by inserted jobs and relevance, not fetched totals alone.
+3. Verify a long fetch still holds its group lease after 30 minutes and releases it at completion. Runtime reduction remains outstanding; renewal prevents expiry-driven overlap, not slow work itself.
+4. JSearch requires checking access/subscription/quota in the provider account and then a source-only retry. Do not paste API keys into the conversation. Missing optional provider credentials are setup gaps, not parser bugs.
 
 - Fetch adapters run in `api`, `boards`, and `browser` groups (`app/services/job_fetcher.py`). Sources outside a run's group are recorded as disabled; do not treat these rows as actual source outages.
 - `fetch_runs` and `fetch_source_runs` preserve fetched/inserted/merged/skipped/stale counts and errors. Only 200 runs are retained globally (`app/services/fetch_history.py`); a requested 30-day window may contain much less history.
@@ -18,7 +59,9 @@ Status: initial code review complete; awaiting production reports before impleme
 1. [x] Review scheduler, source adapters, board selection/retirement, browser intake, and deduplication.
 2. [x] Append confirmed behaviors and separately labeled impact hypotheses with code references.
 3. [x] Save read-only diagnostic SQL and exact production commands; check model/migration references.
-4. [ ] Await the user's report, rank sources by recoverable new jobs, and then implement targeted fixes with regression checks.
+4. [x] Read the user's reports and rank fixes by recoverable new jobs.
+5. [x] Complete the first targeted patch and focused regression checks; record deployment verification steps and remaining work.
+6. [ ] Deploy and measure new-job yield; continue source-specific fixes listed above using the new evidence.
 
 ## Findings and proposed improvements
 
@@ -75,7 +118,7 @@ No database dump, full profile, resume, raw browser payload, API key, cookie, or
 4. Compare new distinct jobs per attempted run/day, board coverage, failures, elapsed time, and request cost against a comparable baseline. Different groups and browser paths need separate denominators. A higher fetched count alone is not improvement.
 5. If a parser is implicated, request only a small relevant sanitized sample or replay saved samples locally before changing extraction. Do not request all captured traffic up front.
 
-## Validation and limits
+## Original audit validation and limits (before reports arrived)
 
 Schema references were checked against current SQLAlchemy models and migration 0032 for `harvest_samples`. No live database query execution or provider testing has occurred. The system Python lacks the project's SQLAlchemy/pytest/PostgreSQL driver dependencies, so this audit does not claim a full application test run or PostgreSQL execution validation.
 
@@ -90,4 +133,27 @@ Remaining evidence gaps: actual production credential validity, provider respons
 
 ## Resume instruction
 
-Read this file first, then `scripts/db_source_intake.sql` once created. Preserve the source-intake-only scope. Ask for the report if not supplied; do not assume local configuration matches production.
+### Follow-up intake batch (implemented locally)
+
+Public responses captured on 2026-09-22 confirm additional adapter gaps:
+
+- Jobspresso `/feed/` has zero items; `/?feed=job_feed` has 10 job items with company/location namespaces and RFC2822 dates. Switch feeds and preserve those fields.
+- iCIMS search is an iframe wrapper. The same search with `in_iframe=1` contains `iCIMS_JobCardItem` cards. Fetch and validate the readable inner listing; retry legacy false rejections once.
+- Built In search HTML contains `data-id="job-card"` cards with titles, companies and locations, but the adapter accepts JSON-LD only.
+- The Muse supports page 0; the current loop starts at 1 and skips it.
+- Himalayas browse API caps pages at 20, ignoring the requested 100. Its documented search endpoint returns different jobs on pages 1 and 2. Use bounded role searches instead of repeatedly filtering the same first browse page.
+- Workday searches only the first five expanded roles and always offset 0. Add bounded pagination and cover the ten current expanded roles without increasing the detail-request cap.
+
+Evidence files are local ignored captures under `.venv-test/evidence/`; they are not deployment artifacts. These findings do not establish increased production inserts.
+
+Implemented all six changes above. Jobspresso preserves employer, geographic restrictions, stable numeric ID and ISO-formatted posting dates. Built In and iCIMS card readers require same-host posting URLs and leave missing descriptions/dates for enrichment. iCIMS validation uses the same host resolution and inner-page URL as fetching. Legacy iCIMS format rejections now join Jobvite/Teamtailor's bounded one-time retry.
+
+Workday now searches up to 10 distinct roles, trying every first page before deeper pages, with at most 20 listing requests per tenant and 3 pages per role. Its existing 20-detail-request cap remains. Himalayas uses at most 3 search pages per role; empty or repeated pages stop early, and a later failure preserves earlier results. The Muse includes page 0 within its existing two-page/category budget. These request caps increase coverage but can increase runtime; compare completed-run duration and new distinct inserts before increasing them further. iCIMS and Built In currently still read the first listing page; Jobspresso reads the feed's 10 available entries. They are not full historical backfills.
+
+Verification: 130 focused tests passed across both intake regression modules, ATS discovery/validation/adapters, and existing Workday/Himalayas/The Muse tests. New cases exercise request limits, late-page failures, short/repeated pages, role coverage, stable identities, geographic restrictions, foreign-link rejection and one-time registry recovery. As above, this uses mocked HTTP and an isolated SQLite board table, not full PostgreSQL integration. The earlier 22 fetch-lock/task checks remain recorded separately.
+
+Captured-response replays through the real adapters recovered 25 unique Built In jobs matching Software Engineer (all with company/location), 20 unique iCIMS jobs with locations, 10 Jobspresso entries with company/location, and 23 unique Software Engineer results across two Himalayas search pages. These 78 extracted entries are not a production insert count and include roles/geographies that normal matching may reject. The iCIMS probe accepted the captured inner page. `git diff --check` passed.
+
+Primary public format references: [Jobspresso jobs feed](https://jobspresso.co/?feed=job_feed), [Built In search](https://builtin.com/jobs?search=software%20engineer), [iCIMS inner listing](https://hotjobs-teksynap.icims.com/jobs/search?ss=1&searchRelation=keyword_all&in_iframe=1), [Himalayas API documentation](https://himalayas.app/api), [The Muse page zero](https://www.themuse.com/api/public/jobs?category=Software%20Engineering&page=0). Public format/access checks were made from this workstation; production connectivity remains to be measured.
+
+Read this file first. The reports are now supplied in the workspace. Preserve the source-intake-only scope and do not repeat the baseline request. Do not assume local configuration matches production. Raw user reports should remain untracked.

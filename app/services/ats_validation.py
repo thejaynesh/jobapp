@@ -88,34 +88,43 @@ def _probe_personio(slug: str) -> bool:
     return r.status_code == 200 and r.content.lstrip()[:1] == b"<"
 
 
-def _probe_listing(url: str) -> bool:
+def _probe_listing(url: str, source: str = "", slug: str = "") -> bool:
     """
-    A board we read through structured data is valid when it publishes some.
+    Require structured postings or a recognized listing-card format.
 
-    A 200 alone is not enough: iCIMS, Teamtailor and Jobvite all serve a
-    friendly "company not found" page with a 200, and treating that as a live
-    board would put a nonexistent company in the registry to be polled forever.
+    A 200 alone cannot distinguish a board from a friendly not-found page.
+    Teamtailor and Jobvite also publish real listing cards without JSON-LD.
     """
     from app.services.sources.base import LISTING_HEADERS
 
     r = httpx.get(url, headers=LISTING_HEADERS, timeout=_TIMEOUT,
                   follow_redirects=True)
-    return r.status_code == 200 and "jobposting" in r.text.lower()
+    if r.status_code != 200:
+        return False
+    if "jobposting" in r.text.lower():
+        return True
+    from app.services.sources.listing_fallbacks import extract_listing_jobs
+
+    return bool(extract_listing_jobs(
+        r.text, str(r.url) if isinstance(r.url, httpx.URL) else url, source, slug,
+    ))
 
 
 def _probe_icims(slug: str) -> bool:
+    from app.services.sources.icims import _hosts, _SEARCH_URL
+
     return any(
-        _probe_listing(f"https://{host}/jobs/search?ss=1")
-        for host in (f"{slug}.icims.com", f"careers-{slug}.icims.com")
+        _probe_listing(_SEARCH_URL.format(host=host), "icims", slug)
+        for host in _hosts(slug)
     )
 
 
 def _probe_teamtailor(slug: str) -> bool:
-    return _probe_listing(f"https://{slug}.teamtailor.com/jobs")
+    return _probe_listing(f"https://{slug}.teamtailor.com/jobs", "teamtailor", slug)
 
 
 def _probe_jobvite(slug: str) -> bool:
-    return _probe_listing(f"https://jobs.jobvite.com/{slug}/search")
+    return _probe_listing(f"https://jobs.jobvite.com/{slug}/search", "jobvite", slug)
 
 
 PROBES = {
@@ -216,6 +225,10 @@ def probe_board(ats: str, slug: str) -> BoardProbe:
     except Exception as exc:
         return BoardProbe(True, error=f"probe failed: {exc}")
     if not exists:
+        if ats in ("teamtailor", "jobvite", "icims"):
+            # Different from the old JSON-LD-only rejection so the registry
+            # can reconsider old false negatives once, within its probe cap.
+            return BoardProbe(False, error=f"{ats}: no readable job listing")
         return BoardProbe(False, error=f"{ats} has no board for this slug")
     return BoardProbe(True, company=board_company_name(ats, slug))
 

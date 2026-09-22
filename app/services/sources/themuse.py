@@ -35,7 +35,7 @@ def fetch(query: str) -> list[dict]:
     q_words = set(query.lower().split())
 
     for category in _CATEGORIES:
-        for page in range(1, _PAGES + 1):
+        for page in range(_PAGES):
             try:
                 resp = httpx.get(
                     _BASE,
@@ -81,7 +81,7 @@ def fetch(query: str) -> list[dict]:
                 })
 
             # Stop paging early when the API says there are no more pages.
-            if page >= int(data.get("page_count") or 1):
+            if not data.get("results") or page + 1 >= int(data.get("page_count") or 1):
                 break
 
     logger.info("The Muse: %d jobs for query '%s'", len(jobs), query)

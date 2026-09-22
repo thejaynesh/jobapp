@@ -16,6 +16,8 @@ conflict with a fetch, so sharing one key would have each block the other.
 import logging
 import time
 import uuid
+from contextlib import contextmanager
+from threading import Event, Thread
 
 from app.config import settings
 
@@ -23,15 +25,8 @@ logger = logging.getLogger(__name__)
 
 LOCK_KEY = "jobapp:fetch:running"
 COMPARE_LOCK_KEY = "jobapp:compare:running"
-# Comfortably longer than a slow cycle, short enough that a crashed worker
-# doesn't block the next scheduled run for long.
-#
-# Was an hour, which is far longer than anything it guards — and the TTL is
-# not only the crash window. `release` runs a compare-and-delete, and on a
-# Redis error it logs and leaves the key to expire; so a blip during release,
-# on a cycle that had already finished, blocked the next fetch for up to a
-# full hour. Sized to a slow cycle now (the match and enrich locks next door
-# use 1,800 for the same reason), and `release` retries before giving up.
+# Crash recovery window. Real fetches can take hours, so fetch tasks renew
+# their owned leases with keepalive rather than assuming this exceeds runtime.
 DEFAULT_TTL_SECONDS = 1800
 
 # Only the holder's own token may release the lock (same script as llm_gate).
@@ -40,6 +35,13 @@ DEFAULT_TTL_SECONDS = 1800
 _RELEASE = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+_RENEW = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], ARGV[2])
 end
 return 0
 """
@@ -96,6 +98,41 @@ def release(key: str = LOCK_KEY) -> None:
                 )
             else:
                 time.sleep(0.5)
+
+
+@contextmanager
+def keepalive(keys, ttl: int = DEFAULT_TTL_SECONDS):
+    """Renew owned fetch leases while a slow cycle is still doing work."""
+    # Snapshot ownership. A renewal must never extend a subsequent holder's
+    # lease if Redis expired ours during an outage or a process suspension.
+    owned = {key: _held_tokens[key] for key in keys if key in _held_tokens}
+    if not owned:
+        yield
+        return
+    stopped = Event()
+
+    def heartbeat():
+        while not stopped.wait(min(60, max(1, ttl / 3))):
+            for key, token in list(owned.items()):
+                if stopped.is_set():
+                    return
+                try:
+                    renewed = _client().eval(_RENEW, 1, key, token, ttl)
+                    if not renewed:
+                        logger.error("fetch_lock: ownership lost for %s", key)
+                        owned.pop(key, None)
+                except Exception as exc:
+                    # Retry on the next heartbeat. The existing TTL remains
+                    # the crash fallback if Redis stays unreachable.
+                    logger.warning("fetch_lock: could not renew %s: %s", key, exc)
+
+    worker = Thread(target=heartbeat, name="fetch-lock-heartbeat", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        worker.join(timeout=6)
 
 
 def state(key: str = LOCK_KEY) -> dict:

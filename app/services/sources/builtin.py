@@ -1,16 +1,4 @@
-"""
-Built In — tech-focused job board with city hubs (builtin.com).
-
-Built In publishes JobPosting structured data on every search results page,
-the same data Google's job search reads. One request per city page returns
-up to 100 tech jobs with titles, companies, locations, and descriptions —
-all server-rendered, no browser needed.
-
-No API key, no scraping of DOM elements, no Playwright: just the JSON-LD
-blocks every employer pays to have on their listing. A redesign that changes
-the card markup has no effect; only removing structured data entirely would
-break this, and that would cost every employer their Google Jobs placement.
-"""
+"""Built In tech jobs, from structured data or public search-result cards."""
 
 import logging
 import re
@@ -21,6 +9,7 @@ import httpx
 from app.services.descriptions import clean as clean_description
 from app.services.enrichment import json_ld_postings
 from app.services.sources.base import parse_experience_level
+from app.services.sources.listing_fallbacks import extract_listing_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +31,7 @@ _CITY_HUBS = (
     "los-angeles", "new-york", "san-francisco", "seattle",
 )
 
-_ID_RE = re.compile(r"/jobs?/(\d+)")
+_ID_RE = re.compile(r"/jobs?/(?:[^/]+/)?(\d+)(?:/|$)")
 
 
 def _fetch_page(url: str, query: str) -> list[dict]:
@@ -56,7 +45,10 @@ def _fetch_page(url: str, query: str) -> list[dict]:
 
     postings = json_ld_postings(resp.text)
     if not postings:
-        return []
+        postings = extract_listing_jobs(
+            resp.text, str(resp.url) if isinstance(resp.url, httpx.URL) else url,
+            "builtin", "",
+        )
 
     q_lower = query.lower()
     q_words = set(q_lower.split())
@@ -90,9 +82,9 @@ def _fetch_page(url: str, query: str) -> list[dict]:
             "description": desc,
             "experience_level": parse_experience_level(title, desc),
             "posted_at": posting["posted_at"],
-            "salary_min": posting["salary_min"],
-            "salary_max": posting["salary_max"],
-            "salary_currency": posting["salary_currency"],
+            "salary_min": posting.get("salary_min"),
+            "salary_max": posting.get("salary_max"),
+            "salary_currency": posting.get("salary_currency"),
         })
 
     return jobs

@@ -16,7 +16,7 @@ ones are retired, so the per-cycle budget keeps going to companies that hire.
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import Integer, func
+from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.company_board import CompanyBoard
@@ -163,13 +163,15 @@ def record_boards(
 
 
 def board_slugs(db: Session, ats: str, limit: int) -> list[str]:
-    """
-    Active boards for one ATS, best first: proven producers, then the most
-    recently seen. Ties broken by slug so the order is stable across cycles.
-    """
-    rows = (
+    """Reserve a quarter of a capped poll for untried or oldest-polled boards."""
+    if limit <= 0:
+        return []
+    eligible = (
         db.query(CompanyBoard.slug)
         .filter(CompanyBoard.ats == ats, CompanyBoard.active.is_(True))
+    )
+    ranked = (
+        eligible
         .order_by(
             CompanyBoard.last_job_count.desc(),
             CompanyBoard.total_job_count.desc(),
@@ -179,7 +181,24 @@ def board_slugs(db: Session, ats: str, limit: int) -> list[str]:
         .limit(limit)
         .all()
     )
-    return [row[0] for row in rows]
+    if len(ranked) < limit:
+        return [row[0] for row in ranked]
+
+    # Returned volume is mostly repeat sightings. Ranking by it alone meant
+    # 2,680 active boards never received their first poll. Keep producers in
+    # the remaining slots without increasing the per-cycle request budget.
+    rotation = (
+        eligible.order_by(
+            CompanyBoard.last_fetched_at.asc().nullsfirst(),
+            CompanyBoard.first_seen_at.asc(),
+            CompanyBoard.slug.asc(),
+        )
+        .limit(max(1, limit // 4))
+        .all()
+    )
+    # Rotation first so configured slugs prepended by build_ats_slugs consume
+    # producer slots, not the coverage reserve.
+    return list(dict.fromkeys(row[0] for row in [*rotation, *ranked]))[:limit]
 
 
 def registry_slugs(db: Session, caps: dict[str, int]) -> dict[str, list[str]]:
@@ -230,7 +249,19 @@ def validate_pending(db: Session, limit: int = 150, workers: int = 8) -> dict:
 
     pending = (
         db.query(CompanyBoard)
-        .filter(CompanyBoard.validated_at.is_(None))
+        .filter(or_(
+            CompanyBoard.validated_at.is_(None),
+            # Retry only the old format-specific rejections. A successful
+            # probe clears the reason; a new rejection uses a new reason, so
+            # this repair does not repeat on every cycle or need a migration.
+            and_(
+                CompanyBoard.active.is_(False),
+                CompanyBoard.ats.in_(("teamtailor", "jobvite", "icims")),
+                CompanyBoard.inactive_reason == (
+                    CompanyBoard.ats + " has no board for this slug"
+                ),
+            ),
+        ))
         # Newest first: a board discovered this cycle is the one most likely to
         # be about to matter.
         .order_by(CompanyBoard.first_seen_at.desc())

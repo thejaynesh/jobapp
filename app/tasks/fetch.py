@@ -17,7 +17,7 @@ import logging
 from app.celery_app import celery_app
 from app.config import settings
 from app.database import SessionLocal
-from app.services.fetch_lock import LOCK_KEY, acquire, release
+from app.services.fetch_lock import LOCK_KEY, acquire, keepalive, release
 from app.services.job_fetcher import ALL_GROUPS, fetch_and_save_jobs
 
 logger = logging.getLogger(__name__)
@@ -82,9 +82,10 @@ def _run(group: str | None, only: list[str] | None, match_after: bool) -> dict:
 
     db = SessionLocal()
     try:
-        result = fetch_and_save_jobs(
-            db, only=set(only) if only else None, group=group
-        )
+        with keepalive(held):
+            result = fetch_and_save_jobs(
+                db, only=set(only) if only else None, group=group
+            )
         logger.info(
             "fetch_jobs(%s) complete — fetched=%d inserted=%d merged=%d skipped=%d",
             group or "all", result["fetched"], result["inserted"],
