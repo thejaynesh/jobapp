@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -885,3 +885,120 @@ class TestUndatedJobVisibility:
             ))
         db.commit()
         assert "dated=0" in client.get("/jobs?dated=0").text
+
+
+class TestTheAgeWindow:
+    """
+    `DASHBOARD_MAX_AGE_DAYS` — the jobs list looks back a fixed number of days
+    since the job was *fetched*.
+
+    `fetched_at` rather than `posted_at` because `posted_at` is null on a large
+    share of rows; that is what `TestUndatedJobVisibility` above is about, and
+    an age window built on it would be an age window that ignores those rows.
+
+    Off by default in this suite (see `conftest._age_cutoff_off_by_default`),
+    so these set it explicitly.
+    """
+
+    def _job(self, db, *, title, days_ago, favourite=False, applied=False):
+        import hashlib
+        from app.models.application import Application
+        from app.models.job import Job, JobStatus
+
+        url = f"https://ex.com/age/{title}"
+        job = Job(
+            source="linkedin", source_urls=[url], title=title, company="Acme",
+            location="NYC", is_remote=False, url=url, description="d" * 400,
+            experience_level="mid", status=JobStatus.matched,
+            fetched_at=datetime.now(timezone.utc) - timedelta(days=days_ago),
+            favourite=favourite,
+            favourited_at=datetime.now(timezone.utc) if favourite else None,
+            dedupe_hash=hashlib.sha256(url.encode()).hexdigest()[:32],
+        )
+        db.add(job)
+        db.flush()
+        if applied:
+            db.add(Application(job_id=job.id))
+        db.commit()
+        return job
+
+    @pytest.fixture(autouse=True)
+    def _window(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "DASHBOARD_MAX_AGE_DAYS", 20)
+
+    def test_a_recent_job_is_shown(self, db, client):
+        self._job(db, title="Fresh Role", days_ago=3)
+        assert "Fresh Role" in client.get("/jobs").text
+
+    def test_an_old_job_is_hidden(self, db, client):
+        self._job(db, title="Ancient Role", days_ago=40)
+        assert "Ancient Role" not in client.get("/jobs").text
+
+    def test_the_page_says_how_many_it_is_hiding(self, db, client):
+        """
+        A list that silently drops rows reads as a broken list. Same reasoning
+        as the count beside the salary filter.
+        """
+        self._job(db, title="Ancient Role", days_ago=40)
+        body = client.get("/jobs").text
+
+        assert "hidden" in body
+        assert "Show them" in body
+
+    def test_asking_for_everything_shows_it(self, db, client):
+        self._job(db, title="Ancient Role", days_ago=40)
+        assert "Ancient Role" in client.get("/jobs?age=all").text
+
+    def test_a_job_you_applied_to_is_never_hidden(self, db, client):
+        """
+        An application means the row is the user's pipeline, not a listing —
+        the same carve-out `services.archive` makes, for the same reason.
+        """
+        self._job(db, title="Applied Long Ago", days_ago=90, applied=True)
+        assert "Applied Long Ago" in client.get("/jobs").text
+
+    def test_a_starred_job_is_never_hidden(self, db, client):
+        self._job(db, title="Starred Long Ago", days_ago=90, favourite=True)
+        assert "Starred Long Ago" in client.get("/jobs").text
+
+    def test_an_exempt_job_is_not_counted_as_hidden(self, db, client):
+        """The count has to agree with the list, or the page contradicts itself."""
+        self._job(db, title="Starred Long Ago", days_ago=90, favourite=True)
+        self._job(db, title="Applied Long Ago", days_ago=90, applied=True)
+        body = client.get("/jobs").text
+
+        assert "Starred Long Ago" in body
+        assert "Applied Long Ago" in body
+        # Nothing is actually being withheld, so no banner.
+        assert "Show them" not in body
+
+    def test_zero_disables_the_window(self, db, client, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "DASHBOARD_MAX_AGE_DAYS", 0)
+        self._job(db, title="Ancient Role", days_ago=400)
+
+        body = client.get("/jobs").text
+        assert "Ancient Role" in body
+        assert "Show them" not in body
+
+    def test_a_nonsense_setting_widens_rather_than_empties(self, db, client,
+                                                           monkeypatch):
+        """
+        The value is editable from the tunables page, so a bad one must fail
+        towards showing too much rather than towards an empty dashboard.
+        """
+        from app.config import settings
+        monkeypatch.setattr(settings, "DASHBOARD_MAX_AGE_DAYS", "not a number")
+        self._job(db, title="Ancient Role", days_ago=400)
+
+        assert "Ancient Role" in client.get("/jobs").text
+
+    def test_the_window_survives_another_filter(self, db, client):
+        """
+        `age` is carried in the form as a hidden field; without it, changing
+        any other filter would snap the list back to the default window.
+        """
+        self._job(db, title="Ancient Remote Role", days_ago=40)
+
+        assert "Ancient Remote Role" in client.get("/jobs?age=all&status=matched").text

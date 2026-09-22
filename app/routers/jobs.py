@@ -1,7 +1,7 @@
 import re
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -112,6 +112,59 @@ def _undated_count(db: Session) -> int:
     ) or 0
 
 
+def _age_cutoff() -> datetime | None:
+    """
+    The oldest `fetched_at` the list shows by default, or None for no limit.
+
+    `DASHBOARD_MAX_AGE_DAYS` days back. Defensive about the setting because it
+    is user-editable from the tunables page, and a bad value should widen the
+    list rather than empty it.
+    """
+    try:
+        days = int(getattr(settings, "DASHBOARD_MAX_AGE_DAYS", 20))
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _recent_or_mine(cutoff: datetime):
+    """
+    Fresh enough to be worth looking at, or yours regardless of age.
+
+    The two exemptions are the same ones `services.archive` makes, for the same
+    reason: an application means the row is the user's pipeline and not a
+    listing, and a star is them saying so explicitly. A six-week-old job you
+    applied to disappearing from the list would be a bug, not a feature.
+    """
+    return or_(
+        Job.fetched_at >= cutoff,
+        Job.favourite.is_(True),
+        Job.applications.any(),
+    )
+
+
+def _stale_count(db: Session, cutoff: datetime | None) -> int:
+    """
+    How many jobs the age cutoff is holding back.
+
+    Reported on the page for the same reason `_priced_count` is: a filter that
+    silently removes rows reads as a broken list, and the only cure is for the
+    page to say how many it is hiding and offer the switch to see them.
+    """
+    if cutoff is None:
+        return 0
+    return (
+        db.query(func.count(Job.id))
+        .filter(
+            Job.status.in_(_FILTERABLE_STATUSES),
+            ~_recent_or_mine(cutoff),
+        )
+        .scalar()
+    ) or 0
+
+
 def _priced_count(db: Session) -> int:
     """
     How many visible jobs state any pay at all.
@@ -170,11 +223,19 @@ def get_jobs(
     filter_reason: str = "",
     dated: str = "",
     favourite: str = "",
+    age: str = "",
     sort: str = "score_desc",
     page: int = 0,
     db: Session = Depends(get_db),
 ):
     query = db.query(Job).filter(Job.status.in_(_FILTERABLE_STATUSES))
+
+    # Old listings are noise, so the list looks back DASHBOARD_MAX_AGE_DAYS by
+    # default. `?age=all` lifts it; anything the user applied to or starred is
+    # exempt either way — see `_recent_or_mine`.
+    cutoff = _age_cutoff()
+    if cutoff is not None and age != "all":
+        query = query.filter(_recent_or_mine(cutoff))
 
     # Checked before anything else so the shortlist is the shortlist: a starred
     # job that the matcher filtered out must still appear here, and a status or
@@ -289,6 +350,12 @@ def get_jobs(
             "undated_count": _undated_count(db),
             "favourite_filter": favourite,
             "favourite_count": _favourite_count(db),
+            "age_filter": age,
+            "age_days": (
+                int(getattr(settings, "DASHBOARD_MAX_AGE_DAYS", 20) or 0)
+                if cutoff is not None else 0
+            ),
+            "stale_count": _stale_count(db, cutoff),
             "sort": sort,
             "page": page,
             "total": total,

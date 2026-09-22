@@ -19,10 +19,32 @@
 </p>
 {% endif %}
 
+{# The age cutoff, said out loud in both directions.
+   A list that quietly drops rows reads as a broken list, so the count and the
+   way to see them are on the page rather than in the settings. #}
+{% if age_filter == "all" and age_days %}
+<p class="text-sm text-gray-500 -mt-2 mb-4">
+  Showing jobs of every age, including ones fetched more than {{ age_days }} days ago.
+  <a href="{{ request.url.remove_query_params('age') }}"
+     class="text-blue-600 hover:text-blue-800 underline ml-1">Back to the last {{ age_days }} days</a>
+</p>
+{% elif stale_count and age_days %}
+<p class="text-sm text-gray-500 -mt-2 mb-4">
+  {{ "{:,}".format(stale_count) }} job{{ "s" if stale_count != 1 }} fetched more than
+  {{ age_days }} days ago {{ "are" if stale_count != 1 else "is" }} hidden. Anything you
+  applied to or starred stays regardless of age.
+  <a href="{{ request.url.include_query_params(age='all') }}"
+     class="text-blue-600 hover:text-blue-800 underline ml-1">Show them</a>
+</p>
+{% endif %}
+
 {% set has_active_filters = status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter %}
 {% set has_advanced_filters = source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter %}
 <form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg shadow-sm mb-6">
   <input type="hidden" name="page" value="0">
+  {# Carried through the filter form, or changing any other filter would
+     silently snap the list back to the default age window. #}
+  {% if age_filter %}<input type="hidden" name="age" value="{{ age_filter }}">{% endif %}
 
   <div class="px-4 pt-4 pb-3">
     <div class="flex flex-wrap gap-2 items-center">

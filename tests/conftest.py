@@ -177,6 +177,26 @@ def _slug_harvest_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _age_cutoff_off_by_default(monkeypatch):
+    """
+    The jobs list's age window, off unless a test is about it.
+
+    `DASHBOARD_MAX_AGE_DAYS` hides jobs fetched more than twenty days ago, and
+    almost every fixture in this suite stamps `fetched_at` with a hardcoded
+    date — `datetime(2026, 8, 3)` and friends. Those are already outside the
+    window and drift further outside it every month, so leaving the cutoff on
+    made seventeen tests about sorting, sources, filter reasons and posted-date
+    labels fail on their fixture's age instead of on what they assert. Worse,
+    they would have started failing on a date rather than on a commit.
+
+    So the window is a product default, not a test default, and the tests that
+    are actually about it set the value themselves — see
+    `tests/test_tracker_ui.py::TestTheAgeWindow`.
+    """
+    monkeypatch.setattr(settings, "DASHBOARD_MAX_AGE_DAYS", 0)
+
+
+@pytest.fixture(autouse=True)
 def _board_validation_off_by_default(monkeypatch):
     """
     Board validation probes real ATS APIs, one request per unproven board.

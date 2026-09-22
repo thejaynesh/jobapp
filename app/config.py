@@ -679,6 +679,20 @@ class Settings(BaseSettings):
 
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
+    # How far back the jobs list looks, in days since the job was *fetched*.
+    #
+    # Distinct from MAX_JOB_AGE_DAYS above, which is a fetch-time gate on
+    # `posted_at` — the date the employer published. This one is a display
+    # cutoff on `fetched_at`, the date we first saw the posting, and it is
+    # `fetched_at` precisely because `posted_at` is null on a large share of
+    # rows (that is what the "undated" filter on the page exists to show).
+    #
+    # Hiding, not deleting, and never unconditionally: a job with an
+    # application or a star stays visible however old it is, because that is
+    # the user's own pipeline rather than a stale listing. `?age=all` shows
+    # everything, and the page reports how many rows the cutoff is holding
+    # back, so it can never be a silent disappearance. 0 disables it.
+    DASHBOARD_MAX_AGE_DAYS: int = 20
     FILTER_SENIOR_TITLES: bool = True  # prefilter Senior/Staff/... titles for junior candidates
     JUNIOR_MAX_YEARS: float = 3.0  # candidate is "junior" below this many years of experience
 
