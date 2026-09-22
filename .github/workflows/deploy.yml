@@ -54,17 +54,36 @@ jobs:
           script: |
             set -e
             cd /opt/jobapp
+            C="docker compose -f docker-compose.prod.yml"
             git pull origin main
             # Build, migrate with the new image, then move traffic onto it.
             # `up -d --build` followed by a migration ran the new code against
             # the old schema for the length of the migration; a `run` before the
             # build would have applied the old image's migrations.
-            docker compose -f docker-compose.prod.yml build
-            docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
-            docker compose -f docker-compose.prod.yml up -d
+            $C build
+            # Stop the background workers BEFORE migrating.
+            #
+            # Migrations take locks on `jobs` — a share lock for CREATE INDEX,
+            # access exclusive for ALTER TABLE — and this step used to run with
+            # the old containers still writing. On the first real deployment
+            # that put CREATE INDEX behind an 11.5-hour write transaction from
+            # the old fetch cycle, and Postgres lock queues are FIFO, so every
+            # later writer queued behind it. The table was unusable for an hour
+            # and the deploy looked like it had hung.
+            #
+            # `web` deliberately stays up: it writes only in short transactions
+            # on user action, and stopping it would be downtime. The long
+            # transactions all come from the workers.
+            $C stop worker worker-interactive beat
+            if ! $C run --rm web alembic upgrade head; then
+              echo "migration failed — restarting workers on the previous image"
+              $C start worker worker-interactive beat
+              exit 1
+            fi
+            $C up -d
             # The Caddyfile is a read-only bind mount, so compose cannot see a
             # change to it and `up -d` leaves the proxy alone.
-            docker compose -f docker-compose.prod.yml restart caddy
+            $C restart caddy
 
       # Port 22 on the VPS periodically stops accepting connections for a few
       # minutes at a time — both attempts fail on `dial tcp :22: i/o timeout`,
@@ -95,17 +114,36 @@ jobs:
           script: |
             set -e
             cd /opt/jobapp
+            C="docker compose -f docker-compose.prod.yml"
             git pull origin main
             # Build, migrate with the new image, then move traffic onto it.
             # `up -d --build` followed by a migration ran the new code against
             # the old schema for the length of the migration; a `run` before the
             # build would have applied the old image's migrations.
-            docker compose -f docker-compose.prod.yml build
-            docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
-            docker compose -f docker-compose.prod.yml up -d
+            $C build
+            # Stop the background workers BEFORE migrating.
+            #
+            # Migrations take locks on `jobs` — a share lock for CREATE INDEX,
+            # access exclusive for ALTER TABLE — and this step used to run with
+            # the old containers still writing. On the first real deployment
+            # that put CREATE INDEX behind an 11.5-hour write transaction from
+            # the old fetch cycle, and Postgres lock queues are FIFO, so every
+            # later writer queued behind it. The table was unusable for an hour
+            # and the deploy looked like it had hung.
+            #
+            # `web` deliberately stays up: it writes only in short transactions
+            # on user action, and stopping it would be downtime. The long
+            # transactions all come from the workers.
+            $C stop worker worker-interactive beat
+            if ! $C run --rm web alembic upgrade head; then
+              echo "migration failed — restarting workers on the previous image"
+              $C start worker worker-interactive beat
+              exit 1
+            fi
+            $C up -d
             # The Caddyfile is a read-only bind mount, so compose cannot see a
             # change to it and `up -d` leaves the proxy alone.
-            docker compose -f docker-compose.prod.yml restart caddy
+            $C restart caddy
 
       - name: Wait before final retry
         if: steps.deploy_first.outcome == 'failure' && steps.deploy_second.outcome == 'failure'
@@ -126,14 +164,33 @@ jobs:
           script: |
             set -e
             cd /opt/jobapp
+            C="docker compose -f docker-compose.prod.yml"
             git pull origin main
             # Build, migrate with the new image, then move traffic onto it.
             # `up -d --build` followed by a migration ran the new code against
             # the old schema for the length of the migration; a `run` before the
             # build would have applied the old image's migrations.
-            docker compose -f docker-compose.prod.yml build
-            docker compose -f docker-compose.prod.yml run --rm web alembic upgrade head
-            docker compose -f docker-compose.prod.yml up -d
+            $C build
+            # Stop the background workers BEFORE migrating.
+            #
+            # Migrations take locks on `jobs` — a share lock for CREATE INDEX,
+            # access exclusive for ALTER TABLE — and this step used to run with
+            # the old containers still writing. On the first real deployment
+            # that put CREATE INDEX behind an 11.5-hour write transaction from
+            # the old fetch cycle, and Postgres lock queues are FIFO, so every
+            # later writer queued behind it. The table was unusable for an hour
+            # and the deploy looked like it had hung.
+            #
+            # `web` deliberately stays up: it writes only in short transactions
+            # on user action, and stopping it would be downtime. The long
+            # transactions all come from the workers.
+            $C stop worker worker-interactive beat
+            if ! $C run --rm web alembic upgrade head; then
+              echo "migration failed — restarting workers on the previous image"
+              $C start worker worker-interactive beat
+              exit 1
+            fi
+            $C up -d
             # The Caddyfile is a read-only bind mount, so compose cannot see a
             # change to it and `up -d` leaves the proxy alone.
-            docker compose -f docker-compose.prod.yml restart caddy
+            $C restart caddy
