@@ -125,16 +125,125 @@ def fetch_jobs(self, only: list[str] | None = None, match_after: bool = True,
 # The scheduled groups
 # ---------------------------------------------------------------------------
 
+# Each scheduled group's interval, as the settings-page key that holds it.
+_INTERVAL_KEYS = {
+    "api": "fetch_api_interval_hours",
+    "boards": "fetch_boards_interval_hours",
+    "browser": "fetch_browser_interval_hours",
+}
+
+# A run due at 14:00 that the ten-minute tick reaches at 13:58 should go, not
+# wait for 14:08 and slip a little further every cycle.
+_DUE_SLACK_SECONDS = 300
+
+
+def _due(group: str) -> bool:
+    """
+    Whether this group's interval, as currently set, has passed since it ran.
+
+    Read from the profile on every call, so a change on the settings page
+    applies to the next tick. Any failure to tell answers "due": a missed run
+    is worse than an extra one, and the lock still prevents overlap.
+    """
+    from datetime import datetime, timezone
+
+    from app.models.fetch_run import FetchRun
+    from app.models.profile import Profile
+    from app.services.tunables import value as tunable
+
+    db = SessionLocal()
+    try:
+        profile = db.query(Profile).first()
+        hours = tunable(profile.data if profile else {}, _INTERVAL_KEYS[group])
+        last = (
+            db.query(FetchRun.started_at)
+            .filter(FetchRun.group == group)
+            .order_by(FetchRun.started_at.desc())
+            .limit(1)
+            .scalar()
+        )
+    except Exception as exc:
+        logger.warning("fetch: could not tell whether %s is due: %s", group, exc)
+        return True
+    finally:
+        db.close()
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    return elapsed >= float(hours) * 3600 - _DUE_SLACK_SECONDS
+
+
+def _scheduled(group: str) -> dict:
+    """A scheduled group run, if its interval has passed."""
+    try:
+        from app.services.fetch_lock import _client
+
+        _client().delete(f"jobapp:fetch:queued:{group}")
+    except Exception:
+        pass
+    if not _due(group):
+        return {**_EMPTY, "skipped_reason": "not due"}
+    return _run(group, None, True)
+
+
+@celery_app.task(name="app.tasks.fetch.dispatch_due_fetches", bind=False, max_retries=0)
+def dispatch_due_fetches() -> list[str]:
+    """
+    Queue every fetch group whose interval has passed and is not running.
+
+    Beat calls this on a short tick instead of scheduling each group itself,
+    because beat reads its schedule once at start — the intervals on the
+    settings page could not have reached it.
+    """
+    from app.services.fetch_lock import any_state
+
+    tasks = {"api": fetch_api_sources, "boards": fetch_ats_boards,
+             "browser": fetch_browser_tier}
+    queued = []
+    for group, task in tasks.items():
+        if group == "browser" and not settings.BROWSER_TIER_ENABLED:
+            continue
+        try:
+            if any_state((GROUP_LOCK_KEYS[group], LOCK_KEY)).get("running"):
+                continue
+        except Exception:
+            pass
+        if not _due(group):
+            continue
+        # One queued copy at a time. The batch worker can be busy for hours,
+        # and a tick every ten minutes would otherwise stack a copy per tick
+        # behind it — each harmless (it finds the group not due and returns),
+        # but a queue full of no-ops hides the work that is actually waiting.
+        try:
+            from app.services.fetch_lock import _client
+
+            if not _client().set(f"jobapp:fetch:queued:{group}", "1",
+                                 nx=True, ex=_QUEUED_MARKER_SECONDS):
+                continue
+        except Exception:
+            pass
+        task.delay()
+        queued.append(group)
+    return queued
+
+
+# Long enough to cover a busy worker, short enough that a lost task (a worker
+# killed before it ran) is re-queued within the hour.
+_QUEUED_MARKER_SECONDS = 3600
+
+
 @celery_app.task(name="app.tasks.fetch.fetch_api_sources", bind=False, max_retries=0)
 def fetch_api_sources() -> dict:
     """The cheap tier: keyed APIs and public feeds. Minutes, so run it often."""
-    return _run("api", None, True)
+    return _scheduled("api")
 
 
 @celery_app.task(name="app.tasks.fetch.fetch_ats_boards", bind=False, max_retries=0)
 def fetch_ats_boards() -> dict:
     """The company board registry: hundreds of slugs, one request each."""
-    return _run("boards", None, True)
+    return _scheduled("boards")
 
 
 @celery_app.task(name="app.tasks.fetch.fetch_browser_tier", bind=False, max_retries=0)
@@ -142,7 +251,7 @@ def fetch_browser_tier() -> dict:
     """Playwright. The most expensive thing here, and the least urgent."""
     if not settings.BROWSER_TIER_ENABLED:
         return {**_EMPTY, "skipped_reason": "disabled"}
-    return _run("browser", None, True)
+    return _scheduled("browser")
 
 
 @celery_app.task(name="app.tasks.fetch.sweep_linked_boards", bind=False, max_retries=0)

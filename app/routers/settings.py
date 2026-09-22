@@ -42,10 +42,7 @@ def _settings_context(profile) -> dict:
                     # Rebuilt per render for a dynamic tunable. A provider
                     # whose key was added since the process started would
                     # otherwise never appear in its own dropdown.
-                    "choices": (
-                        model_roles.choices(t.key.removeprefix("model_"))
-                        if t.dynamic else t.choices
-                    ),
+                    "choices": tunables.choices_for(t, data),
                 }
                 for t in tunables.TUNABLES if t.group == group
             ])
@@ -257,7 +254,9 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
 
     form = dict(await request.form())
     profile = get_or_create_profile(db)
-    profile.data = tunables.apply_to_profile(profile.data, tunables.parse_form(form))
+    profile.data = tunables.apply_to_profile(
+        profile.data, tunables.parse_form(form, profile.data)
+    )
     db.commit()
     return templates.TemplateResponse(
         "settings/index.html", _page_context(request, profile, db, True)

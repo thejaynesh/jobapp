@@ -1,9 +1,10 @@
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 import httpx
 
 from app.services.sources.base import (
+    age_cutoff,
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
@@ -16,10 +17,8 @@ logger = logging.getLogger(__name__)
 _BASE = "https://api.ashbyhq.com/posting-api/job-board/{slug}"
 
 
-def fetch(company_slugs: list[str]) -> list[dict]:
-    from app.config import settings
-    days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
+    cutoff = age_cutoff(max_age_days)
 
     def _fetch_one(slug: str) -> list[dict]:
         resp = httpx.get(_BASE.format(slug=slug), timeout=15)
@@ -31,7 +30,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
             if item.get("isListed") is False:
                 continue
             published_raw = item.get("publishedAt", "")
-            if published_raw:
+            if published_raw and cutoff is not None:
                 try:
                     published = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
                     if published < cutoff:

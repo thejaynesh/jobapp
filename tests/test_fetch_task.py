@@ -220,30 +220,29 @@ class TestFetchJobsTask:
 
     def test_beat_schedule_configured(self):
         """
-        The schedule runs the three groups, not one task for everything —
-        that is the whole point of the split, and scheduling the combined task
-        as well would fetch everything twice.
+        One short tick dispatches the three groups, not one task for
+        everything — scheduling the combined task as well would fetch
+        everything twice — and not a fixed schedule per group, which beat
+        reads once at start and so the settings page could never change.
         """
-        from app.celery_app import celery_app
+        from app.celery_app import FETCH_DISPATCH_TICK_SECONDS, celery_app
         schedule = celery_app.conf.beat_schedule
-        for key, task in (
-            ("fetch-api-sources", "app.tasks.fetch.fetch_api_sources"),
-            ("fetch-ats-boards", "app.tasks.fetch.fetch_ats_boards"),
-            ("fetch-browser-tier", "app.tasks.fetch.fetch_browser_tier"),
-        ):
-            assert key in schedule, key
-            assert schedule[key]["task"] == task
+        entry = schedule["dispatch-due-fetches"]
+        assert entry["task"] == "app.tasks.fetch.dispatch_due_fetches"
+        assert entry["schedule"].seconds == FETCH_DISPATCH_TICK_SECONDS
+        assert FETCH_DISPATCH_TICK_SECONDS <= 3600
+        for key in ("fetch-api-sources", "fetch-ats-boards", "fetch-browser-tier"):
+            assert key not in schedule, key
 
-    def test_beat_schedule_interval_matches_config(self):
+    def test_the_dispatcher_runs_on_the_interactive_queue(self):
+        """On the batch queue it would wait behind the fetches it schedules."""
+        from celery.app.routes import prepare
         from app.celery_app import celery_app
-        from app.config import settings
-        schedule = celery_app.conf.beat_schedule
-        for key, hours in (
-            ("fetch-api-sources", settings.FETCH_API_INTERVAL_HOURS),
-            ("fetch-ats-boards", settings.FETCH_BOARDS_INTERVAL_HOURS),
-            ("fetch-browser-tier", settings.FETCH_BROWSER_INTERVAL_HOURS),
-        ):
-            assert schedule[key]["schedule"].seconds == hours * 3600, key
+
+        route = next(
+            r for r in prepare(celery_app.conf.task_routes)
+        )("app.tasks.fetch.dispatch_due_fetches", (), {}, {})
+        assert route == {"queue": "interactive"}
 
     def test_the_cheap_tier_refreshes_more_often_than_the_expensive_one(self):
         # If they were equal the split would have bought nothing.
@@ -926,10 +925,11 @@ class TestFetchGroups:
     def test_the_schedule_runs_the_groups_not_the_monolith(self):
         from app.celery_app import celery_app
 
+        from app.tasks import fetch as fetch_task
+
         scheduled = {e["task"] for e in celery_app.conf.beat_schedule.values()}
-        assert "app.tasks.fetch.fetch_api_sources" in scheduled
-        assert "app.tasks.fetch.fetch_ats_boards" in scheduled
-        assert "app.tasks.fetch.fetch_browser_tier" in scheduled
+        assert "app.tasks.fetch.dispatch_due_fetches" in scheduled
+        assert set(fetch_task._INTERVAL_KEYS) == {"api", "boards", "browser"}
         # The combined task stays for the manual trigger, but nothing schedules
         # it — that would run everything twice.
         assert "app.tasks.fetch.fetch_jobs" not in scheduled
@@ -1069,3 +1069,75 @@ class TestAJobWeCouldNotStoreIsCountedAndNamed:
         accounted = sum(result[key] for key in
                         ("inserted", "merged", "skipped", "stale", "dropped"))
         assert accounted == result["fetched"] == 3
+
+
+
+class TestGroupIntervalsComeFromTheSettingsPage:
+    """
+    The fetch interval on the settings page was read by nothing: the schedule
+    had moved to three env variables read once by beat. Each group now asks
+    whether it is due by the interval stored on the profile.
+    """
+
+    def _last_run(self, db, group, hours_ago):
+        from datetime import timedelta
+        from app.models.fetch_run import FetchRun
+
+        db.add(FetchRun(started_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+                        group=group))
+        db.commit()
+
+    def _profile(self, db, **overrides):
+        from app.models.profile import Profile
+        from app.services import tunables
+
+        db.add(Profile(data={tunables.STORE_KEY: overrides}))
+        db.commit()
+
+    def _due(self, db, group):
+        from app.tasks import fetch as fetch_task
+
+        with patch("app.tasks.fetch.SessionLocal", return_value=db), \
+                patch.object(db, "close"):
+            return fetch_task._due(group)
+
+    def test_a_group_that_never_ran_is_due(self, db):
+        self._profile(db)
+        assert self._due(db, "api") is True
+
+    def test_the_stored_interval_decides(self, db):
+        self._profile(db, fetch_api_interval_hours=6)
+        self._last_run(db, "api", hours_ago=3)
+        assert self._due(db, "api") is False
+
+    def test_shortening_the_interval_makes_it_due_now(self, db):
+        self._profile(db, fetch_api_interval_hours=2)
+        self._last_run(db, "api", hours_ago=3)
+        assert self._due(db, "api") is True
+
+    def test_a_scheduled_run_that_is_not_due_does_nothing(self, db):
+        from app.tasks import fetch as fetch_task
+
+        with patch("app.tasks.fetch._due", return_value=False), \
+                patch("app.tasks.fetch._run") as run:
+            result = fetch_task.fetch_api_sources.apply().result
+        assert result["skipped_reason"] == "not due"
+        run.assert_not_called()
+
+    def test_the_dispatcher_queues_only_what_is_due(self):
+        from app.tasks import fetch as fetch_task
+
+        due = {"api": True, "boards": False, "browser": True}
+        with patch("app.tasks.fetch._due", side_effect=lambda g: due[g]), \
+                patch("app.services.fetch_lock.any_state", return_value={"running": False}), \
+                patch("app.services.fetch_lock._client") as client, \
+                patch.object(fetch_task.fetch_api_sources, "delay") as api, \
+                patch.object(fetch_task.fetch_ats_boards, "delay") as boards, \
+                patch.object(fetch_task.fetch_browser_tier, "delay") as browser, \
+                patch.object(fetch_task.settings, "BROWSER_TIER_ENABLED", True):
+            client.return_value.set.return_value = True
+            queued = fetch_task.dispatch_due_fetches()
+        assert queued == ["api", "browser"]
+        api.assert_called_once()
+        boards.assert_not_called()
+        browser.assert_called_once()

@@ -22,25 +22,22 @@ ROLLUP_WINDOW = 20
 # on Tuesday.
 AGENT_WINDOW_DAYS = 7
 
-# NIM models worth comparing for job matching, current default first.
-#
-# Reasoning models spend tokens thinking before they answer. The parser handles
-# the wrapping, and NIM_MATCH_MAX_TOKENS is now sized for it — with a ceiling
-# that only fits the JSON they get truncated mid-object, which reads as the
-# model being bad at scoring rather than as a budget that was too small.
-NIM_MODELS = [
-    "z-ai/glm-5.2",
-    "deepseek-ai/deepseek-v4-flash",
-    "meta/llama-3.3-70b-instruct",
-    "meta/llama-3.1-70b-instruct",
-    "qwen/qwen3-next-80b-a3b-instruct",
-    "mistralai/mistral-medium-3.5-128b",
-    "google/gemma-4-31b-it",
-    "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-    "meta/llama-3.1-8b-instruct",
-    "openai/gpt-oss-120b",
-    "nvidia/nemotron-3-super-120b-a12b",
-]
+def _nim_models(db: Session) -> list[str]:
+    """
+    NIM models worth comparing, current default first — the list edited on the
+    settings page, so a newly released model can be compared the day it lands.
+
+    Reasoning models spend tokens thinking before they answer. The parser
+    handles the wrapping, and NIM_MATCH_MAX_TOKENS is sized for it — with a
+    ceiling that only fits the JSON they get truncated mid-object, which reads
+    as the model being bad at scoring rather than as a budget too small.
+    """
+    from app.models.profile import Profile
+    from app.services.model_catalog import models
+
+    profile = db.query(Profile).first()
+    return models(profile.data if profile else {}, "nim")
+
 
 # Every source the fetcher knows about, for the manual-trigger picker.
 TRIGGERABLE_SOURCES = [
@@ -659,7 +656,7 @@ def _compare_context(request: Request, db: Session, queued: dict | None = None) 
         "request": request,
         "compare_result": record,
         "compare_progress": progress(record),
-        "compare_models_available": NIM_MODELS,
+        "compare_models_available": _nim_models(db),
         "current_model": settings.NVIDIA_NIM_MODEL,
         "queued": queued,
     }
@@ -693,7 +690,8 @@ def trigger_compare(request: Request, models: list[str] = Form(default=[]),
             _compare_context(request, db, {"ok": ok, "message": message}),
         )
 
-    wanted = [m for m in models if m in NIM_MODELS]
+    available = set(_nim_models(db))
+    wanted = [m for m in models if m in available]
     if len(wanted) < 2:
         return panel("Pick at least two models to compare.")
 

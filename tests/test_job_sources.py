@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -1641,3 +1642,75 @@ class TestABoardThatSendsNullWhereAnObjectGoes:
             results = fetch(app_id="ID", app_key="KEY", query="Python", location="NY")
 
         assert [(job["company"], job["location"]) for job in results] == [("", "")]
+
+
+class TestBoardAdaptersHonourTheMaximumAge:
+    """
+    Greenhouse, Lever and Ashby read `settings.MAX_JOB_AGE_DAYS` directly, so
+    the "Maximum job age" control on the settings page changed the fetcher's
+    filter and not theirs — and 0 ("no limit") became 30 inside them.
+    """
+
+    def _gh(self, days_old, **extra):
+        from datetime import timedelta
+        resp = MagicMock()
+        stamp = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+        resp.json.return_value = {"jobs": [{
+            "id": 1, "title": "SWE", "location": {"name": "NYC"},
+            "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "content": "desc", "updated_at": stamp, **extra,
+        }]}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_a_longer_window_keeps_an_older_posting(self):
+        from app.services.sources.greenhouse import fetch
+        with patch("httpx.get", return_value=self._gh(45)):
+            assert len(fetch(["acme"], max_age_days=60)) == 1
+        with patch("httpx.get", return_value=self._gh(45)):
+            assert fetch(["acme"], max_age_days=30) == []
+
+    def test_zero_means_no_limit(self):
+        from app.services.sources.greenhouse import fetch
+        with patch("httpx.get", return_value=self._gh(400)):
+            assert len(fetch(["acme"], max_age_days=0)) == 1
+
+    def test_first_published_is_the_posting_date(self):
+        """A re-saved old posting has a fresh updated_at; its age is its publication."""
+        from datetime import timedelta
+        from app.services.sources.greenhouse import fetch
+        old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        with patch("httpx.get", return_value=self._gh(1, first_published=old)):
+            assert fetch(["acme"], max_age_days=30) == []
+
+    def test_lever_and_ashby_take_the_window_too(self):
+        from datetime import timedelta
+        from app.services.sources import ashby, lever
+        created = (datetime.now(timezone.utc) - timedelta(days=45)).timestamp() * 1000
+        resp = MagicMock()
+        resp.json.return_value = [{"id": "x", "text": "SWE", "createdAt": created,
+                                   "categories": {"location": "NYC"},
+                                   "hostedUrl": "https://jobs.lever.co/acme/x"}]
+        with patch("httpx.get", return_value=resp):
+            assert len(lever.fetch(["acme"], max_age_days=60)) == 1
+            assert lever.fetch(["acme"], max_age_days=30) == []
+
+        published = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+        resp = MagicMock()
+        resp.json.return_value = {"jobs": [{"id": "y", "title": "SWE", "publishedAt": published,
+                                            "jobUrl": "https://jobs.ashbyhq.com/acme/y"}]}
+        with patch("httpx.get", return_value=resp):
+            assert len(ashby.fetch(["acme"], max_age_days=60)) == 1
+            assert ashby.fetch(["acme"], max_age_days=0) != []
+            assert ashby.fetch(["acme"], max_age_days=30) == []
+
+    def test_the_fetcher_passes_the_profile_override(self, db):
+        """The stored setting, not the environment, reaches the adapter."""
+        from app.services import tunables
+        from app.services.job_fetcher import _run_all_adapters
+
+        cfg = tunables.effective_settings({tunables.STORE_KEY: {"max_job_age_days": 90}})
+        with patch("app.services.sources.greenhouse.fetch", return_value=[]) as gh:
+            _run_all_adapters([], [], cfg, ats_slugs={"greenhouse": ["acme"]},
+                              only={"greenhouse"})
+        assert gh.call_args.kwargs["max_age_days"] == 90

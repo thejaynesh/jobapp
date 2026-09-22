@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass, field
 
 from app.config import settings
+from app.services.model_catalog import DEFAULT_NIM_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -69,19 +70,10 @@ TUNABLES: list[Tunable] = [
     ),
     Tunable(
         key="nvidia_nim_model", env="NVIDIA_NIM_MODEL", kind="choice",
-        choices=[
-            "z-ai/glm-5.2",
-            "deepseek-ai/deepseek-v4-flash",
-            "meta/llama-3.3-70b-instruct",
-            "meta/llama-3.1-70b-instruct",
-            "qwen/qwen3-next-80b-a3b-instruct",
-            "mistralai/mistral-medium-3.5-128b",
-            "google/gemma-4-31b-it",
-            "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-            "meta/llama-3.1-8b-instruct",
-            "openai/gpt-oss-120b",
-            "nvidia/nemotron-3-super-120b-a12b",
-        ],
+        # The NIM list on this page, editable under "Model lists" — see
+        # `model_catalog`. Dynamic so a model added there is accepted here.
+        choices=list(DEFAULT_NIM_MODELS),
+        dynamic=True,
         label="Matching model",
         help="Which NIM model scores your jobs. Compare candidates on the runs "
              "page first — the count that matters there is unreadable replies.",
@@ -145,11 +137,33 @@ TUNABLES: list[Tunable] = [
         help="10 results a page. Deeper pages return looser matches and more "
              "undated postings, so more isn't always better.",
     ),
+    # The three scheduled fetch groups. Beat ticks every few minutes and each
+    # group checks its interval against its own last run, so a change here
+    # takes effect on the next tick — no restart. The single "fetch interval"
+    # this replaced was read by nothing: the schedule had moved to these three
+    # environment variables and the setting on this page stayed behind.
     Tunable(
-        key="fetch_interval_hours", env="FETCH_INTERVAL_HOURS", kind="int",
-        minimum=1, maximum=168, group="Schedule", restart_required=True,
-        label="Fetch interval (hours)",
-        help="How often the scheduled cycle runs.",
+        key="fetch_api_interval_hours", env="FETCH_API_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Schedule",
+        label="API sources: every (hours)",
+        help="Keyed APIs and public feeds (Adzuna, LinkedIn guest, RemoteOK…). "
+             "Minutes per run. Lower catches postings sooner and spends more of "
+             "each provider's quota.",
+    ),
+    Tunable(
+        key="fetch_boards_interval_hours", env="FETCH_BOARDS_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=168, group="Schedule",
+        label="Company boards: every (hours)",
+        help="Greenhouse, Lever, Workday and the rest of the board registry. "
+             "A run can take hours; one that is still going when the next is "
+             "due is skipped rather than doubled.",
+    ),
+    Tunable(
+        key="fetch_browser_interval_hours", env="FETCH_BROWSER_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=168, group="Schedule",
+        label="Browser tier: every (hours)",
+        help="The Playwright scrapers — the most expensive tier and the least "
+             "productive per minute, so the least often.",
     ),
 ]
 
@@ -185,6 +199,23 @@ TUNABLES.extend(_model_role_tunables())
 
 BY_KEY: dict[str, Tunable] = {t.key: t for t in TUNABLES}
 
+
+def choices_for(tunable: Tunable, profile_data: dict | None) -> list[str]:
+    """
+    The options to render for a choice tunable, built now rather than at import.
+
+    Model lists are edited on the settings page and provider keys come and go,
+    so a list captured at process start would hide exactly the model somebody
+    just added.
+    """
+    if not tunable.dynamic:
+        return tunable.choices
+    from app.services import model_catalog, model_roles
+
+    if tunable.key == "nvidia_nim_model":
+        return model_catalog.models(profile_data, "nim")
+    return model_roles.choices(tunable.key.removeprefix("model_"), profile_data)
+
 GROUPS: list[str] = list(dict.fromkeys(t.group for t in TUNABLES))
 
 
@@ -215,11 +246,15 @@ def coerce(tunable: Tunable, raw):
         if tunable.kind == "choice":
             text = str(raw).strip()
             if tunable.dynamic:
-                # Anything non-empty. `model_roles.resolve` already falls back
-                # when a setting names a provider that is no longer configured,
-                # and losing the setting outright is worse than carrying one
-                # that is briefly stale.
-                return text or None
+                # Anything shaped like a model id. `model_roles.resolve` already
+                # falls back when a setting names a provider that is no longer
+                # configured, and losing the setting outright is worse than
+                # carrying one that is briefly stale. Membership in the current
+                # list is checked when the form is saved (see `parse_form`),
+                # where the profile's model lists are to hand.
+                from app.services.model_catalog import is_model_id
+
+                return text if text and is_model_id(text) else None
             return text if text in tunable.choices else None
         number = float(raw)
     except (TypeError, ValueError):
@@ -262,12 +297,16 @@ def is_overridden(profile_data: dict | None, key: str) -> bool:
     return value(profile_data, key) != default(BY_KEY[key])
 
 
-def parse_form(form: dict) -> dict:
+def parse_form(form: dict, profile_data: dict | None = None) -> dict:
     """
     Coerce a submitted form into the stored override dict.
 
     Unchecked checkboxes don't appear in a form body at all, so booleans are
     read as absent-means-false rather than skipped like the other kinds.
+
+    A model is only accepted if it is on the list the page offered — the model
+    lists edited under "Model lists" — because the id goes straight to the
+    provider. Pass the profile so that list can be read.
     """
     parsed = {}
     for tunable in TUNABLES:
@@ -277,8 +316,13 @@ def parse_form(form: dict) -> dict:
         if tunable.key not in form:
             continue
         coerced = coerce(tunable, form[tunable.key])
-        if coerced is not None:
-            parsed[tunable.key] = coerced
+        if coerced is None:
+            continue
+        if tunable.dynamic and coerced not in choices_for(tunable, profile_data):
+            logger.warning("tunables: %s=%r is not on the offered list; ignored",
+                           tunable.key, coerced)
+            continue
+        parsed[tunable.key] = coerced
     return parsed
 
 

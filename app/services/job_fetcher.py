@@ -275,7 +275,8 @@ def _run_all_adapters(
     if greenhouse_slugs and not _skip("greenhouse"):
         from app.services.sources.greenhouse import fetch as gh_fetch
         try:
-            jobs = gh_fetch(company_slugs=greenhouse_slugs)
+            jobs = gh_fetch(company_slugs=greenhouse_slugs,
+                            max_age_days=getattr(cfg, "MAX_JOB_AGE_DAYS", None))
             _record(stats, "greenhouse", jobs)
             all_jobs.extend(jobs)
         except Exception as exc:
@@ -289,7 +290,8 @@ def _run_all_adapters(
     if lever_slugs and not _skip("lever"):
         from app.services.sources.lever import fetch as lever_fetch
         try:
-            jobs = lever_fetch(company_slugs=lever_slugs)
+            jobs = lever_fetch(company_slugs=lever_slugs,
+                               max_age_days=getattr(cfg, "MAX_JOB_AGE_DAYS", None))
             _record(stats, "lever", jobs)
             all_jobs.extend(jobs)
         except Exception as exc:
@@ -303,7 +305,8 @@ def _run_all_adapters(
     if ashby_slugs and not _skip("ashby"):
         from app.services.sources.ashby import fetch as ashby_fetch
         try:
-            jobs = ashby_fetch(company_slugs=ashby_slugs)
+            jobs = ashby_fetch(company_slugs=ashby_slugs,
+                               max_age_days=getattr(cfg, "MAX_JOB_AGE_DAYS", None))
             _record(stats, "ashby", jobs)
             all_jobs.extend(jobs)
         except Exception as exc:

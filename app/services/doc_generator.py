@@ -17,7 +17,13 @@ from jinja2 import Environment, FileSystemLoader
 from app.config import settings
 # Quality-first multi-provider chat (Anthropic -> Gemini -> passed-in primary);
 # keeps the single-provider chat_completion signature.
-from app.llm.providers import generation_chat as chat_completion
+from app.llm.providers import generation_chat
+
+
+def chat_completion(*args, **kwargs):
+    """`generation_chat` as the "Writing documents" model role."""
+    kwargs.setdefault("role", "generate")
+    return generation_chat(*args, **kwargs)
 
 logger = logging.getLogger(__name__)
 

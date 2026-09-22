@@ -91,23 +91,6 @@ ROLES_BY_KEY = {role.key: role for role in ROLES}
 # The setting value meaning "use this role's preference order".
 AUTO = "auto"
 
-# NIM models worth offering. The same list the runs page compares against —
-# kept here because this is now the module that answers "which models exist".
-NIM_MODELS = (
-    "z-ai/glm-5.2",
-    "deepseek-ai/deepseek-v4-flash",
-    "meta/llama-3.3-70b-instruct",
-    "meta/llama-3.1-70b-instruct",
-    "qwen/qwen3-next-80b-a3b-instruct",
-    "mistralai/mistral-medium-3.5-128b",
-    "google/gemma-4-31b-it",
-    "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-    "meta/llama-3.1-8b-instruct",
-    "openai/gpt-oss-120b",
-    "nvidia/nemotron-3-super-120b-a12b",
-)
-
-
 def tunable_key(role_key: str) -> str:
     return f"model_{role_key}"
 
@@ -122,7 +105,7 @@ def _providers() -> dict:
     return providers
 
 
-def available(role_key: str = "") -> list[tuple[str, str]]:
+def available(role_key: str = "", profile_data: dict | None = None) -> list[tuple[str, str]]:
     """
     Every `(value, label)` a role may be set to, "auto" first.
 
@@ -141,7 +124,11 @@ def available(role_key: str = "") -> list[tuple[str, str]]:
         provider = providers.get(name)
         if provider is None:
             continue
-        models = NIM_MODELS if name == "nim" else (provider.model,)
+        from app.services.model_catalog import models as catalog_models
+
+        # The provider's editable list, so a model released last week is one
+        # line on the settings page away from every dropdown here.
+        models = catalog_models(profile_data, name) or [provider.model]
         for model in models:
             if not model:
                 continue
@@ -149,9 +136,30 @@ def available(role_key: str = "") -> list[tuple[str, str]]:
     return options
 
 
-def choices(role_key: str = "") -> list[str]:
+def choices(role_key: str = "", profile_data: dict | None = None) -> list[str]:
     """Just the values, for a `choice` tunable."""
-    return [value for value, _ in available(role_key)]
+    return [value for value, _ in available(role_key, profile_data)]
+
+
+def pinned(profile_data: dict | None, role_key: str):
+    """
+    The provider this role was explicitly set to, or None when it is on auto.
+
+    For the call paths that keep their own fallback chains — scoring, the
+    second pass, generation, extraction. They were written before roles
+    existed and each encodes something worth keeping (NIM's rate-limit loop,
+    the paid-call budget, the "not the same model twice" rule for a second
+    opinion), so a pinned model goes *first* in the chain rather than
+    replacing it. Auto leaves every chain exactly as it was.
+    """
+    from app.services.tunables import value as tunable
+
+    if role_key not in ROLES_BY_KEY:
+        return None
+    chosen = str(tunable(profile_data or {}, tunable_key(role_key)) or AUTO)
+    if chosen == AUTO:
+        return None
+    return resolve(profile_data, role_key)
 
 
 def resolve(profile_data: dict | None, role_key: str):

@@ -164,6 +164,7 @@ def critique(
 
     try:
         raw = generation_chat(
+            role="generate",
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},

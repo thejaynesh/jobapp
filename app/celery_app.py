@@ -65,6 +65,9 @@ celery_app.conf.update(
     # docker-compose.prod.yml), so a long pass cannot starve a button.
     task_default_queue="interactive",
     task_routes={
+        # The dispatcher only reads timestamps and queues work. On the batch
+        # queue it would wait behind the multi-hour fetches it is scheduling.
+        "app.tasks.fetch.dispatch_due_fetches": {"queue": "interactive"},
         "app.tasks.fetch.*": {"queue": "batch"},
         "app.tasks.match.*": {"queue": "batch"},
         "app.tasks.enrich.*": {"queue": "batch"},
@@ -86,22 +89,22 @@ celery_app.conf.update(
     },
 )
 
+# How often beat asks whether a fetch group is due. Short next to any interval
+# a person would set, so an hourly group runs within a few minutes of the hour.
+FETCH_DISPATCH_TICK_SECONDS = 600
+
 celery_app.conf.beat_schedule = {
     # Fetching in three slices rather than one. The combined task still exists
     # for the manual trigger, but nothing schedules it: one 47-minute cycle
     # meant Adzuna refreshed on the schedule of a Chromium launch, and every
     # posting arrived hours later than it could have.
-    "fetch-api-sources": {
-        "task": "app.tasks.fetch.fetch_api_sources",
-        "schedule": celery_schedule(settings.FETCH_API_INTERVAL_HOURS * 3600),
-    },
-    "fetch-ats-boards": {
-        "task": "app.tasks.fetch.fetch_ats_boards",
-        "schedule": celery_schedule(settings.FETCH_BOARDS_INTERVAL_HOURS * 3600),
-    },
-    "fetch-browser-tier": {
-        "task": "app.tasks.fetch.fetch_browser_tier",
-        "schedule": celery_schedule(settings.FETCH_BROWSER_INTERVAL_HOURS * 3600),
+    # One tick for the three fetch groups rather than a fixed schedule each.
+    # A fixed schedule is read once when beat starts, so the intervals on the
+    # settings page could not change it; the tick asks each group whether it
+    # is due by its *current* setting and queues the ones that are.
+    "dispatch-due-fetches": {
+        "task": "app.tasks.fetch.dispatch_due_fetches",
+        "schedule": celery_schedule(FETCH_DISPATCH_TICK_SECONDS),
     },
     # Boards with a stored credential, asked over their own API. Its own entry
     # rather than a fourth fetch group because it is the one source that can be

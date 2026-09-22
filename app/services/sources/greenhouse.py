@@ -1,10 +1,10 @@
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 import httpx
 
-from app.config import settings
 from app.services.sources.base import (
+    age_cutoff,
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
@@ -13,15 +13,8 @@ from app.services.sources.base import (
 logger = logging.getLogger(__name__)
 
 
-def _cutoff() -> datetime:
-    # Align with the fetcher's freshness window: a 25h cutoff hid every existing
-    # opening at newly configured/discovered companies. Dedupe absorbs re-fetches.
-    days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
-    return datetime.now(timezone.utc) - timedelta(days=days)
-
-
-def fetch(company_slugs: list[str]) -> list[dict]:
-    cutoff = _cutoff()
+def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
+    cutoff = age_cutoff(max_age_days)
 
     def _fetch_one(slug: str) -> list[dict]:
         url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
@@ -31,11 +24,14 @@ def fetch(company_slugs: list[str]) -> list[dict]:
 
         jobs = []
         for item in data.get("jobs", []):
-            updated_raw = item.get("updated_at", "")
-            if updated_raw:
+            # `first_published` is when the posting went up; `updated_at` moves
+            # on every edit, so an old requisition someone re-saved looked new
+            # and a posting's age read as the age of its last typo fix.
+            dated_raw = item.get("first_published") or item.get("updated_at") or ""
+            if dated_raw and cutoff is not None:
                 try:
-                    updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
-                    if updated < cutoff:
+                    dated = datetime.fromisoformat(dated_raw.replace("Z", "+00:00"))
+                    if dated < cutoff:
                         continue
                 except Exception:
                     pass
@@ -52,7 +48,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "url": item.get("absolute_url", ""),
                 "description": desc,
                 "experience_level": parse_experience_level(title, desc),
-                "posted_at": item.get("updated_at"),
+                "posted_at": dated_raw or None,
             })
         return jobs
 

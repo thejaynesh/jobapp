@@ -70,6 +70,31 @@ def fetch_boards_concurrently(
     return jobs
 
 
+def age_cutoff(max_age_days=None):
+    """
+    The oldest posting date a board adapter should keep, or None for no limit.
+
+    `max_age_days` is the value the fetcher resolved from the settings page;
+    None means the caller did not pass one (the environment then decides). Zero
+    means no limit, as it does in the fetcher. These adapters used to read the
+    environment directly and turn 0 into 30 — so the "Maximum job age" setting
+    changed the fetcher's filter and silently not theirs.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if max_age_days is None:
+        from app.config import settings
+
+        max_age_days = getattr(settings, "MAX_JOB_AGE_DAYS", 30)
+    try:
+        days = float(max_age_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
 def board_workers() -> int:
     from app.config import settings
     return getattr(settings, "ATS_BOARD_FETCH_WORKERS", DEFAULT_BOARD_WORKERS)

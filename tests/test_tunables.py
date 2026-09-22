@@ -91,10 +91,22 @@ class TestCoercion:
         assert tunables.coerce(tunables.BY_KEY["filter_senior_titles"],
                                raw) is expected
 
-    def test_an_unlisted_model_is_refused(self):
-        """The id goes straight to the provider; only the curated list runs."""
-        assert tunables.coerce(tunables.BY_KEY["nvidia_nim_model"],
-                               "attacker/whatever") is None
+    def test_a_malformed_model_is_refused(self):
+        """The id goes straight to the provider and into a <select>."""
+        for raw in ("<script>x</script>", "two words", ""):
+            assert tunables.coerce(tunables.BY_KEY["nvidia_nim_model"], raw) is None
+
+    def test_an_unlisted_model_is_refused_on_save(self):
+        """Only the list the page offered runs — which is now the user's list."""
+        parsed = tunables.parse_form({"nvidia_nim_model": "attacker/whatever"}, {})
+        assert "nvidia_nim_model" not in parsed
+
+    def test_a_model_added_to_the_list_can_be_chosen(self):
+        from app.services import model_catalog
+
+        data = model_catalog.store({}, "nim", ["vendor/brand-new-model"])
+        parsed = tunables.parse_form({"nvidia_nim_model": "vendor/brand-new-model"}, data)
+        assert parsed["nvidia_nim_model"] == "vendor/brand-new-model"
 
     def test_nonsense_numbers_are_none(self):
         assert tunables.coerce(tunables.BY_KEY["max_job_age_days"], "soon") is None

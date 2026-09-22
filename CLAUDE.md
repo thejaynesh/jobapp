@@ -75,20 +75,6 @@ Which one depends on whether you have the profile to hand.
   one and threads it through `_run_all_adapters` as `cfg`, so adapters have it
   without needing a session of their own.
 
-### Known debt
-
-`app/services/sources/greenhouse.py`, `lever.py` and `ashby.py` each compute
-their freshness cutoff from the module-level `settings.MAX_JOB_AGE_DAYS`,
-ignoring the `cfg` overlay their caller already has. So the "Maximum job age"
-control on the settings page works for `job_fetcher` and silently does nothing
-for those three adapters — precisely the failure mode above, live in the repo
-today.
-
-The fix is to take the value from `cfg` rather than `settings`, which means
-`_cutoff()` accepting it and `fetch()` passing it down. Not a one-liner: three
-adapters, their call sites in `job_fetcher`, and their tests. Worth doing next
-time any of those files is open.
-
 ---
 
 ## Testing

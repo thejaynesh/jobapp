@@ -449,6 +449,7 @@ def compose_message(
     try:
         with llm_log.stage(f"outreach_{kind}"[:40]):
             raw = generation_chat(
+                role="generate",
                 messages=messages,
                 api_key=settings.NVIDIA_NIM_API_KEY,
                 base_url=settings.NVIDIA_NIM_BASE_URL,

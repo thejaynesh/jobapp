@@ -532,6 +532,7 @@ def llm_extraction(html: str, job_id=None) -> Extraction:
                 model=settings.NVIDIA_NIM_MODEL,
                 temperature=0.0,
                 max_tokens=4096,
+                role="extract",
             )
     except Exception as exc:
         logger.warning("enrichment: LLM extraction failed: %s", exc)

@@ -1,10 +1,9 @@
 import logging
-from datetime import datetime, timezone, timedelta
 
 import httpx
 
-from app.config import settings
 from app.services.sources.base import (
+    age_cutoff,
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
@@ -13,11 +12,10 @@ from app.services.sources.base import (
 logger = logging.getLogger(__name__)
 
 
-def fetch(company_slugs: list[str]) -> list[dict]:
-    # Align with the fetcher's freshness window (was 25h, which hid every
-    # existing opening at newly configured/discovered companies).
-    days = getattr(settings, "MAX_JOB_AGE_DAYS", 30) or 30
-    cutoff_ms = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000
+def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
+    # The fetcher's freshness window, as set on the settings page.
+    cutoff = age_cutoff(max_age_days)
+    cutoff_ms = cutoff.timestamp() * 1000 if cutoff is not None else 0
 
     def _fetch_one(slug: str) -> list[dict]:
         url = f"https://api.lever.co/v0/postings/{slug}?mode=json"

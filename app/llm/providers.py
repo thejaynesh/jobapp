@@ -279,7 +279,10 @@ def _with_match_model(name: str, provider: Provider) -> Provider:
     return replace(provider, model=match_model(settings) or provider.model)
 
 
-def matching_fallbacks() -> list[Provider]:
+_UNSET = object()
+
+
+def matching_fallbacks(first=_UNSET) -> list[Provider]:
     """
     Providers to try (in order) when the primary matching provider fails.
     Matching is high-volume JSON scoring, so the Anthropic entry uses the cheap
@@ -289,15 +292,19 @@ def matching_fallbacks() -> list[Provider]:
     failed, immediately, is a call spent to watch it fail again. NIM joins the
     end of the chain when it is not the one going first, so switching the
     primary moves it down rather than removing it.
+
+    `first` is whatever went first when the caller chose it itself — a model
+    pinned on the settings page. Left out, it is the configured primary.
     """
-    primary = primary_matching_provider()
+    primary = primary_matching_provider() if first is _UNSET else first
     providers = configured_providers()
     chain = []
     for name in MATCHING_PREFERENCE:
         if name not in providers or (primary is not None and name == primary.name):
             continue
         chain.append(_with_match_model(name, providers[name]))
-    if primary is not None and settings.NVIDIA_NIM_API_KEY:
+    if (primary is not None and primary.name != "nim"
+            and settings.NVIDIA_NIM_API_KEY):
         chain.append(nim_provider())
     return chain
 
@@ -378,18 +385,31 @@ def generation_chat(
     model: str,
     temperature: float = 0.1,
     max_tokens: int = 512,
+    role: str | None = None,
+    profile_data: dict | None = None,
 ) -> str:
     """
     Chat completion for document generation: try quality providers first
     (Anthropic, then Gemini), then fall back to the passed-in primary
     (NVIDIA NIM) credentials. Signature matches the old single-provider
     chat_completion so call sites and tests are unchanged.
+
+    `role` names the model role this call serves ("generate", "extract"). When
+    that role is pinned to a model on the settings page, that model goes first
+    and the usual chain stays behind it as the fallback. Without this the
+    role's dropdown saved and changed nothing.
     """
     providers = configured_providers()
     chain: list[Provider] = [
         providers[name] for name in GENERATION_PREFERENCE if name in providers
     ]
     chain.append(Provider(name="primary", api_key=api_key, model=model, base_url=base_url))
+    if role:
+        chosen = _pinned_for(role, profile_data)
+        if chosen is not None:
+            chain = [chosen] + [
+                p for p in chain if provider_label(p) != provider_label(chosen)
+            ]
 
     last_exc: Exception | None = None
     for provider in chain:
@@ -404,3 +424,38 @@ def generation_chat(
             last_exc = exc
             logger.warning("generation_chat: provider %s failed: %s", provider.name, exc)
     raise last_exc if last_exc else RuntimeError("no LLM providers configured")
+
+
+def _pinned_for(role: str, profile_data: dict | None) -> "Provider | None":
+    """The model a role is pinned to, reading the profile if not handed one."""
+    from app.services import model_roles
+
+    if profile_data is None:
+        profile_data = _current_profile_data()
+    try:
+        return model_roles.pinned(profile_data, role)
+    except Exception as exc:
+        logger.warning("model role %s could not be resolved: %s", role, exc)
+        return None
+
+
+def _current_profile_data() -> dict:
+    """
+    The profile, for a call site that has no session to hand.
+
+    Enrichment and extraction run deep inside helpers that were never given the
+    profile. One short query is cheap next to the LLM call it precedes.
+    """
+    try:
+        from app.database import SessionLocal
+        from app.models.profile import Profile
+
+        db = SessionLocal()
+        try:
+            profile = db.query(Profile).first()
+            return dict(profile.data or {}) if profile else {}
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("could not read the profile for model roles: %s", exc)
+        return {}

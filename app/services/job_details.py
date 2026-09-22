@@ -290,6 +290,7 @@ def extract(description: str, job_id=None) -> dict | None:
                 model=settings.NVIDIA_NIM_MODEL,
                 temperature=0.0,
                 max_tokens=1024,
+                role="extract",
             )
     except Exception as exc:
         logger.warning("job_details: extraction call failed: %s", exc)

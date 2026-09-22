@@ -834,14 +834,15 @@ def _retry_delays() -> list[int]:
     return [int(interval * 2), 65]
 
 
-def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None) -> dict | None:
+def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None,
+                        first=None, pinned: bool = False) -> dict | None:
     """
     Try the secondary (paid) providers; None if all fail, none are set, or the
     per-cycle paid-call budget is exhausted. `budget` is a mutable counter dict
     shared across one matching cycle: {"paid_calls": int}.
     """
     cap = getattr(settings, "MAX_PAID_MATCH_CALLS_PER_CYCLE", 150)
-    for provider in matching_fallbacks():
+    for provider in (matching_fallbacks(first) if pinned else matching_fallbacks()):
         # The cap exists to stop a NIM outage turning into a surprise bill. A
         # provider that cannot bill — a fixed free daily allowance — has nothing
         # to be surprised by, and counting its calls would spend the budget
@@ -901,8 +902,20 @@ def _llm_score_job(
     # matching pass that bypassed the gate would collide with every document
     # generation running beside it.
     from app.llm.providers import primary_matching_provider
+    from app.services import model_roles
 
-    primary = primary_matching_provider()
+    # A model pinned to "Scoring jobs" on the settings page goes first. NIM
+    # keeps its own path below (the rate-limit loop is sized to it); anything
+    # else goes through `call_provider` like the configured primary does.
+    chosen = model_roles.pinned(profile_data, "match")
+    pinned = chosen is not None
+    if chosen is not None and chosen.name == "nim":
+        model = chosen.model
+        primary = None
+    elif chosen is not None:
+        primary = chosen
+    else:
+        primary = primary_matching_provider()
     if primary is not None:
         try:
             # Already inside `llm_score_job`'s "match" stage, so the call is
@@ -922,7 +935,7 @@ def _llm_score_job(
                 "llm_score_job: primary provider %s failed for job %s: %s",
                 primary.name, getattr(job, "id", "?"), exc,
             )
-            result = _score_via_fallbacks(messages, job, budget)
+            result = _score_via_fallbacks(messages, job, budget, primary, pinned)
             if result is not None:
                 return result
             raise LLMUnavailableError(str(exc)) from exc
@@ -953,7 +966,7 @@ def _llm_score_job(
 
     # Primary provider exhausted — try the configured fallback providers before
     # giving up, so a NIM outage/rate-limit doesn't stall matching.
-    result = _score_via_fallbacks(messages, job, budget)
+    result = _score_via_fallbacks(messages, job, budget, None, pinned)
     if result is not None:
         return result
 
@@ -1018,7 +1031,15 @@ def _deep_score(job, profile_data: dict, score: float,
     # let FreeInference serve as its own second opinion on 117 of 121 jobs,
     # for an average shift of -2.2 points. `job.matched_by` is set a few lines
     # above this call and is the only record of who actually replied.
-    chain = deep_matching_chain(exclude_label=getattr(job, "matched_by", "") or "")
+    exclude = getattr(job, "matched_by", "") or ""
+    chain = deep_matching_chain(exclude_label=exclude)
+    # A model pinned to "Second-pass scoring" goes first — unless it is the
+    # one that just gave the first score, for the reason above.
+    from app.services import model_roles
+
+    chosen = model_roles.pinned(profile_data, "match_deep")
+    if chosen is not None and provider_label(chosen) != exclude:
+        chain = [chosen] + [c for c in chain if provider_label(c) != provider_label(chosen)]
     if not chain:
         # Nothing configured that is stronger than the primary: re-asking the
         # same model the same question is a call spent to hear the same answer.
@@ -1286,6 +1307,14 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
     profile = db.query(Profile).first()
     profile_data = profile.data if profile else {}
     model = tunable(profile_data, "nvidia_nim_model")
+
+    # Pacing follows whichever model actually goes first: NIM's RPM sleep means
+    # nothing to a pinned provider that queues on concurrency instead.
+    from app.services import model_roles
+
+    chosen = model_roles.pinned(profile_data, "match")
+    if chosen is not None:
+        pace_interval = _rpm_interval() if chosen.name == "nim" else 0.0
 
     query = db.query(Job).filter(Job.status == JobStatus.new).order_by(Job.fetched_at.desc())
     if limit is not None:
