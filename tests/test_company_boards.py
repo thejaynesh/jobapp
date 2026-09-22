@@ -493,3 +493,40 @@ class TestSummaryDistinguishesInactiveStates:
         record_boards(db, {"greenhouse": ["unproven"]}, origin="discovered")
         db.flush()
         assert retired_boards(db) == []
+
+
+class TestBoardJobsCarryTheEmployersName:
+    """
+    Board adapters file a posting under its slug ("doordashusa"), so the same
+    opening seen on LinkedIn as "DoorDash" never deduplicated against it and an
+    excluded-companies entry never matched it. The registry knows the name.
+    """
+
+    def test_a_slug_company_takes_the_registry_name(self, db):
+        from app.services.job_fetcher import _name_board_jobs
+
+        board = _board(db, slug="doordashusa")
+        board.company = "DoorDash"
+        db.flush()
+        jobs = [{"source": "greenhouse", "ats_slug": "doordashusa", "company": "doordashusa"},
+                {"source": "greenhouse", "ats_slug": "doordashusa", "company": ""}]
+        assert _name_board_jobs(db, jobs) == 2
+        assert [j["company"] for j in jobs] == ["DoorDash", "DoorDash"]
+
+    def test_a_name_the_adapter_read_is_kept(self, db):
+        from app.services.job_fetcher import _name_board_jobs
+
+        board = _board(db, slug="acme")
+        board.company = "Acme Holdings"
+        db.flush()
+        jobs = [{"source": "greenhouse", "ats_slug": "acme", "company": "Acme Robotics"}]
+        assert _name_board_jobs(db, jobs) == 0
+        assert jobs[0]["company"] == "Acme Robotics"
+
+    def test_a_board_with_no_better_name_changes_nothing(self, db):
+        from app.services.job_fetcher import _name_board_jobs
+
+        _board(db, slug="plainco")
+        jobs = [{"source": "greenhouse", "ats_slug": "plainco", "company": "plainco"}]
+        _name_board_jobs(db, jobs)
+        assert jobs[0]["company"] == "plainco"

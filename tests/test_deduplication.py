@@ -639,3 +639,44 @@ class TestTheMigrationsFrozenCopyStillAgrees:
 
         assert self.frozen()._new_hash(company, title, location) == \
             compute_dedupe_hash(company, title, location)
+
+
+class TestAPostingWithNoCompany:
+    """
+    With the company blank, company|title|location degenerated to title and
+    location, so every blank-company "Software Engineer / Remote" from every
+    source hashed alike and the second employer's opening was merged away.
+    """
+
+    def test_two_blank_company_postings_hash_apart(self):
+        from app.services.deduplication import compute_dedupe_hash
+        a = compute_dedupe_hash("", "Software Engineer", "Remote", "https://a.example/1")
+        b = compute_dedupe_hash("", "Software Engineer", "Remote", "https://b.example/2")
+        assert a != b
+
+    def test_the_same_blank_company_posting_hashes_the_same(self):
+        from app.services.deduplication import compute_dedupe_hash
+        url = "https://a.example/1"
+        assert compute_dedupe_hash("", "SWE", "Remote", url) == \
+            compute_dedupe_hash(" ", "SWE", "Remote", url)
+
+    def test_a_named_company_still_dedupes_across_sources(self):
+        from app.services.deduplication import compute_dedupe_hash
+        assert compute_dedupe_hash("Acme Inc", "Sr. Engineer", "Boston, MA", "https://x/1") == \
+            compute_dedupe_hash("Acme", "Senior Engineer", "Boston", "https://y/2")
+
+    def test_the_fetcher_stores_both(self, db):
+        from app.models.profile import Profile
+        from app.services import job_fetcher
+
+        db.add(Profile(data={"target_roles": ["Software Engineer"]}))
+        db.commit()
+        jobs = [
+            {"source": "remoteok", "url": f"https://example.com/{i}", "title": "Software Engineer",
+             "company": "", "location": "Remote", "description": "x"}
+            for i in range(2)
+        ]
+        from unittest.mock import patch
+        with patch.object(job_fetcher, "_run_all_adapters", return_value=(jobs, {})):
+            counts = job_fetcher.fetch_and_save_jobs(db)
+        assert counts["inserted"] == 2

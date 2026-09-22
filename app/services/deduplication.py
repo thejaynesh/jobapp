@@ -105,9 +105,25 @@ def normalize_location(location: str) -> str:
     return " ".join(kept or tokens)
 
 
-def compute_dedupe_hash(company: str, title: str, location: str) -> str:
+def compute_dedupe_hash(company: str, title: str, location: str,
+                        identity: str = "") -> str:
+    """
+    The cross-source identity of a posting: who, what and where.
+
+    Without a company there is no "who", and the hash degenerates to title and
+    location — so every blank-company "Software Engineer / Remote" from every
+    source hashed the same, and the second employer's posting was merged into
+    the first's and never stored. The column is unique, so those rows cannot
+    simply skip the comparison; they hash by their own `identity` (the URL)
+    instead, and are only ever matched as the same posting, never as a
+    cross-post.
+    """
+    company_key = normalize_company(company)
+    if not company_key and identity:
+        payload = f"anonymous|{identity.strip()}"
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
     payload = (
-        f"{normalize_company(company)}|{normalize_title(title)}|{normalize_location(location)}"
+        f"{company_key}|{normalize_title(title)}|{normalize_location(location)}"
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 

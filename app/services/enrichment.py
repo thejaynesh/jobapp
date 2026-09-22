@@ -741,7 +741,8 @@ def _rehash(db, job: Job) -> None:
 
     from app.services.deduplication import compute_dedupe_hash
 
-    fresh = compute_dedupe_hash(job.company or "", job.title or "", job.location or "")
+    fresh = compute_dedupe_hash(job.company or "", job.title or "", job.location or "",
+                                job.url or "")
     if fresh == job.dedupe_hash:
         return
     taken = db.execute(

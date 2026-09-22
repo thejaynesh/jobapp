@@ -705,6 +705,56 @@ def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
     )
 
 
+def _name_board_jobs(db: Session, raw_jobs: list[dict]) -> int:
+    """
+    Put the employer's name on jobs that arrived filed under a board slug.
+
+    Greenhouse, Workday and the listing readers only know the slug, so a
+    posting came in as company "doordashusa" — and the same opening from
+    LinkedIn as "DoorDash" hashed differently and was stored twice, while an
+    excluded-companies entry for "DoorDash" never matched it. The registry
+    already holds the board's own name (validation refiles it from the board's
+    API); this uses it. Only a company that *is* the slug, or is blank, is
+    replaced — a name the adapter actually read is left alone.
+    """
+    from app.models.company_board import CompanyBoard
+
+    wanted: dict[tuple[str, str], list[dict]] = {}
+    for job in raw_jobs:
+        slug = job.get("ats_slug")
+        if not slug:
+            continue
+        company = (job.get("company") or "").strip()
+        if company and company.lower() != str(slug).lower():
+            continue
+        wanted.setdefault((job.get("source", ""), str(slug)), []).append(job)
+    if not wanted:
+        return 0
+
+    names: dict[tuple[str, str], str] = {}
+    sources = {ats for ats, _ in wanted}
+    slugs = {slug for _, slug in wanted}
+    rows = (
+        db.query(CompanyBoard.ats, CompanyBoard.slug, CompanyBoard.company)
+        .filter(CompanyBoard.ats.in_(sources), CompanyBoard.slug.in_(slugs),
+                CompanyBoard.company.isnot(None))
+        .all()
+    )
+    for ats, slug, company in rows:
+        if company and company.strip() and company.strip().lower() != slug.lower():
+            names[(ats, slug)] = company.strip()
+
+    renamed = 0
+    for key, jobs in wanted.items():
+        name = names.get(key)
+        if not name:
+            continue
+        for job in jobs:
+            job["company"] = name
+            renamed += 1
+    return renamed
+
+
 def _maybe_backfill_boards(db: Session, profile) -> dict | None:
     """
     Mine the pre-registry jobs table, once, on the first cycle after deploy.
@@ -1014,6 +1064,13 @@ def fetch_and_save_jobs(
         except Exception as exc:
             logger.error("job_fetcher: apply-link resolution failed: %s", exc)
 
+    if settings.ATS_BOARD_REGISTRY:
+        try:
+            counts["board_names"] = _name_board_jobs(db, raw_jobs)
+        except Exception as exc:
+            logger.error("job_fetcher: naming board jobs failed: %s", exc)
+            db.rollback()
+
     # Persist last fetch stats on the profile so UI can show them
     import copy
     updated_data = copy.deepcopy(profile.data)
@@ -1151,7 +1208,7 @@ def fetch_and_save_jobs(
                     _tally(source, "stale")
                     continue
 
-                dedupe_hash = compute_dedupe_hash(company, title, location)
+                dedupe_hash = compute_dedupe_hash(company, title, location, url)
                 existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
 
                 if existing is not None:

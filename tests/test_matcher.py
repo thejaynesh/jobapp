@@ -162,6 +162,20 @@ class TestKeywordFilter:
         passes, score = keyword_filter(mock_job, profile_data)
         assert passes is False
 
+    def test_excluded_company_ignores_legal_suffixes(self, mock_job, profile_data):
+        """"BadCorp" on the list catches "BadCorp, Inc." and "SkipThis" alone."""
+        from app.services.matcher import keyword_filter
+        for company in ("BadCorp, Inc.", "BADCORP LLC", "SkipThis"):
+            mock_job.company = company
+            passes, _ = keyword_filter(mock_job, profile_data)
+            assert passes is False, company
+
+    def test_a_company_merely_containing_an_excluded_name_passes(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        mock_job.company = "BadCorp Rivals"
+        passes, _ = keyword_filter(mock_job, profile_data)
+        assert passes is True
+
 
 class TestCitizenshipRestriction:
     """

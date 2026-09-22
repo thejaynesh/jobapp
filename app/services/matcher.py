@@ -409,8 +409,13 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
             f"Location {loc_text or 'unknown'!r} is outside your preferences ({wanted}).",
         )
 
-    excluded = [c.lower() for c in profile_data.get("excluded_companies", [])]
-    if job.company and job.company.lower() in excluded:
+    # Compared normalized: "Acme" on the list has to catch "Acme, Inc." and
+    # "ACME Corp" too, or excluding a company only works for one spelling.
+    from app.services.deduplication import normalize_company
+
+    excluded = {normalize_company(c) for c in profile_data.get("excluded_companies", [])}
+    excluded.discard("")
+    if job.company and normalize_company(job.company) in excluded:
         return FilterOutcome(
             False, 0.0, "excluded_company",
             f"{job.company} is on your excluded-companies list.",
