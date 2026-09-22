@@ -89,8 +89,13 @@ class Board:
     def __init__(self, key, host, label, search=None, entries=(),
                  page_param=None, page_size=25, page_base=0,
                  feed_setting=None, scroll_passes=None, click_pages=None,
-                 alt_hosts=(), submit_search=False):
+                 alt_hosts=(), submit_search=False, needs_reader=False):
         self.key = key
+        # Only planned while some browser reports reading this host. The
+        # extension refuses to open a page on a site whose box is unticked, so
+        # queueing one anyway spends a queue slot on a guaranteed refusal —
+        # for the boards added later, where nobody has ticked anything yet.
+        self.needs_reader = bool(needs_reader)
         self.host = host
         self.label = label
         self.search = search
@@ -287,6 +292,51 @@ BOARDS = (
     ),
 )
 
+# The boards that refuse a server outright — each answers a datacenter IP with
+# a bot challenge (see `sources.base.is_bot_challenge`) — and that the fetch
+# cycle had therefore given up on: Indeed's RSS feed was retired, and the rest
+# never had a server path at all. A browser on a residential connection gets
+# the real page, and since the interceptor now also reads the data a page
+# ships *inside* its HTML (Indeed's `mosaic` store, `__NEXT_DATA__`), opening
+# their search pages harvests the first page of results rather than nothing.
+#
+# Planned only for a browser that has the site ticked (`needs_reader`), and
+# paced, paused and backed off like every other board.
+BOARDS = BOARDS + (
+    Board(
+        "indeed", "indeed.com", "Indeed",
+        search="https://www.indeed.com/jobs?q={q}&l={loc}&fromage=7&sort=date",
+        # An offset in tens: `start=10` is page two.
+        page_param="start", page_size=10,
+        needs_reader=True,
+    ),
+    Board(
+        "ziprecruiter", "ziprecruiter.com", "ZipRecruiter",
+        search="https://www.ziprecruiter.com/jobs-search?search={q}&location={loc}&days=7",
+        page_param="page", page_size=1, page_base=1,
+        needs_reader=True,
+    ),
+    Board(
+        "glassdoor", "glassdoor.com", "Glassdoor",
+        search="https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}&locKeyword={loc}&fromAge=7",
+        # "Show more jobs" loads the next batch in place, over the API the
+        # interceptor already reads; there is no page-two URL.
+        scroll_passes=30,
+        needs_reader=True,
+    ),
+    Board(
+        "simplyhired", "simplyhired.com", "SimplyHired",
+        search="https://www.simplyhired.com/search?q={q}&l={loc}&t=7",
+        needs_reader=True,
+    ),
+    Board(
+        "monster", "monster.com", "Monster",
+        search="https://www.monster.com/jobs/search?q={q}&where={loc}",
+        scroll_passes=30,
+        needs_reader=True,
+    ),
+)
+
 BOARDS_BY_KEY = {board.key: board for board in BOARDS}
 
 # Sources whose postings live on a board a crawl can open. Keyed by host so a
@@ -357,7 +407,11 @@ def paused_hosts() -> tuple[str, ...]:
     pages a crawl planned; enrichment queues postings by URL, and the point of
     a pause is that *nothing* goes there.
     """
-    raw = str(getattr(settings, "BROWSE_PAUSED_HOSTS", "") or "")
+    # The settings-page value, not the environment's: the moment this is
+    # needed is the minute after a site complains, not the next deploy.
+    from app.services.tunables import current
+
+    raw = str(current("browse_paused_hosts") or "")
     hosts = []
     for part in raw.replace("\n", ",").split(","):
         host = part.strip().lower().lstrip(".")
@@ -610,8 +664,14 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None,
     locations = locations[:4] or [""]
 
     pages = _depth() if depth is None else max(1, depth)
+    reading = None
     urls: list[str] = []
     for board in (boards if boards is not None else BOARDS):
+        if board.needs_reader:
+            if reading is None:
+                reading = browser_tasks.reading_hosts(db) if db is not None else set()
+            if not _read_by_agent(board, reading):
+                continue
         search, entries = board.resolve()
         # Its fixed pages either way: a board can have both a keyword search
         # and a filter set that needs no keyword, and the second is not a
@@ -637,6 +697,15 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None,
                     # it was finding nothing.
                     urls.extend(_pages_for(db, board, first, pages))
     return urls
+
+
+def _read_by_agent(board: "Board", reading: set[str]) -> bool:
+    """Whether some browser reports reading this board's host."""
+    hosts = (board.host, *board.alt_hosts)
+    return any(
+        seen == host or seen.endswith(f".{host}") or host.endswith(f".{seen}")
+        for seen in reading for host in hosts
+    )
 
 
 def _host_of(url: str | None) -> str:

@@ -31,6 +31,8 @@ away the safe half of the feature to fix the risky half.
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from unittest.mock import patch
+
 import pytest
 
 from app.config import settings
@@ -1396,3 +1398,49 @@ class TestAPausedHostStillGetsARation:
         outcome = browse_plan.crawl_urls(
             db, "https://www.linkedin.com/jobs/search/?keywords=go")
         assert outcome["queued"] == 0
+
+
+class TestTheBoardsThatRefuseAServer:
+    """
+    Indeed, ZipRecruiter, Glassdoor, SimplyHired and Monster answer a server IP
+    with a bot challenge, so the fetch cycle had given up on them. A browser
+    gets the real page — but the extension will not open a site whose box is
+    unticked, so they are planned only for a browser that reads them.
+    """
+
+    def _agent_reads(self, db, *hosts):
+        from app.models.profile import Profile
+        profile = db.query(Profile).first()
+        if profile is None:
+            profile = Profile(data={})
+            db.add(profile)
+        profile.data = {**(profile.data or {}),
+                        "agents": {"laptop": {"harvest_sites": list(hosts)}}}
+        db.commit()
+
+    def test_nothing_is_planned_where_no_browser_reads(self, db):
+        urls = browse_plan.search_urls(PROFILE, db=db)
+        assert not any("indeed.com" in u or "glassdoor.com" in u for u in urls)
+
+    def test_a_ticked_site_is_planned(self, db):
+        self._agent_reads(db, "linkedin.com", "indeed.com")
+        urls = browse_plan.search_urls(PROFILE, db=db)
+        indeed = [u for u in urls if "indeed.com" in u]
+        assert indeed and all("fromage=7" in u for u in indeed)
+        assert any("start=10" in u for u in indeed)
+        assert not any("ziprecruiter.com" in u for u in urls)
+
+    def test_pausing_it_on_the_settings_page_stops_it(self, db):
+        from app.models.profile import Profile
+        from app.services import tunables
+
+        self._agent_reads(db, "indeed.com")
+        profile = db.query(Profile).first()
+        profile.data = {**profile.data,
+                        tunables.STORE_KEY: {"browse_paused_hosts": "indeed.com"}}
+        db.commit()
+        with patch("app.database.SessionLocal", return_value=db), \
+                patch.object(db, "close"):
+            assert browse_plan.is_paused("https://www.indeed.com/jobs?q=x")
+            browse_plan.crawl_searches(db, PROFILE, board="indeed")
+        assert not any("indeed.com" in url for url in queued_urls(db))

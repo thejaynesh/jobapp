@@ -156,6 +156,29 @@ _POSTING_URL = {
     HARVEST_SOURCE: "https://www.linkedin.com/jobs/view/{id}/",
     # Handshake's GraphQL `Job` nodes carry a numeric `id` and no link at all.
     "handshake_harvest": "https://app.joinhandshake.com/jobs/{id}",
+    # Indeed's cards link through a click tracker (`/rc/clk?jk=…&…`), relative
+    # and full of per-visit parameters. The `jobkey` is the posting, and
+    # `viewjob?jk=` is its canonical page — stable, and the same address the
+    # next visit will produce, so the two sightings merge.
+    "indeed_harvest": "https://www.indeed.com/viewjob?jk={id}",
+}
+
+# Sources whose own posting link is worse than the address rebuilt from the id
+# (see Indeed above). Everywhere else a link the payload gives wins.
+_PREFER_POSTING_URL = frozenset({"indeed_harvest"})
+
+# Where a relative link on each board points. A payload read from the page's
+# embedded data carries paths like `/job-listing/…`, and stored as-is those are
+# addresses that lead nowhere.
+_BOARD_ORIGIN = {
+    "indeed_harvest": "https://www.indeed.com",
+    "glassdoor_harvest": "https://www.glassdoor.com",
+    "ziprecruiter_harvest": "https://www.ziprecruiter.com",
+    "simplyhired_harvest": "https://www.simplyhired.com",
+    "monster_harvest": "https://www.monster.com",
+    "dice_harvest": "https://www.dice.com",
+    "wellfound_harvest": "https://wellfound.com",
+    "builtin_harvest": "https://builtin.com",
 }
 _COMPANY_KEYS = (
     "companyName", "company", "companyUrn", "primarySubtitle", "subtitle",
@@ -180,6 +203,7 @@ _DESCRIPTION_KEYS = (
 _URL_KEYS = (
     "jobPostingUrl", "applyUrl", "companyApplyUrl", "url", "link",
     "jobUrl", "viewJobLink", "externalPath",      # Indeed / Workday
+    "seoJobLink", "jobViewUrl",                   # Glassdoor (relative)
     # Greenhouse's aggregate board. Worth more than the average alias: it holds
     # the *employer's own* board URL — job-boards.greenhouse.io/<slug>/jobs/<id>
     # — which is both what a person should apply through and the slug the
@@ -719,6 +743,11 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
 
     job_id = _job_id(node)
     url = _first(node, _URL_KEYS)
+    if job_id and source in _PREFER_POSTING_URL:
+        url = _POSTING_URL[source].format(id=job_id)
+    if url and url.startswith("/") and not url.startswith("//"):
+        origin = _BOARD_ORIGIN.get(source)
+        url = f"{origin}{url}" if origin else ""
     if not url and job_id:
         # Reconstructing beats dropping the job, for a board whose posting URL
         # we actually know. See `_POSTING_URL` for why that list is short.

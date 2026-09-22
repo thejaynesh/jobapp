@@ -172,6 +172,14 @@ TUNABLES: list[Tunable] = [
         help="Each page is one call against a small monthly quota, for every "
              "role and location you search — so 2 doubles the spend.",
     ),
+    Tunable(
+        key="browse_paused_hosts", env="BROWSE_PAUSED_HOSTS", kind="text",
+        group="Browser agent", label="Paused sites",
+        help="Sites the browser extension must not open pages on, comma-"
+             "separated (e.g. linkedin.com, indeed.com). For a site that has "
+             "warned you about the volume: nothing is queued there until it "
+             "is removed. Takes effect within a minute.",
+    ),
     # The three scheduled fetch groups. Beat ticks every few minutes and each
     # group checks its interval against its own last run, so a change here
     # takes effect on the next tick — no restart. The single "fetch interval"
@@ -329,6 +337,32 @@ def value(profile_data: dict | None, key: str):
         if coerced is not None:
             return coerced
     return default(tunable)
+
+
+def current(key: str):
+    """
+    A tunable's value for code that has no profile to hand.
+
+    Some consumers sit a long way from a session — a check made once per URL
+    inside a planner, a helper deep in enrichment — and threading the profile
+    down to them would touch a dozen signatures for one read. This reads it
+    itself. Deliberately uncached: it is one single-row query, and the settings
+    it serves (a site to stop visiting) have to bite the moment they are saved.
+    """
+    data: dict = {}
+    try:
+        from app.database import SessionLocal
+        from app.models.profile import Profile
+
+        db = SessionLocal()
+        try:
+            profile = db.query(Profile).first()
+            data = dict(profile.data or {}) if profile else {}
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("tunables: could not read the profile for %s: %s", key, exc)
+    return value(data, key)
 
 
 def values(profile_data: dict | None) -> dict:

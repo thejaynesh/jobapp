@@ -402,6 +402,64 @@
   // request is initiated, so that is the frame a CSP refusal would name. The
   // listener goes on in `open` instead, which has already returned by the time
   // anything is sent.
+  // --- Data the page shipped with -----------------------------------------
+  //
+  // Everything above reads what a page *fetches*. Indeed, Glassdoor,
+  // ZipRecruiter and SimplyHired render their first page of results on the
+  // server and ship the data inside the HTML — Indeed in
+  // `window.mosaic.providerData`, the Next.js boards in `__NEXT_DATA__`, others
+  // in `application/json` script tags — and fetch nothing until you paginate.
+  // So a crawl could open their search pages and harvest nothing at all, and
+  // that is why they were never in the crawl plan.
+  //
+  // Read once the page has loaded, and once more a little later for boards
+  // that hydrate a second store after load. Each blob goes through
+  // `maybeOffer` exactly as a response would: the same size cap, the same
+  // job-shaped test, the same forwarding.
+  const EMBEDDED_GLOBALS = [
+    (w) => w.mosaic && w.mosaic.providerData,          // Indeed
+    (w) => w.__NEXT_DATA__,
+    (w) => w.__APOLLO_STATE__,
+    (w) => w.__INITIAL_STATE__,
+    (w) => w.__PRELOADED_STATE__,
+  ];
+  const offeredEmbedded = new Set();
+
+  function offerEmbedded() {
+    const page = location.href;
+    const consider = (text, parsed) => {
+      const key = text ? `${text.length}:${text.slice(0, 80)}` : null;
+      if (key && offeredEmbedded.has(key)) return;
+      if (key) offeredEmbedded.add(key);
+      maybeOffer(page, text, parsed);
+    };
+    try {
+      for (const el of document.querySelectorAll(
+        'script[type="application/json"], script[type="application/ld+json"], script#__NEXT_DATA__',
+      )) {
+        const text = el.textContent || "";
+        if (looksLikeJson(text)) consider(text);
+      }
+    } catch (_) {
+      /* a page that throws on querySelectorAll is not one to fight with */
+    }
+    for (const read of EMBEDDED_GLOBALS) {
+      try {
+        const value = read(window);
+        if (!value || typeof value !== "object") continue;
+        const text = JSON.stringify(value);
+        if (text) consider(text);
+      } catch (_) {
+        /* circular or hostile getter; skip it */
+      }
+    }
+  }
+
+  window.addEventListener("load", () => {
+    setTimeout(offerEmbedded, 1500);
+    setTimeout(offerEmbedded, 6000);
+  });
+
   const nativeOpen = XMLHttpRequest.prototype.open;
 
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {

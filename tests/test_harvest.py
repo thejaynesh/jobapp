@@ -1520,3 +1520,35 @@ class TestHarvestStopsAssertingEveryJobIsMidLevel:
 
         save_harvested_jobs(db, [self._job("Backend Engineer")])
         assert db.query(Job).one().experience_level is None
+
+
+class TestEmbeddedPageDataFromBlockedBoards:
+    """
+    Indeed ships its result cards inside the HTML (`mosaic.providerData`) and
+    links them through a relative click tracker; Glassdoor's links are relative
+    too. Stored as given they were addresses that lead nowhere.
+    """
+
+    def test_indeed_cards_get_their_canonical_address(self):
+        from app.services.harvest import extract_jobs
+        payload = {"mosaic-provider-jobcards": {"metaData": {"mosaicProviderJobCardsModel": {
+            "results": [{"jobkey": "a1b2c3d4e5f60718", "title": "Software Engineer",
+                         "company": "Acme", "formattedLocation": "Boston, MA",
+                         "viewJobLink": "/rc/clk?jk=a1b2c3d4e5f60718&from=vj"}]}}}}
+        [job] = extract_jobs(payload, source="indeed_harvest")
+        assert job["url"] == "https://www.indeed.com/viewjob?jk=a1b2c3d4e5f60718"
+        assert job["company"] == "Acme"
+
+    def test_a_relative_glassdoor_link_is_made_absolute(self):
+        from app.services.harvest import extract_jobs
+        payload = {"jobs": [{"jobTitleText": "Data Engineer", "employerName": "Gamma",
+                             "locationName": "Austin, TX", "listingId": 1009876543,
+                             "seoJobLink": "/job-listing/data-engineer-JV_KO0,13.htm?jl=1009876543"}]}
+        [job] = extract_jobs(payload, source="glassdoor_harvest")
+        assert job["url"].startswith("https://www.glassdoor.com/job-listing/")
+
+    def test_a_relative_link_on_an_unknown_board_is_not_stored(self):
+        from app.services.harvest import extract_jobs
+        payload = {"jobs": [{"title": "Engineer", "companyName": "Delta",
+                             "url": "/jobs/123"}]}
+        assert extract_jobs(payload, source="linkedin_harvest_unknown") == []
