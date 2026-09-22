@@ -1714,3 +1714,38 @@ class TestBoardAdaptersHonourTheMaximumAge:
             _run_all_adapters([], [], cfg, ats_slugs={"greenhouse": ["acme"]},
                               only={"greenhouse"})
         assert gh.call_args.kwargs["max_age_days"] == 90
+
+
+class TestJSearchWindowComesFromTheSettingsPage:
+    """
+    JSearch asked only for postings from "today", so a day the fetch did not
+    run was a day of JSearch postings never seen.
+    """
+
+    def _resp(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"data": []}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_the_default_window_overlaps_a_missed_day(self):
+        from app.services.sources.jsearch import fetch
+        with patch("httpx.get", return_value=self._resp()) as get:
+            fetch("k", "SWE", "NYC")
+        assert get.call_args.kwargs["params"]["date_posted"] == "3days"
+
+    def test_a_stored_override_changes_the_request(self):
+        from app.config import settings
+        from app.services import tunables
+        from app.services.job_fetcher import _run_all_adapters
+
+        cfg = tunables.effective_settings({tunables.STORE_KEY: {
+            "jsearch_date_posted": "week", "jsearch_num_pages": 2,
+        }})
+        with patch.object(settings, "JSEARCH_API_KEY", "key"), \
+                patch("httpx.get", return_value=self._resp()) as get:
+            _run_all_adapters(["SWE"], ["NYC"], cfg, ats_slugs={}, only={"jsearch"})
+        params = get.call_args.kwargs["params"]
+        assert params["date_posted"] == "week"
+        assert params["num_pages"] == 2

@@ -1176,3 +1176,41 @@ class TestBlockedTitleWords:
 
         assert "blocked_title" in FILTER_REASON_LABELS
         assert "duplicate" in FILTER_REASON_LABELS
+
+
+class TestSkillSynonyms:
+    """
+    The skill filter counts literal mentions, so a profile listing
+    "PostgreSQL" and "Kubernetes" scored zero against "Postgres and k8s" and
+    the posting was filtered as too few skills before anything read it.
+    """
+
+    def test_a_posting_that_abbreviates_still_counts(self):
+        from app.services.matcher import _count_skill_matches
+        desc = "You'll run Postgres on k8s, with a Golang API and a Node backend."
+        assert _count_skill_matches(desc, ["PostgreSQL", "Kubernetes", "Go", "Node.js"]) == 4
+
+    def test_the_other_direction_too(self):
+        from app.services.matcher import _count_skill_matches
+        desc = "Experience with PostgreSQL, Kubernetes and JavaScript."
+        assert _count_skill_matches(desc, ["postgres", "k8s", "JS"]) == 3
+
+    def test_java_is_still_not_javascript(self):
+        from app.services.matcher import _count_skill_matches
+        assert _count_skill_matches("Strong JavaScript and JS skills.", ["Java"]) == 0
+
+    def test_a_clearance_is_not_typescript(self):
+        from app.services.matcher import _count_skill_matches
+        assert _count_skill_matches("Active TS/SCI clearance required.", ["TypeScript"]) == 0
+
+    def test_a_group_counts_once(self):
+        """Postgres and PostgreSQL in one posting are one skill, not two."""
+        from app.services.matcher import _count_skill_matches
+        assert _count_skill_matches("PostgreSQL (Postgres) experience", ["PostgreSQL"]) == 1
+
+    def test_the_filter_passes_what_it_used_to_drop(self, mock_job, profile_data):
+        from app.services.matcher import keyword_filter
+        profile_data = {**profile_data, "skills": {"db": ["PostgreSQL", "Kubernetes"]}}
+        mock_job.description = "Backend Engineer: Postgres, k8s, on-call rotation."
+        passes, _ = keyword_filter(mock_job, profile_data)
+        assert passes is True

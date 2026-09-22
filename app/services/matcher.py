@@ -120,23 +120,59 @@ def title_priority_match(title: str, target_roles: list[str]) -> bool:
     return False
 
 
+# Names a posting uses for a skill the profile spells differently. The skill
+# filter counts literal mentions, so a profile listing "PostgreSQL" scored zero
+# against "Postgres, Redis and k8s" — and a posting two mentions short of the
+# minimum is filtered as `few_skills` and never scored. Each group is one skill;
+# a mention of any member counts for whichever member the profile lists.
+#
+# Deliberately short and unambiguous. "TS" is not here (it is also TS/SCI, a
+# clearance), nor "TF" or "ML" alone as abbreviations of prose-common words.
+_SKILL_ALIASES: tuple[frozenset[str], ...] = tuple(frozenset(group) for group in (
+    {"javascript", "js", "ecmascript"},
+    {"postgresql", "postgres"},
+    {"kubernetes", "k8s"},
+    {"go", "golang"},
+    {"node.js", "nodejs", "node"},
+    {"react", "react.js", "reactjs"},
+    {"vue", "vue.js", "vuejs"},
+    {"next.js", "nextjs"},
+    {"aws", "amazon web services"},
+    {"gcp", "google cloud", "google cloud platform"},
+    {"azure", "microsoft azure"},
+    {"ci/cd", "cicd", "continuous integration"},
+    {"rest", "restful", "rest api", "rest apis"},
+    {"mongodb", "mongo"},
+    {"c#", "csharp"},
+    {"scikit-learn", "sklearn"},
+    {"machine learning", "ml engineering"},
+    {"elasticsearch", "elastic search"},
+    {"sql server", "mssql"},
+))
+_ALIAS_INDEX: dict[str, frozenset[str]] = {
+    name: group for group in _SKILL_ALIASES for name in group
+}
+
+
+def _mentions(desc_lower: str, s: str) -> bool:
+    if " " in s:
+        # Multi-word skills: simple substring is fine
+        return s in desc_lower
+    if re.match(r'^\w+$', s):
+        # Pure alphanumeric: word boundaries prevent false positives (java ≠ javascript)
+        return re.search(r'\b' + re.escape(s) + r'\b', desc_lower) is not None
+    # Special chars (c++, c#, node.js): use lookaround instead of \b
+    return re.search(r'(?<![a-z0-9])' + re.escape(s) + r'(?![a-z0-9])', desc_lower) is not None
+
+
 def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
     desc_lower = description.lower()
     count = 0
     for skill in skills_flat:
-        s = skill.lower()
-        if " " in s:
-            # Multi-word skills: simple substring is fine
-            if s in desc_lower:
-                count += 1
-        elif re.match(r'^\w+$', s):
-            # Pure alphanumeric: word boundaries prevent false positives (java ≠ javascript)
-            if re.search(r'\b' + re.escape(s) + r'\b', desc_lower):
-                count += 1
-        else:
-            # Special chars (c++, c#, node.js): use lookaround instead of \b
-            if re.search(r'(?<![a-z0-9])' + re.escape(s) + r'(?![a-z0-9])', desc_lower):
-                count += 1
+        s = skill.lower().strip()
+        names = _ALIAS_INDEX.get(s, frozenset({s}))
+        if any(_mentions(desc_lower, name) for name in names):
+            count += 1
     return count
 
 

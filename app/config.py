@@ -370,6 +370,13 @@ class Settings(BaseSettings):
     ADZUNA_APP_ID: str = ""
     ADZUNA_APP_KEY: str = ""
     JSEARCH_API_KEY: str = ""
+    # How far back each JSearch search reaches. "today" missed every posting
+    # from a day the fetch did not run; three days overlaps any short outage,
+    # and the repeats are merged by dedupe. One of today|3days|week|month|all.
+    JSEARCH_DATE_POSTED: str = "3days"
+    # Pages per query/location search. Each page is one call against a small
+    # monthly quota, so this multiplies spend directly.
+    JSEARCH_NUM_PAGES: int = 1
     LINKEDIN_SESSION_COOKIE: str = ""
     HANDSHAKE_SESSION_COOKIE: str = ""
     GREENHOUSE_COMPANY_SLUGS: str = ""

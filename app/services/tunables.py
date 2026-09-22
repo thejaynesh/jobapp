@@ -138,6 +138,21 @@ TUNABLES: list[Tunable] = [
         help="10 results a page. Deeper pages return looser matches and more "
              "undated postings, so more isn't always better.",
     ),
+    Tunable(
+        key="jsearch_date_posted", env="JSEARCH_DATE_POSTED", kind="choice",
+        choices=["today", "3days", "week", "month", "all"], group="Sources",
+        label="JSearch: posted within",
+        help="How far back each JSearch search reaches. \"today\" misses "
+             "anything from a day the fetch did not run; wider windows return "
+             "more repeats, which dedupe merges.",
+    ),
+    Tunable(
+        key="jsearch_num_pages", env="JSEARCH_NUM_PAGES", kind="int",
+        minimum=1, maximum=5, group="Sources",
+        label="JSearch: pages per search",
+        help="Each page is one call against a small monthly quota, for every "
+             "role and location you search — so 2 doubles the spend.",
+    ),
     # The three scheduled fetch groups. Beat ticks every few minutes and each
     # group checks its interval against its own last run, so a change here
     # takes effect on the next tick — no restart. The single "fetch interval"

@@ -19,6 +19,7 @@ def fetch(
     query: str,
     location: str,
     num_pages: int = 1,
+    date_posted: str = "3days",
 ) -> list[dict]:
     """
     Search JSearch (RapidAPI).
@@ -30,7 +31,8 @@ def fetch(
     collecting an identical error for each one.
     """
     headers = {"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": _HOST}
-    params = {"query": f"{query} in {location}", "num_pages": num_pages, "date_posted": "today"}
+    params = {"query": f"{query} in {location}", "num_pages": num_pages,
+              "date_posted": date_posted or "3days"}
     try:
         resp = httpx.get(_BASE, headers=headers, params=params, timeout=15)
         raise_if_blocked(resp, "JSearch")

@@ -275,7 +275,9 @@ def _run_all_adapters(
         _run_combos(
             stats, all_jobs, "jsearch",
             lambda role, loc: jsearch_fetch(
-                api_key=cfg.JSEARCH_API_KEY, query=role, location=loc),
+                api_key=cfg.JSEARCH_API_KEY, query=role, location=loc,
+                num_pages=getattr(cfg, "JSEARCH_NUM_PAGES", 1),
+                date_posted=getattr(cfg, "JSEARCH_DATE_POSTED", "3days")),
             [(r, l) for r in roles for l in locations],
             _skip,
         )
