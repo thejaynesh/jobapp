@@ -89,7 +89,8 @@ class Board:
     def __init__(self, key, host, label, search=None, entries=(),
                  page_param=None, page_size=25, page_base=0,
                  feed_setting=None, scroll_passes=None, click_pages=None,
-                 alt_hosts=(), submit_search=False, needs_reader=False):
+                 alt_hosts=(), submit_search=False, needs_reader=False,
+                 page_path=None):
         self.key = key
         # Only planned while some browser reports reading this host. The
         # extension refuses to open a page on a site whose box is unticked, so
@@ -127,6 +128,10 @@ class Board:
         # applying at exactly the moment the page is real.
         self.alt_hosts = tuple(alt_hosts)
         self.page_param = page_param
+        # For a board whose page number is a path segment rather than a
+        # parameter: the path it follows. ZipRecruiter's fourth page is
+        # `/jobs-search/4?search=...`, and `?page=4` on it is ignored.
+        self.page_path = page_path
         self.page_size = max(1, page_size)
         # What the parameter reads on the first page. Boards count two
         # different ways — an offset in results (`start=0, 25, 50`) or an
@@ -160,13 +165,16 @@ class Board:
         The first page is the URL as given, so a board with no pagination
         scheme is not a special case anywhere else.
         """
-        if not self.page_param or depth <= 1:
+        from app.services import crawl_recipes
+
+        if self.page_path:
+            spec = {"mode": "path", "path_prefix": self.page_path}
+        elif self.page_param:
+            spec = {"mode": "url", "page_param": self.page_param}
+        else:
             return [url]
-        joiner = "&" if "?" in url else "?"
-        return [url] + [
-            f"{url}{joiner}{self.page_param}={self.page_base + n * self.page_size}"
-            for n in range(1, depth)
-        ]
+        spec.update(page_base=self.page_base, page_size=self.page_size)
+        return crawl_recipes.page_urls(url, spec, depth)
 
 
 BOARDS = (
@@ -313,7 +321,8 @@ BOARDS = BOARDS + (
     Board(
         "ziprecruiter", "ziprecruiter.com", "ZipRecruiter",
         search="https://www.ziprecruiter.com/jobs-search?search={q}&location={loc}&days=7",
-        page_param="page", page_size=1, page_base=1,
+        # The page is a path segment: `/jobs-search/2?search=...`.
+        page_path="/jobs-search", page_size=1, page_base=1,
         needs_reader=True,
     ),
     Board(
@@ -863,16 +872,10 @@ def _pages_for(db, board, url: str, depth: int) -> list[str]:
     them, since `entries`-only boards were added without any notion of depth.
     """
     learned = _learned(db, url)
-    if learned and learned.get("mode") == "url" and depth > 1:
-        param = str(learned.get("page_param") or "")
-        size = max(1, int(learned.get("page_size") or 25))
-        base = int(learned.get("page_base") or 0)
-        if param:
-            joiner = "&" if "?" in url else "?"
-            return [url] + [
-                f"{url}{joiner}{param}={base + n * size}"
-                for n in range(1, depth)
-            ]
+    if learned and learned.get("mode") in ("url", "path"):
+        from app.services import crawl_recipes
+
+        return crawl_recipes.page_urls(url, learned, depth)
     if board is not None:
         return board.pages(url, depth)
     return [url]

@@ -29,10 +29,18 @@ logger = logging.getLogger(__name__)
     soft_time_limit=1800,
     time_limit=1860,
 )
-def take_backup() -> dict:
+def take_backup(force: bool = False) -> dict:
+    """
+    The hourly tick, and the Back up now button.
+
+    The schedule fires every hour and does nothing unless a backup is due by
+    the current setting (`backups.due`). The button passes `force`.
+    """
+    if not force and not backups.due():
+        return {"ok": True, "skipped": True, "detail": "not due"}
     db = SessionLocal()
     try:
-        return backups.run(db)
+        return backups.run(db, force=force)
     finally:
         db.close()
 

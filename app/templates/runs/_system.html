@@ -491,14 +491,22 @@
               {% endif %}
             </span>
             <div class="shrink-0 flex items-center gap-1">
-              <button hx-post="/runs/agent/learn"
-                      hx-vals='{"host": {{ row.host | tojson }}}'
-                      hx-target="#system-panel" hx-swap="outerHTML"
-                      hx-disabled-elt="this"
-                      title="Ask the model how this site's payloads are shaped, then check the answer against these samples"
-                      class="text-[11px] border border-blue-600 text-blue-600 rounded px-1.5 py-0.5 hover:bg-blue-50">
-                {% if row.has_recipe %}Re-learn{% else %}Learn{% endif %}
-              </button>
+              {# One field, optional: a job title you can see on that page.
+                 Found in a payload it says where the jobs are outright, so
+                 the recipe is built without a model at all. #}
+              <form hx-post="/runs/agent/learn" hx-target="#system-panel" hx-swap="outerHTML"
+                    hx-disabled-elt="find button" class="flex items-center gap-1">
+                <input type="hidden" name="host" value="{{ row.host }}">
+                <input name="hint" placeholder="a job title on that page (optional)"
+                       title="Type a job title exactly as the page shows it — it pins down where the jobs are in the payload"
+                       class="w-44 border border-gray-300 rounded px-1.5 py-0.5 text-[11px]">
+                <button type="submit"
+                        title="Work out how this site's payloads are shaped, then check the answer against these samples"
+                        class="text-[11px] border border-blue-600 text-blue-600 rounded px-1.5 py-0.5 hover:bg-blue-50">
+                  {% if row.has_recipe %}Re-learn{% else %}Learn{% endif %}
+                  <span class="htmx-indicator">…</span>
+                </button>
+              </form>
               {# For the host whose slots filled with the wrong thing. The store
                  ranks a forward above a probe now, but a probe kept before it
                  could tell them apart looks like a forward and holds its slot
@@ -531,33 +539,72 @@
            in a payload; this learns how to make the page show more of them —
            whether the board scrolls, pages by URL, or needs a click, and which
            control does it. #}
-        {% if system.agent.uncrawlable %}
-        <div class="mt-3 pt-3 border-t border-gray-100">
-          <p class="text-[11px] font-medium text-gray-600 mb-1">Boards we can't get past page one of</p>
-          {% for host in system.agent.uncrawlable %}
-          <div class="flex items-center justify-between gap-2 py-0.5">
-            <span class="text-[11px] text-gray-600 truncate">{{ host }}</span>
-            <button hx-post="/runs/agent/learn-crawl"
-                    hx-vals='{"host": {{ host | tojson }}}'
-                    hx-target="#system-panel" hx-swap="outerHTML"
-                    hx-disabled-elt="this"
-                    title="Ask the model how this board paginates, from the controls the page actually offered"
+        {% macro teach_form(host='') %}
+        {# Teaching by example. An address of a later page is read directly —
+           where the number sits and how it counts — and needs no model; the
+           note only matters when one is still needed. #}
+        <form hx-post="/runs/agent/learn-crawl" hx-target="#system-panel" hx-swap="outerHTML"
+              hx-disabled-elt="find button" class="mt-1 mb-2 space-y-1">
+          <input type="hidden" name="host" value="{{ host }}">
+          <textarea name="examples" rows="2" spellcheck="false"
+                    placeholder="Paste the address of page 2 (or any later page) — one per line, e.g. https://…/jobs-search/4?search=… page 4"
+                    class="w-full border border-gray-300 rounded px-2 py-1 text-[11px] font-mono"></textarea>
+          <div class="flex items-center gap-2">
+            <input name="page" inputmode="numeric" placeholder="which page?"
+                   title="Which page the first address is. Lets it tell a page number from an offset."
+                   class="w-24 border border-gray-300 rounded px-2 py-0.5 text-[11px]">
+            <input name="hint" placeholder="anything else, e.g. “the number is in the path”, “click the › arrow”"
+                   class="flex-1 min-w-0 border border-gray-300 rounded px-2 py-0.5 text-[11px]">
+            <button type="submit"
                     class="shrink-0 text-[11px] border border-blue-600 text-blue-600 rounded px-1.5 py-0.5 hover:bg-blue-50">
               Work it out
             </button>
           </div>
+        </form>
+        {% endmacro %}
+
+        <div class="mt-3 pt-3 border-t border-gray-100">
+          <p class="text-[11px] font-medium text-gray-600 mb-1">Boards we can't get past page one of</p>
+          {% for host in system.agent.uncrawlable %}
+          <div class="py-0.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-[11px] text-gray-600 truncate">{{ host }}</span>
+              <button hx-post="/runs/agent/learn-crawl"
+                      hx-vals='{"host": {{ host | tojson }}}'
+                      hx-target="#system-panel" hx-swap="outerHTML"
+                      hx-disabled-elt="this"
+                      title="Read the page's own pagination links; ask the model if they don't say"
+                      class="shrink-0 text-[11px] border border-blue-600 text-blue-600 rounded px-1.5 py-0.5 hover:bg-blue-50">
+                Work it out
+              </button>
+            </div>
+            <details class="text-[11px]">
+              <summary class="cursor-pointer text-gray-400 hover:text-blue-600">teach it…</summary>
+              {{ teach_form(host) }}
+            </details>
+          </div>
           {% endfor %}
+          <details class="text-[11px] mt-1" {% if not system.agent.uncrawlable %}open{% endif %}>
+            <summary class="cursor-pointer text-gray-500 hover:text-blue-600">
+              Teach any board how it pages — paste an address of its page 2 or later
+            </summary>
+            {{ teach_form() }}
+          </details>
         </div>
-        {% endif %}
 
         {% if system.agent.crawl_recipes %}
         <div class="mt-3 pt-3 border-t border-gray-100">
           <p class="text-[11px] font-medium text-gray-600 mb-1">Learned navigation</p>
           {% for row in system.agent.crawl_recipes %}
+          {% set r = row.recipe or {} %}
           <div class="py-0.5">
             <span class="text-[11px] {% if row.status == 'active' %}text-gray-700{% else %}text-gray-400{% endif %}">
               {{ row.host }}
-              <span class="text-gray-400">{{ row.recipe.get('mode', '?') }}</span>
+              <span class="text-gray-400">
+                {% if r.get('mode') == 'path' %}{{ r.get('path_prefix') }}/N
+                {% elif r.get('mode') == 'url' %}?{{ r.get('page_param') }}=
+                {% else %}{{ r.get('mode', '?') }}{% endif %}
+              </span>
               <span class="{% if row.status == 'active' %}text-green-600{% elif row.status == 'proposed' %}text-amber-600{% else %}text-gray-400{% endif %}">
                 {{ row.status }}
               </span>
@@ -566,7 +613,13 @@
               {% endif %}
             </span>
             {% if row.note %}
-            <p class="text-[10px] text-gray-400 leading-tight">{{ row.note }}</p>
+            <p class="text-[10px] text-gray-400 leading-tight">{{ row.note }}{% if row.model %} <span class="text-gray-300">({{ row.model }})</span>{% endif %}</p>
+            {% endif %}
+            {% if row.status != 'active' %}
+            <details class="text-[11px]">
+              <summary class="cursor-pointer text-gray-400 hover:text-blue-600">wrong? teach it…</summary>
+              {{ teach_form(row.host) }}
+            </details>
             {% endif %}
           </div>
           {% endfor %}
@@ -662,13 +715,31 @@
       {% if system.backups and system.backups.enabled and system.backups.stale %}
         border-red-200 bg-red-50
       {% else %}border-gray-100{% endif %}">
-      <h3 class="text-sm font-semibold text-gray-700 mb-2">Backups</h3>
+      <div class="flex items-center justify-between gap-2 mb-2">
+        <h3 class="text-sm font-semibold text-gray-700">Backups</h3>
+        {% if system.backups %}
+        <button hx-post="/runs/backup" hx-target="#system-panel" hx-swap="outerHTML"
+                hx-disabled-elt="this"
+                {% if system.backups.in_progress %}disabled{% endif %}
+                class="text-[11px] border border-blue-600 text-blue-600 rounded px-2 py-0.5 hover:bg-blue-50 disabled:opacity-50">
+          {% if system.backups.in_progress %}Backing up…{% else %}Back up now{% endif %}
+        </button>
+        {% endif %}
+      </div>
+      {% if system.backups and system.backups.in_progress %}
+      {# Polls while the backup the button started is running, then stops. #}
+      <div hx-get="/runs/system" hx-trigger="every 5s" hx-target="#system-panel"
+           hx-swap="outerHTML" class="text-[11px] text-blue-700 mb-1.5">
+        Writing a backup — started {{ system.backups.requested_at[11:16] }} UTC.
+      </div>
+      {% endif %}
       {% if not system.backups %}
         <p class="text-xs text-gray-400">Status unavailable.</p>
-      {% elif not system.backups.enabled %}
+      {% elif not system.backups.enabled and not system.backups.files %}
         <p class="text-xs text-gray-500">
-          Switched off. Nothing else in this system can recover the database if
-          it is lost — set <code>BACKUP_ENABLED=true</code>.
+          Scheduled backups are switched off (Settings → Backups). Nothing else
+          in this system can recover the database if it is lost. Back up now
+          still works.
         </p>
       {% else %}
         {% if system.backups.newest %}
@@ -692,8 +763,7 @@
         <p class="text-[11px] text-red-700 mt-1.5">
           This is stale — backups run every {{ system.backups.interval_hours }}
           hours. Check that <code>beat</code> is up and that the image has
-          <code>pg_dump</code>. Run one now with
-          <code>python -m app.tasks.backup</code>.
+          <code>pg_dump</code>, or press Back up now.
         </p>
         {% endif %}
         {% if system.backups.last_error %}
@@ -701,9 +771,23 @@
           Last attempt failed: {{ system.backups.last_error }}
         </p>
         {% endif %}
+        {% if system.backups.files %}
+        <details class="mt-1.5 text-[11px]">
+          <summary class="cursor-pointer text-blue-600">Download a backup</summary>
+          <ul class="mt-1 space-y-0.5">
+            {% for f in system.backups.files %}
+            <li class="flex justify-between gap-2">
+              <a href="/runs/backup/{{ f.name }}" download class="text-blue-600 hover:underline font-mono truncate">{{ f.name }}</a>
+              <span class="text-gray-400 shrink-0">{{ "%.1f"|format(f.bytes / 1000000) }} MB</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+        {% endif %}
         <p class="text-[10px] text-gray-400 mt-1.5">
           On this machine only. A dump beside the database survives a bad
-          migration or a dropped table; it does not survive losing the box.
+          migration or a dropped table; it does not survive losing the box —
+          download one now and then to keep a copy somewhere else.
         </p>
       {% endif %}
     </div>

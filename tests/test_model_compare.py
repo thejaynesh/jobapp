@@ -544,3 +544,48 @@ class TestCompareRoutes:
         assert response.status_code == 200
         # A blank panel reads the same as one whose result went missing.
         assert "No comparison has run yet" in response.text
+
+
+class TestAnyProvider:
+    """Models added for FreeInference or Gemini can be compared, not only NIM's."""
+
+    def test_a_bare_id_is_nim_and_a_prefixed_one_is_its_provider(self):
+        from app.services.model_compare import split_choice
+        assert split_choice("meta/llama-3.3-70b-instruct") == ("nim", "meta/llama-3.3-70b-instruct")
+        assert split_choice("freeinference:glm-9") == ("freeinference", "glm-9")
+
+    def test_a_non_nim_model_is_called_on_its_own_provider(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from app.config import settings
+        from app.services.model_compare import score_with_model
+
+        monkeypatch.setattr(settings, "FREEINFERENCE_API_KEY", "k")
+        job = MagicMock()
+        job.id = "j1"
+        with patch("app.services.matcher._build_match_prompt", return_value=[]), \
+                patch("app.llm.providers.call_provider", return_value=_GOOD) as call, \
+                patch("app.services.matcher.chat_completion") as nim:
+            score, status = score_with_model(job, {}, "freeinference:glm-9")
+        nim.assert_not_called()
+        assert status == "ok"
+        provider = call.call_args.args[0]
+        assert (provider.name, provider.model) == ("freeinference", "glm-9")
+
+    def test_the_panel_offers_other_providers_models(self, client, db, monkeypatch):
+        from app.config import settings
+        from app.models.profile import Profile
+        from app.services import model_catalog
+
+        monkeypatch.setattr(settings, "FREEINFERENCE_API_KEY", "k")
+        db.add(Profile(data=model_catalog.store({}, "freeinference", ["glm-9"])))
+        db.commit()
+        body = client.get("/runs/compare/status").text
+        assert 'value="freeinference:glm-9"' in body
+
+    def test_it_runs_on_the_interactive_queue(self):
+        from app.celery_app import celery_app
+        from app.tasks.compare_models import run_comparison  # noqa: F401
+
+        route = celery_app.amqp.router.route({}, "app.tasks.compare_models.run_comparison")
+        assert route["queue"].name == "interactive"

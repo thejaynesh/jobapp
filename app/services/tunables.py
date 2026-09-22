@@ -218,6 +218,30 @@ TUNABLES: list[Tunable] = [
         help="The Playwright scrapers — the most expensive tier and the least "
              "productive per minute, so the least often.",
     ),
+    # Backups. The directory is infrastructure and stays in the environment;
+    # how often and how many are preferences.
+    Tunable(
+        key="backup_enabled", env="BACKUP_ENABLED", kind="bool", group="Backups",
+        label="Nightly database backups",
+        help="A compressed pg_dump on the server's storage volume. Off means "
+             "nothing can recover the database if it is lost. The Back up now "
+             "button on the Runs page works either way.",
+    ),
+    Tunable(
+        key="backup_interval_hours", env="BACKUP_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Backups",
+        label="Back up every (hours)",
+        help="Checked hourly, so a change takes effect within the hour. Lower "
+             "loses less on a bad day and writes a full dump each time.",
+    ),
+    Tunable(
+        key="backup_keep", env="BACKUP_KEEP", kind="int",
+        minimum=1, maximum=90, group="Backups",
+        label="Backups to keep",
+        help="Older ones are deleted after each verified new backup — never "
+             "before. Each is a full compressed copy, so this times the newest "
+             "one's size is the disk it takes.",
+    ),
 ]
 
 def _model_role_tunables() -> list[Tunable]:

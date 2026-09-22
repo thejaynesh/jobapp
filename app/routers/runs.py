@@ -300,8 +300,57 @@ def queue_ping(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/backup", response_class=HTMLResponse)
+def backup_now(request: Request, db: Session = Depends(get_db)):
+    """
+    Take a backup now, instead of waiting for the schedule.
+
+    On the interactive queue: the batch worker spends hours at a time on
+    fetches, and a backup you asked for before a risky change is no use at
+    three in the morning.
+    """
+    from app.services import backups
+
+    try:
+        from app.tasks.backup import take_backup
+
+        backups.mark_requested(db)
+        take_backup.apply_async(kwargs={"force": True}, queue="interactive")
+        flash = ("Backup started. It takes a minute or two; this panel "
+                 "updates itself, and the file appears under Backups to download.")
+    except Exception as exc:
+        logger.error("runs: could not start a backup: %s", exc)
+        db.rollback()
+        flash = f"Could not start a backup: {exc}"
+    return templates.TemplateResponse(
+        "runs/_system.html",
+        {"request": request, "system": _system_context(db), "browse_flash": flash},
+    )
+
+
+@router.get("/backup/{name}")
+def download_backup(name: str):
+    """
+    One backup file, to keep somewhere other than this server.
+
+    The backups sit beside the database, so they survive a bad migration and
+    not a lost machine. Downloading one is the off-box copy. Only a name from
+    the backup listing is served — see `backups.find`.
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
+    from app.services import backups
+
+    path = backups.find(name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No such backup.")
+    return FileResponse(path, media_type="application/gzip", filename=path.name)
+
+
 @router.post("/agent/learn", response_class=HTMLResponse)
 def learn_harvest_recipe(request: Request, host: str = Form(...),
+                         hint: str = Form(""),
                          db: Session = Depends(get_db)):
     """
     Work out how to read a host whose payloads the generic reader cannot.
@@ -325,12 +374,22 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
     profile_data = (profile.data if profile else None) or {}
 
     try:
-        outcome = harvest_recipes.learn(db, host.strip(), profile_data)
+        outcome = harvest_recipes.learn(db, host.strip(), profile_data, hint=hint)
         logger.info("runs: learned a recipe for %s — %s", host, outcome["reason"])
+        # Said out loud. This used to re-render the panel and nothing else, so
+        # a refused proposal, a model that was down and a success all looked
+        # like a button that did nothing.
+        flash = (
+            f"{host}: learned — {outcome['reason']}. New visits are read with it."
+            if outcome["ok"] else f"{host}: not learned — {outcome['reason']}"
+        )
     except Exception as exc:
         logger.error("runs: could not learn a recipe for %s: %s", host, exc)
+        db.rollback()
+        flash = f"{host}: could not work it out — {exc}"
     return templates.TemplateResponse(
-        "runs/_system.html", {"request": request, "system": _system_context(db)}
+        "runs/_system.html",
+        {"request": request, "system": _system_context(db), "browse_flash": flash},
     )
 
 
@@ -426,7 +485,9 @@ def queue_pass_check(request: Request, host: str = Form(...),
 
 
 @router.post("/agent/learn-crawl", response_class=HTMLResponse)
-def learn_crawl_recipe(request: Request, host: str = Form(...),
+def learn_crawl_recipe(request: Request, host: str = Form(""),
+                       examples: str = Form(""), page: str = Form(""),
+                       hint: str = Form(""),
                        db: Session = Depends(get_db)):
     """
     Work out how a board shows its second page, instead of being told.
@@ -444,6 +505,12 @@ def learn_crawl_recipe(request: Request, host: str = Form(...),
     Being wrong is still possible and is handled separately — a recipe whose
     visits keep landing on page one retires itself, which puts the board back
     on its hand-written setting.
+
+    `examples`, `page` and `hint` are the "teach it" form: addresses of later
+    pages, which page the first one is, and anything else worth saying. An
+    address is read directly and needs no model at all; the note goes into the
+    model's prompt when one is still needed. `host` may be left blank, and is
+    then taken from the first address.
     """
     from app.config import settings as cfg
     from app.models.profile import Profile
@@ -455,7 +522,14 @@ def learn_crawl_recipe(request: Request, host: str = Form(...),
 
     flash = ""
     try:
-        outcome = crawl_recipes.learn(db, host.strip(), profile_data)
+        page_number = int(page) if str(page or "").strip().isdigit() else None
+        taught = crawl_recipes.parse_examples(examples, page_number)
+        if (examples or "").strip() and not taught:
+            raise ValueError("no http(s) address found in what you pasted")
+        host = (host or "").strip() or (
+            crawl_recipes.host_of(taught[0][1]) if taught else "")
+        outcome = crawl_recipes.learn(db, host, profile_data,
+                                      hint=hint, examples=taught)
         flash = (
             f"{host}: {outcome['reason']}" if outcome["ok"]
             else f"{host}: not accepted — {outcome['reason']}"
@@ -463,6 +537,7 @@ def learn_crawl_recipe(request: Request, host: str = Form(...),
         logger.info("runs: crawl recipe for %s — %s", host, outcome["reason"])
     except Exception as exc:
         logger.error("runs: could not learn to crawl %s: %s", host, exc)
+        db.rollback()
         flash = f"Could not work that out: {exc}"
     return templates.TemplateResponse(
         "runs/_system.html",
@@ -653,14 +728,45 @@ def _compare_context(request: Request, db: Session, queued: dict | None = None) 
         logger.warning("runs: comparison state unavailable: %s", exc)
         record = None
 
+    choices, current = _compare_choices(db)
     return {
         "request": request,
         "compare_result": record,
         "compare_progress": progress(record),
-        "compare_models_available": _nim_models(db),
-        "current_model": settings.NVIDIA_NIM_MODEL,
+        "compare_models_available": choices,
+        "current_model": current,
         "queued": queued,
     }
+
+
+def _compare_choices(db: Session) -> tuple[list[str], str]:
+    """
+    Every `provider:model` that can be compared, and the one scoring now.
+
+    Every configured provider's list, not only NIM's: the models added on the
+    settings page for FreeInference or Gemini are exactly the ones worth
+    comparing before switching to them.
+    """
+    from app.models.profile import Profile
+    from app.services import model_roles
+    from app.services.tunables import value as tunable
+
+    profile = db.query(Profile).first()
+    data = (profile.data if profile else None) or {}
+    def plain(value: str) -> str:
+        # NIM models keep their bare id — what every stored comparison and
+        # the command line use; `model_compare.split_choice` reads both.
+        return value[4:] if value.startswith("nim:") else value
+
+    choices = [plain(value) for value, _ in model_roles.available("match", data)
+               if value != model_roles.AUTO]
+    pinned = str(tunable(data, model_roles.tunable_key("match")) or model_roles.AUTO)
+    current = plain(pinned) if pinned != model_roles.AUTO else \
+        str(tunable(data, "nvidia_nim_model") or settings.NVIDIA_NIM_MODEL)
+    if current in choices:
+        choices.remove(current)
+        choices.insert(0, current)
+    return choices, current
 
 
 @router.get("/compare/status", response_class=HTMLResponse)
@@ -691,7 +797,7 @@ def trigger_compare(request: Request, models: list[str] = Form(default=[]),
             _compare_context(request, db, {"ok": ok, "message": message}),
         )
 
-    available = set(_nim_models(db))
+    available = set(_compare_choices(db)[0])
     wanted = [m for m in models if m in available]
     if len(wanted) < 2:
         return panel("Pick at least two models to compare.")

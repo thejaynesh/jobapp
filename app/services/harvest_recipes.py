@@ -314,7 +314,8 @@ def _clean(raw: str) -> str:
     return re.sub(r"\s*```$", "", text).strip()
 
 
-def propose(samples: list, host: str, profile_data: dict | None = None) -> dict:
+def propose(samples: list, host: str, profile_data: dict | None = None,
+            located: list | None = None, hint: str = "") -> dict:
     """
     Ask a model how to read this host. Returns `{recipe, error}`.
 
@@ -331,9 +332,14 @@ def propose(samples: list, host: str, profile_data: dict | None = None) -> dict:
         rendered = "\n\n---\n\n".join(
             json.dumps(payload, indent=1)[:12000] for payload in payloads
         )
+        prompt = _PROMPT.format(host=host, samples=rendered)
+        if located:
+            where = ", ".join(f"{root}.{key}" if root else key for root, key in located[:6])
+            prompt += (f"\n\nA job titled {hint!r} is on this page, and appears in "
+                       f"these responses at: {where}. The job objects are there.\n")
         raw = model_roles.call(
             profile_data, "learn",
-            [{"role": "user", "content": _PROMPT.format(host=host, samples=rendered)}],
+            [{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=2000,
         )
@@ -432,20 +438,177 @@ def save(db, host: str, recipe: dict, outcome: dict, model: str = "") -> object:
     return row
 
 
-def learn(db, host: str, profile_data: dict | None = None) -> dict:
-    """Propose, validate and store in one go. What the button calls."""
+# ---------------------------------------------------------------------------
+# Choosing what to show the model, and reading a hint
+# ---------------------------------------------------------------------------
+
+_JOBBY_KEY = re.compile(
+    r"^(job)?title$|jobtitle|posting|company|employer|hiringorg|location"
+    r"|salary|compensation|description|apply|remote|workplace|seniority",
+    re.I,
+)
+
+
+def jobbiness(payload, limit: int = 20_000) -> int:
+    """
+    How many keys in this payload are named like job fields.
+
+    A payload with none is not a job list whatever else it is, and sending it
+    to a model to find the jobs in wastes the call and returns "found no jobs",
+    which reads as the model failing rather than the evidence being wrong.
+    """
+    count = 0
+    stack = [payload]
+    seen = 0
+    while stack and seen < limit:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if _JOBBY_KEY.search(str(key)):
+                    count += 1
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return count
+
+
+def locate_text(payload, needle: str, limit: int = 8) -> list[tuple[str, str]]:
+    """
+    Where a piece of text you can see on the page lives in a payload.
+
+    Returns `(path to the array holding the object, key within it)` pairs — a
+    job title found at `data.jobs[3].title` comes back as `("data.jobs",
+    "title")`, which is exactly a recipe's root and field. Paths are written
+    without indices because `_dig` steps through arrays by itself.
+    """
+    needle = (needle or "").strip().lower()
+    if len(needle) < 3:
+        return []
+    found: list[tuple[str, str]] = []
+
+    def walk(node, path, array_path):
+        if len(found) >= limit:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                here = f"{path}.{key}" if path else str(key)
+                if isinstance(value, str) and needle in value.lower():
+                    root = array_path if array_path is not None else path
+                    rel = here[len(root) + 1:] if root and here.startswith(root + ".") else str(key)
+                    pair = (root or "", rel)
+                    if pair not in found:
+                        found.append(pair)
+                else:
+                    walk(value, here, array_path)
+        elif isinstance(node, list):
+            for item in node[:200]:
+                walk(item, path, path)
+
+    walk(payload, "", None)
+    return found
+
+
+def _field_near(node: dict, keys, depth: int = 2) -> str | None:
+    """The first key in `keys` present on `node` or one level inside it."""
+    if not isinstance(node, dict):
+        return None
+    for key in keys:
+        if key in node and node[key] not in (None, "", [], {}):
+            value = node[key]
+            if isinstance(value, dict) and depth > 1:
+                inner = _field_near(value, ("name", "displayName", "title", "text"), 1)
+                if inner:
+                    return f"{key}.{inner}"
+                continue
+            return key
+    return None
+
+
+def recipe_from_title(samples: list, title: str) -> dict | None:
+    """
+    A recipe built from a job title you can see on the page, with no model.
+
+    The title says which array holds the jobs and which key is the title; the
+    other fields are then the usual aliases looked up on that same object. It
+    is only a draft — `validate` decides whether it reads real jobs.
+    """
+    from app.services import harvest
+
+    for payload in samples:
+        for root, key in locate_text(payload, title):
+            objects = [o for o in _candidates(payload, [root]) if isinstance(o, dict)]
+            if not objects:
+                continue
+            sample = objects[0]
+            fields = {"title": [key]}
+            for name, aliases in (
+                ("company", harvest._COMPANY_KEYS), ("location", harvest._LOCATION_KEYS),
+                ("description", harvest._DESCRIPTION_KEYS), ("url", harvest._URL_KEYS),
+                ("id", harvest._ID_KEYS),
+            ):
+                hit = _field_near(sample, aliases)
+                if hit:
+                    fields[name] = [hit]
+            if "company" in fields and ("url" in fields or "id" in fields):
+                return {"roots": [root] if root else [""], "fields": fields,
+                        "note": f"built from the title {title!r} found at {root}.{key}"}
+    return None
+
+
+def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> dict:
+    """
+    Propose, validate and store in one go. What the button calls.
+
+    `hint` is optional and is usually a job title you can see on the page.
+    Found in a payload, it pins down where the jobs are without asking anyone,
+    and when a model is still needed it is told exactly where to look.
+    """
     from app.services import harvest_samples, model_roles
 
-    samples = harvest_samples.for_host(db, host, limit=5)
+    samples = harvest_samples.for_host(db, host, limit=8)
     if not samples:
         return {"ok": False, "reason": "No samples stored for this host yet."}
 
-    proposal = propose(samples, host, profile_data)
+    hint = (hint or "").strip()[:300]
+    # The most job-like payloads first. The store keeps whatever arrived, and
+    # the first three were often analytics — which is what the model was shown.
+    ranked = sorted(samples, key=lambda row: jobbiness(row.payload), reverse=True)
+    payloads = [row.payload for row in ranked]
+    located = []
+    if hint:
+        located = [pair for payload in payloads for pair in locate_text(payload, hint)]
+        ranked = sorted(ranked, key=lambda row: bool(locate_text(row.payload, hint)),
+                        reverse=True)
+        payloads = [row.payload for row in ranked]
+    elif not jobbiness(payloads[0]):
+        return {"ok": False,
+                "reason": f"none of the {len(samples)} stored payloads look like job "
+                          "listings (no title, company or location fields) — they are "
+                          "probably the site's analytics. Press Forget, open a search "
+                          "on the site, then try again; or type a job title you can "
+                          "see on the page into the box"}
+    if hint and not located:
+        return {"ok": False,
+                "reason": f"{hint!r} does not appear in any of the {len(samples)} stored "
+                          "payloads, so the jobs on that page arrived some other way. "
+                          "Press Forget and visit the page again"}
+
+    if hint:
+        drafted = recipe_from_title(payloads, hint)
+        if drafted:
+            outcome = validate(payloads, drafted)
+            if outcome["ok"]:
+                row = save(db, host, drafted, outcome, model="built from your hint")
+                return {"ok": True, "reason": outcome["reason"] + " (from your hint, no model)",
+                        "jobs": outcome["jobs"], "recipe": drafted, "id": str(row.id)}
+
+    proposal = propose(ranked, host, profile_data, located=located, hint=hint)
     if proposal["error"]:
         return {"ok": False, "reason": proposal["error"]}
 
     provider = model_roles.resolve(profile_data, "learn")
-    outcome = validate([s.payload for s in samples], proposal["recipe"])
+    outcome = validate(payloads, proposal["recipe"])
     row = save(db, host, proposal["recipe"], outcome,
                model=provider.model if provider else "")
     return {

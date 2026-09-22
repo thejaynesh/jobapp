@@ -472,6 +472,9 @@ def _learn_to_crawl(db, url: str, result: dict, pages_done: int,
                     batches=int((navigation.get("scroll") or {}).get("batches") or 0),
                     note="visit did not get past the first screen",
                 )
+                # A board whose pagination links carry their page numbers has
+                # told us how it pages; nobody needs to press a button for it.
+                crawl_recipes.learn_automatically(db, host, url, navigation)
     except Exception as exc:
         logger.debug("agent_work: could not record crawl evidence for %s: %s",
                      host, exc)

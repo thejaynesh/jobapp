@@ -70,32 +70,62 @@ def sample_jobs(db: Session, limit: int) -> list[Job]:
     )
 
 
+def split_choice(choice: str) -> tuple[str, str]:
+    """
+    `(provider, model)` for a comparison choice.
+
+    Choices are `provider:model`, the same values the settings page's model
+    dropdowns use, so anything on any provider's list can be compared. A bare
+    model id is NIM's, which is what every comparison stored before this was.
+    """
+    from app.services.model_catalog import PROVIDER_LABELS
+
+    name, sep, model = str(choice or "").partition(":")
+    if sep and name in PROVIDER_LABELS and model:
+        return name, model
+    return "nim", str(choice or "")
+
+
 def score_with_model(job, profile_data: dict, model: str) -> tuple[int | None, str]:
     """
     Score one job with one model.
 
     Returns (score, status) where status is "ok", "unreadable" or "error".
-    Deliberately calls the primary provider only: the point is to judge this
+    Deliberately calls that one provider only: the point is to judge this
     model, not to watch the fallback chain rescue it.
     """
+    from dataclasses import replace
+
     from app.services.matcher import (
         ResponseParseError,
         _build_match_prompt,
+        _match_max_tokens,
         _parse_llm_response,
         chat_completion,
     )
 
-    from app.services import llm_log
+    from app.llm.providers import call_provider
+    from app.services import llm_log, model_roles
 
+    provider_name, model_id = split_choice(model)
     messages = _build_match_prompt(job, profile_data)
     try:
         with llm_log.stage("model_compare", job_id=job.id):
-            raw = chat_completion(
-                messages=messages,
-                api_key=settings.NVIDIA_NIM_API_KEY,
-                base_url=settings.NVIDIA_NIM_BASE_URL,
-                model=model,
-            )
+            if provider_name == "nim":
+                raw = chat_completion(
+                    messages=messages,
+                    api_key=settings.NVIDIA_NIM_API_KEY,
+                    base_url=settings.NVIDIA_NIM_BASE_URL,
+                    model=model_id,
+                )
+            else:
+                provider = model_roles._providers().get(provider_name)
+                if provider is None:
+                    raise RuntimeError(f"{provider_name} is not configured")
+                raw = call_provider(
+                    replace(provider, model=model_id), messages,
+                    max_tokens=_match_max_tokens(),
+                )
     except Exception as exc:
         logger.warning("compare: %s call failed for %s: %s", model, job.id, exc)
         return None, "error"

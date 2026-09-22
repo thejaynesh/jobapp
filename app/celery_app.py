@@ -93,11 +93,14 @@ celery_app.conf.update(
         "app.tasks.descriptions.*": {"queue": "batch"},
         "app.tasks.liveness.*": {"queue": "batch"},
         "app.tasks.links.*": {"queue": "batch"},
-        "app.tasks.compare_models.*": {"queue": "batch"},
         "app.tasks.match_eval.*": {"queue": "batch"},
         "app.tasks.providers.*": {"queue": "batch"},
         # Deliberately interactive: the user pressed something, or the laptop
         # is waiting for work to do.
+        # Pressed on /runs by somebody waiting for the answer. On the batch
+        # queue it sat behind hours of fetching and matching, showing "queued,
+        # waiting for a worker" until the panel called it stalled.
+        "app.tasks.compare_models.*": {"queue": "interactive"},
         "app.tasks.generate.*": {"queue": "interactive"},
         "app.tasks.browse.*": {"queue": "interactive"},
         "app.tasks.outreach.*": {"queue": "interactive"},
@@ -191,7 +194,9 @@ celery_app.conf.beat_schedule = {
     # thing nothing else in the system can recover from.
     "take-backup": {
         "task": "app.tasks.backup.take_backup",
-        "schedule": celery_schedule(settings.BACKUP_INTERVAL_HOURS * 3600),
+        # Hourly, and the task decides whether one is due — so the interval
+        # on the settings page applies without restarting beat.
+        "schedule": celery_schedule(3600),
     },
     # Settled rejections stop carrying their descriptions after 60 days. They
     # are moved rather than deleted: deduplication reads three columns off the

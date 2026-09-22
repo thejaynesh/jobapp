@@ -33,12 +33,13 @@ import logging
 import re
 
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
 # The modes a recipe may claim. Closed set: free text here would eventually
 # produce three spellings of "scroll".
-MODES = ("scroll", "click", "url")
+MODES = ("scroll", "click", "url", "path")
 
 # Ceilings, applied to whatever a model asks for. These are the same numbers
 # the extension clamps to, stated here so a nonsense proposal is refused at the
@@ -248,7 +249,276 @@ def _default_page_size(param: str, base, query: dict) -> int:
     return 1
 
 
-def validate(evidence: dict, recipe: dict) -> dict:
+# ---------------------------------------------------------------------------
+# The page number in the address, wherever it sits
+# ---------------------------------------------------------------------------
+#
+# Boards put the page counter in two places. A query parameter —
+# `?page=4`, `?start=30` — is the one `url` recipes cover. The other is a path
+# segment: ZipRecruiter's fourth page is `/jobs-search/4?search=...`, and its
+# first is `/jobs-search?search=...` with no number at all. Nothing here could
+# represent that, so the board was walked with an invented `?page=` that it
+# ignores, and every "page" was page one.
+#
+# A `path` recipe names the path the counter follows (`path_prefix`), and the
+# counter goes directly after it, replacing one that is already there.
+
+_PATH_PREFIX_OK = re.compile(r"^(/[A-Za-z0-9._~%+-]{1,80}){1,8}$")
+
+
+def _numeric(text, digits: int = 5) -> bool:
+    return bool(re.fullmatch(r"\d{1,%d}" % digits, str(text or "")))
+
+
+def _segments(path: str) -> list[str]:
+    return [piece for piece in (path or "").split("/") if piece]
+
+
+def _counters(url: str) -> dict:
+    """
+    Every number in this URL that could be a page counter.
+
+    Keyed `("q", name)` for a query parameter and `("p", "/prefix")` for a
+    path segment, the prefix being the path before it. A path number is only a
+    candidate when it follows a word — `/jobs-search/4` — and is short; a long
+    one is an id (`/job/48213377`) and a number after a number is a date.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return {}
+    found: dict = {}
+    for name, value in parse_qsl(parts.query, keep_blank_values=True):
+        if _numeric(value):
+            found[("q", name)] = int(value)
+    segments = _segments(parts.path)
+    for index, piece in enumerate(segments):
+        if index and _numeric(piece, 4) and not _numeric(segments[index - 1]):
+            found[("p", "/" + "/".join(segments[:index]))] = int(piece)
+    return found
+
+
+def _recipe_for(key, base: int, size: int) -> dict:
+    kind, name = key
+    if kind == "q":
+        return {"mode": "url", "page_param": name,
+                "page_base": base, "page_size": size}
+    return {"mode": "path", "path_prefix": name,
+            "page_base": base, "page_size": size}
+
+
+def _is_pagey(key) -> bool:
+    kind, name = key
+    if kind == "p":
+        return True
+    lowered = name.lower()
+    return lowered in _ORDINAL_PARAMS or lowered in _OFFSET_PARAMS
+
+
+def _fit(key, known: list, values: list, absent_somewhere: bool):
+    """
+    `(base, size, assumed)` for a counter, or None if the numbers disagree.
+
+    `known` holds `(page number, value)` pairs — a link labelled "3" whose
+    address reads `/jobs-search/3`, or a URL you pasted and said was page 4.
+    Two of them settle both numbers exactly. One settles them when the value is
+    the page number (an ordinal) or a multiple of the pages before it (an
+    offset). None at all is a guess, and it is said to be one.
+    """
+    known = sorted(set(known))
+    if len(known) >= 2:
+        (p1, v1), (p2, v2) = known[0], known[1]
+        if p1 == p2 or (v2 - v1) % (p2 - p1):
+            return None
+        size = (v2 - v1) // (p2 - p1)
+        base = v1 - (p1 - 1) * size
+        if size < 1 or size > MAX_PAGE_SIZE or base not in (0, 1):
+            return None
+        if any(v != base + (p - 1) * size for p, v in known):
+            return None
+        return base, size, False
+
+    if len(known) == 1:
+        page, value = known[0]
+        if page == 1:
+            if value not in (0, 1):
+                return None
+            size = 1 if value == 1 or key[0] == "p" or key[1].lower() in _ORDINAL_PARAMS else 25
+            return value, size, size != 1
+        if value == page:
+            return 1, 1, False
+        if value == page - 1:
+            return 0, 1, False
+        if value and value % (page - 1) == 0 and value // (page - 1) <= MAX_PAGE_SIZE:
+            return 0, value // (page - 1), False
+        return None
+
+    # No page numbers at all: only a counter that looks like one is trusted.
+    if not _is_pagey(key):
+        return None
+    distinct = sorted(set(values))
+    if len(distinct) >= 2:
+        step = min(b - a for a, b in zip(distinct, distinct[1:]))
+        if step == 1:
+            return 1, 1, True
+        if step <= MAX_PAGE_SIZE:
+            return 0, step, True
+        return None
+    if key[0] == "q" and key[1].lower() in _OFFSET_PARAMS:
+        return 0, 25, True
+    return 1, 1, True
+
+
+def infer(observations: list, reference: str | None = None) -> dict:
+    """
+    Work out the page counter from addresses, without asking a model.
+
+    `observations` are `(page number or None, url)` — the links a page's
+    pagination row points at, or URLs somebody pasted. `reference` is a URL
+    known to be a results page (the one the visit opened), used only to notice
+    a counter that is *absent* on it and present on the others, which is how
+    most boards write page one.
+
+    Returns `{ok, reason, recipe}`. This is the first thing tried because it is
+    exact where it works: the board has already written page two's address
+    into its own markup, and reading it beats describing the page to a model
+    and hoping.
+    """
+    rows = []
+    for page, url in observations or []:
+        if not url:
+            continue
+        counters = _counters(url)
+        rows.append((page if isinstance(page, int) and page >= 1 else None, counters))
+    if not rows:
+        return {"ok": False, "reason": "No example addresses to read."}
+
+    reference_counters = _counters(reference) if reference else None
+    keys = {key for _, counters in rows for key in counters}
+    best = None
+    for key in keys:
+        known = [(page, counters[key]) for page, counters in rows
+                 if page is not None and key in counters]
+        values = [counters[key] for _, counters in rows if key in counters]
+        absent = (reference_counters is not None and key not in reference_counters) \
+            or any(key not in counters for _, counters in rows)
+        fitted = _fit(key, known, values, absent)
+        if fitted is None:
+            continue
+        base, size, assumed = fitted
+        # Evidence first: numbers matched to page numbers beat a counter that
+        # merely varies, which beats one that merely looks like a page number.
+        score = (len(known) * 10 + (5 if len(set(values)) > 1 else 0)
+                 + (3 if absent else 0) + (2 if _is_pagey(key) else 0)
+                 + (1 if key[0] == "p" else 0))
+        if best is None or score > best[0]:
+            best = (score, key, base, size, assumed)
+
+    if best is None:
+        return {"ok": False,
+                "reason": "None of those addresses carries a number that "
+                          "changes with the page."}
+
+    _, key, base, size, assumed = best
+    recipe = _recipe_for(key, base, size)
+    where = f"?{key[1]}=" if key[0] == "q" else f"{key[1]}/N"
+    reason = f"The page number is {where} (first page {base}, +{size} a page)"
+    if assumed:
+        reason += " — assumed from the name; say which page an address is to be sure"
+    recipe["note"] = reason
+    return {"ok": True, "reason": reason + ".", "recipe": recipe}
+
+
+def infer_from_links(source_url: str | None, controls: list) -> dict:
+    """The page counter, read off the hrefs of a page's numbered links."""
+    observations = []
+    for control in controls or []:
+        if not isinstance(control, dict):
+            continue
+        href = str(control.get("href") or "").strip()
+        if not href or href.startswith(("#", "javascript:")):
+            continue
+        try:
+            url = urljoin(source_url or "", href)
+        except ValueError:
+            continue
+        label = _label_of(control)
+        if label.isdigit():
+            observations.append((int(label), url))
+        elif _PAGINATION_LABEL.match(label) and not _BACKWARD_LABEL.match(label):
+            observations.append((None, url))
+    if not any(page for page, _ in observations):
+        return {"ok": False, "reason": "The page's links carry no page numbers."}
+    return infer(observations, reference=source_url)
+
+
+def _set_query(url: str, name: str, value: int) -> str:
+    parts = urlsplit(url)
+    pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k != name]
+    pairs.append((name, str(value)))
+    return urlunsplit(parts._replace(query=urlencode(pairs)))
+
+
+def _set_path(url: str, prefix: str, value: int) -> str | None:
+    parts = urlsplit(url)
+    want = _segments(prefix)
+    have = _segments(parts.path)
+    if have[:len(want)] != want:
+        return None
+    rest = have[len(want):]
+    if rest and _numeric(rest[0], 4):
+        rest = rest[1:]
+    path = "/" + "/".join(want + [str(value)] + rest)
+    if parts.path.endswith("/") and rest:
+        path += "/"
+    return urlunsplit(parts._replace(path=path))
+
+
+def _current(url: str, recipe: dict) -> int | None:
+    """The counter this URL already carries under `recipe`, if any."""
+    counters = _counters(url)
+    if recipe.get("mode") == "url":
+        return counters.get(("q", str(recipe.get("page_param") or "")))
+    if recipe.get("mode") == "path":
+        prefix = "/" + "/".join(_segments(str(recipe.get("path_prefix") or "")))
+        return counters.get(("p", prefix))
+    return None
+
+
+def page_urls(url: str, recipe: dict, depth: int) -> list[str]:
+    """
+    `url` and the `depth - 1` pages after it, for a `url` or `path` recipe.
+
+    Starts from wherever `url` already is: a pasted page-four address carries
+    its counter, and appending `?page=2` to it gave a URL with two page
+    parameters that a board resolves however it likes. The counter is
+    *replaced*, never appended.
+    """
+    mode = (recipe or {}).get("mode")
+    if depth <= 1 or mode not in ("url", "path"):
+        return [url]
+    base = int(recipe.get("page_base") or 0)
+    size = max(1, int(recipe.get("page_size") or 1))
+    current = _current(url, recipe)
+    start = 0 if current is None else max(0, (current - base) // size)
+    out = [url]
+    for n in range(start + 1, start + depth):
+        value = base + n * size
+        if mode == "url":
+            param = str(recipe.get("page_param") or "")
+            if not param:
+                break
+            out.append(_set_query(url, param, value))
+        else:
+            nxt = _set_path(url, str(recipe.get("path_prefix") or ""), value)
+            if nxt is None:
+                break
+            out.append(nxt)
+    return out
+
+
+def validate(evidence: dict, recipe: dict, source_url: str | None = None) -> dict:
     """
     Whether this recipe is safe and plausible for this page.
 
@@ -300,6 +570,30 @@ def validate(evidence: dict, recipe: dict) -> dict:
         out["scroll_passes"] = min(passes, MAX_SCROLL_PASSES)
         return ok(f"Scrolls {out['scroll_passes']} times.")
 
+    if mode == "path":
+        prefix = str(recipe.get("path_prefix") or "").strip()
+        if not prefix.startswith("/"):
+            prefix = "/" + prefix
+        prefix = prefix.rstrip("/")
+        if not _PATH_PREFIX_OK.match(prefix):
+            return no(f"Implausible path_prefix {prefix!r}.")
+        out["path_prefix"] = prefix
+        base = _whole_number(recipe.get("page_base"), 1)
+        if base not in (0, 1):
+            return no("page_base must be 0 or 1.")
+        out["page_base"] = base
+        size = _whole_number(recipe.get("page_size"), 1)
+        if size is None or not 1 <= size <= MAX_PAGE_SIZE:
+            return no(f"page_size must be 1..{MAX_PAGE_SIZE}.")
+        out["page_size"] = size
+        # The address the page was on has to be under that path, or every
+        # URL built from it is refused at run time and nothing is crawled.
+        if source_url:
+            have = _segments(urlsplit(source_url).path)
+            if have[:len(_segments(prefix))] != _segments(prefix):
+                return no(f"{prefix!r} is not the path of {source_url}.")
+        return ok(f"Pages by {prefix}/N (+{size} each)")
+
     if mode == "url":
         param = str(recipe.get("page_param") or "")
         if not _PARAM_OK.match(param):
@@ -327,7 +621,14 @@ def validate(evidence: dict, recipe: dict) -> dict:
         # The parameter has to be one the page actually uses, or one that is
         # absent — inventing `?page=2` on a board that pages by `start` gives a
         # URL that returns page one, five times, and looks like depth.
-        if seen and param not in seen:
+        # A parameter the page's own links carry counts as present: most
+        # boards leave the counter off page one and write it into the links to
+        # page two onwards.
+        linked = any(
+            param in dict(parse_qsl(urlsplit(str(c.get("href") or "")).query))
+            for c in ((evidence or {}).get("controls") or []) if isinstance(c, dict)
+        )
+        if seen and param not in seen and not linked:
             known = ", ".join(sorted(seen)) or "none"
             return no(f"{param!r} is not in this URL (has: {known}).")
         return ok(f"Pages by ?{param}= (+{out['page_size']} each)")
@@ -403,25 +704,29 @@ A crawler opened {url} and could not get past the first screenful. It scrolled
 offered: the query parameters already in the URL, and every control that might
 move between pages.
 
-There are exactly three answers:
+There are exactly four answers:
 
   scroll — there is no second page. The list grows as you move down it.
            Correct when scrolling did produce batches, or when there are no
            page controls at all.
   click  — numbered controls or a "next" button, with one address for every
            page. Correct when such a control is listed below.
-  url    — the page number is a query parameter already visible in the URL.
+  url    — the page number is a query parameter already visible in the URL
+           or in the href of the page's own numbered links.
+  path   — the page number is a segment of the path, e.g. /jobs-search/4.
+           Give "path_prefix", the path BEFORE the number ("/jobs-search").
 
 Return ONLY this JSON, no prose. Include only the keys for the mode you chose:
 
 {{
-  "mode": "scroll" | "click" | "url",
+  "mode": "scroll" | "click" | "url" | "path",
   "scroll_passes": 150,
   "selector": "css selector for the NEXT-page control",
   "max_pages": 10,
   "page_param": "name of the query parameter",
   "page_size": 25,
   "page_base": 0,
+  "path_prefix": "/path/before/the/number",
   "note": "one sentence on how this board paginates"
 }}
 
@@ -449,8 +754,12 @@ Rules:
   number is nearly always in the URL — answer "url".
 - Prefer a selector built from a stable attribute (aria-label, rel, data-testid)
   over a generated class name.
+- Read the "href" of each control: a link labelled "2" whose href is
+  "/jobs-search/2?..." says exactly where page two is.
 - If nothing below looks like a page control, answer "scroll".
-
+- If the person running this has told you something below, it outranks your
+  own reading of the controls.
+{hint}
 URL: {url}
 Query parameters already present: {query}
 Scroll: {passes} passes, {batches} batches, page height {height}
@@ -461,7 +770,19 @@ Controls found on the page:
 """
 
 
-def propose(sample, profile_data: dict | None = None) -> dict:
+def _hint_block(hint: str, examples: list) -> str:
+    lines = []
+    if examples:
+        lines.append("\nAddresses of later pages, given by the person running this:")
+        for page, url in examples:
+            lines.append(f"  - {url}" + (f"  (page {page})" if page else ""))
+    if (hint or "").strip():
+        lines.append("\nThey also say: " + hint.strip()[:1000])
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def propose(sample, profile_data: dict | None = None, hint: str = "",
+            examples: list | None = None) -> dict:
     """
     Ask a model how this board paginates. Returns `{recipe, error}`.
 
@@ -482,6 +803,7 @@ def propose(sample, profile_data: dict | None = None) -> dict:
     evidence = sample.evidence or {}
     scroll = evidence.get("scroll") or {}
     prompt = _PROMPT.format(
+        hint=_hint_block(hint, examples or []),
         url=sample.source_url or f"https://{sample.host}/",
         query=json.dumps(evidence.get("query") or {}, ensure_ascii=False),
         passes=scroll.get("passes", 0),
@@ -704,24 +1026,106 @@ def note_outcome(db, host: str, pages_reached: int, batches: int = 0) -> None:
     db.commit()
 
 
-def learn(db, host: str, profile_data: dict | None = None) -> dict:
-    """Propose, validate and store in one go. What the button calls."""
+def parse_examples(text: str, page: int | None = None) -> list:
+    """
+    `(page number or None, url)` from what somebody pasted.
+
+    One address per line, each optionally saying which page it is — "page 4",
+    "p4", "4:" or a bare number beside it. `page` applies to the first address
+    when its own line says nothing, which is what the separate "which page is
+    this?" box on the panel is for.
+    """
+    out = []
+    for line in re.split(r"[\n\r]+", text or ""):
+        found = re.search(r"https?://\S+", line)
+        if not found:
+            continue
+        url = found.group(0).rstrip(".,;)")
+        rest = (line[:found.start()] + " " + line[found.end():]).strip()
+        number = re.search(r"(?:page|pg|p)?\s*#?\s*(\d{1,4})\b", rest, re.I)
+        out.append((int(number.group(1)) if number else None, url))
+    if out and out[0][0] is None and page and page >= 1:
+        out[0] = (int(page), out[0][1])
+    return out[:10]
+
+
+def host_of(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def learn(db, host: str, profile_data: dict | None = None, hint: str = "",
+          examples: list | None = None) -> dict:
+    """
+    Work out how a board paginates. What both panel buttons call.
+
+    In order of how much it can be trusted:
+
+    1. **Addresses you gave it.** A page-four URL says where the counter is
+       and, with its page number, exactly how it counts.
+    2. **The board's own links.** A pagination row's hrefs are page two's
+       address written by the board itself, and the extension has sent them
+       all along — they were shown to a model and never simply read.
+    3. **A model**, with your note and examples in the prompt, and its answer
+       checked against the evidence before it runs.
+    """
+    from types import SimpleNamespace
+
     from app.services import model_roles
 
-    sample = latest_sample(db, host)
-    if sample is None:
-        return {"ok": False,
-                "reason": "Nothing stored for that host yet — crawl it once "
-                          "so the extension can describe the page."}
+    examples = [(page, url) for page, url in (examples or []) if url]
+    host = (host or "").strip().lower() or (host_of(examples[0][1]) if examples else "")
+    if not host:
+        return {"ok": False, "reason": "No host given."}
 
-    proposal = propose(sample, profile_data)
+    sample = latest_sample(db, host)
+    evidence = (sample.evidence if sample else None) or {}
+    reference = (sample.source_url if sample else None) or None
+
+    # 1 and 2: read, don't guess.
+    attempts = []
+    if examples:
+        attempts.append((infer(examples, reference=reference), examples[0][1],
+                         "your example"))
+    if sample is not None:
+        attempts.append((infer_from_links(reference, evidence.get("controls")),
+                         reference, "the page's own links"))
+    for inferred, checked_against, source in attempts:
+        if not inferred["ok"]:
+            continue
+        outcome = validate(evidence, inferred["recipe"], source_url=checked_against)
+        if outcome["ok"]:
+            stored = outcome["recipe"]
+            row = save(db, host, stored,
+                       {"ok": True, "reason": f"{inferred['reason']} Read from {source}."},
+                       model=f"read from {source}")
+            return {"ok": True, "reason": f"{inferred['reason']} (read from {source})",
+                    "recipe": stored, "id": str(row.id)}
+
+    if sample is None and not examples:
+        return {"ok": False,
+                "reason": "Nothing stored for that host yet — crawl it once so "
+                          "the extension can describe the page, or paste the "
+                          "address of page 2."}
+    if sample is None:
+        first = examples[0][1]
+        sample = SimpleNamespace(
+            host=host, source_url=first,
+            evidence={"query": dict(parse_qsl(urlsplit(first).query)), "controls": []},
+        )
+
+    # 3: a model, told whatever the person told us.
+    proposal = propose(sample, profile_data, hint=hint, examples=examples)
     if proposal["error"]:
         return {"ok": False, "reason": proposal["error"]}
 
     # Recorded so a recipe that turns out badly can be traced to the model that
     # wrote it, which is the first thing you want to know.
     provider = model_roles.resolve(profile_data, "learn")
-    outcome = validate(sample.evidence or {}, proposal["recipe"])
+    outcome = validate(sample.evidence or {}, proposal["recipe"],
+                       source_url=examples[0][1] if examples else sample.source_url)
     # The normalised form, not the raw proposal: a budget that was clamped or a
     # page size that was inferred has to be what runs, or the recipe does one
     # thing and the panel says another.
@@ -734,6 +1138,30 @@ def learn(db, host: str, profile_data: dict | None = None) -> dict:
         "recipe": stored,
         "id": str(row.id),
     }
+
+
+def learn_automatically(db, host: str, source_url: str, evidence: dict) -> bool:
+    """
+    Adopt a recipe read straight off a page's links, with no button pressed.
+
+    Only the exact case — numbered links whose addresses agree with their
+    labels — and never a model call: this runs on every unproductive visit,
+    and something that costs nothing and cannot be wrong in an interesting way
+    is the only thing that should run that often.
+    """
+    if active_for(db, host):
+        return False
+    inferred = infer_from_links(source_url, (evidence or {}).get("controls"))
+    if not inferred["ok"] or "assumed" in inferred["reason"]:
+        return False
+    outcome = validate(evidence or {}, inferred["recipe"], source_url=source_url)
+    if not outcome["ok"]:
+        return False
+    save(db, host, outcome["recipe"],
+         {"ok": True, "reason": f"{inferred['reason']} Read from the page's own links."},
+         model="read from the page's own links")
+    logger.info("crawl_recipes: learned %s from its links — %s", host, inferred["reason"])
+    return True
 
 
 def listing(db, limit: int = 30) -> list:

@@ -69,15 +69,67 @@ def directory() -> Path:
     return Path(getattr(settings, "BACKUP_DIR", "/storage/backups"))
 
 
+def _tunable(key: str, fallback):
+    """A Backups setting from the settings page, falling back to the env."""
+    try:
+        from app.services import tunables
+
+        found = tunables.current(key)
+        return fallback if found is None else found
+    except Exception:
+        return fallback
+
+
 def _keep() -> int:
     try:
-        return max(1, int(getattr(settings, "BACKUP_KEEP", 14)))
+        return max(1, int(_tunable("backup_keep", getattr(settings, "BACKUP_KEEP", 14))))
     except (TypeError, ValueError):
         return 14
 
 
 def enabled() -> bool:
-    return bool(getattr(settings, "BACKUP_ENABLED", True))
+    return bool(_tunable("backup_enabled", getattr(settings, "BACKUP_ENABLED", True)))
+
+
+def interval_hours() -> int:
+    try:
+        return max(1, int(_tunable("backup_interval_hours",
+                                   getattr(settings, "BACKUP_INTERVAL_HOURS", 24))))
+    except (TypeError, ValueError):
+        return 24
+
+
+def due() -> bool:
+    """
+    Whether the scheduled backup should run now.
+
+    The schedule ticks hourly and asks this, rather than running at a fixed
+    interval read once when `beat` started — so the interval is a setting that
+    bites within the hour instead of one that needs a restart.
+    """
+    if not enabled():
+        return False
+    files = existing()
+    if not files:
+        return True
+    modified = datetime.fromtimestamp(files[0].stat().st_mtime, tz=timezone.utc)
+    age = (datetime.now(timezone.utc) - modified).total_seconds()
+    # Five minutes of slack so an hourly tick landing just short of the mark
+    # does not push the backup a whole extra hour.
+    return age >= interval_hours() * 3600 - 300
+
+
+def find(name: str) -> Path | None:
+    """
+    One existing backup by file name, or None.
+
+    Looked up in the listing rather than joined onto the directory, so a name
+    carrying `../` or a path cannot reach anything that is not a backup.
+    """
+    for path in existing():
+        if path.name == name:
+            return path
+    return None
 
 
 def _dsn_environment(url: str) -> tuple[list[str], dict]:
@@ -207,15 +259,19 @@ def existing() -> list[Path]:
     return sorted(files, key=lambda path: path.name, reverse=True)
 
 
-def run(db=None) -> dict:
+def run(db=None, force: bool = False) -> dict:
     """
     Take one backup. Returns what happened; never raises.
+
+    `force` is the Back up now button: it runs even with the schedule switched
+    off, because switching off the nightly job is not a decision never to have
+    a backup.
 
     Rotation runs only after a verified success. Deleting an old backup to make
     room for one that then fails is how a retention policy turns into data
     loss.
     """
-    if not enabled():
+    if not force and not enabled():
         return {"ok": False, "skipped": True, "detail": "Backups are switched off."}
 
     folder = directory()
@@ -296,6 +352,7 @@ def _finish(db, result: dict) -> dict:
             ),
             "last_file": result.get("file") if result.get("ok") else state.get("last_file"),
             "last_bytes": result.get("bytes") if result.get("ok") else state.get("last_bytes"),
+            "requested_at": state.get("requested_at"),
         }
         data = dict(profile.data or {})
         data[STATE_KEY] = merged
@@ -333,8 +390,22 @@ def status(db=None) -> dict:
         except Exception as exc:
             logger.warning("backups: could not read the stored state: %s", exc)
 
-    interval = max(1, int(getattr(settings, "BACKUP_INTERVAL_HOURS", 24)))
+    interval = interval_hours()
+    requested = state.get("requested_at")
+    # A press of the button that has not finished yet: requested after the
+    # last attempt, and recently enough that the worker could still be on it.
+    in_progress = bool(
+        requested
+        and (not state.get("last_attempt") or requested > state["last_attempt"])
+        and _age_seconds(requested) < 3600
+    )
     return {
+        "in_progress": in_progress,
+        "requested_at": requested,
+        "files": [
+            {"name": path.name, "bytes": path.stat().st_size}
+            for path in files
+        ],
         "enabled": enabled(),
         "directory": str(directory()),
         "count": len(files),
@@ -344,13 +415,38 @@ def status(db=None) -> dict:
         "age_hours": round(age_hours, 1) if age_hours is not None else None,
         # The judgement the page needs to make. Twice the interval, because one
         # missed run is a restart and two is a job that has stopped.
-        "stale": age_hours is None or age_hours > interval * 2,
+        "stale": enabled() and (age_hours is None or age_hours > interval * 2),
         "interval_hours": interval,
         "last_error": state.get("last_error"),
         "last_attempt": state.get("last_attempt"),
         "last_success": state.get("last_success"),
         "total_bytes": sum(path.stat().st_size for path in files),
     }
+
+
+def _age_seconds(stamp: str) -> float:
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return float("inf")
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds()
+
+
+def mark_requested(db) -> None:
+    """Note that somebody pressed Back up now, so the panel can say so."""
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return
+    data = dict(profile.data or {})
+    state = dict(data.get(STATE_KEY) or {})
+    state["requested_at"] = _now()
+    data[STATE_KEY] = state
+    profile.data = data
+    db.commit()
 
 
 def restore_command(name: str | None = None) -> str:
