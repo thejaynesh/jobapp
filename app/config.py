@@ -401,6 +401,9 @@ class Settings(BaseSettings):
     # Y Combinator's public role pages (a fixed taxonomy, not search queries).
     YC_ENABLED: bool = True
     YC_ROLES: str = ""             # blank uses sources.ycombinator.DEFAULT_ROLES
+    # Built In publishes JobPosting structured data on city hub pages — free,
+    # no key, and descriptions come included.
+    BUILTIN_ENABLED: bool = True
 
     # A source that has failed every run for this many cycles is skipped rather
     # than called again — an expired key answers identically forever, and the
@@ -455,7 +458,7 @@ class Settings(BaseSettings):
     # LinkedIn guest API. The endpoint pages in blocks of 10, and jobs without a
     # description are dropped by the skill filter, so these two caps set the
     # source's real yield.
-    LINKEDIN_MAX_PAGES: int = 15
+    LINKEDIN_MAX_PAGES: int = 25
     LINKEDIN_RECENCY_HOURS: int = 168  # 0 disables the freshness filter
     # A politeness ceiling, not a ration. The old 200 was spent before the
     # title gate ran, mostly on jobs that died at it moments later — which is
@@ -479,11 +482,10 @@ class Settings(BaseSettings):
     WELLFOUND_ROLES: str = (
         "software-engineer,full-stack-engineer,backend-engineer,mobile-engineer"
     )
-    # Wellfound has served this server empty responses through a browser, and
-    # every one of the 140 jobs it ever stored arrived with no description at
-    # all. Off until that changes: a Chromium launch per cycle is the most
-    # expensive thing in the fetch, and it has never bought a usable posting.
-    WELLFOUND_ENABLED: bool = False
+    # Wellfound now tries plain HTTP first (the role pages are server-rendered)
+    # and only falls back to Playwright when that yields nothing. Re-enabled
+    # because the httpx-first path avoids the empty-browser-response problem.
+    WELLFOUND_ENABLED: bool = True
     # Dice's search results carry titles and links but no descriptions — those
     # live on the job-detail pages, which enrichment fetches. Here so the whole
     # browser tier can be switched off from the settings page if it stops
@@ -501,7 +503,10 @@ class Settings(BaseSettings):
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"
         "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md,"
         "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/README.md,"
-        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md"
+        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md,"
+        "https://raw.githubusercontent.com/pittcsc/Summer2026-Internships/dev/README.md,"
+        "https://raw.githubusercontent.com/ReaVNaiL/New-Grad-2025/main/README.md,"
+        "https://raw.githubusercontent.com/Ouckah/Summer2025-Internships/main/README.md"
     )
 
     # ---- Enrichment ------------------------------------------------------

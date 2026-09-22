@@ -88,6 +88,8 @@ HARVEST_SOURCES = {
     "amazon.jobs": "amazon_harvest",
     "google.com": "google_harvest",
     "my.greenhouse.io": "greenhouse_harvest",
+    "workingnomads.com": "workingnomads_harvest",
+    "jobspresso.co": "jobspresso_harvest",
 }
 
 

@@ -1029,6 +1029,7 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
         # them.
         db.commit()
         try:
+            sp = db.begin_nested()
             drafted.append(
                 draft_message(
                     db, contact,
@@ -1038,9 +1039,10 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
                     application=message.application,
                 )
             )
+            sp.commit()
         except Exception as exc:
             logger.error("draft_due_follow_ups: contact %s failed: %s", contact.id, exc)
-            db.rollback()
+            sp.rollback()
     db.commit()
     logger.info("draft_due_follow_ups: drafted %d follow-up(s)", len(drafted))
     return drafted
