@@ -6,6 +6,20 @@ Only increase useful job intake from existing sources, especially broken or zero
 
 Status: production reports received; two targeted intake batches implemented and locally verified. Original audit checkout: `514fdf6`; implementation starts from `e679515`. Production deployment and measurement remain pending. See Git history for the implementation commit and the checkpoints below for current evidence; the original findings table records the original issues and must be read together with these checkpoints.
 
+## Checkpoint: review fixes (2026-09-22, later)
+
+Addressed in code on `claude/gallant-ptolemy-epbp0s`, with tests; not yet measured in production:
+
+- **S02** JSearch window is a tunable (default `3days`), as is pages per search.
+- **S05** Errors from a source that still returned jobs are kept; the source is recorded as partial. Warnings are stored separately.
+- **S06** Scheduled group runs rest failing sources (a `manual` flag replaces reading `only` as manual); the browser tier checks resting too.
+- **S07** The re-probe clock counts, per source, rests since its last real call, instead of `count(fetch_runs) % N`.
+- **S13** Celery no longer re-delivers multi-hour fetches: fetch tasks opt out of late acks and the visibility timeout is 2h.
+- Per-source durations are recorded on each run (settings page "Time" column, run log) — the input needed to reduce the ~4h board runtime.
+- Also outside this audit's list: US cities sharing foreign names were rejected by the location filter; blank-company postings collapsed in dedupe; board jobs are now filed under the registry's company name; Greenhouse/Lever/Ashby honour the settings-page max age.
+
+Still open: S08 (other sources' paging), S09 (uniform rate-limit handling), S10/S11 (commit-accurate counters, persisted drop counts), S12 (requisition-aware dedupe), JSearch 403 (account-side).
+
 ## Evidence already established
 
 ### Production baseline received (2026-09-22 15:26 UTC)

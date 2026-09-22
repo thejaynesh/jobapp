@@ -1749,3 +1749,34 @@ class TestJSearchWindowComesFromTheSettingsPage:
         params = get.call_args.kwargs["params"]
         assert params["date_posted"] == "week"
         assert params["num_pages"] == 2
+
+
+class TestEachSourceIsTimed:
+    """Board runs average four hours and nothing said where the time went."""
+
+    def test_a_source_reports_how_long_it_took(self):
+        from app.config import settings
+        from app.services.job_fetcher import _run_all_adapters
+
+        clock = iter([100.0, 107.5, 200.0, 300.0])
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"data": []}
+        with patch.object(settings, "JSEARCH_API_KEY", "key"), \
+                patch("httpx.get", return_value=resp), \
+                patch("app.services.job_fetcher.time.monotonic", side_effect=lambda: next(clock)):
+            _, stats = _run_all_adapters(["SWE"], ["NYC"], settings, ats_slugs={},
+                                         only={"jsearch"})
+        assert stats["jsearch"]["seconds"] == 7.5
+        assert "_last" not in stats["jsearch"]
+
+    def test_the_time_reaches_the_stored_run_summary(self, db):
+        from app.models.profile import Profile
+        from app.services import job_fetcher
+
+        db.add(Profile(data={"target_roles": ["Backend Engineer"], "skills": {}}))
+        db.commit()
+        stats = {"remoteok": {"count": 0, "errors": [], "enabled": True, "seconds": 3.2}}
+        with patch.object(job_fetcher, "_run_all_adapters", return_value=([], stats)):
+            job_fetcher.fetch_and_save_jobs(db, only={"remoteok"})
+        stored = db.query(Profile).first().data["last_fetch"]["sources"]
+        assert stored["remoteok"]["seconds"] == 3.2

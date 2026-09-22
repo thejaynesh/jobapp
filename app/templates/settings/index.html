@@ -314,6 +314,7 @@
               <th class="text-left px-4 py-2">Source</th>
               <th class="text-left px-4 py-2">Status</th>
               <th class="text-right px-4 py-2">Jobs</th>
+              <th class="text-right px-4 py-2" title="How long the source took this run">Time</th>
               <th class="text-left px-4 py-2">Errors</th>
             </tr>
           </thead>
@@ -337,6 +338,11 @@
               </td>
               <td class="px-4 py-2 text-right text-gray-600">
                 {% if info.enabled %}{{ info.count }}{% else %}&mdash;{% endif %}
+              </td>
+              <td class="px-4 py-2 text-right text-gray-500 tabular-nums whitespace-nowrap">
+                {% if info.seconds is not none and info.seconds is defined %}
+                  {% if info.seconds >= 60 %}{{ (info.seconds / 60)|round(1) }} min{% else %}{{ info.seconds|round(1) }} s{% endif %}
+                {% else %}&mdash;{% endif %}
               </td>
               <td class="px-4 py-2 text-xs text-red-500 max-w-xs truncate">
                 {% if info.errors %}

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -132,6 +133,8 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
     entry["count"] += len(jobs)
     if error:
         entry["errors"].append(error)
+    # When this source last reported, for its duration (see `_run_all_adapters`).
+    entry["_last"] = time.monotonic()
 
 
 def _run_combos(
@@ -200,6 +203,7 @@ def _run_all_adapters(
     _reset_source_caches()
 
     resting = resting or {}
+    started: dict[str, float] = {}
     if manual is None:
         manual = only is not None
 
@@ -239,6 +243,10 @@ def _run_all_adapters(
         if _rests(source):
             _disable(source, _resting_reason(source))
             return True
+        # Every source asks this immediately before it starts, which makes it
+        # the one place to start a clock without touching thirty branches.
+        if source not in started:
+            started[source] = time.monotonic()
         return False
 
     def _rests(source: str) -> bool:
@@ -645,6 +653,13 @@ def _run_all_adapters(
     for src in pw_rested:
         stats[src] = {"count": 0, "enabled": False, "errors": [_resting_reason(src)]}
 
+    # How long each source took. Board runs average four hours and nothing
+    # said where the time went; this is the number that answers it.
+    for source, entry in stats.items():
+        last = entry.pop("_last", None)
+        if source in started and last is not None:
+            entry["seconds"] = round(max(0.0, last - started[source]), 1)
+
     # Log summary
     logger.info("=== fetch summary ===")
     for source, s in stats.items():
@@ -654,7 +669,8 @@ def _run_all_adapters(
             if s["count"] > 0 else
             f"FAILED {len(s['errors'])} error(s)"
         )
-        logger.info("  %-12s %s", source, status)
+        took = f" in {s['seconds']:g}s" if s.get("seconds") is not None else ""
+        logger.info("  %-12s %s%s", source, status, took)
         for err in s["errors"]:
             logger.warning("    └─ %s", err)
 
@@ -1140,7 +1156,8 @@ def fetch_and_save_jobs(
         "fetched": len(raw_jobs),
         "sources": {
             src: {"count": s["count"], "enabled": s["enabled"],
-                  "errors": s["errors"][:3]}  # cap at 3 reasons stored
+                  "errors": s["errors"][:3],  # cap at 3 reasons stored
+                  "seconds": s.get("seconds")}
             for src, s in source_stats.items()
         },
         "links": resolve_stats.as_dict() if resolve_stats else None,
