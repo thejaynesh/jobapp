@@ -1002,3 +1002,34 @@ class TestTheAgeWindow:
         self._job(db, title="Ancient Remote Role", days_ago=40)
 
         assert "Ancient Remote Role" in client.get("/jobs?age=all&status=matched").text
+
+    def test_the_settings_page_value_is_what_the_list_obeys(self, db, client):
+        """
+        The window is editable from the settings page, which stores overrides on
+        the profile blob — so the list has to read it through `tunables.value`
+        and not off `settings`. The first version read the environment value,
+        which would have left the control in the UI doing nothing at all.
+        """
+        from app.models.profile import Profile
+        from app.services import tunables
+
+        self._job(db, title="Thirty Day Old Role", days_ago=30)
+        # Hidden at the default window of 20 days.
+        assert "Thirty Day Old Role" not in client.get("/jobs").text
+
+        profile = Profile(data={tunables.STORE_KEY: {"dashboard_max_age_days": 60}})
+        db.add(profile)
+        db.commit()
+
+        assert "Thirty Day Old Role" in client.get("/jobs").text
+
+    def test_the_banner_reports_the_overridden_window(self, db, client):
+        from app.models.profile import Profile
+        from app.services import tunables
+
+        self._job(db, title="Old Role", days_ago=400)
+        db.add(Profile(data={tunables.STORE_KEY: {"dashboard_max_age_days": 45}}))
+        db.commit()
+
+        body = client.get("/jobs").text
+        assert "45 days" in body

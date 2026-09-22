@@ -95,6 +95,16 @@ TUNABLES: list[Tunable] = [
              "date, and only to new fetches — it won't clear what's stored.",
     ),
     Tunable(
+        key="dashboard_max_age_days", env="DASHBOARD_MAX_AGE_DAYS", kind="int",
+        minimum=0, maximum=3650, group="Filtering",
+        label="Hide jobs older than (days)",
+        help="How far back the jobs list looks, counted from when the job was "
+             "fetched — not from the posting date, which most sources don't "
+             "report. Nothing is deleted, and anything you applied to or "
+             "starred stays visible however old it is. The list says how many "
+             "it's hiding and links to show them. 0 shows everything.",
+    ),
+    Tunable(
         key="filter_senior_titles", env="FILTER_SENIOR_TITLES", kind="bool",
         group="Filtering",
         label="Skip senior-titled jobs while junior",

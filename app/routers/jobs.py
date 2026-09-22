@@ -6,11 +6,12 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.database import get_db
+from app.models.application import Application
 from app.models.job import Job, JobStatus
 from app.services.locations import REGIONS, REGION_OPTIONS, resolve_region_key
 from app.services.matcher import FILTER_REASON_LABELS
@@ -112,17 +113,28 @@ def _undated_count(db: Session) -> int:
     ) or 0
 
 
-def _age_cutoff() -> datetime | None:
+def _age_cutoff(db: Session) -> datetime | None:
     """
     The oldest `fetched_at` the list shows by default, or None for no limit.
 
-    `DASHBOARD_MAX_AGE_DAYS` days back. Defensive about the setting because it
-    is user-editable from the tunables page, and a bad value should widen the
-    list rather than empty it.
+    Read through `tunables.value` rather than off `settings` directly, because
+    the setting is editable from the settings page and that stores the override
+    on the profile blob. Reading the environment value here would have left the
+    control in the UI doing nothing — which is the shape of the bug three
+    source adapters already have with `MAX_JOB_AGE_DAYS`.
+
+    Still defensive about the result: `coerce` falls back to the environment
+    value when a stored one is unreadable, and that can be anything a `.env`
+    holds. A bad value should widen the list rather than empty it.
     """
+    from app.models.profile import Profile
+    from app.services import tunables
+
+    profile = db.query(Profile).first()
     try:
-        days = int(getattr(settings, "DASHBOARD_MAX_AGE_DAYS", 20))
-    except (TypeError, ValueError):
+        days = int(tunables.value(profile.data if profile else None,
+                                  "dashboard_max_age_days"))
+    except (TypeError, ValueError, KeyError):
         return None
     if days <= 0:
         return None
@@ -137,11 +149,24 @@ def _recent_or_mine(cutoff: datetime):
     reason: an application means the row is the user's pipeline and not a
     listing, and a star is them saying so explicitly. A six-week-old job you
     applied to disappearing from the list would be a bug, not a feature.
+
+    An explicit EXISTS rather than `Job.applications.any()`, because that
+    relationship is a backref and so does not exist as an attribute until
+    SQLAlchemy has configured its mappers. Tests that drive this router with a
+    mock session never trigger that configuration, and the first version of
+    this failed on them with `type object 'Job' has no attribute
+    'applications'` — a real fragility rather than a test artefact, since it
+    means the query depends on whatever ran before it.
     """
+    applied = (
+        select(Application.id)
+        .where(Application.job_id == Job.id)
+        .exists()
+    )
     return or_(
         Job.fetched_at >= cutoff,
         Job.favourite.is_(True),
-        Job.applications.any(),
+        applied,
     )
 
 
@@ -152,17 +177,26 @@ def _stale_count(db: Session, cutoff: datetime | None) -> int:
     Reported on the page for the same reason `_priced_count` is: a filter that
     silently removes rows reads as a broken list, and the only cure is for the
     page to say how many it is hiding and offer the switch to see them.
+
+    Coerced to an int inside a guard for that same reason. The template formats
+    this with a thousands separator, so anything that is not a number takes the
+    whole page down with a `TypeError` — a worse outcome than a missing count,
+    and the exact failure `_priced_count` below was already written to avoid.
     """
     if cutoff is None:
         return 0
-    return (
-        db.query(func.count(Job.id))
-        .filter(
-            Job.status.in_(_FILTERABLE_STATUSES),
-            ~_recent_or_mine(cutoff),
+    try:
+        return int(
+            db.query(func.count(Job.id))
+            .filter(
+                Job.status.in_(_FILTERABLE_STATUSES),
+                ~_recent_or_mine(cutoff),
+            )
+            .scalar()
+            or 0
         )
-        .scalar()
-    ) or 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _priced_count(db: Session) -> int:
@@ -233,7 +267,7 @@ def get_jobs(
     # Old listings are noise, so the list looks back DASHBOARD_MAX_AGE_DAYS by
     # default. `?age=all` lifts it; anything the user applied to or starred is
     # exempt either way — see `_recent_or_mine`.
-    cutoff = _age_cutoff()
+    cutoff = _age_cutoff(db)
     if cutoff is not None and age != "all":
         query = query.filter(_recent_or_mine(cutoff))
 
@@ -351,8 +385,10 @@ def get_jobs(
             "favourite_filter": favourite,
             "favourite_count": _favourite_count(db),
             "age_filter": age,
+            # Derived from the cutoff rather than read again, so the number
+            # in the banner cannot disagree with the filter that produced it.
             "age_days": (
-                int(getattr(settings, "DASHBOARD_MAX_AGE_DAYS", 20) or 0)
+                (datetime.now(timezone.utc) - cutoff).days
                 if cutoff is not None else 0
             ),
             "stale_count": _stale_count(db, cutoff),
