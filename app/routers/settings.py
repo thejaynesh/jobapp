@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
@@ -187,6 +187,126 @@ def _retired_boards(db: Session) -> list:
         return []
 
 
+def _model_card(profile_data: dict, provider: str, **extra) -> dict:
+    """One provider's model list, as the page renders it."""
+    from app.services import model_catalog
+
+    endpoint = model_catalog._endpoint(provider)
+    return {
+        "provider": provider,
+        "label": model_catalog.PROVIDER_LABELS[provider],
+        "models": model_catalog.models(profile_data, provider),
+        "custom": model_catalog.saved(profile_data, provider) is not None,
+        "configured": bool(endpoint and (endpoint[1] or "").strip()),
+        "discovered": None,
+        "message": "",
+        "ok": True,
+        "rejected": [],
+        **extra,
+    }
+
+
+def _model_cards(profile_data: dict) -> list[dict]:
+    from app.services import model_catalog
+
+    return [_model_card(profile_data, provider) for provider, _ in model_catalog.PROVIDERS]
+
+
+def _render_card(request: Request, card: dict, first: str | None):
+    return templates.TemplateResponse(
+        request, "settings/partials/model_list.html",
+        {"card": card, "first": bool(first)},
+    )
+
+
+def _known_provider(provider: str) -> None:
+    from app.services import model_catalog
+
+    if provider not in model_catalog.PROVIDER_LABELS:
+        raise HTTPException(status_code=404, detail="Unknown provider")
+
+
+@router.post("/models/{provider}", response_class=HTMLResponse)
+def save_model_list(request: Request, provider: str, models: str = Form(""),
+                    first: str = Form(""), db: Session = Depends(get_db)):
+    """
+    Replace one provider's model list with what was typed.
+
+    Ids that are not shaped like a model id are reported back rather than
+    silently dropped, so a pasted sentence does not vanish unexplained.
+    """
+    from app.services import model_catalog
+
+    _known_provider(provider)
+    valid, rejected = model_catalog.parse(models)
+    profile = get_or_create_profile(db)
+    if not valid:
+        card = _model_card(profile.data, provider, ok=False, rejected=rejected,
+                           message="Nothing to save — the list needs at least one model. "
+                                   "Use “Reset to defaults” to go back to the built-in list.")
+        return _render_card(request, card, first)
+    profile.data = model_catalog.store(profile.data, provider, valid)
+    db.commit()
+    card = _model_card(profile.data, provider, rejected=rejected,
+                       message=f"Saved {len(valid)} model{'s' if len(valid) != 1 else ''}. "
+                               "They are in the model dropdowns above after a reload.")
+    return _render_card(request, card, first)
+
+
+@router.post("/models/{provider}/reset", response_class=HTMLResponse)
+def reset_model_list(request: Request, provider: str, first: str = Form(""),
+                     db: Session = Depends(get_db)):
+    from app.services import model_catalog
+
+    _known_provider(provider)
+    profile = get_or_create_profile(db)
+    profile.data = model_catalog.reset(profile.data, provider)
+    db.commit()
+    return _render_card(request, _model_card(profile.data, provider,
+                                             message="Back on the built-in list."), first)
+
+
+@router.post("/models/{provider}/discover", response_class=HTMLResponse)
+def discover_models(request: Request, provider: str, first: str = Form(""),
+                    db: Session = Depends(get_db)):
+    """Ask the provider what it serves, and offer what is not on the list yet."""
+    from app.services import model_catalog
+
+    _known_provider(provider)
+    profile = get_or_create_profile(db)
+    try:
+        found = model_catalog.discover(provider)
+    except ValueError as exc:
+        return _render_card(request, _model_card(profile.data, provider, ok=False,
+                                                 message=str(exc)), first)
+    current = set(model_catalog.models(profile.data, provider))
+    new = [m for m in found if m not in current]
+    return _render_card(request, _model_card(profile.data, provider, discovered=new),
+                        first)
+
+
+@router.post("/models/{provider}/add", response_class=HTMLResponse)
+async def add_models(request: Request, provider: str, db: Session = Depends(get_db)):
+    """Append the ticked discoveries to the provider's list."""
+    from app.services import model_catalog
+
+    _known_provider(provider)
+    form = await request.form()
+    ticked = [m for m in form.getlist("add") if model_catalog.is_model_id(m)]
+    profile = get_or_create_profile(db)
+    if not ticked:
+        return _render_card(request, _model_card(profile.data, provider, ok=False,
+                                                 message="Nothing was ticked."),
+                            form.get("first"))
+    merged = model_catalog.models(profile.data, provider) + ticked
+    profile.data = model_catalog.store(profile.data, provider, merged)
+    db.commit()
+    card = _model_card(profile.data, provider,
+                       message=f"Added {len(ticked)}. They are in the model dropdowns "
+                               "above after a reload.")
+    return _render_card(request, card, form.get("first"))
+
+
 def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
     integrations = _integrations_status()
     flags = _feature_flags()
@@ -201,6 +321,7 @@ def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
         "request": request,
         "saved": saved,
         **settings_ctx,
+        "model_cards": _model_cards(profile.data or {}),
         "last_fetch": profile.data.get("last_fetch"),
         "board_registry": _board_registry(db),
         "retired_boards": _retired_boards(db),

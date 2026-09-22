@@ -1,0 +1,80 @@
+{# One provider's editable model list. Swapped in place by every action on it. #}
+<div id="models-{{ card.provider }}" class="px-5 py-4 {% if not first %}border-t border-gray-100{% endif %}">
+  <div class="flex items-baseline gap-2 flex-wrap mb-2">
+    <h3 class="text-sm font-medium text-gray-700">{{ card.label }}</h3>
+    <span class="text-xs text-gray-400 tabular-nums">{{ card.models|length }} model{{ '' if card.models|length == 1 else 's' }}</span>
+    {% if card.custom %}
+    <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">edited</span>
+    {% else %}
+    <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">defaults</span>
+    {% endif %}
+    {% if not card.configured %}
+    <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">no API key</span>
+    {% endif %}
+  </div>
+
+  {% if card.message %}
+  <p class="text-xs mb-2 {% if card.ok %}text-green-700{% else %}text-red-600{% endif %}">{{ card.message }}</p>
+  {% endif %}
+  {% if card.rejected %}
+  <p class="text-xs mb-2 text-amber-700">
+    Ignored (not a model id): {% for r in card.rejected %}<code class="bg-amber-50 px-1 rounded">{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+
+  <form hx-post="/settings/models/{{ card.provider }}" hx-target="#models-{{ card.provider }}" hx-swap="outerHTML">
+    <textarea name="models" rows="{{ [[card.models|length + 1, 4]|max, 12]|min }}" spellcheck="false"
+              class="w-full border border-gray-300 rounded px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="one model id per line, e.g. meta/llama-4-maverick-instruct">{{ card.models|join('\n') }}</textarea>
+    <input type="hidden" name="first" value="{{ '1' if first else '' }}">
+    <div class="flex items-center gap-3 mt-2 flex-wrap">
+      <button type="submit" class="bg-blue-600 text-white px-4 py-1 rounded text-xs hover:bg-blue-700">Save list</button>
+      {% if card.configured %}
+      <button type="button" hx-post="/settings/models/{{ card.provider }}/discover"
+              hx-target="#models-{{ card.provider }}" hx-swap="outerHTML"
+              hx-vals='{"first": "{{ '1' if first else '' }}"}'
+              hx-indicator="#models-{{ card.provider }}-spinner"
+              class="border border-gray-300 text-gray-700 px-3 py-1 rounded text-xs hover:bg-gray-50">
+        Check {{ card.label }} for new models
+      </button>
+      <span id="models-{{ card.provider }}-spinner" class="htmx-indicator text-xs text-gray-400">asking…</span>
+      {% endif %}
+      {% if card.custom %}
+      <button type="button" hx-post="/settings/models/{{ card.provider }}/reset"
+              hx-target="#models-{{ card.provider }}" hx-swap="outerHTML"
+              hx-vals='{"first": "{{ '1' if first else '' }}"}'
+              hx-confirm="Put {{ card.label }} back on the built-in list?"
+              class="text-xs text-gray-500 hover:text-red-500 underline">Reset to defaults</button>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if card.discovered is not none %}
+  <div class="mt-3 border border-gray-200 rounded bg-gray-50/60 p-3">
+    {% if card.discovered %}
+    <form hx-post="/settings/models/{{ card.provider }}/add" hx-target="#models-{{ card.provider }}" hx-swap="outerHTML">
+      <input type="hidden" name="first" value="{{ '1' if first else '' }}">
+      <div class="flex items-center gap-2 mb-2 flex-wrap">
+        <p class="text-xs text-gray-600 flex-1">
+          {{ card.discovered|length }} model{{ '' if card.discovered|length == 1 else 's' }} {{ card.label }} serves that {{ 'is' if card.discovered|length == 1 else 'are' }} not on your list. Tick the ones to add.
+        </p>
+        <input type="search" placeholder="filter"
+               oninput="var q=this.value.toLowerCase();this.form.querySelectorAll('[data-model]').forEach(function(el){el.style.display=el.dataset.model.indexOf(q)>-1?'':'none'})"
+               class="border border-gray-300 rounded px-2 py-0.5 text-xs w-40">
+      </div>
+      <div class="max-h-56 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
+        {% for model in card.discovered %}
+        <label class="flex items-center gap-2 text-xs font-mono text-gray-700 min-w-0" data-model="{{ model|lower }}">
+          <input type="checkbox" name="add" value="{{ model }}" class="rounded border-gray-300 text-blue-600">
+          <span class="truncate" title="{{ model }}">{{ model }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <button type="submit" class="mt-2 bg-blue-600 text-white px-3 py-1 rounded text-xs hover:bg-blue-700">Add ticked models</button>
+    </form>
+    {% else %}
+    <p class="text-xs text-gray-600">Everything {{ card.label }} serves is already on your list.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

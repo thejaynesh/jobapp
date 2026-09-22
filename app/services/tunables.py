@@ -75,8 +75,9 @@ TUNABLES: list[Tunable] = [
         choices=list(DEFAULT_NIM_MODELS),
         dynamic=True,
         label="Matching model",
-        help="Which NIM model scores your jobs. Compare candidates on the runs "
-             "page first — the count that matters there is unreadable replies.",
+        help="Which NIM model scores your jobs. Add newly released models under "
+             "\"Model lists\" below; compare candidates on the runs page first — "
+             "the count that matters there is unreadable replies.",
     ),
     Tunable(
         key="max_job_age_days", env="MAX_JOB_AGE_DAYS", kind="int",

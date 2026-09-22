@@ -145,6 +145,33 @@
   </div>
 </div>
 
+{# ── Model lists ──────────────────────────────────────────────── #}
+{# What every model dropdown above offers, per provider. Providers release
+   models every few weeks; this is where a new one is added, without a deploy. #}
+<div class="mb-6">
+  <button type="button" data-collapse="model-lists-section"
+          class="flex items-center gap-2 text-sm font-semibold text-gray-800 hover:text-blue-600 w-full text-left py-1">
+    <svg class="w-4 h-4 collapse-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+    </svg>
+    Model lists
+    <span class="text-xs font-normal text-gray-400">which models the dropdowns offer — add new releases here</span>
+  </button>
+  <div id="model-lists-section" class="hidden">
+    <div class="bg-white border border-gray-200 rounded-lg shadow-sm mt-2">
+      <p class="px-5 pt-4 text-xs text-gray-500">
+        One model id per line, exactly as the provider names it. Saving replaces the list;
+        “Check for new models” asks the provider what it serves now and lets you tick which to add.
+        The model set in <code>.env</code> is always included.
+      </p>
+      {% for card in model_cards %}
+      {% set first = loop.first %}
+      {% include "settings/partials/model_list.html" %}
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
 {# ── Integrations status ──────────────────────────────────────── #}
 <div class="mb-6">
   <button type="button" data-collapse="integrations-section"
