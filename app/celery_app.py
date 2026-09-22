@@ -17,6 +17,8 @@ celery_app = Celery(
     ],
 )
 
+VISIBILITY_TIMEOUT_SECONDS = 7200
+
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
@@ -45,7 +47,21 @@ celery_app.conf.update(
     # documents" button, say — reads as a hang rather than as an error. Workers
     # still retry on their own schedule, so a short timeout here just means
     # noticing sooner rather than giving up.
-    broker_transport_options={"socket_connect_timeout": 3, "socket_timeout": 3},
+    broker_transport_options={
+        "socket_connect_timeout": 3, "socket_timeout": 3,
+        # How long Redis waits for a late ack before handing the task to
+        # another worker. The default is one hour, and board fetches run for
+        # about four — so with late acks every long fetch was re-delivered
+        # while still running, which is where the overlapping runs came from.
+        #
+        # Two hours covers every task's time limit (the longest is 65
+        # minutes). The tasks that can legitimately run longer — the fetches,
+        # the board backfill, a model comparison — opt out of late acks
+        # instead (`acks_late=False` on each): they are rescheduled on their
+        # own, so a run lost to a crash costs nothing, and one re-delivered
+        # mid-run costs a second copy of hours of requests.
+        "visibility_timeout": VISIBILITY_TIMEOUT_SECONDS,
+    },
     redis_socket_connect_timeout=3,
     # Two queues, because two kinds of work share this broker and only one of
     # them has somebody waiting on it.

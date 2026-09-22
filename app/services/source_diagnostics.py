@@ -32,6 +32,9 @@ class SourceLogCapture(logging.Handler):
     def __init__(self, level: int = logging.WARNING) -> None:
         super().__init__(level=level)
         self.messages: dict[str, list[str]] = {}
+        # The ERROR-and-above subset: a request that failed, as opposed to a
+        # warning about something the adapter worked around.
+        self.errors: dict[str, list[str]] = {}
 
     def emit(self, record: logging.LogRecord) -> None:
         if not record.name.startswith(_SOURCE_LOGGER_ROOT):
@@ -49,6 +52,10 @@ class SourceLogCapture(logging.Handler):
         message = message[:MAX_MESSAGE_LENGTH]
         if message not in bucket:
             bucket.append(message)
+        if record.levelno >= logging.ERROR:
+            failed = self.errors.setdefault(source, [])
+            if message not in failed:
+                failed.append(message)
 
     def __enter__(self) -> "SourceLogCapture":
         logging.getLogger(_SOURCE_LOGGER_ROOT).addHandler(self)
@@ -58,17 +65,35 @@ class SourceLogCapture(logging.Handler):
         logging.getLogger(_SOURCE_LOGGER_ROOT).removeHandler(self)
 
 
-def merge_into_stats(stats: dict, captured: dict[str, list[str]]) -> None:
+def merge_into_stats(stats: dict, captured: dict[str, list[str]],
+                     errors: dict[str, list[str]] | None = None) -> None:
     """
     Attach captured reasons to the per-source fetch stats.
 
-    Only for sources that ended up with no jobs: a source that returned results
-    despite a warning worked, and surfacing noise there would train the reader
-    to ignore the column.
+    A source that ended up with no jobs gets everything captured: that is the
+    reason it came back empty.
+
+    A source that returned jobs gets its *errors* too, and is recorded as
+    partial. It used to get nothing, and most adapters log a failed board or
+    page and carry on — so one working board hid every broken one behind it,
+    and a source failing on nine requests out of ten reported "OK". Its
+    warnings (things it worked around) go under `warnings`, which the status
+    ignores: surfacing those as failures would train the reader to ignore the
+    column.
     """
+    errors = errors or {}
     for source, messages in captured.items():
         entry = stats.get(source)
-        if entry is None or entry.get("count"):
+        if entry is None:
+            continue
+        if entry.get("count"):
+            failed = errors.get(source) or []
+            if failed:
+                existing = entry.setdefault("errors", [])
+                existing.extend(m for m in failed if m not in existing)
+            warned = [m for m in messages if m not in failed]
+            if warned:
+                entry.setdefault("warnings", []).extend(warned)
             continue
         existing = entry.setdefault("errors", [])
         for message in messages:

@@ -1028,9 +1028,16 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
         # itself commits inside `draft_message`, so a success is durable
         # either way and a failure now costs one attempt rather than all of
         # them.
+        #
+        # No savepoint around the draft. `draft_message` commits, which ends
+        # any savepoint opened here, so `sp.commit()` raised "This transaction
+        # is closed" after every *successful* draft — and `sp.rollback()` in
+        # the handler raised the same again, out of the loop. One follow-up
+        # was drafted per run and the rest waited for the next tick. With the
+        # clear already committed, a plain rollback discards only the failed
+        # draft.
         db.commit()
         try:
-            sp = db.begin_nested()
             drafted.append(
                 draft_message(
                     db, contact,
@@ -1040,10 +1047,9 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
                     application=message.application,
                 )
             )
-            sp.commit()
         except Exception as exc:
             logger.error("draft_due_follow_ups: contact %s failed: %s", contact.id, exc)
-            sp.rollback()
+            db.rollback()
     db.commit()
     logger.info("draft_due_follow_ups: drafted %d follow-up(s)", len(drafted))
     return drafted

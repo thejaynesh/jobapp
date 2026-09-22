@@ -20,7 +20,7 @@ from app.services.board_backfill import backfill_boards
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="app.tasks.backfill.backfill_boards", bind=True, max_retries=0)
+@celery_app.task(name="app.tasks.backfill.backfill_boards", bind=True, max_retries=0, acks_late=False)
 def backfill_boards_task(
     self,
     resolve_links: bool = True,

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODELS = "meta/llama-3.1-70b-instruct,meta/llama-3.3-70b-instruct"
 
 
-@celery_app.task(name="app.tasks.compare_models.run_comparison", bind=True, max_retries=0)
+@celery_app.task(name="app.tasks.compare_models.run_comparison", bind=True, max_retries=0, acks_late=False)
 def run_comparison(self, models: list[str], limit: int = 10,
                    pace: float = 1.5) -> dict:
     """

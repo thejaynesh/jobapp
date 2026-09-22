@@ -104,7 +104,7 @@ def _run(group: str | None, only: list[str] | None, match_after: bool) -> dict:
             release(key=key)
 
 
-@celery_app.task(name="app.tasks.fetch.fetch_jobs", bind=True, max_retries=0)
+@celery_app.task(name="app.tasks.fetch.fetch_jobs", bind=True, max_retries=0, acks_late=False)
 def fetch_jobs(self, only: list[str] | None = None, match_after: bool = True,
                group: str | None = None) -> dict:
     """
@@ -188,7 +188,7 @@ def _scheduled(group: str) -> dict:
     return _run(group, None, True)
 
 
-@celery_app.task(name="app.tasks.fetch.dispatch_due_fetches", bind=False, max_retries=0)
+@celery_app.task(name="app.tasks.fetch.dispatch_due_fetches", bind=False, max_retries=0, acks_late=False)
 def dispatch_due_fetches() -> list[str]:
     """
     Queue every fetch group whose interval has passed and is not running.
@@ -234,19 +234,19 @@ def dispatch_due_fetches() -> list[str]:
 _QUEUED_MARKER_SECONDS = 3600
 
 
-@celery_app.task(name="app.tasks.fetch.fetch_api_sources", bind=False, max_retries=0)
+@celery_app.task(name="app.tasks.fetch.fetch_api_sources", bind=False, max_retries=0, acks_late=False)
 def fetch_api_sources() -> dict:
     """The cheap tier: keyed APIs and public feeds. Minutes, so run it often."""
     return _scheduled("api")
 
 
-@celery_app.task(name="app.tasks.fetch.fetch_ats_boards", bind=False, max_retries=0)
+@celery_app.task(name="app.tasks.fetch.fetch_ats_boards", bind=False, max_retries=0, acks_late=False)
 def fetch_ats_boards() -> dict:
     """The company board registry: hundreds of slugs, one request each."""
     return _scheduled("boards")
 
 
-@celery_app.task(name="app.tasks.fetch.fetch_browser_tier", bind=False, max_retries=0)
+@celery_app.task(name="app.tasks.fetch.fetch_browser_tier", bind=False, max_retries=0, acks_late=False)
 def fetch_browser_tier() -> dict:
     """Playwright. The most expensive thing here, and the least urgent."""
     if not settings.BROWSER_TIER_ENABLED:
@@ -254,7 +254,7 @@ def fetch_browser_tier() -> dict:
     return _scheduled("browser")
 
 
-@celery_app.task(name="app.tasks.fetch.sweep_linked_boards", bind=False, max_retries=0)
+@celery_app.task(name="app.tasks.fetch.sweep_linked_boards", bind=False, max_retries=0, acks_late=False)
 def sweep_linked_boards(deep: bool = False) -> dict:
     """
     Boards that have to be asked over their own API, with a stored credential.

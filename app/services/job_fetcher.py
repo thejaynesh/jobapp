@@ -169,6 +169,7 @@ def _run_all_adapters(
     roles: list[str], locations: list[str], cfg,
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
     only: set[str] | None = None, resting: dict | None = None,
+    manual: bool | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
@@ -199,6 +200,8 @@ def _run_all_adapters(
     _reset_source_caches()
 
     resting = resting or {}
+    if manual is None:
+        manual = only is not None
 
     def _disable(source: str, reason: str = "") -> None:
         """
@@ -226,19 +229,27 @@ def _run_all_adapters(
         # again today. Skipped rather than removed: a probe goes out
         # periodically, so a refreshed key is picked up on its own.
         #
-        # Only on a full cycle. Reaching here with `only` set means this source
-        # was asked for by name on the runs page, which is exactly how somebody
-        # checks whether the key they just fixed works — resting is an
-        # automatic economy, not a lock.
-        if only is None and source in resting:
-            _disable(
-                source,
-                f"resting after failing {resting[source]} runs in a row; "
-                f"re-probed periodically, or fix its credentials to resume "
-                f"immediately",
-            )
+        # Not on a manual run. A source asked for by name on the runs page is
+        # exactly how somebody checks whether the key they just fixed works —
+        # resting is an automatic economy, not a lock.
+        #
+        # "Manual" is its own flag now. It used to be read as `only is None`,
+        # but every scheduled group run passes its group's sources as `only`,
+        # so resting never applied to any scheduled run at all.
+        if _rests(source):
+            _disable(source, _resting_reason(source))
             return True
         return False
+
+    def _rests(source: str) -> bool:
+        return not manual and source in resting
+
+    def _resting_reason(source: str) -> str:
+        return (
+            f"resting after failing {resting[source]} runs in a row; "
+            f"re-probed periodically, or fix its credentials to resume "
+            f"immediately"
+        )
 
     # --- Tier 1: httpx adapters ---
 
@@ -560,13 +571,16 @@ def _run_all_adapters(
     # Launching a browser is the most expensive thing here, so don't do it at
     # all when none of its sources were asked for.
     pw_sources = {"wellfound", "dice", "handshake"}
-    run_browser_tier = only is None or bool(pw_sources & only)
+    # Resting applies here too; these branches never went through `_skip`.
+    pw_rested = {src for src in pw_sources if _rests(src)}
+    wanted_pw = (pw_sources if only is None else pw_sources & only) - pw_rested
+    run_browser_tier = bool(wanted_pw)
 
     async def _run_playwright() -> tuple[list[dict], dict]:
         pw_jobs: list[dict] = []
         pw_stats: dict = {}
 
-        if (only is None or "wellfound" in only) and getattr(
+        if "wellfound" in wanted_pw and getattr(
             cfg, "WELLFOUND_ENABLED", True
         ):
             # Wellfound is scraped by role page, not by search query: the
@@ -583,7 +597,7 @@ def _run_all_adapters(
         else:
             pw_stats["wellfound"] = {"count": 0, "errors": [], "enabled": False}
 
-        if (only is None or "dice" in only) and getattr(cfg, "DICE_ENABLED", True):
+        if "dice" in wanted_pw and getattr(cfg, "DICE_ENABLED", True):
             from app.services.sources.dice import fetch as dice_fetch
             pw_stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
             for role in roles:
@@ -597,9 +611,7 @@ def _run_all_adapters(
         else:
             pw_stats["dice"] = {"count": 0, "errors": [], "enabled": False}
 
-        if getattr(cfg, "HANDSHAKE_SESSION_COOKIE", "") and (
-            only is None or "handshake" in only
-        ):
+        if getattr(cfg, "HANDSHAKE_SESSION_COOKIE", "") and "handshake" in wanted_pw:
             from app.services.sources.handshake import fetch as hs_fetch
             pw_stats.setdefault("handshake", {"count": 0, "errors": [], "enabled": True})
             for role in roles:
@@ -628,6 +640,8 @@ def _run_all_adapters(
         logger.error("Playwright scrapers fatal error: %s", exc)
         for src in ("wellfound", "dice", "handshake"):
             stats.setdefault(src, {"count": 0, "errors": [str(exc)], "enabled": True})
+    for src in pw_rested:
+        stats[src] = {"count": 0, "enabled": False, "errors": [_resting_reason(src)]}
 
     # Log summary
     logger.info("=== fetch summary ===")
@@ -922,6 +936,8 @@ def fetch_and_save_jobs(
     the more specific request.
     """
     started_at = datetime.now(timezone.utc)
+    # Named sources are a person on the runs page; a group is the schedule.
+    manual = only is not None
     if only is None:
         only = group_sources(group)
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0,
@@ -1047,9 +1063,9 @@ def fetch_and_save_jobs(
         with SourceLogCapture() as capture:
             raw_jobs, source_stats = _run_all_adapters(
                 queries, locations, cfg, ats_slugs, loc_prefs, only,
-                resting=_resting_sources(db),
+                resting=_resting_sources(db), manual=manual,
             )
-        merge_into_stats(source_stats, capture.messages)
+        merge_into_stats(source_stats, capture.messages, capture.errors)
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
         return counts

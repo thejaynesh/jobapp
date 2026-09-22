@@ -298,6 +298,21 @@ class TestRestingDeadSources:
         self._history(db, 3)
         assert resting_sources(db, threshold=10, retry_every=0) == {}
 
+    def _rested(self, db, count: int, source="jsearch"):
+        """`count` newer runs in which the source was rested, not called."""
+        from datetime import timedelta
+        from app.models.fetch_run import FetchRun, FetchSourceRun
+
+        now = datetime.now(timezone.utc)
+        for i in range(count):
+            run = FetchRun(started_at=now + timedelta(minutes=i + 1), status="ok")
+            db.add(run)
+            db.flush()
+            db.add(FetchSourceRun(run_id=run.id, source=source, status="disabled",
+                                  enabled=False,
+                                  errors=["resting after failing 12 runs in a row"]))
+        db.commit()
+
     def test_a_probe_still_goes_out_periodically(self, db):
         """
         Resting is not removal: a key the user refreshes has to resume without
@@ -305,8 +320,69 @@ class TestRestingDeadSources:
         """
         from app.services.fetch_history import resting_sources
 
-        self._history(db, 10)  # 10 runs recorded, so 10 % 10 == 0
+        self._history(db, 12)
+        self._rested(db, 9)
+        assert resting_sources(db, threshold=5, retry_every=10) == {"jsearch": 12}
+        self._rested(db, 1)
         assert resting_sources(db, threshold=5, retry_every=10) == {}
+
+    def test_the_probe_clock_does_not_stick_at_the_retention_limit(self, db):
+        """
+        It was `count(fetch_runs) % retry_every`, and pruning holds the count
+        at 200 — so once history filled, the answer never changed again.
+        """
+        from app.services.fetch_history import resting_sources
+
+        self._history(db, 12)
+        with patch("app.services.fetch_history.func.count"):
+            self._rested(db, 3)
+            assert resting_sources(db, threshold=5, retry_every=10) == {"jsearch": 12}
+
+    def test_a_scheduled_group_run_rests_a_dead_source(self, db):
+        """
+        Every scheduled group passes its sources as `only`, which read as a
+        manual request — so resting never applied to any scheduled run.
+        """
+        from app.services.job_fetcher import _run_all_adapters
+        from app.config import settings
+
+        with patch("app.services.sources.jsearch.fetch") as jsearch, \
+             patch.object(settings, "JSEARCH_API_KEY", "key"):
+            _run_all_adapters(
+                ["SWE"], ["NYC"], settings, ats_slugs={},
+                only={"jsearch", "adzuna"}, resting={"jsearch": 20}, manual=False,
+            )
+        jsearch.assert_not_called()
+
+    def test_the_fetcher_treats_a_group_as_scheduled(self, db):
+        from app.models.profile import Profile
+        from app.services import job_fetcher
+
+        db.add(Profile(data={"target_roles": ["Backend Engineer"], "skills": {}}))
+        db.commit()
+
+        with patch.object(job_fetcher, "_run_all_adapters",
+                          return_value=([], {})) as run_all:
+            job_fetcher.fetch_and_save_jobs(db, group="api")
+        assert run_all.call_args.kwargs["manual"] is False
+
+        with patch.object(job_fetcher, "_run_all_adapters",
+                          return_value=([], {})) as run_all:
+            job_fetcher.fetch_and_save_jobs(db, only={"jsearch"})
+        assert run_all.call_args.kwargs["manual"] is True
+
+    def test_a_rested_browser_source_is_not_launched(self, db):
+        from app.services.job_fetcher import _run_all_adapters
+        from app.config import settings
+
+        with patch("asyncio.run") as run_browser:
+            _, stats = _run_all_adapters(
+                ["SWE"], ["NYC"], settings, ats_slugs={},
+                only={"wellfound", "dice", "handshake"},
+                resting={"wellfound": 20, "dice": 20, "handshake": 20}, manual=False,
+            )
+        run_browser.assert_not_called()
+        assert "resting after failing" in stats["dice"]["errors"][0]
 
     def test_a_resting_source_is_not_called(self, db):
         from app.services.job_fetcher import _run_all_adapters
@@ -316,9 +392,12 @@ class TestRestingDeadSources:
         # is the more useful of the two answers — so give it one.
         with patch("app.services.sources.jsearch.fetch") as jsearch, \
              patch.object(settings, "JSEARCH_API_KEY", "key"):
+            # Restricted to jsearch, as a scheduled run would be: unrestricted,
+            # this ran every public adapter against the live network and took
+            # two minutes. `manual=False` is what a scheduled group passes.
             _, stats = _run_all_adapters(
                 ["SWE"], ["NYC"], settings, ats_slugs={},
-                resting={"jsearch": 20},
+                only={"jsearch"}, resting={"jsearch": 20}, manual=False,
             )
 
         jsearch.assert_not_called()

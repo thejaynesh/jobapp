@@ -84,11 +84,34 @@ class TestMergeIntoStats:
         merge_into_stats(stats, {"indeed": ["403 Forbidden"]})
         assert stats["indeed"]["errors"] == ["403 Forbidden"]
 
-    def test_leaves_a_productive_source_alone(self):
+    def test_a_warning_on_a_productive_source_is_not_an_error(self):
         """A warning on a source that still delivered isn't worth alarming over."""
         stats = {"linkedin": {"count": 12, "errors": [], "enabled": True}}
         merge_into_stats(stats, {"linkedin": ["one search was throttled"]})
         assert stats["linkedin"]["errors"] == []
+        assert stats["linkedin"]["warnings"] == ["one search was throttled"]
+        assert classify(stats["linkedin"]) == "ok"
+
+    def test_a_failed_request_on_a_productive_source_makes_it_partial(self):
+        """
+        One working board used to hide every broken one: the errors were
+        dropped whenever the source returned any jobs at all.
+        """
+        stats = {"greenhouse": {"count": 40, "errors": [], "enabled": True}}
+        merge_into_stats(stats, {"greenhouse": ["acme: 500", "throttled"]},
+                         {"greenhouse": ["acme: 500"]})
+        assert stats["greenhouse"]["errors"] == ["acme: 500"]
+        assert stats["greenhouse"]["warnings"] == ["throttled"]
+        assert classify(stats["greenhouse"]) == "partial"
+
+    def test_the_capture_separates_errors_from_warnings(self):
+        import logging
+
+        with SourceLogCapture() as capture:
+            logging.getLogger("app.services.sources.greenhouse").warning("slow")
+            logging.getLogger("app.services.sources.greenhouse").error("acme: 500")
+        assert capture.messages["greenhouse"] == ["slow", "acme: 500"]
+        assert capture.errors["greenhouse"] == ["acme: 500"]
 
     def test_ignores_sources_absent_from_the_stats(self):
         stats = {}

@@ -620,6 +620,27 @@ class TestSequence:
         assert drafted[0].sequence_step == 2
         assert message.follow_up_due_at is None
 
+    def test_every_due_follow_up_is_drafted_in_one_run(self, db, profile):
+        """
+        `draft_message` commits, which closed the savepoint wrapped around it,
+        so the first success raised "This transaction is closed" and the run
+        stopped: one follow-up drafted per tick however many were due.
+        """
+        first = self._sent_message(db, days_ago=30)
+        second = self._sent_message(db, days_ago=30)
+        with patch("app.services.outreach.generation_chat", return_value="Hi Sam, " + "x " * 30):
+            drafted = draft_due_follow_ups(db)
+        assert len(drafted) == 2
+        assert first.follow_up_due_at is None and second.follow_up_due_at is None
+
+    def test_one_failing_draft_does_not_stop_the_rest(self, db, profile):
+        self._sent_message(db, days_ago=30)
+        self._sent_message(db, days_ago=30)
+        with patch("app.services.outreach.draft_message",
+                   side_effect=[RuntimeError("provider down"), MagicMock(kind="follow_up")]):
+            drafted = draft_due_follow_ups(db)
+        assert len(drafted) == 1
+
     def test_an_archived_contact_is_not_chased(self, db, profile):
         message = self._sent_message(db, days_ago=30)
         message.contact.archived = True

@@ -224,11 +224,52 @@ def resting_sources(
     if not streaks:
         return {}
 
-    total_runs = db.query(func.count(FetchRun.id)).scalar() or 0
-    if retry_every > 0 and total_runs % retry_every == 0:
-        logger.info("fetch_history: re-probing rested sources %s", sorted(streaks))
+    if retry_every <= 0:
+        return streaks
+
+    # Per source: how many times it has been rested since it was last actually
+    # called. This used to be `count(fetch_runs) % retry_every`, and pruning
+    # holds that count at the retention limit (200) — so once history filled
+    # up the remainder never changed, and every rested source was either
+    # probed on every run or never again.
+    rested_since = _times_rested_since_last_attempt(db, set(streaks))
+    probing = sorted(src for src in streaks if rested_since.get(src, 0) >= retry_every)
+    if probing:
+        logger.info("fetch_history: re-probing rested sources %s", probing)
+    return {src: n for src, n in streaks.items() if src not in probing}
+
+
+_RESTING_PREFIX = "resting after failing"
+
+
+def _times_rested_since_last_attempt(db: Session, sources: set[str],
+                                     lookback: int = 400) -> dict[str, int]:
+    """For each source, the rested rows since its most recent real attempt."""
+    recent = recent_runs(db, lookback)
+    if not recent or not sources:
         return {}
-    return streaks
+    rows = (
+        db.query(FetchSourceRun.run_id, FetchSourceRun.source,
+                 FetchSourceRun.status, FetchSourceRun.errors)
+        .filter(FetchSourceRun.run_id.in_([r.id for r in recent]),
+                FetchSourceRun.source.in_(sources))
+        .all()
+    )
+    by_run: dict = {}
+    for run_id, source, status, errors in rows:
+        by_run.setdefault(run_id, {})[source] = (status, errors or [])
+
+    counts: dict[str, int] = {}
+    done: set[str] = set()
+    for run in recent:  # newest first
+        for source, (status, errors) in (by_run.get(run.id) or {}).items():
+            if source in done:
+                continue
+            if status not in ("disabled", "skipped"):
+                done.add(source)
+            elif any(str(e).startswith(_RESTING_PREFIX) for e in errors):
+                counts[source] = counts.get(source, 0) + 1
+    return counts
 
 
 def source_totals(db: Session, runs: int = 20) -> list[dict]:

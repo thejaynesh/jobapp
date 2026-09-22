@@ -47,6 +47,7 @@ TRIGGERABLE_SOURCES = [
     "careerjet", "findwork", "usajobs", "hiringcafe", "ycombinator",
     "indeed", "remotive", "arbeitnow", "remoteok",
     "weworkremotely", "themuse", "himalayas", "jobicy", "hnhiring",
+    "workingnomads", "builtin", "jobspresso",
     "wellfound", "dice", "handshake",
 ]
 

@@ -279,6 +279,14 @@ def validate_pending(db: Session, limit: int = 150, workers: int = 8) -> dict:
     now = datetime.now(timezone.utc)
     for board, probe in results:
         counts["probed"] += 1
+        # A board being re-checked after a rejection, rather than one nobody
+        # has probed yet. A probe that could not reach the ATS reads as
+        # "exists" (unvalidated boards fail open), and applied here that turned
+        # a board already found dead back on over a network blip. It stays as
+        # it was — same reason, so the next cycle retries it.
+        if board.validated_at is not None and probe.exists and probe.error:
+            counts["unreachable"] += 1
+            continue
         board.validated_at = now
 
         if not probe.exists:

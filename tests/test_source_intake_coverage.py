@@ -223,3 +223,31 @@ def test_fetch_lock_heartbeat_uses_original_ownership_and_stops(monkeypatch, los
     assert len(calls) == 1
     assert calls[0][1:] == ("test-fetch", "owner", 1800)
     assert "redis.call('get', KEYS[1]) == ARGV[1]" in calls[0][0]
+
+
+@pytest.mark.parametrize("ats", ["teamtailor", "jobvite", "icims"])
+def test_an_unreachable_recheck_leaves_a_rejected_board_rejected(board_db, monkeypatch, ats):
+    """
+    A probe that errors reads as "exists" so that new boards fail open. On a
+    board already found dead, that turned it back on over a network blip.
+    """
+    from app.services.ats_validation import BoardProbe
+
+    reason = f"{ats} has no board for this slug"
+    row = board(board_db, "acme", ats=ats, active=False, inactive_reason=reason)
+    monkeypatch.setattr("app.services.ats_validation.probe_board",
+                        lambda *a: BoardProbe(True, error="probe failed: timed out"))
+    counts = company_boards.validate_pending(board_db)
+    assert counts["activated"] == 0 and counts["unreachable"] == 1
+    assert not row.active and row.inactive_reason == reason
+
+
+def test_a_new_board_still_fails_open_when_unreachable(board_db, monkeypatch):
+    from app.services.ats_validation import BoardProbe
+
+    row = board(board_db, "fresh", active=False, validated_at=None,
+                inactive_reason="awaiting validation")
+    monkeypatch.setattr("app.services.ats_validation.probe_board",
+                        lambda *a: BoardProbe(True, error="probe failed: timed out"))
+    company_boards.validate_pending(board_db)
+    assert row.active
