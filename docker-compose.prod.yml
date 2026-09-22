@@ -42,8 +42,31 @@ services:
       timeout: 5s
       retries: 5
 
+  # The one image. `web`, `worker`, `worker-interactive` and `beat` are the
+  # same code with different commands, so they share a single build.
+  #
+  # All four used to say `build: .`. The build itself was fine — the layers are
+  # identical, so they were cached after the first — but each service still got
+  # its own *export*, and that is where the time went. Measured on the VPS:
+  #
+  #     => [web]                exporting to image   1275.5s
+  #     => => exporting layers                         634.3s
+  #     => => unpacking to jobapp-web:latest           632.3s
+  #     ... the same again for worker, worker-interactive and beat
+  #
+  # Four copies of a multi-gigabyte image (texlive plus Chromium), written and
+  # unpacked four times, contending on one disk — about twenty of the
+  # twenty-three minutes a build took. It also kept ~16GB on disk where ~4GB
+  # would do, which is the likeliest reason the layer cache got evicted and the
+  # apt layer went cold in the first place.
+  #
+  # `image:` names what the build produces; the other three reference that name
+  # and declare no build of their own, so `docker compose build` builds and
+  # exports once. The name is local and unversioned on purpose — nothing pushes
+  # this anywhere, and `up -d` runs after `build` in every path that deploys.
   web:
     build: .
+    image: jobapp-app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     volumes:
       - storage_data:/storage
@@ -60,7 +83,8 @@ services:
         condition: service_healthy
 
   worker:
-    build: .
+    # Built by `web`. See the note there.
+    image: jobapp-app
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=25 -Q batch -n batch@%h
     volumes:
       - storage_data:/storage
@@ -89,7 +113,8 @@ services:
   # matching pass and an enrichment pass both re-queue themselves — and a
   # "Generate documents" click should not wait behind a backlog.
   worker-interactive:
-    build: .
+    # Built by `web`. See the note there.
+    image: jobapp-app
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q interactive -n interactive@%h
     volumes:
       - storage_data:/storage
@@ -103,7 +128,8 @@ services:
         condition: service_healthy
 
   beat:
-    build: .
+    # Built by `web`. See the note there.
+    image: jobapp-app
     command: celery -A app.celery_app beat --loglevel=info
     env_file: .env
     restart: unless-stopped

@@ -21,8 +21,12 @@ services:
       timeout: 5s
       retries: 5
 
+  # One image for all three, as in docker-compose.prod.yml — see the note
+  # there. Same code, different commands, so building it once is enough; four
+  # separate exports of a multi-gigabyte image was most of the build time.
   web:
     build: .
+    image: jobapp-app-dev
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - .:/app
@@ -37,7 +41,8 @@ services:
         condition: service_healthy
 
   worker:
-    build: .
+    # Built by `web`.
+    image: jobapp-app-dev
     # Both queues in one worker for dev; production splits them so a
     # long batch pass cannot starve an interactive one.
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q batch,interactive
@@ -52,7 +57,8 @@ services:
         condition: service_healthy
 
   beat:
-    build: .
+    # Built by `web`.
+    image: jobapp-app-dev
     command: celery -A app.celery_app beat --loglevel=info
     volumes:
       - .:/app

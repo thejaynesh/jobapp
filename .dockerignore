@@ -1,0 +1,37 @@
+# What `COPY . .` should not ship.
+#
+# There was no .dockerignore at all, so the build context was the whole working
+# tree — including `.git`, every `__pycache__`, and the pytest caches. On the
+# VPS that `COPY` step measured 61.7s. The context is only about 19MB, so this
+# is a slow disk rather than a big tree, which is exactly the case where not
+# copying something is the only way to make it faster.
+#
+# Deliberately conservative: `tests/` stays, because the image installs the
+# `dev` extra and running the suite inside the container should keep working.
+
+.git
+.gitignore
+.github
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local virtualenvs, if anyone keeps one in the tree.
+.venv/
+venv/
+
+# Never bake secrets into an image. The compose files pass the real one in
+# with `env_file:` at run time; `.env.example` stays, it is documentation.
+.env
+
+# Generated documents and backups live on the `storage_data` volume.
+storage/
+
+docs/
+ROADMAP.md
