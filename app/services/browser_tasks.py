@@ -181,6 +181,7 @@ def lease(
     *,
     agent_id: str = "",
     limit: int = 1,
+    exclude_sites: list[str] | None = None,
 ) -> list[BrowserTask]:
     """
     Claim up to `limit` queued tasks for `agent_id`.
@@ -208,13 +209,25 @@ def lease(
         # them to the next available work instead of waiting or duplicating.
         .with_for_update(skip_locked=True)
     )
+    for site in exclude_sites or []:
+        # In the query, not only after it: a busy site with a deep backlog
+        # would otherwise fill the whole candidate window and hide every other
+        # site's work behind it.
+        # Coalesced: a task with no URL (a ping) would otherwise compare as
+        # NULL, and NOT NULL filters it out along with the busy site.
+        url = func.coalesce(BrowserTask.payload["url"].astext, "")
+        stmt = stmt.where(~url.ilike(f"%://{site}/%"), ~url.ilike(f"%.{site}/%"))
     if kinds:
         unknown = [k for k in kinds if k not in TASK_KINDS]
         if unknown:
             raise TaskError(f"Unknown task kind(s): {', '.join(sorted(unknown))}")
         stmt = stmt.where(BrowserTask.kind.in_(kinds))
 
-    tasks = _interleave_sites(list(db.execute(stmt).scalars().all()), limit)
+    candidates = list(db.execute(stmt).scalars().all())
+    if exclude_sites:
+        skip = {site.lower() for site in exclude_sites}
+        candidates = [t for t in candidates if _site_of(t) not in skip]
+    tasks = _interleave_sites(candidates, limit)
     for task in tasks:
         task.status = "leased"
         task.agent_id = agent_id or None

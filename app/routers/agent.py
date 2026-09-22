@@ -98,10 +98,12 @@ def _max_poll_seconds() -> int:
     return max(0, int(getattr(settings, "AGENT_POLL_MAX_WAIT_SECONDS", 25)))
 
 
-def _lease_once(db: Session, kinds: list[str], agent_id: str, limit: int) -> list[dict]:
+def _lease_once(db: Session, kinds: list[str], agent_id: str, limit: int,
+                exclude_sites: list[str] | None = None) -> list[dict]:
     """One atomic attempt to claim work. Serialized inside the threadpool call
     so no ORM object escapes into the event loop still attached to a session."""
-    tasks = browser_tasks.lease(db, kinds or None, agent_id=agent_id, limit=limit)
+    tasks = browser_tasks.lease(db, kinds or None, agent_id=agent_id, limit=limit,
+                                exclude_sites=exclude_sites)
     return [task.as_dict() for task in tasks]
 
 
@@ -130,6 +132,15 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         for h in (body.get("harvest_sites") or [])
         if str(h).strip()
     ][:60]
+    # Sites the extension already has a page open on. It asks for more work
+    # the moment one of its lanes empties, and that work has to be for a site
+    # it is not already busy with — otherwise the new lane would only queue
+    # behind the busy one.
+    exclude_sites = [
+        str(h).strip().lower()[:160]
+        for h in (body.get("busy_sites") or [])
+        if str(h).strip()
+    ][:20]
     limit = body.get("max", 1)
     try:
         limit = max(1, int(limit))
@@ -156,7 +167,8 @@ async def lease(request: Request, db: Session = Depends(get_db)):
     deadline = time.monotonic() + wait
     while True:
         try:
-            tasks = await run_in_threadpool(_lease_once, db, kinds, agent_id, limit)
+            tasks = await run_in_threadpool(_lease_once, db, kinds, agent_id, limit,
+                                            exclude_sites)
         except TaskError as exc:
             return _bad_request(exc)
 

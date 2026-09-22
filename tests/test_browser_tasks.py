@@ -390,3 +390,21 @@ class TestABatchMixesSites:
         urgent = self._page(db, "https://www.indeed.com/jobs?q=now", priority=10)
         batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=1)
         assert [t.id for t in batch] == [urgent.id]
+
+    def test_a_busy_site_is_skipped_even_when_it_fills_the_queue(self, db):
+        """
+        A lane that empties asks for work for a site nobody is busy with. A
+        deep LinkedIn backlog ahead of one Indeed page must not hide it.
+        """
+        for n in range(30):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}")
+        indeed = self._page(db, "https://www.indeed.com/jobs?q=a")
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=2,
+                                    exclude_sites=["linkedin.com"])
+        assert [t.id for t in batch] == [indeed.id]
+
+    def test_a_task_without_a_url_is_not_excluded(self, db):
+        browser_tasks.enqueue(db, "ping", {})
+        batch = browser_tasks.lease(db, ["ping"], agent_id="x", limit=1,
+                                    exclude_sites=["linkedin.com"])
+        assert len(batch) == 1

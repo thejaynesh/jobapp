@@ -1591,16 +1591,26 @@ function keepLeasesAlive(pending, agent, leaseSeconds) {
 // ---------------------------------------------------------------------------
 
 let polling = false;
+// Sites with a lane running right now. A lane is one site's pages, worked one
+// after another; each lane that finishes asks for more work at once, for a
+// site nobody is busy with, instead of waiting for every other lane to finish.
+// Waiting was the old shape: one slow LinkedIn crawl held Indeed's lane empty
+// until the whole batch was done.
+const activeSites = new Set();
 
 async function pollOnce() {
-  // Alarms can overlap a chained poll that is still running. Two concurrent
-  // loops would lease two batches and race each other's reports.
+  // Only the lease request is exclusive. Two at once would ask for the same
+  // free slots twice; the lanes themselves run on regardless.
   if (polling) return;
   polling = true;
 
   try {
     const config = await getConfig();
     if (!config.enabled || !config.serverUrl || !config.token) return;
+
+    // Every slot busy: nothing to ask for. A lane finishing calls back here.
+    const free = parallelSites - activeSites.size;
+    if (free <= 0) return;
 
     const id = await agentId();
     const kinds = await supportedKinds();
@@ -1614,10 +1624,13 @@ async function pollOnce() {
     const lease = await api("/api/agent/lease", {
       kinds,
       agent_id: id,
-      // Enough for every lane to have a couple of pages queued.
-      max: Math.max(5, parallelSites * 3),
-      wait: 25,
+      // A few pages for each free lane.
+      max: Math.max(3, free * 3),
+      // Long-poll only when idle. With lanes running, a lane that finishes
+      // will ask again, so holding a request open would only delay it.
+      wait: activeSites.size ? 0 : 25,
       harvest_sites: reading,
+      busy_sites: Array.from(activeSites),
     });
     const tasks = lease.tasks;
 
@@ -1628,75 +1641,78 @@ async function pollOnce() {
       lastError: null,
       kinds,
     });
-    if (!tasks || tasks.length === 0) return;
-
-    let done = 0;
-    // The tasks still leased to us, kept current so the heartbeat does not
-    // keep asking for ones we have already reported on.
-    const pending = new Set(tasks.map((task) => task.id));
-    const stopHeartbeat = keepLeasesAlive(pending, id, lease.lease_seconds);
 
     // How many sites may run side by side, from the server's setting.
     if (lease.parallel_sites) setParallelSites(lease.parallel_sites);
+    if (!tasks || tasks.length === 0) return;
 
     // One lane per site: a site's pages stay in order, one after another, with
     // its own pause between them; different sites run concurrently, up to the
-    // cap `withTabLock` enforces. A batch of five LinkedIn pages behaves exactly
-    // as before; LinkedIn, Indeed and ZipRecruiter no longer wait on each other.
+    // cap `withTabLock` enforces.
     const lanes = new Map();
     for (const task of tasks) {
       const key = siteKey((task.payload && task.payload.url) || "");
       if (!lanes.has(key)) lanes.set(key, []);
       lanes.get(key).push(task);
     }
-
-    const work = async (task) => {
-        let result;
-        try {
-          result = await runTask(task);
-        } catch (error) {
-          pending.delete(task.id);
-          await reportFailure(task, error, id);
-          return;
-        }
-
-        // Reported separately from the work, because the two fail for
-        // completely different reasons and only one of them is the task's
-        // fault. A visit that succeeded and could not be uploaded — the server
-        // restarted, the proxy answered 502, the wifi dropped — used to be
-        // posted as a task failure, burning an attempt and, on requeue,
-        // re-opening the same page through the same logged-in session for work
-        // that had already been done correctly. Saying nothing is better: the
-        // lease lapses, the reaper returns the task to the queue, and no
-        // attempt is charged for a network we do not control.
-        pending.delete(task.id);
-        try {
-          await api(`/api/agent/tasks/${task.id}/result`, { result, agent_id: id });
-          done += 1;
-        } catch (error) {
-          console.warn("jobapp: could not report a finished task", task.id, error);
-        }
-    };
-
-    try {
-      await Promise.all(
-        Array.from(lanes.values()).map(async (lane) => {
-          for (const task of lane) await work(task);
-        }),
-      );
-    } finally {
-      stopHeartbeat();
+    for (const [key, laneTasks] of lanes) {
+      activeSites.add(key);
+      // Deliberately not awaited: the lease request is done, and the next one
+      // should be free to go out as soon as any lane has room.
+      runLane(key, laneTasks, id, lease.lease_seconds);
     }
-    await setStatus({ lastCompleted: done, lastTaskAt: new Date().toISOString() });
-
-    // More work probably waits behind what we just drained, and the next alarm
-    // is up to a minute away.
-    setTimeout(() => pollOnce(), 0);
   } catch (error) {
     await setStatus({ lastError: String(error && error.message ? error.message : error) });
   } finally {
     polling = false;
   }
+
+  // If slots are still free (the server had work for fewer sites than we have
+  // lanes), the next alarm will ask again; nothing to chain here.
+}
+
+async function runLane(key, tasks, id, leaseSeconds) {
+  // The tasks still leased to us, kept current so the heartbeat does not keep
+  // asking for ones we have already reported on.
+  const pending = new Set(tasks.map((task) => task.id));
+  const stopHeartbeat = keepLeasesAlive(pending, id, leaseSeconds);
+  let done = 0;
+  try {
+    for (const task of tasks) {
+      let result;
+      try {
+        result = await runTask(task);
+      } catch (error) {
+        pending.delete(task.id);
+        await reportFailure(task, error, id);
+        continue;
+      }
+
+      // Reported separately from the work, because the two fail for
+      // completely different reasons and only one of them is the task's
+      // fault. A visit that succeeded and could not be uploaded — the server
+      // restarted, the proxy answered 502, the wifi dropped — used to be
+      // posted as a task failure, burning an attempt and, on requeue,
+      // re-opening the same page through the same logged-in session for work
+      // that had already been done correctly. Saying nothing is better: the
+      // lease lapses, the reaper returns the task to the queue, and no
+      // attempt is charged for a network we do not control.
+      pending.delete(task.id);
+      try {
+        await api(`/api/agent/tasks/${task.id}/result`, { result, agent_id: id });
+        done += 1;
+      } catch (error) {
+        console.warn("jobapp: could not report a finished task", task.id, error);
+      }
+    }
+  } finally {
+    stopHeartbeat();
+    activeSites.delete(key);
+  }
+  await setStatus({ lastCompleted: done, lastTaskAt: new Date().toISOString() });
+  // This lane's slot is free. More work probably waits, and the next alarm is
+  // up to a minute away.
+  setTimeout(() => pollOnce(), 0);
 }
 
 // ---------------------------------------------------------------------------
