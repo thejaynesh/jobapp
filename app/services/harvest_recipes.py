@@ -556,6 +556,53 @@ def recipe_from_title(samples: list, title: str) -> dict | None:
     return None
 
 
+_TITLE_LIKE_KEY = re.compile(r"title|position|role|headline", re.I)
+
+
+def title_candidates(payloads: list, limit: int = 12) -> list[str]:
+    """
+    Strings in these payloads that read like job titles.
+
+    What you would otherwise have to find yourself: a hint only helps if it is
+    a title the payload actually holds, and nobody can be expected to know
+    what a stored response contains. So the values under title-shaped keys are
+    offered — to the panel as click-to-use buttons, and to `learn`, which
+    tries them on its own before it asks a model anything.
+    """
+    from app.services import harvest
+
+    strong = {k.lower() for k in harvest._STRONG_TITLE_KEYS}
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def plausible(text: str) -> bool:
+        text = text.strip()
+        return (4 <= len(text) <= 120 and re.search(r"[A-Za-z]{3}", text)
+                and not text.startswith(("http", "/", "{", "urn:"))
+                and not _LOOKS_LIKE_ID.match(text) and text.count(" ") <= 14)
+
+    def walk(node, depth=0):
+        if len(found) >= limit or depth > 30:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                name = str(key)
+                if isinstance(value, str) and (name.lower() in strong or _TITLE_LIKE_KEY.search(name)):
+                    text = value.strip()
+                    if plausible(text) and text.lower() not in seen:
+                        seen.add(text.lower())
+                        found.append(text)
+                else:
+                    walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node[:50]:
+                walk(item, depth + 1)
+
+    for payload in sorted(payloads or [], key=jobbiness, reverse=True):
+        walk(payload)
+    return found[:limit]
+
+
 def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> dict:
     """
     Propose, validate and store in one go. What the button calls.
@@ -594,14 +641,22 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
                           "payloads, so the jobs on that page arrived some other way. "
                           "Press Forget and visit the page again"}
 
-    if hint:
-        drafted = recipe_from_title(payloads, hint)
-        if drafted:
-            outcome = validate(payloads, drafted)
-            if outcome["ok"]:
-                row = save(db, host, drafted, outcome, model="built from your hint")
-                return {"ok": True, "reason": outcome["reason"] + " (from your hint, no model)",
-                        "jobs": outcome["jobs"], "recipe": drafted, "id": str(row.id)}
+    # A title — yours, or failing that each title-shaped value the payloads
+    # hold — says where the jobs are. Tried without a model first: it is exact
+    # when it works and costs nothing when it does not.
+    tries = [(hint, "your hint")] if hint else [
+        (title, "the payload itself") for title in title_candidates(payloads, 8)
+    ]
+    for title, source in tries:
+        drafted = recipe_from_title(payloads, title)
+        if not drafted:
+            continue
+        outcome = validate(payloads, drafted)
+        if outcome["ok"]:
+            row = save(db, host, drafted, outcome, model=f"read from {source}")
+            return {"ok": True,
+                    "reason": outcome["reason"] + f" (read from {source}, no model)",
+                    "jobs": outcome["jobs"], "recipe": drafted, "id": str(row.id)}
 
     proposal = propose(ranked, host, profile_data, located=located, hint=hint)
     if proposal["error"]:

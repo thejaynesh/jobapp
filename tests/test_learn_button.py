@@ -52,7 +52,11 @@ class TestJunkSamples:
         assert "analytics" in out["reason"]
 
     def test_the_most_job_like_payload_is_shown_first(self, db):
-        _store(db, JOBS)
+        # Titles, but the company is only a reference — so reading it straight
+        # off fails and the model is asked.
+        hard = {"results": [{"jobTitle": "Platform Engineer", "companyRef": "urn:c:1",
+                             "jobUrl": "https://board.test/j/9"}]}
+        _store(db, hard)
         _store(db, ANALYTICS)  # newer, so it used to come first
         seen = {}
 
@@ -62,7 +66,7 @@ class TestJunkSamples:
 
         with patch("app.services.harvest_recipes.propose", side_effect=fake):
             harvest_recipes.learn(db, "board.test")
-        assert seen["first"] == JOBS
+        assert seen["first"] == hard
 
 
 class TestTheButtonReports:
@@ -76,3 +80,28 @@ class TestTheButtonReports:
         body = client.post("/runs/agent/learn",
                            data={"host": "board.test", "hint": "Data Engineer"}).text
         assert "learned" in body and "2 job(s)" in body
+
+
+class TestNoNeedToKnowThePayload:
+    """You cannot type a title you have never seen, so it finds them itself."""
+
+    def test_titles_are_pulled_out_of_the_payloads(self):
+        found = harvest_recipes.title_candidates([ANALYTICS, JOBS])
+        assert found[:2] == ["Senior Backend Engineer", "Data Engineer"]
+
+    def test_learn_without_a_hint_tries_them_before_any_model(self, db):
+        _store(db, ANALYTICS)
+        _store(db, JOBS)
+        with patch("app.services.harvest_recipes.propose") as model:
+            out = harvest_recipes.learn(db, "board.test")
+        model.assert_not_called()
+        assert out["ok"] and "payload itself" in out["reason"]
+
+    def test_show_lists_the_payloads_and_their_titles(self, client, db):
+        _store(db, ANALYTICS)
+        _store(db, JOBS)
+        body = client.get("/runs/agent/samples", params={"host": "board.test"}).text
+        assert "2 stored payloads" in body
+        assert "Senior Backend Engineer" in body
+        assert "probably analytics" in body
+        assert 'hx-post="/runs/agent/learn"' in body

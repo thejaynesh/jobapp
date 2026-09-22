@@ -1,0 +1,46 @@
+{# What is stored for one host — opened under its row in "Payloads we can't read". #}
+<div class="my-1.5 border border-gray-200 rounded bg-gray-50/60 p-2 text-[11px]">
+  <div class="flex items-center justify-between mb-1">
+    <p class="font-medium text-gray-600">{{ samples|length }} stored payload{{ '' if samples|length == 1 else 's' }} from {{ host }}</p>
+    <button type="button" onclick="this.closest('[id^=samples-]').innerHTML=''"
+            class="text-gray-400 hover:text-gray-700">hide</button>
+  </div>
+
+  {% if titles %}
+  <p class="text-gray-600 mb-1">
+    Job titles found in them. Click the one that is really a job on that page
+    and it will learn from it:
+  </p>
+  <div class="flex flex-wrap gap-1 mb-2">
+    {% for title in titles %}
+    <button hx-post="/runs/agent/learn" hx-vals='{"host": {{ host | tojson }}, "hint": {{ title | tojson }}}'
+            hx-target="#system-panel" hx-swap="outerHTML" hx-disabled-elt="this"
+            class="border border-blue-300 text-blue-700 bg-white rounded px-1.5 py-0.5 hover:bg-blue-50">
+      {{ title }}
+    </button>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="text-amber-700 mb-2">
+    Nothing in these looks like a job title, so the jobs on that page did not
+    arrive in them. Press Forget, open a search on the site, and check again.
+  </p>
+  {% endif %}
+
+  {% for sample in samples %}
+  <details class="border-t border-gray-200 py-1">
+    <summary class="cursor-pointer text-gray-600">
+      <span class="{% if sample.jobbiness %}text-green-700{% else %}text-gray-400{% endif %}">
+        {% if sample.jobbiness %}{{ sample.jobbiness }} job-like fields{% else %}no job fields — probably analytics{% endif %}
+      </span>
+      &middot; {{ "%.1f"|format((sample.bytes or 0) / 1000) }} KB
+      &middot; <span class="font-mono text-gray-400 break-all">{{ (sample.source_url or '')[:90] }}</span>
+    </summary>
+    {% if sample.titles %}
+    <p class="text-gray-500 mt-1">Titles in this one: {{ sample.titles | join(' · ') }}</p>
+    {% endif %}
+    <pre class="mt-1 max-h-72 overflow-auto bg-white border border-gray-200 rounded p-2 text-[10px] leading-tight whitespace-pre-wrap break-all">{{ sample.preview }}{% if sample.cut %}
+… (cut here){% endif %}</pre>
+  </details>
+  {% endfor %}
+</div>

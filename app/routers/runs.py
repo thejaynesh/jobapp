@@ -393,6 +393,41 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
     )
 
 
+@router.get("/agent/samples", response_class=HTMLResponse)
+def show_harvest_samples(request: Request, host: str, db: Session = Depends(get_db)):
+    """
+    What is actually stored for a host, so the Learn hint is not a guess.
+
+    The hint box asks for a job title, and nobody can know which titles a
+    stored response holds without seeing it. This shows each payload — where
+    it came from, how job-like it is, and the title-shaped values in it as
+    buttons that learn with that title.
+    """
+    import json as _json
+
+    from app.services import harvest_recipes, harvest_samples
+
+    host = (host or "").strip().lower()
+    rows = harvest_samples.for_host(db, host, limit=8)
+    samples = []
+    for row in sorted(rows, key=lambda r: harvest_recipes.jobbiness(r.payload), reverse=True):
+        text = _json.dumps(row.payload, indent=1, ensure_ascii=False)
+        samples.append({
+            "source_url": row.source_url,
+            "bytes": row.bytes,
+            "created_at": row.created_at,
+            "jobbiness": harvest_recipes.jobbiness(row.payload),
+            "titles": harvest_recipes.title_candidates([row.payload], 6),
+            "preview": text[:15000],
+            "cut": len(text) > 15000,
+        })
+    return templates.TemplateResponse(
+        "runs/partials/samples.html",
+        {"request": request, "host": host, "samples": samples,
+         "titles": harvest_recipes.title_candidates([r.payload for r in rows], 12)},
+    )
+
+
 @router.post("/agent/forget-samples", response_class=HTMLResponse)
 def forget_harvest_samples(request: Request, host: str = Form(...),
                            db: Session = Depends(get_db)):
