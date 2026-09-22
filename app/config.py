@@ -498,6 +498,10 @@ class Settings(BaseSettings):
     # browser tier can be switched off from the settings page if it stops
     # earning its keep.
     DICE_ENABLED: bool = True
+    # The key Dice's own search page sends to its JSON API — public, embedded
+    # in dice.com, and not an account of ours. If Dice rotates it, copy the
+    # current `x-api-key` from any dice.com search's network requests.
+    DICE_API_KEY: str = "1YAt0R9wBg4WfsF9VB2778F5CHLAPMVW3WAZcKd8"
     # Community job lists, mined for the ATS slugs in their apply links. Each
     # one is a few thousand company boards for the cost of a single request,
     # which makes it by far the cheapest discovery we have — the three original

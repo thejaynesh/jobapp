@@ -81,6 +81,9 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "hiringcafe", "ycombinator", "linkedin", "indeed", "remotive",
         "arbeitnow", "remoteok", "weworkremotely", "themuse", "himalayas",
         "jobicy", "hnhiring", "workingnomads", "builtin", "jobspresso",
+        # Dice answers a plain HTTP request through its search API now, so it
+        # left the browser tier — see `sources.dice.fetch_api`.
+        "dice",
     }),
     # The company board registry: hundreds of slugs, one request each.
     "boards": frozenset({
@@ -89,7 +92,7 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "personio",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
-    "browser": frozenset({"wellfound", "dice", "handshake"}),
+    "browser": frozenset({"wellfound", "handshake"}),
 }
 
 ALL_GROUPS = tuple(SOURCE_GROUPS)
@@ -166,6 +169,62 @@ def _run_combos(
             continue
         _record(stats, source, jobs)
         all_jobs.extend(jobs)
+
+
+def _fetch_dice(stats: dict, roles: list[str], locations: list[str]) -> list[dict]:
+    """
+    Dice through its search API; the browser scrape only if the API refuses.
+
+    The API is the same one Dice's own page calls, so it returns structured
+    rows — employer, pay, posting date — for a plain request, where the scrape
+    needed Chromium and got cards with none of that. The key it needs is a
+    public one that could rotate; when the API refuses, the scrape still runs
+    so Dice does not go dark while the setting is updated.
+    """
+    from app.services.sources.dice import DiceApiUnavailable, fetch_api
+
+    jobs: list[dict] = []
+    refused: str | None = None
+    for role in roles:
+        for loc in locations:
+            try:
+                found = fetch_api(role, loc)
+            except DiceApiUnavailable as exc:
+                refused = str(exc)
+                break
+            except Exception as exc:
+                _record(stats, "dice", [], f"{role}/{loc}: {exc}")
+                continue
+            _record(stats, "dice", found)
+            jobs.extend(found)
+        if refused:
+            break
+    if not refused:
+        return jobs
+
+    _record(stats, "dice", [], f"search API unavailable ({refused}); used the browser scrape")
+    logger.error("Dice: search API unavailable (%s); falling back to the browser scrape",
+                 refused)
+    from app.services.sources.dice import fetch as dice_scrape
+
+    async def _scrape_all() -> list[dict]:
+        out: list[dict] = []
+        for role in roles:
+            for loc in locations:
+                try:
+                    found = await dice_scrape(query=role, location=loc)
+                except Exception as exc:
+                    _record(stats, "dice", [], f"{role}/{loc}: {exc}")
+                    continue
+                _record(stats, "dice", found)
+                out.extend(found)
+        return out
+
+    try:
+        jobs.extend(asyncio.run(_scrape_all()))
+    except Exception as exc:
+        _record(stats, "dice", [], f"browser scrape failed: {exc}")
+    return jobs
 
 
 def _run_all_adapters(
@@ -577,10 +636,17 @@ def _run_all_adapters(
     _run_combos(stats, all_jobs, "jobspresso",
                 lambda role: jobspresso_fetch(query=role), [(r,) for r in roles], _skip)
 
-    # --- Tier 2: Playwright scrapers (Wellfound, Dice, Handshake) ---
+    # --- Dice: its own search API, with the browser scrape as the fallback ---
+    if getattr(cfg, "DICE_ENABLED", True) and not _skip("dice"):
+        stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
+        all_jobs.extend(_fetch_dice(stats, roles, locations))
+    else:
+        _disable("dice")
+
+    # --- Tier 2: Playwright scrapers (Wellfound, Handshake) ---
     # Launching a browser is the most expensive thing here, so don't do it at
     # all when none of its sources were asked for.
-    pw_sources = {"wellfound", "dice", "handshake"}
+    pw_sources = {"wellfound", "handshake"}
     # Resting applies here too; these branches never went through `_skip`.
     pw_rested = {src for src in pw_sources if _rests(src)}
     wanted_pw = (pw_sources if only is None else pw_sources & only) - pw_rested
@@ -606,20 +672,6 @@ def _run_all_adapters(
                 _record(pw_stats, "wellfound", [], str(exc))
         else:
             pw_stats["wellfound"] = {"count": 0, "errors": [], "enabled": False}
-
-        if "dice" in wanted_pw and getattr(cfg, "DICE_ENABLED", True):
-            from app.services.sources.dice import fetch as dice_fetch
-            pw_stats.setdefault("dice", {"count": 0, "errors": [], "enabled": True})
-            for role in roles:
-                for loc in locations:
-                    try:
-                        jobs = await dice_fetch(query=role, location=loc)
-                        _record(pw_stats, "dice", jobs)
-                        pw_jobs.extend(jobs)
-                    except Exception as exc:
-                        _record(pw_stats, "dice", [], f"{role}/{loc}: {exc}")
-        else:
-            pw_stats["dice"] = {"count": 0, "errors": [], "enabled": False}
 
         if getattr(cfg, "HANDSHAKE_SESSION_COOKIE", "") and "handshake" in wanted_pw:
             from app.services.sources.handshake import fetch as hs_fetch
@@ -648,7 +700,7 @@ def _run_all_adapters(
             _disable(src)
     except Exception as exc:
         logger.error("Playwright scrapers fatal error: %s", exc)
-        for src in ("wellfound", "dice", "handshake"):
+        for src in ("wellfound", "handshake"):
             stats.setdefault(src, {"count": 0, "errors": [str(exc)], "enabled": True})
     for src in pw_rested:
         stats[src] = {"count": 0, "enabled": False, "errors": [_resting_reason(src)]}

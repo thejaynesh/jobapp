@@ -1780,3 +1780,84 @@ class TestEachSourceIsTimed:
             job_fetcher.fetch_and_save_jobs(db, only={"remoteok"})
         stored = db.query(Profile).first().data["last_fetch"]["sources"]
         assert stored["remoteok"]["seconds"] == 3.2
+
+
+class TestDiceSearchApi:
+    """
+    Dice's own search page calls a JSON API that answers a plain request with
+    employer, pay, posting date and a summary. The browser scrape it replaces
+    launched Chromium for cards carrying none of that.
+    """
+
+    _ROW = {
+        "id": "1bbb", "guid": "22297a6e-c311-4b73-adbd-cd91c38b3840",
+        "title": "Embedded Software Engineer",
+        "jobLocation": {"displayName": "Greene, New York, USA"},
+        "firstActiveDate": "2026-09-19T05:20:02Z",
+        "detailsPageUrl": "https://www.dice.com/job-detail/22297a6e-c311-4b73-adbd-cd91c38b3840",
+        "salary": "USD 73,840.00 - 94,667.00 per year",
+        "companyName": "Toyota Material Handling North America",
+        "employmentType": "Full-time",
+        "summary": "Join our team as an Embedded Software Engineer.",
+        "workFromHomeAvailability": "FALSE",
+    }
+
+    def _resp(self, rows, page_count=1, status=200):
+        resp = MagicMock(status_code=status)
+        resp.json.return_value = {"data": rows, "meta": {"pageCount": page_count}}
+        return resp
+
+    def test_a_row_becomes_a_full_job(self):
+        from app.services.sources import dice
+        with patch("httpx.get", return_value=self._resp([self._ROW])):
+            [job] = dice.fetch_api("software engineer", "Boston, MA", api_key="k")
+        assert job["company"] == "Toyota Material Handling North America"
+        assert job["source_job_id"] == "22297a6e-c311-4b73-adbd-cd91c38b3840"
+        assert job["posted_at"] == "2026-09-19T05:20:02Z"
+        assert (job["salary_min"], job["salary_max"]) == (73840.0, 94667.0)
+        assert (job["salary_currency"], job["salary_period"]) == ("USD", "year")
+        assert job["employment_type"] == "Full-time"
+
+    def test_it_asks_for_recent_postings_where_the_user_is(self):
+        from app.services.sources import dice
+        with patch("httpx.get", return_value=self._resp([])) as get:
+            dice.fetch_api("python", "Boston, MA", api_key="k")
+        params = get.call_args.kwargs["params"]
+        assert params["location"] == "Boston, MA"
+        assert params["filters.postedDate"] == "SEVEN"
+        assert get.call_args.kwargs["headers"]["x-api-key"] == "k"
+
+    def test_a_remote_search_uses_the_workplace_filter_and_marks_the_rows(self):
+        from app.services.sources import dice
+        with patch("httpx.get", return_value=self._resp([self._ROW])) as get:
+            [job] = dice.fetch_api("python", "Remote", api_key="k")
+        assert get.call_args.kwargs["params"]["filters.workplaceTypes"] == "Remote"
+        assert "location" not in get.call_args.kwargs["params"]
+        assert job["is_remote"] is True
+
+    def test_it_pages_until_the_last_page(self):
+        from app.services.sources import dice
+        second = {**self._ROW, "detailsPageUrl": "https://www.dice.com/job-detail/other"}
+        with patch("httpx.get", side_effect=[self._resp([self._ROW], 2),
+                                             self._resp([second], 2)]) as get:
+            jobs = dice.fetch_api("python", "", api_key="k", max_pages=5)
+        assert len(jobs) == 2 and get.call_count == 2
+
+    def test_a_rejected_key_is_reported_for_the_fallback(self):
+        from app.services.sources import dice
+        with patch("httpx.get", return_value=self._resp([], status=403)):
+            with pytest.raises(dice.DiceApiUnavailable, match="DICE_API_KEY"):
+                dice.fetch_api("python", "", api_key="k")
+
+    @pytest.mark.parametrize("text,expected", [
+        ("USD 50.00 - 60.00 per hour", (50.0, 60.0, "hour")),
+        ("$120,000", (120000.0, 120000.0, None)),
+        ("Depends on Experience", None),
+    ])
+    def test_pay_strings(self, text, expected):
+        from app.services.sources.dice import _salary
+        out = _salary(text)
+        if expected is None:
+            assert out == {}
+        else:
+            assert (out["salary_min"], out["salary_max"], out.get("salary_period")) == expected

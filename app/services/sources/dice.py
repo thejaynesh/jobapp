@@ -221,8 +221,165 @@ async def _scrape(query: str, location: str) -> list[dict]:
 
 
 async def fetch(query: str, location: str) -> list[dict]:
+    """The browser scrape. Only the fallback now — see `fetch_api`."""
     try:
         return await _scrape(query, location)
     except Exception as exc:
         logger.error("Dice fetch error: %s", exc)
         return []
+
+
+# ---------------------------------------------------------------------------
+# The search API
+# ---------------------------------------------------------------------------
+#
+# Dice's own search page is a client of a JSON API, and that API answers a
+# plain HTTP request with structured results: title, employer, location,
+# posting date, stated pay, remote flag, sponsorship, and a summary. The
+# browser scrape it replaces launched Chromium to read cards that carried none
+# of that — and was the reason Dice sat in the expensive tier at all.
+#
+# The key is not ours: it is the public one Dice's own front end sends, which
+# is why it is a setting (`DICE_API_KEY`) rather than a constant — if Dice
+# rotates it, the new one is in the request headers of any dice.com search and
+# changing it is not a deploy. A rejected key is reported as such, and the
+# caller falls back to the browser scrape rather than going dark.
+
+_API = "https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search"
+_API_PAGE_SIZE = 50
+_SALARY_RE = re.compile(
+    r"(?P<cur>[A-Z]{3})?\s*\$?(?P<lo>[\d,]+(?:\.\d+)?)"
+    r"(?:\s*[-–]\s*\$?(?P<hi>[\d,]+(?:\.\d+)?))?\s*(?:per\s+(?P<per>\w+))?",
+    re.I,
+)
+
+
+class DiceApiUnavailable(Exception):
+    """The API refused or failed; the browser scrape is the fallback."""
+
+
+def _salary(text: str | None) -> dict:
+    """"USD 73,840.00 - 94,667.00 per year" as the columns the fetcher stores."""
+    if not text:
+        return {}
+    match = _SALARY_RE.search(text)
+    if not match:
+        return {}
+    try:
+        low = float(match.group("lo").replace(",", ""))
+        high = float((match.group("hi") or match.group("lo")).replace(",", ""))
+    except (TypeError, ValueError):
+        return {}
+    if low <= 0:
+        return {}
+    out = {"salary_min": low, "salary_max": max(low, high)}
+    if match.group("cur"):
+        out["salary_currency"] = match.group("cur").upper()
+    elif "$" in text:
+        out["salary_currency"] = "USD"
+    if match.group("per"):
+        out["salary_period"] = match.group("per").lower()
+    return out
+
+
+def _from_api(item: dict) -> dict | None:
+    title = (item.get("title") or "").strip()
+    url = item.get("detailsPageUrl") or ""
+    if not title or not url:
+        return None
+    place = item.get("jobLocation") or {}
+    location = (place.get("displayName") or "").strip() if isinstance(place, dict) else ""
+    remote = bool(item.get("isRemote")) or str(
+        item.get("workFromHomeAvailability") or "").upper() == "TRUE"
+    summary = (item.get("summary") or "").strip()
+    job = {
+        "source": "dice",
+        # The detail page's guid, which is what the scrape recorded too — so a
+        # posting stored before this change is recognised as the same one.
+        "source_job_id": _job_id_from_url(url) or item.get("guid") or item.get("id"),
+        "title": title,
+        "company": (item.get("companyName") or "").strip(),
+        "location": location or ("Remote" if remote else ""),
+        "is_remote": remote or is_remote_location(location, title),
+        "url": url,
+        # A summary is the first few hundred characters, not the posting.
+        # Stored so matching has something; enrichment fetches the whole page.
+        "description": summary,
+        "experience_level": parse_experience_level(title, summary),
+        "posted_at": item.get("firstActiveDate") or item.get("postedDate"),
+        "employment_type": (item.get("employmentType") or "").strip() or None,
+        **_salary(item.get("salary")),
+    }
+    return job
+
+
+def fetch_api(query: str, location: str = "", max_pages: int = 2,
+              api_key: str | None = None, posted_within: str = "SEVEN") -> list[dict]:
+    """
+    Search Dice's JSON API. Raises `DiceApiUnavailable` when it cannot answer.
+
+    Recent postings first by the API's own filter (`SEVEN` days), paged up to
+    `max_pages` of fifty. An empty location searches the whole US.
+    """
+    import httpx
+
+    from app.config import settings
+
+    key = api_key or getattr(settings, "DICE_API_KEY", "")
+    if not key:
+        raise DiceApiUnavailable("no DICE_API_KEY configured")
+    headers = {"x-api-key": key, "Accept": "application/json",
+               "User-Agent": "Mozilla/5.0 (compatible; jobapp)"}
+    params = {
+        "q": query, "countryCode2": "US", "radius": 30, "radiusUnit": "mi",
+        "pageSize": _API_PAGE_SIZE, "language": "en",
+        "filters.postedDate": posted_within,
+    }
+    remote_search = (location or "").strip().lower() == "remote"
+    if remote_search:
+        # The workplace filter is what Dice's own "Remote" chip sends, and it
+        # does narrow the results — but the rows it returns carry no remote
+        # flag of their own (`workFromHomeAvailability` is a legacy field that
+        # reads FALSE on remote postings), so the search is the evidence.
+        params["filters.workplaceTypes"] = "Remote"
+    elif location and location.strip().lower() not in ("united states", "usa", "us"):
+        params["location"] = location
+
+    jobs: list[dict] = []
+    seen: set[str] = set()
+    for page in range(1, max(1, max_pages) + 1):
+        try:
+            resp = httpx.get(_API, params={**params, "page": page}, headers=headers,
+                             timeout=20)
+        except Exception as exc:
+            if page == 1:
+                raise DiceApiUnavailable(f"request failed: {exc}") from exc
+            break
+        if resp.status_code in (401, 403):
+            raise DiceApiUnavailable(
+                f"the API refused the key ({resp.status_code}); copy the current "
+                "x-api-key from a dice.com search into DICE_API_KEY"
+            )
+        if resp.status_code >= 400:
+            if page == 1:
+                raise DiceApiUnavailable(f"HTTP {resp.status_code}")
+            break
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise DiceApiUnavailable("the API answered with something other than JSON") from exc
+        rows = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or not rows:
+            break
+        for item in rows:
+            job = _from_api(item) if isinstance(item, dict) else None
+            if job and remote_search:
+                job["is_remote"] = True
+            if job and job["url"] not in seen:
+                seen.add(job["url"])
+                jobs.append(job)
+        meta = data.get("meta") or {}
+        if page >= int(meta.get("pageCount") or page):
+            break
+    logger.info("Dice API: %d jobs for %s / %s", len(jobs), query, location or "US")
+    return jobs

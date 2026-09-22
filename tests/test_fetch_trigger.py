@@ -288,9 +288,34 @@ class TestSourceFiltering:
         from app.services.job_fetcher import _run_all_adapters
         with patch("asyncio.run", return_value=([], {})) as async_run:
             _run_all_adapters(
+                ["SWE"], ["Remote"], self._cfg(), {}, {}, only={"wellfound"},
+            )
+        async_run.assert_called_once()
+
+    def test_dice_no_longer_needs_the_browser(self):
+        """Its search API answers a plain request; Chromium is the fallback."""
+        from app.services.job_fetcher import _run_all_adapters
+        with patch("app.services.sources.dice.fetch_api", return_value=[]) as api, \
+             patch("asyncio.run") as async_run:
+            _, stats = _run_all_adapters(
+                ["SWE"], ["Remote"], self._cfg(), {}, {}, only={"dice"},
+            )
+        api.assert_called_once_with("SWE", "Remote")
+        async_run.assert_not_called()
+        assert stats["dice"]["enabled"] is True
+
+    def test_dice_falls_back_to_the_scrape_when_the_api_refuses(self):
+        from app.services.job_fetcher import _run_all_adapters
+        from app.services.sources.dice import DiceApiUnavailable
+        with patch("app.services.sources.dice.fetch_api",
+                   side_effect=DiceApiUnavailable("key rotated")), \
+             patch("asyncio.run", return_value=[{"source": "dice", "url": "u"}]) as async_run:
+            jobs, stats = _run_all_adapters(
                 ["SWE"], ["Remote"], self._cfg(), {}, {}, only={"dice"},
             )
         async_run.assert_called_once()
+        assert any("key rotated" in e for e in stats["dice"]["errors"])
+        assert jobs == [{"source": "dice", "url": "u"}]
 
     def test_no_filter_runs_everything(self):
         from app.services.job_fetcher import _run_all_adapters
