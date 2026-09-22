@@ -327,8 +327,11 @@ def resolve_urls(
     if not urls:
         return []
     limiter = _HostLimiter(max_concurrent=per_host, min_interval=host_delay)
+    from app.services.url_safety import EVENT_HOOKS
+
     with httpx.Client(
-        headers=_HEADERS, timeout=timeout, follow_redirects=True, max_redirects=10
+        headers=_HEADERS, timeout=timeout, follow_redirects=True, max_redirects=10,
+        event_hooks=EVENT_HOOKS,
     ) as client:
         with ThreadPoolExecutor(max_workers=max(1, min(workers, len(urls)))) as pool:
             return list(pool.map(lambda u: resolve_url(u, client, limiter), urls))

@@ -118,7 +118,10 @@ def sniff_host(host: str, seed_html: str = "") -> dict[str, list[str]]:
     if seed_html and _absorb(seed_html):
         return {ats: sorted(slugs) for ats, slugs in found.items()}
 
-    with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True) as client:
+    from app.services.url_safety import EVENT_HOOKS
+
+    with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True,
+                      event_hooks=EVENT_HOOKS) as client:
         for path in _CAREER_PATHS:
             try:
                 resp = client.get(_origin(host) + path)

@@ -197,6 +197,22 @@ def _age_cutoff_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_dns_in_the_url_guard(monkeypatch):
+    """
+    `url_safety` resolves a host before letting a posting's URL be fetched.
+
+    Real DNS is network, which no test may touch — and the fixtures use made-up
+    hosts ("acme.example", "boards.greenhouse.io") that should read as public.
+    Every name resolves to a public address (example.com's) here; the
+    guard's own tests replace this to exercise private answers.
+    """
+    from app.services import url_safety
+
+    monkeypatch.setattr(url_safety, "_resolve", lambda host: ["93.184.216.34"])
+    url_safety.is_public_host.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _board_validation_off_by_default(monkeypatch):
     """
     Board validation probes real ATS APIs, one request per unproven board.

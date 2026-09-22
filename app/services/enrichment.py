@@ -1247,9 +1247,12 @@ def enrich_jobs(
         # One client for the pass. httpx.Client is safe to share across threads
         # and pools its connections, which is most of what makes a few hundred
         # requests cheap rather than a few hundred TLS handshakes.
+        from app.services.url_safety import EVENT_HOOKS
+
         with httpx.Client(
             headers=_HEADERS, timeout=DEFAULT_TIMEOUT,
             follow_redirects=True, max_redirects=5,
+            event_hooks=EVENT_HOOKS,
         ) as client:
 
             def _work(job: Job) -> tuple[Job, Extraction | None, Exception | None]:
