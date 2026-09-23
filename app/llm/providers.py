@@ -122,12 +122,22 @@ def configured_providers() -> dict[str, Provider]:
 DEFAULT_TIMEOUT_SECONDS = 90
 
 
+def _sdk_retries(max_retries: int | None) -> dict:
+    """
+    `max_retries` for an SDK client, or nothing to keep the SDK's own default.
+
+    The default is two retries, and on a timeout that multiplies the wait by
+    three without saying so — a 90 second limit that took 280 seconds to fail.
+    """
+    return {} if max_retries is None else {"max_retries": max(0, int(max_retries))}
+
+
 def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int,
                     timeout: float = DEFAULT_TIMEOUT_SECONDS,
-                    entry=None) -> str:
+                    entry=None, max_retries: int | None = None) -> str:
     import anthropic
 
-    client = anthropic.Anthropic(api_key=provider.api_key)
+    client = anthropic.Anthropic(api_key=provider.api_key, **_sdk_retries(max_retries))
     system = "\n\n".join(
         m["content"] for m in messages if m.get("role") == "system"
     )
@@ -159,10 +169,12 @@ def _call_anthropic(provider: Provider, messages: list[dict], max_tokens: int,
 def _call_openai_compatible(
     provider: Provider, messages: list[dict], temperature: float, max_tokens: int,
     timeout: float = DEFAULT_TIMEOUT_SECONDS, entry=None,
+    max_retries: int | None = None,
 ) -> str:
     from openai import OpenAI
 
-    client = OpenAI(api_key=provider.api_key, base_url=provider.base_url)
+    client = OpenAI(api_key=provider.api_key, base_url=provider.base_url,
+                    **_sdk_retries(max_retries))
     response = client.chat.completions.create(
         model=provider.model,
         messages=messages,
@@ -188,17 +200,23 @@ def call_provider(
     max_tokens: int = 512,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     gate_wait: float | None = None,
+    max_retries: int | None = None,
 ) -> str:
     from app.services import llm_log
 
     with _concurrency_gate(provider, gate_wait):
         with llm_log.call(provider.name, provider.model, messages,
                           temperature=temperature, max_tokens=max_tokens) as entry:
+            # Passed only when asked for, so every existing caller makes
+            # exactly the call it always did.
+            retries = {} if max_retries is None else {"max_retries": max_retries}
             if provider.name == "anthropic":
-                result = _call_anthropic(provider, messages, max_tokens, timeout, entry)
+                result = _call_anthropic(provider, messages, max_tokens, timeout,
+                                         entry, **retries)
             else:
                 result = _call_openai_compatible(
-                    provider, messages, temperature, max_tokens, timeout, entry
+                    provider, messages, temperature, max_tokens, timeout, entry,
+                    **retries,
                 )
     _record_llm_use(provider)
     return result

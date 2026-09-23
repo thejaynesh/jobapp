@@ -273,6 +273,24 @@ def _model_role_tunables() -> list[Tunable]:
 
 
 TUNABLES.extend(_model_role_tunables())
+TUNABLES.extend([
+    Tunable(
+        key="compare_timeout_seconds", env="COMPARE_TIMEOUT_SECONDS", kind="int",
+        minimum=15, maximum=900, group="Models",
+        label="Model comparison: time limit per call (seconds)",
+        help="How long one scoring call in a comparison on the Runs page may "
+             "take. Tried once, with no silent retries. Reasoning models can "
+             "need a few minutes; lower gives up on slow ones sooner.",
+    ),
+    Tunable(
+        key="compare_give_up_after", env="COMPARE_GIVE_UP_AFTER", kind="int",
+        minimum=0, maximum=50, group="Models",
+        label="Model comparison: drop a model after this many failures in a row",
+        help="A model that times out or errors this many times running is "
+             "skipped for the rest of the comparison, and the table says so. "
+             "0 never gives up — every job is tried, however long it takes.",
+    ),
+])
 
 BY_KEY: dict[str, Tunable] = {t.key: t for t in TUNABLES}
 

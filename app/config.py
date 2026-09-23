@@ -202,6 +202,10 @@ class Settings(BaseSettings):
     # and the parse fails. Costs nothing when a model does not use it — only
     # tokens actually produced are generated.
     NIM_MATCH_MAX_TOKENS: int = 1536
+    # Model comparison on /runs: how long one scoring call may take, and how
+    # many failures in a row drop a model from the rest of the run.
+    COMPARE_TIMEOUT_SECONDS: int = 120
+    COMPARE_GIVE_UP_AFTER: int = 3
     # How much of a posting the scoring prompt carries. Was 4,000 characters,
     # chosen when descriptions were mostly 500-character stubs and the ceiling
     # never bound; now that enrichment fetches the real text it was cutting off

@@ -42,6 +42,8 @@ class ModelResult:
     scores: dict = field(default_factory=dict)      # job id -> score
     unreadable: int = 0                              # replies we couldn't parse
     errors: int = 0                                  # calls that failed outright
+    timeouts: int = 0                                # of those, ran out of time
+    skipped: int = 0                                 # never tried: gave up first
     seconds: float = 0.0
 
     @property
@@ -86,11 +88,19 @@ def split_choice(choice: str) -> tuple[str, str]:
     return "nim", str(choice or "")
 
 
-def score_with_model(job, profile_data: dict, model: str) -> tuple[int | None, str]:
+def _is_timeout(exc: Exception) -> bool:
+    return "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
+
+
+def score_with_model(job, profile_data: dict, model: str,
+                     timeout: float = 120) -> tuple[int | None, str]:
     """
     Score one job with one model.
 
-    Returns (score, status) where status is "ok", "unreadable" or "error".
+    Returns (score, status) where status is "ok", "unreadable", "timeout" or
+    "error". One attempt, bounded by `timeout`: the SDKs retry twice by
+    default, which turned a 90 second limit into 280 seconds per job on a slow
+    reasoning model.
     Deliberately calls that one provider only: the point is to judge this
     model, not to watch the fallback chain rescue it.
     """
@@ -117,6 +127,7 @@ def score_with_model(job, profile_data: dict, model: str) -> tuple[int | None, s
                     api_key=settings.NVIDIA_NIM_API_KEY,
                     base_url=settings.NVIDIA_NIM_BASE_URL,
                     model=model_id,
+                    timeout=timeout, max_retries=0,
                 )
             else:
                 provider = model_roles._providers().get(provider_name)
@@ -125,10 +136,11 @@ def score_with_model(job, profile_data: dict, model: str) -> tuple[int | None, s
                 raw = call_provider(
                     replace(provider, model=model_id), messages,
                     max_tokens=_match_max_tokens(),
+                    timeout=timeout, max_retries=0,
                 )
     except Exception as exc:
         logger.warning("compare: %s call failed for %s: %s", model, job.id, exc)
-        return None, "error"
+        return None, "timeout" if _is_timeout(exc) else "error"
 
     try:
         return _parse_llm_response(raw)["score"], "ok"
@@ -147,18 +159,35 @@ def compare_models(
     if not jobs:
         return [], []
 
+    from app.services.tunables import value as tunable
+
+    timeout = float(tunable(profile_data or {}, "compare_timeout_seconds") or 120)
+    give_up = int(tunable(profile_data or {}, "compare_give_up_after") or 0)
+
     results = []
     for model in models:
         result = ModelResult(model=model)
         started = time.monotonic()
-        for job in jobs:
-            score, status = score_with_model(job, profile_data, model)
+        failed_in_a_row = 0
+        for index, job in enumerate(jobs):
+            score, status = score_with_model(job, profile_data, model, timeout=timeout)
             if status == "ok":
                 result.scores[str(job.id)] = score
+                failed_in_a_row = 0
             elif status == "unreadable":
                 result.unreadable += 1
+                failed_in_a_row = 0
             else:
                 result.errors += 1
+                result.timeouts += status == "timeout"
+                failed_in_a_row += 1
+            # A model that is down or far too slow says so within a few jobs;
+            # waiting out every remaining one only delays the models after it.
+            if give_up and failed_in_a_row >= give_up:
+                result.skipped = len(jobs) - index - 1
+                logger.info("compare: gave up on %s after %d failures in a row",
+                            model, failed_in_a_row)
+                break
             if pace_seconds:
                 time.sleep(pace_seconds)
         result.seconds = round(time.monotonic() - started, 1)
@@ -207,6 +236,7 @@ def report_dict(jobs: list[Job], results: list[ModelResult], threshold: int) -> 
         "summary": [{
             "model": r.model, "scored": r.scored, "average": r.average,
             "unreadable": r.unreadable, "errors": r.errors, "seconds": r.seconds,
+            "timeouts": r.timeouts, "skipped": r.skipped,
         } for r in results],
         "flips": flips,
     }

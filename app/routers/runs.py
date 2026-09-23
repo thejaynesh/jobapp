@@ -763,12 +763,22 @@ def _compare_context(request: Request, db: Session, queued: dict | None = None) 
         logger.warning("runs: comparison state unavailable: %s", exc)
         record = None
 
+    from app.services.model_catalog import PROVIDER_LABELS
+    from app.services.model_compare import split_choice
+
     choices, current = _compare_choices(db)
+    # Grouped by provider, so a model added to one list on the settings page
+    # is found under that provider rather than somewhere in one long row.
+    groups: dict[str, list] = {}
+    for value in choices:
+        name, model = split_choice(value)
+        groups.setdefault(PROVIDER_LABELS.get(name, name), []).append((value, model))
     return {
         "request": request,
         "compare_result": record,
         "compare_progress": progress(record),
         "compare_models_available": choices,
+        "compare_groups": groups,
         "current_model": current,
         "queued": queued,
     }

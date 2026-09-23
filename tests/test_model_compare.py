@@ -589,3 +589,79 @@ class TestAnyProvider:
 
         route = celery_app.amqp.router.route({}, "app.tasks.compare_models.run_comparison")
         assert route["queue"].name == "interactive"
+
+
+class TestSlowModels:
+    """A reasoning model timing out cost 280 seconds a job: 90s, twice retried."""
+
+    def _jobs(self, db, n=5):
+        from datetime import datetime, timezone
+
+        from app.models.job import Job
+        for i in range(n):
+            db.add(Job(title=f"Engineer {i}", company="Acme", description="Python",
+                       url=f"https://x/{i}", source="t", dedupe_hash=f"slow-{i}",
+                       fetched_at=datetime.now(timezone.utc)))
+        db.commit()
+
+    def test_one_attempt_with_the_configured_time_limit(self, db):
+        from app.models.profile import Profile
+        from app.services import tunables
+        from app.services.model_compare import compare_models
+
+        self._jobs(db, 1)
+        db.add(Profile(data={tunables.STORE_KEY: {"compare_timeout_seconds": 45}}))
+        db.commit()
+        with patch("app.services.matcher.chat_completion", return_value=_GOOD) as call:
+            compare_models(db, ["meta/a"], limit=1)
+        assert call.call_args.kwargs["timeout"] == 45
+        assert call.call_args.kwargs["max_retries"] == 0
+
+    def test_a_model_that_keeps_timing_out_is_dropped(self, db):
+        from openai import APITimeoutError
+
+        from app.models.profile import Profile
+        from app.services import tunables
+        from app.services.model_compare import compare_models
+
+        self._jobs(db, 5)
+        db.add(Profile(data={tunables.STORE_KEY: {"compare_give_up_after": 2}}))
+        db.commit()
+
+        def reply(**kwargs):
+            if kwargs["model"] == "slow/kimi":
+                raise APITimeoutError(request=MagicMock())
+            return _GOOD
+
+        with patch("app.services.matcher.chat_completion", side_effect=reply) as call:
+            _, results = compare_models(db, ["slow/kimi", "fast/llama"], limit=5)
+        slow, fast = results
+        assert (slow.timeouts, slow.skipped) == (2, 3)
+        assert fast.scored == 5
+        assert call.call_count == 2 + 5
+
+    def test_zero_means_never_give_up(self, db):
+        from app.models.profile import Profile
+        from app.services import tunables
+        from app.services.model_compare import compare_models
+
+        self._jobs(db, 4)
+        db.add(Profile(data={tunables.STORE_KEY: {"compare_give_up_after": 0}}))
+        db.commit()
+        with patch("app.services.matcher.chat_completion", side_effect=RuntimeError("down")):
+            _, (result,) = compare_models(db, ["m/x"], limit=4)
+        assert (result.errors, result.skipped) == (4, 0)
+
+    def test_the_panel_groups_models_by_provider(self, client, db, monkeypatch):
+        from app.config import settings
+        from app.models.profile import Profile
+        from app.services import model_catalog
+
+        monkeypatch.setattr(settings, "FREEINFERENCE_API_KEY", "k")
+        data = model_catalog.store({}, "nim", ["moonshotai/kimi-k3"])
+        data = model_catalog.store(data, "freeinference", ["glm-9"])
+        db.add(Profile(data=data))
+        db.commit()
+        body = client.get("/runs/compare/status").text
+        assert "NVIDIA NIM" in body and "FreeInference" in body
+        assert 'value="moonshotai/kimi-k3"' in body

@@ -13,19 +13,32 @@
   {% endif %}
 
   <form hx-post="/runs/compare" hx-target="#compare-panel" hx-swap="outerHTML">
-    <div class="flex flex-wrap gap-x-4 gap-y-1.5 mb-3">
-      {% for model in compare_models_available %}
-      <label class="text-xs text-gray-600 flex items-center gap-1 whitespace-nowrap">
-        <input type="checkbox" name="models" value="{{ model }}"
+    <div class="flex items-center gap-2 mb-2">
+      <input type="search" placeholder="filter models"
+             oninput="var q=this.value.toLowerCase();this.form.querySelectorAll('[data-model]').forEach(function(el){el.style.display=el.dataset.model.indexOf(q)>-1?'':'none'})"
+             class="border border-gray-300 rounded px-2 py-0.5 text-xs w-48">
+      <span class="text-[11px] text-gray-400">
+        From the lists under <a href="/settings#models-nim" class="text-blue-600 hover:underline">Settings → Model lists</a>.
+        Added a model and it isn't here? Save that list first — and a provider
+        only appears once its API key is set.
+      </span>
+    </div>
+    {% for label, entries in compare_groups.items() %}
+    <p class="text-[11px] font-medium text-gray-500 mt-1">{{ label }} <span class="text-gray-400 font-normal">({{ entries|length }})</span></p>
+    <div class="flex flex-wrap gap-x-4 gap-y-1.5 mb-2">
+      {% for value, model in entries %}
+      <label class="text-xs text-gray-600 flex items-center gap-1 whitespace-nowrap" data-model="{{ value|lower }}">
+        <input type="checkbox" name="models" value="{{ value }}"
                class="rounded border-gray-300"
-               {% if model == current_model %}checked{% endif %}>
+               {% if value == current_model %}checked{% endif %}>
         {{ model }}
-        {% if model == current_model %}
+        {% if value == current_model %}
         <span class="text-[10px] text-blue-600">(in use)</span>
         {% endif %}
       </label>
       {% endfor %}
     </div>
+    {% endfor %}
     <div class="flex flex-wrap items-center gap-3">
       <label class="text-xs text-gray-500">
         Jobs to score
@@ -100,6 +113,8 @@
             </td>
             <td class="px-3 py-2 text-right {% if s.errors %}text-red-500{% else %}text-gray-300{% endif %}">
               {{ s.errors }}
+              {% if s.timeouts %}<span class="block text-[10px] text-red-400">{{ s.timeouts }} timed out</span>{% endif %}
+              {% if s.skipped %}<span class="block text-[10px] text-gray-500">gave up, {{ s.skipped }} skipped</span>{% endif %}
             </td>
             <td class="px-3 py-2 text-right text-gray-400">{{ s.seconds }}s</td>
           </tr>

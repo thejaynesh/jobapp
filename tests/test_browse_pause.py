@@ -1240,8 +1240,11 @@ class TestAHostThatKeepsTurningUsAwayIsLeftAloneForLonger:
         """
         from app.services import browse_plan
 
+        # Two days back, not one: from yesterday's midnight the last refusal
+        # (00:21) is under a day old until 00:21 today, so the test failed
+        # whenever the suite ran in the first twenty minutes after midnight UTC.
         midnight = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
         for minute in (-40, -20, 1, 21):
             self._challenge(db, "jooble.org", midnight + timedelta(minutes=minute))
 

@@ -794,19 +794,24 @@ def chat_completion(
     model: str,
     temperature: float = 0.1,
     max_tokens: int | None = None,
+    timeout: float = 90,
+    max_retries: int | None = None,
 ) -> str:
     from app.services import llm_log
 
     ceiling = max_tokens if max_tokens is not None else _match_max_tokens()
     with llm_log.call("nim", model, messages,
                       temperature=temperature, max_tokens=ceiling) as entry:
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        # `max_retries=None` keeps the SDK's two silent retries. A caller that
+        # wants a timeout to mean the timeout passes 0.
+        extra = {} if max_retries is None else {"max_retries": max(0, int(max_retries))}
+        client = OpenAI(api_key=api_key, base_url=base_url, **extra)
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=ceiling,
-            timeout=90,
+            timeout=timeout,
         )
         message = response.choices[0].message
         # Logged as the model actually returned them, not as _reply_text folds
