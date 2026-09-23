@@ -143,6 +143,13 @@
         {% endfor %}
       </tbody>
     </table>
+    {% if agent_events.harvest_hidden %}
+    <p class="text-[11px] text-gray-400 mt-1">
+      {{ agent_events.harvest_hidden }} other host{{ '' if agent_events.harvest_hidden == 1 else 's' }}
+      hidden — analytics, ad and sign-in services the pages loaded, never
+      opened by a crawl and never a source of jobs.
+    </p>
+    {% endif %}
   </div>
   {% endif %}
 

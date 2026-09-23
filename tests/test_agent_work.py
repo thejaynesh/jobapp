@@ -329,3 +329,22 @@ class TestRedditViaBrowser:
         browser_tasks.lease(db, ["fetch_json"], agent_id="ext-1")
         done = browser_tasks.complete(db, task.id, {"json": {"a": 1}}, agent_id="ext-1")
         assert done.status == "done"
+
+
+class TestAHostThatKeepsCheckingUs:
+    """Jooble puts a bot check on every `away` link: 700 failures in a week."""
+
+    JOOBLE = "https://jooble.org/away/12345678"
+
+    def test_a_blocked_host_gets_no_more_links(self, db):
+        from app.models.agent_event import AgentEvent
+
+        make_job(db, url=self.JOOBLE, source="jooble", dedupe_hash="j1")
+        db.add(AgentEvent(kind="browse", host="jooble.org", ok=False,
+                          summary={"challenge": "timeout"}))
+        db.commit()
+        assert agent_work.enqueue_unresolved_links(db) == 0
+
+    def test_it_is_tried_again_once_nothing_is_blocking(self, db):
+        make_job(db, url=self.JOOBLE, source="jooble", dedupe_hash="j1")
+        assert agent_work.enqueue_unresolved_links(db) == 1

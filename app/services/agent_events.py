@@ -154,6 +154,35 @@ def _window_start(days: int) -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=max(1, days))
 
 
+def _boards_only(db, rows: list) -> dict:
+    """
+    The site rows worth reading, and how many were left out.
+
+    Every board loads analytics, ad and identity services that answer in
+    JSON — PostHog, ZoomInfo, StackAdapt, Cognito — and each one got a
+    "Forwarding, never finds jobs" row, burying the boards that matter. A
+    host is left out only when nothing points at it being a board: no page of
+    ours was opened on it, nothing was ever found there, and it is not a
+    domain the harvest or the extension knows.
+    """
+    try:
+        from app.services.harvest_samples import _related, worth_learning
+
+        ours = worth_learning(db)
+    except Exception:
+        return {"harvest_health": rows, "harvest_hidden": 0}
+    kept, hidden = [], 0
+    for row in rows:
+        noise = (not row.get("pages") and not row.get("found")
+                 and not row.get("earlier_found")
+                 and not _related(row.get("host") or "", ours))
+        if noise:
+            hidden += 1
+        else:
+            kept.append(row)
+    return {"harvest_health": kept, "harvest_hidden": hidden}
+
+
 def summary(db, days: int = 7) -> dict:
     """
     What the extension has been doing, shaped for the panel that shows it.
@@ -209,7 +238,7 @@ def summary(db, days: int = 7) -> dict:
         # a stretch of calendar, and narrowing that to a week would throw the
         # comparison away. The page count is bounded, because it is a plain
         # count shown next to other plain counts over this window.
-        "harvest_health": harvest_health(db, pages_days=days),
+        **_boards_only(db, harvest_health(db, pages_days=days)),
         "sweeps": sweep_stats(db, days=days),
         "recent": recent(db, limit=12),
     }

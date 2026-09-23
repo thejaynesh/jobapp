@@ -103,16 +103,32 @@ def enqueue_unresolved_links(db, limit: int | None = None) -> int:
         .all()
     }
 
-    from app.services import browser_tasks
+    from app.services import browse_plan, browser_tasks
+    from app.services.agent_events import host_of
+
+    # A host that keeps putting a bot check in front of its redirects, or one
+    # paused on purpose, gets nothing. Enrichment's queue already honoured
+    # both; this one did not, so Jooble — which checks every `away` link —
+    # was sent a hundred links a cycle and failed seven hundred times a week,
+    # with the boards that do work waiting behind it.
+    blocked = browse_plan.blocked_hosts(db)
 
     queued = 0
+    skipped = 0
     for url in urls:
         if queued >= budget:
             break
         if url in seen:
             continue
+        if (blocked and browse_plan.is_blocked(host_of(url) or "", blocked)) \
+                or browse_plan.is_paused(url):
+            skipped += 1
+            continue
         browser_tasks.enqueue(db, "resolve_link", {"url": url})
         queued += 1
+    if skipped:
+        logger.info("agent_work: %d link(s) held back — their host is blocked "
+                    "or paused", skipped)
 
     if queued:
         logger.info("agent_work: queued %d link(s) for browser resolution", queued)

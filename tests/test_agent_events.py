@@ -301,3 +301,24 @@ class TestPruning:
         db.commit()
 
         assert browser_tasks.prune(db, days=14) == 0
+
+
+class TestTheSiteListIsBoards:
+    """PostHog, ZoomInfo and Cognito each had a 'never finds jobs' row."""
+
+    def test_trackers_are_hidden_and_counted(self, db):
+        for host in ("us.i.posthog.com", "www.linkedin.com"):
+            db.add(AgentEvent(kind="harvest", host=host, ok=True,
+                              summary={"found": 0, "inserted": 0, "merged": 0}))
+        db.commit()
+        result = agent_events.summary(db)
+        hosts = {row["host"] for row in result["harvest_health"]}
+        assert "www.linkedin.com" in hosts
+        assert "us.i.posthog.com" not in hosts
+        assert result["harvest_hidden"] == 1
+
+    def test_a_host_a_crawl_opened_is_never_hidden(self, db):
+        db.add(AgentEvent(kind="browse", host="jooble.org", ok=False, summary={}))
+        db.commit()
+        hosts = {row["host"] for row in agent_events.summary(db)["harvest_health"]}
+        assert "jooble.org" in hosts
