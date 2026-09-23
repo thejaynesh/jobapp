@@ -82,6 +82,13 @@ def _dig(node, path: str):
         nxt = []
         for item in current:
             if isinstance(item, list):
+                # `jobLocation.0.address`: a model writes the index it saw.
+                # Taking it literally beats stepping through every element
+                # looking for a key named "0" and finding nothing.
+                if part.isdigit():
+                    index = int(part)
+                    nxt.append(item[index] if index < len(item) else None)
+                    continue
                 nxt.extend(
                     entry.get(part) for entry in item if isinstance(entry, dict)
                 )
@@ -131,9 +138,13 @@ def _lookup_table(payload, spec: dict) -> dict:
     return table
 
 
-def apply_recipe(payload, recipe: dict, source: str) -> list[dict]:
+def apply_recipe(payload, recipe: dict, source: str, page_url: str = "") -> list[dict]:
     """
     Jobs out of one payload, following `recipe`. Never raises.
+
+    `page_url` is the page the payload came from. A payload holding exactly one
+    job and no link of its own — a posting page's embedded data — is that
+    page's job, so the page's address is its link.
 
     Returns the same shape `harvest.extract_jobs` does, so everything
     downstream — dedupe, storage, slug mining — is untouched by which reader
@@ -166,13 +177,15 @@ def apply_recipe(payload, recipe: dict, source: str) -> list[dict]:
 
             if not job["title"] or not job["company"]:
                 continue
-            if not job["url"] and not job["id"]:
-                continue
 
-            key = job["id"] or job["url"]
+            key = job["id"] or job["url"] or f"#{len(found)}"
             existing = found.get(key)
             if not existing or len(job["description"]) > len(existing["description"]):
                 found[key] = job
+
+        if page_url and len(found) == 1:
+            only = next(iter(found.values()))
+            only["url"] = only["url"] or page_url
 
         return [
             {
@@ -215,7 +228,8 @@ def looks_like_a_name(value: str) -> bool:
     return bool(re.search(r"[A-Za-z]{2}", text))
 
 
-def validate(payload_samples: list, recipe: dict, source: str = "harvest") -> dict:
+def validate(payload_samples: list, recipe: dict, source: str = "harvest",
+             page_urls: list | None = None) -> dict:
     """
     Try a recipe against real payloads. Returns what happened and a verdict.
 
@@ -232,8 +246,9 @@ def validate(payload_samples: list, recipe: dict, source: str = "harvest") -> di
     total = 0
     matched = 0
     named = 0
-    for payload in payload_samples:
-        jobs = apply_recipe(payload, recipe, source)
+    urls = list(page_urls or []) + [""] * len(payload_samples)
+    for payload, page_url in zip(payload_samples, urls):
+        jobs = apply_recipe(payload, recipe, source, page_url=page_url or "")
         if jobs:
             matched += 1
         total += len(jobs)
@@ -300,7 +315,11 @@ Rules:
 - "company" must end up a readable name. If the only company value on the job
   object is an identifier, that is what "join" is for.
 - Every field is a list; put the most likely key first.
-- Omit a field you cannot find rather than guessing at it.
+- Omit a field you cannot find rather than guessing at it. In particular a
+  response describing ONE posting often has no url — that is fine, the page's
+  own address is used. Do not invent one.
+- A path may index an array ("jobLocation.0.address.addressLocality"), but
+  plain keys step through arrays by themselves.
 
 Responses from {host}:
 
@@ -509,7 +528,8 @@ def locate_text(payload, needle: str, limit: int = 8) -> list[tuple[str, str]]:
     return found
 
 
-def _field_near(node: dict, keys, depth: int = 2) -> str | None:
+def _field_near(node: dict, keys, depth: int = 2,
+                inner_keys=("name", "displayName", "title", "text")) -> str | None:
     """The first key in `keys` present on `node` or one level inside it."""
     if not isinstance(node, dict):
         return None
@@ -517,7 +537,7 @@ def _field_near(node: dict, keys, depth: int = 2) -> str | None:
         if key in node and node[key] not in (None, "", [], {}):
             value = node[key]
             if isinstance(value, dict) and depth > 1:
-                inner = _field_near(value, ("name", "displayName", "title", "text"), 1)
+                inner = _field_near(value, inner_keys, 1)
                 if inner:
                     return f"{key}.{inner}"
                 continue
@@ -545,12 +565,18 @@ def recipe_from_title(samples: list, title: str) -> dict | None:
             for name, aliases in (
                 ("company", harvest._COMPANY_KEYS), ("location", harvest._LOCATION_KEYS),
                 ("description", harvest._DESCRIPTION_KEYS), ("url", harvest._URL_KEYS),
-                ("id", harvest._ID_KEYS),
+                ("id", harvest._ID_KEYS + ("identifier",)),
             ):
-                hit = _field_near(sample, aliases)
+                # An id wrapped in an object (schema.org's `identifier`) keeps
+                # it under `value`; a company's name is under `name`.
+                inner = ("value", "id") if name == "id" else (
+                    "name", "displayName", "title", "text")
+                hit = _field_near(sample, aliases, inner_keys=inner)
                 if hit:
                     fields[name] = [hit]
-            if "company" in fields and ("url" in fields or "id" in fields):
+            # A link or an id is no longer demanded here: a posting page's own
+            # data has neither, and `apply_recipe` gives it the page's address.
+            if "company" in fields:
                 return {"roots": [root] if root else [""], "fields": fields,
                         "note": f"built from the title {title!r} found at {root}.{key}"}
     return None
@@ -618,16 +644,36 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
         return {"ok": False, "reason": "No samples stored for this host yet."}
 
     hint = (hint or "").strip()[:300]
+
+    # The built-in reader first. It keeps learning formats (schema.org
+    # JobPosting most recently), so a host can land on this list for a payload
+    # it now reads — and a recipe for that would be a second copy of code that
+    # already works. Its samples are cleared so the host leaves the list.
+    from app.services.harvest import extract_jobs
+
+    readable = sum(
+        len(extract_jobs(row.payload, page_url=row.source_url or ""))
+        for row in samples
+    )
+    if readable:
+        harvest_samples.clear(db, host)
+        db.commit()
+        return {"ok": True, "jobs": readable,
+                "reason": f"the built-in reader already reads these ({readable} "
+                          "job(s)), so no recipe is needed — cleared them from the "
+                          "list; new visits are read as they arrive"}
     # The most job-like payloads first. The store keeps whatever arrived, and
     # the first three were often analytics — which is what the model was shown.
     ranked = sorted(samples, key=lambda row: jobbiness(row.payload), reverse=True)
     payloads = [row.payload for row in ranked]
+    page_urls = [row.source_url or "" for row in ranked]
     located = []
     if hint:
         located = [pair for payload in payloads for pair in locate_text(payload, hint)]
         ranked = sorted(ranked, key=lambda row: bool(locate_text(row.payload, hint)),
                         reverse=True)
         payloads = [row.payload for row in ranked]
+        page_urls = [row.source_url or "" for row in ranked]
     elif not jobbiness(payloads[0]):
         return {"ok": False,
                 "reason": f"none of the {len(samples)} stored payloads look like job "
@@ -651,7 +697,7 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
         drafted = recipe_from_title(payloads, title)
         if not drafted:
             continue
-        outcome = validate(payloads, drafted)
+        outcome = validate(payloads, drafted, page_urls=page_urls)
         if outcome["ok"]:
             row = save(db, host, drafted, outcome, model=f"read from {source}")
             return {"ok": True,
@@ -663,7 +709,7 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
         return {"ok": False, "reason": proposal["error"]}
 
     provider = model_roles.resolve(profile_data, "learn")
-    outcome = validate(payloads, proposal["recipe"])
+    outcome = validate(payloads, proposal["recipe"], page_urls=page_urls)
     row = save(db, host, proposal["recipe"], outcome,
                model=provider.model if provider else "")
     return {

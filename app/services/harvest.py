@@ -156,6 +156,9 @@ _POSTING_URL = {
     HARVEST_SOURCE: "https://www.linkedin.com/jobs/view/{id}/",
     # Handshake's GraphQL `Job` nodes carry a numeric `id` and no link at all.
     "handshake_harvest": "https://app.joinhandshake.com/jobs/{id}",
+    # Wellfound's job pages are /jobs/<id>-<slug>, and /jobs/<id> redirects
+    # to them; the id is the `identifier.value` of the page's JobPosting.
+    "wellfound_harvest": "https://wellfound.com/jobs/{id}",
     # Indeed's cards link through a click tracker (`/rc/clk?jk=…&…`), relative
     # and full of per-visit parameters. The `jobkey` is the posting, and
     # `viewjob?jk=` is its canonical page — stable, and the same address the
@@ -788,8 +791,122 @@ def _normalize(node: dict, source: str = HARVEST_SOURCE,
     }
 
 
+# ---------------------------------------------------------------------------
+# schema.org JobPosting
+# ---------------------------------------------------------------------------
+#
+# The format Google asks every job page to embed, so nearly every board has it:
+# Wellfound, Greenhouse, Lever, Workday, careers sites generally. It is a
+# standard, which makes it the one payload that should never need a model to
+# read — and it was falling through the walker on two counts. Its company is
+# an object (`hiringOrganization.name`), and it has no URL, because it
+# describes the page it sits on. So every posting was recognised and dropped,
+# and a model asked to "learn" it correctly answered "there is no url field".
+
+_LD_PERIOD = {"YEAR": 1, "MONTH": 12, "WEEK": 52, "DAY": 260, "HOUR": 2080}
+
+
+def _is_job_posting(node) -> bool:
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("@type")
+    kinds = kind if isinstance(kind, list) else [kind]
+    return any(str(k).lower() == "jobposting" for k in kinds)
+
+
+def _ld_location(node: dict) -> str:
+    places = node.get("jobLocation")
+    places = places if isinstance(places, list) else [places]
+    for place in places:
+        address = (place or {}).get("address") if isinstance(place, dict) else None
+        if isinstance(address, str) and address.strip():
+            return address.strip()
+        if isinstance(address, dict):
+            parts = [_text(address.get(key)) for key in
+                     ("addressLocality", "addressRegion", "addressCountry")]
+            text = ", ".join(part for part in parts if part)
+            if text:
+                return text
+    return ""
+
+
+def _ld_salary(node: dict) -> dict:
+    block = node.get("baseSalary")
+    if not isinstance(block, dict):
+        return {}
+    value = block.get("value")
+    value = value if isinstance(value, dict) else {"value": value}
+    low = _number(value.get("minValue") if value.get("minValue") is not None else value.get("value"))
+    high = _number(value.get("maxValue"))
+    if low is None:
+        return {}
+    factor = _LD_PERIOD.get(str(value.get("unitText") or "YEAR").upper())
+    if not factor:
+        return {}
+    low, high = low * factor, (high * factor if high is not None else None)
+    if low < _MIN_PLAUSIBLE_ANNUAL:
+        return {}
+    return {"salary_min": low, "salary_max": high,
+            "salary_currency": (_text(block.get("currency")) or "").upper()[:8] or None,
+            "salary_period": "year"}
+
+
+def _from_job_posting(node: dict, source: str, page_url: str = "",
+                      refused: dict | None = None) -> dict | None:
+    """
+    A schema.org JobPosting as a job row.
+
+    The URL is the posting's own `url` when it has one, else the page it was
+    embedded in (`page_url`), which is by definition the posting's page — the
+    caller passes that only when the payload holds a single posting. Failing
+    both, the id rebuilt through `_POSTING_URL`.
+    """
+    title = _text(node.get("title"))
+    org = node.get("hiringOrganization")
+    company = _text(org.get("name")) if isinstance(org, dict) else _text(org)
+    if not title or not company:
+        if refused is not None:
+            refused["no_company"] = refused.get("no_company", 0) + 1
+        return None
+
+    ident = node.get("identifier")
+    job_id = _text(ident.get("value")) if isinstance(ident, dict) else _text(ident)
+    url = _text(node.get("url")) or page_url
+    if not url and job_id and _POSTING_URL.get(source):
+        url = _POSTING_URL[source].format(id=job_id)
+    if url.startswith("/") and not url.startswith("//"):
+        origin = _BOARD_ORIGIN.get(source)
+        url = f"{origin}{url}" if origin else ""
+    if not url:
+        if refused is not None:
+            refused["no_url"] = refused.get("no_url", 0) + 1
+        return None
+
+    remote = str(node.get("jobLocationType") or "").upper() == "TELECOMMUTE"
+    location = _ld_location(node)
+    if remote:
+        allowed = node.get("applicantLocationRequirements")
+        allowed = allowed if isinstance(allowed, list) else [allowed]
+        names = [_text(a.get("name")) for a in allowed if isinstance(a, dict)]
+        names = [n for n in names if n]
+        location = "Remote" + (f" ({', '.join(names[:3])})" if names else "")
+    description = _text(node.get("description"))
+    return {
+        "source": source,
+        "source_job_id": job_id or None,
+        "url": url,
+        "title": title,
+        "company": company,
+        "location": location,
+        "description": description,
+        "is_remote": remote or "remote" in location.lower(),
+        **_ld_salary(node),
+        "experience_level": parse_experience_level(title, description or ""),
+    }
+
+
 def extract_jobs(payload, source: str = HARVEST_SOURCE,
-                 refused: dict | None = None) -> list[dict]:
+                 refused: dict | None = None, page_url: str = "") -> list[dict]:
     """
     Every job-shaped object anywhere in a JSON payload.
 
@@ -810,7 +927,20 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE,
         return []
 
     found: dict[str, dict] = {}
+    postings = [node for node in _walk(payload) if _is_job_posting(node)]
+    # The page's own address stands for a posting only when the page holds
+    # one; a search page listing twenty would otherwise file all twenty under
+    # the same URL and merge them into one.
+    own_page = page_url if len(postings) == 1 else ""
+    for node in postings:
+        job = _from_job_posting(node, source, page_url=own_page, refused=refused)
+        if job:
+            found[job["source_job_id"] or job["url"]] = job
+    seen_postings = {id(node) for node in postings}
+
     for node, company in _walk_scoped(payload):
+        if id(node) in seen_postings:
+            continue
         if not _looks_like_job(node, company=company):
             continue
         job = _normalize(node, source=source, company=company, refused=refused)

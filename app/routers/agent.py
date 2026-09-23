@@ -218,11 +218,13 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
     refused: dict[str, int] = {}
     recipe = harvest_recipes.active_for(db, host)
     if recipe:
-        jobs = harvest_recipes.apply_recipe(payload, recipe, source)
+        jobs = harvest_recipes.apply_recipe(payload, recipe, source,
+                                            page_url=source_url)
         if jobs:
             read_by = "recipe"
     if not jobs:
-        jobs = extract_jobs(payload, source=source, refused=refused)
+        jobs = extract_jobs(payload, source=source, refused=refused,
+                            page_url=source_url)
 
     if not jobs:
         counts = {"found": 0, "inserted": 0, "merged": 0, "skipped": 0,
