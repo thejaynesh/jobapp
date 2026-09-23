@@ -187,6 +187,9 @@ _COMPANY_KEYS = (
     "companyName", "company", "companyUrn", "primarySubtitle", "subtitle",
     "employerName", "truncatedCompany",           # Indeed / Glassdoor
     "hiringOrganization", "employer",
+    # Indeed's GraphQL job: `employer` there is an object of ids and logos,
+    # and the name the card shows is this.
+    "sourceEmployerName",
 )
 _LOCATION_KEYS = (
     # `locations` is an array of strings; `_text` takes the first, which is the
@@ -221,6 +224,9 @@ _ID_KEYS = (
     "jobkey", "jobKey",                           # Indeed
     "listingId", "jobListingId",                  # Glassdoor
     "bulletFields",                               # Workday requisition ids
+    # Indeed's GraphQL job key. Generic, so last: it only counts on a node
+    # that already has a title and a company.
+    "key",
 )
 _REMOTE_KEYS = (
     "workplaceType", "workRemoteAllowed", "workplaceTypes",
@@ -338,7 +344,11 @@ def _job_id(node: dict) -> str:
         raw = _text(node.get(key))
         if not raw:
             continue
-        match = _URN_ID_RE.search(raw)
+        # Digits pulled out of a urn (`urn:li:fsd_jobPosting:4012345678`) —
+        # only out of a urn. Applied to any string it cut Indeed's opaque key
+        # `4c5d7354200380a9` down to `7354200380`: a wrong id and a link to
+        # a posting that does not exist.
+        match = _URN_ID_RE.search(raw) if ":" in raw else None
         if match:
             return match.group(1)
         if raw.isdigit():
@@ -452,6 +462,15 @@ def _salary(node: dict) -> dict:
         for candidate in _walk(block):
             low = _first_number(candidate, _SALARY_MIN_KEYS)
             high = _first_number(candidate, _SALARY_MAX_KEYS)
+            # Indeed's GraphQL states pay in cents and says so in the type
+            # name — `RangeMinor {min: "13000000"}` is $130,000, and read
+            # as dollars it is thirteen million.
+            minor = str(candidate.get("__typename") or "").endswith("Minor")
+            if minor and low is None and high is None:
+                low = _first_number(candidate, ("value",))
+            if minor:
+                low = low / 100 if low is not None else None
+                high = high / 100 if high is not None else None
             if low is None and high is None:
                 continue
             if low is None:
@@ -957,6 +976,59 @@ def _from_link(url: str, name: str, source: str) -> dict | None:
     }
 
 
+def _is_hiring_cafe_hit(node) -> bool:
+    return (isinstance(node, dict) and isinstance(node.get("job_information"), dict)
+            and bool(node.get("apply_url") or node.get("objectID")))
+
+
+def _from_hiring_cafe(node: dict, source: str) -> dict | None:
+    """
+    One Hiring Cafe search hit.
+
+    Its title is one level down (`job_information.title`) and its employer
+    in a sibling (`v5_processed_job_data.company_name`, or the enriched
+    company), so no single object holds both and the walker, which reads
+    one object at a time, found nothing — on the harvest and on the server
+    adapter alike.
+    """
+    info = node.get("job_information") or {}
+    data = node.get("v5_processed_job_data") or {}
+    title = _text(info.get("title") or info.get("job_title_raw"))
+    company = (_text(data.get("company_name"))
+               or _text((node.get("enriched_company_data") or {}).get("name"))
+               or _text((node.get("attributed_org") or {}).get("name")))
+    job_id = _text(node.get("objectID") or node.get("id"))
+    url = _text(node.get("apply_url")) or (
+        f"https://hiring.cafe/viewjob/{job_id}" if job_id else "")
+    if not title or not company or not url:
+        return None
+    cities = data.get("workplace_cities") or []
+    workplace = _text(data.get("workplace_type"))
+    location = _text(cities[0]) if cities else ""
+    if workplace.lower() == "remote":
+        location = f"Remote{f' ({location})' if location else ''}"
+    salary = {}
+    low = _number(data.get("yearly_min_compensation"))
+    high = _number(data.get("yearly_max_compensation"))
+    if low and low >= _MIN_PLAUSIBLE_ANNUAL:
+        salary = {"salary_min": low, "salary_max": high,
+                  "salary_currency": _text(data.get("listed_compensation_currency")) or None,
+                  "salary_period": "year"}
+    description = _text(info.get("description"))
+    return {
+        "source": source,
+        "source_job_id": job_id or None,
+        "url": url,
+        "title": title,
+        "company": company,
+        "location": location,
+        "description": description,
+        "is_remote": workplace.lower() == "remote",
+        **salary,
+        "experience_level": parse_experience_level(title, description or ""),
+    }
+
+
 def _is_list_item(node) -> bool:
     return isinstance(node, dict) and str(node.get("@type") or "").lower() == "listitem"
 
@@ -993,6 +1065,14 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE,
         if job:
             found[job["source_job_id"] or job["url"]] = job
     seen_postings = {id(node) for node in postings}
+
+    for node in _walk(payload):
+        if _is_hiring_cafe_hit(node):
+            job = _from_hiring_cafe(node, source)
+            if job:
+                found.setdefault(job["source_job_id"] or job["url"], job)
+            seen_postings.add(id(node))
+            seen_postings.add(id(node.get("job_information")))
 
     # Search results as a schema.org ItemList, on a board whose links say
     # who is hiring. A result that wraps a full JobPosting was read above.

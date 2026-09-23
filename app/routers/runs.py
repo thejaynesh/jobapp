@@ -409,6 +409,7 @@ def show_harvest_samples(request: Request, host: str, db: Session = Depends(get_
 
     host = (host or "").strip().lower()
     rows = harvest_samples.for_host(db, host, limit=8)
+    recipe = harvest_recipes.active_for(db, host)
     samples = []
     for row in sorted(rows, key=lambda r: harvest_recipes.jobbiness(r.payload), reverse=True):
         text = _json.dumps(row.payload, indent=1, ensure_ascii=False)
@@ -417,7 +418,7 @@ def show_harvest_samples(request: Request, host: str, db: Session = Depends(get_
             "bytes": row.bytes,
             "created_at": row.created_at,
             "jobbiness": harvest_recipes.jobbiness(row.payload),
-            "reads": harvest_recipes.builtin_reads(row, host),
+            "reads": harvest_recipes.builtin_reads(row, host, recipe),
             "titles": harvest_recipes.title_candidates([row.payload], 6),
             "preview": text[:15000],
             "cut": len(text) > 15000,

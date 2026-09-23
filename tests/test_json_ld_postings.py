@@ -147,3 +147,85 @@ class TestZipRecruiterSearchResults:
         found = harvest_recipes.title_candidates([ZIP_HOME])
         assert "For you" not in found and "Our top picks for you" not in found
         assert found == ["Backend Engineer"]
+
+
+INDEED_GQL = [{"data": {"findRelevantJobs": {"results": [
+    {"job": {
+        "key": "4c5d7354200380a9",
+        "title": "Attorney - Foreclosure & Litigation",
+        "benefits": [{"key": "4ZN8U", "label": "Wellness program"}],
+        "employer": {"key": "ddce6c3200287688", "dossier": {"images": {}}},
+        "location": {"city": "San Juan Capistrano",
+                     "formatted": {"long": "San Juan Capistrano, CA 92675",
+                                   "short": "San Juan Capistrano, CA"}},
+        "tracking": {"jobClick": {"url": "http://www.indeed.com/pagead/clk?mo=r&ad=x"}},
+        "__typename": "Job",
+        "compensation": {"baseSalary": {"rangeMinor": {"min": "13000000", "__typename": "RangeMinor"},
+                                        "unitOfWork": "YEAR"},
+                         "currencyCode": "USD", "formattedText": "$130,000 - $150,000 a year"},
+        "sourceEmployerName": "Alterra Assessment Recovery",
+    }},
+    {"job": {
+        "key": "6289a951f628a4bd",
+        "title": "Broadcom Cluster / Licensing Technician",
+        "compensation": {"baseSalary": {"rangeMinor": {"min": "6500", "__typename": "RangeMinor"},
+                                        "unitOfWork": "HOUR"}, "currencyCode": "USD"},
+        "sourceEmployerName": "EMR CPR LLC",
+    }},
+]}}}]
+
+HIRING_CAFE = {"props": {"pageProps": {"ssrHits": [{
+    "id": "higherme___dunkindonuts___67eea3f7b062e",
+    "objectID": "higherme___dunkindonuts___67eea3f7b062e",
+    "apply_url": "https://app.higherme.com/jobs/67eea3f7b062e",
+    "attributed_org": {"name": "Dunkin'"},
+    "job_information": {"title": "Dunkin Assistant Manager", "job_title_raw": "Dunkin Assistant Manager"},
+    "enriched_company_data": {"name": "Dunkin'"},
+    "v5_processed_job_data": {"company_name": "Dunkin' - Franchisee Of Dunkin Donuts",
+                              "workplace_type": "Onsite",
+                              "workplace_cities": ["Omaha, Nebraska, US"]},
+}]}}}
+
+
+class TestIndeedGraphQL:
+    def test_jobs_are_read_with_their_employer_and_key(self):
+        jobs = extract_jobs(INDEED_GQL, source="indeed_harvest")
+        by_key = {j["source_job_id"]: j for j in jobs}
+        attorney = by_key["4c5d7354200380a9"]
+        assert attorney["company"] == "Alterra Assessment Recovery"
+        assert attorney["url"] == "https://www.indeed.com/viewjob?jk=4c5d7354200380a9"
+
+    def test_pay_in_cents_is_dollars_and_hourly_is_left_out(self):
+        by_key = {j["source_job_id"]: j for j in extract_jobs(INDEED_GQL, source="indeed_harvest")}
+        assert by_key["4c5d7354200380a9"]["salary_min"] == 130000
+        assert "salary_min" not in by_key["6289a951f628a4bd"]
+
+    def test_its_titles_are_offered(self):
+        found = harvest_recipes.title_candidates(INDEED_GQL)
+        assert "Attorney - Foreclosure & Litigation" in found
+
+
+class TestHiringCafe:
+    def test_a_hit_is_read(self):
+        (job,) = extract_jobs(HIRING_CAFE, source="hiringcafe_harvest")
+        assert job["title"] == "Dunkin Assistant Manager"
+        assert job["company"] == "Dunkin' - Franchisee Of Dunkin Donuts"
+        assert job["url"] == "https://app.higherme.com/jobs/67eea3f7b062e"
+        assert job["location"] == "Omaha, Nebraska, US"
+
+    def test_its_title_is_offered(self):
+        assert harvest_recipes.title_candidates([HIRING_CAFE]) == ["Dunkin Assistant Manager"]
+
+
+class TestAHostWithAWorkingRecipeLeavesTheList:
+    def test_learn_clears_samples_the_active_recipe_reads(self, db):
+        payload = {"results": [{"jobTitle": "Platform Engineer", "org": {"label": "Acme"},
+                                "link": "https://board.test/j/1"}]}
+        db.add(HarvestSample(host="board.test", source_url="https://board.test/s",
+                             payload=payload, bytes=100, found=0))
+        harvest_recipes.save(db, "board.test", {
+            "roots": ["results"], "fields": {"title": ["jobTitle"], "company": ["org.label"],
+                                             "url": ["link"]}}, {"ok": True})
+        out = harvest_recipes.learn(db, "board.test")
+        assert out["ok"] and "active recipe already reads" in out["reason"]
+        assert db.query(HarvestSample).count() == 0

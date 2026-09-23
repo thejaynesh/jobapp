@@ -615,20 +615,33 @@ def title_candidates(payloads: list, limit: int = 12) -> list[str]:
     # company keys there — and a page section's caption everywhere else.
     identifying -= {"subtitle", "primarysubtitle", "name"}
 
-    def is_posting(node: dict) -> bool:
-        # A job carries something that identifies or places it — a link, an
-        # id, an employer — and is not itself a list of other things. A page
-        # section ("For you", "Remote jobs") has a title and holds the jobs,
-        # which is exactly what a posting does not.
-        if any(isinstance(v, list) and v and isinstance(v[0], dict) for v in node.values()):
-            return False
-        return any(str(k).lower() in identifying for k in node)
+    def holds_titled_items(node: dict) -> bool:
+        # A page section ("For you", "Remote jobs") has a title and a list of
+        # things that have titles — the jobs. A job's own lists (benefits,
+        # attributes) hold labels, not titled things.
+        for value in node.values():
+            if isinstance(value, list):
+                for item in value[:5]:
+                    if isinstance(item, dict) and any(
+                            _TITLE_LIKE_KEY.search(str(k)) for k in item):
+                        return True
+        return False
 
-    def walk(node, depth=0):
+    def is_posting(node: dict, parent_ok: bool) -> bool:
+        # A job carries something that identifies or places it — a link, an
+        # id, an employer — here or on the object that holds it (Hiring
+        # Cafe's title sits in `job_information`, its id beside that).
+        if holds_titled_items(node):
+            return False
+        return parent_ok or any(str(k).lower() in identifying for k in node)
+
+    def walk(node, depth=0, parent_ok=False):
         if len(found) >= limit or depth > 30:
             return
         if isinstance(node, dict):
-            posting = is_posting(node)
+            posting = is_posting(node, parent_ok)
+            own = not holds_titled_items(node) and any(
+                str(k).lower() in identifying for k in node)
             for key, value in node.items():
                 name = str(key)
                 if isinstance(value, str) and posting and (
@@ -638,7 +651,7 @@ def title_candidates(payloads: list, limit: int = 12) -> list[str]:
                         seen.add(text.lower())
                         found.append(text)
                 else:
-                    walk(value, depth + 1)
+                    walk(value, depth + 1, parent_ok=own and isinstance(value, dict))
         elif isinstance(node, list):
             for item in node[:50]:
                 walk(item, depth + 1)
@@ -648,15 +661,20 @@ def title_candidates(payloads: list, limit: int = 12) -> list[str]:
     return found[:limit]
 
 
-def builtin_reads(sample, host: str = "") -> int:
-    """How many jobs the built-in reader gets from a stored sample, as the site's own source."""
+def builtin_reads(sample, host: str = "", recipe: dict | None = None) -> int:
+    """
+    How many jobs are read from a stored sample today — by the built-in
+    reader as the site's own source, or failing that by `recipe`.
+    """
     from app.services.harvest import extract_jobs, source_for_url
 
     page = sample.source_url or ""
+    source = source_for_url(page or f"https://{host}/")
     try:
-        return len(extract_jobs(sample.payload,
-                                source=source_for_url(page or f"https://{host}/"),
-                                page_url=page))
+        found = len(extract_jobs(sample.payload, source=source, page_url=page))
+        if not found and recipe:
+            found = len(apply_recipe(sample.payload, recipe, source, page_url=page))
+        return found
     except Exception:
         return 0
 
@@ -681,14 +699,19 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
     # JobPosting most recently), so a host can land on this list for a payload
     # it now reads — and a recipe for that would be a second copy of code that
     # already works. Its samples are cleared so the host leaves the list.
-    readable = sum(builtin_reads(row, host) for row in samples)
-    if readable:
+    builtin = sum(builtin_reads(row, host) for row in samples)
+    recipe = active_for(db, host)
+    by_recipe = 0 if builtin or not recipe else sum(
+        builtin_reads(row, host, recipe) for row in samples)
+    if builtin or by_recipe:
         harvest_samples.clear(db, host)
         db.commit()
-        return {"ok": True, "jobs": readable,
-                "reason": f"the built-in reader already reads these ({readable} "
-                          "job(s)), so no recipe is needed — cleared them from the "
-                          "list; new visits are read as they arrive"}
+        who = ("the built-in reader already reads these" if builtin
+               else "the active recipe already reads these")
+        return {"ok": True, "jobs": builtin or by_recipe,
+                "reason": f"{who} ({builtin or by_recipe} job(s)), so nothing new is "
+                          "needed — cleared them from the list; new visits are read "
+                          "as they arrive"}
     # The most job-like payloads first. The store keeps whatever arrived, and
     # the first three were often analytics — which is what the model was shown.
     ranked = sorted(samples, key=lambda row: jobbiness(row.payload), reverse=True)

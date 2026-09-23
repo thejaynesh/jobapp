@@ -31,7 +31,7 @@
   <details class="border-t border-gray-200 py-1">
     <summary class="cursor-pointer text-gray-600">
       {% if sample.reads %}
-      <span class="text-green-700 font-medium">built-in reader gets {{ sample.reads }} job{{ '' if sample.reads == 1 else 's' }} — press Learn to clear it</span>
+      <span class="text-green-700 font-medium">read today: {{ sample.reads }} job{{ '' if sample.reads == 1 else 's' }} — press Learn to clear it</span>
       {% else %}
       <span class="{% if sample.jobbiness %}text-amber-700{% else %}text-gray-400{% endif %}">
         {% if sample.jobbiness %}{{ sample.jobbiness }} job-like fields, not read yet{% else %}no job fields — probably analytics{% endif %}
