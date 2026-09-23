@@ -102,3 +102,48 @@ class TestLearnOnAHostTheReaderNowHandles:
         assert out["ok"] and "already reads" in out["reason"]
         assert db.query(HarvestSample).count() == 0
         assert db.query(HarvestRecipe).count() == 0
+
+
+ZIP_PAGE = "https://www.ziprecruiter.com/jobs-search/4?days=7&search=Software"
+ZIP_LIST = {
+    "@type": "ItemList", "@context": "https://schema.org", "numberOfItems": 20,
+    "itemListElement": [
+        {"url": "https://www.ziprecruiter.com/c/Lancesoft-INC/Job/Software-Quality-Engineer-II/-in-Lafayette,CO?jid=4c007d00ffffbc8c",
+         "name": "Software Quality Engineer II", "@type": "ListItem", "position": "1"},
+        {"url": "https://www.ziprecruiter.com/c/Robert-Half/Job/RPA-Software-Engineer/-in-Auburn-Hills,MI?jid=5ee554d2d1397c49",
+         "name": "RPA Software Engineer", "@type": "ListItem", "position": "3"},
+    ],
+}
+ZIP_HOME = {"sections": [
+    {"title": "For you", "subtitle": "Our top picks for you",
+     "jobs": [{"jobTitle": "Backend Engineer", "companyName": "Acme", "jid": "x1"}]},
+    {"title": "Remote jobs", "subtitle": "Jobs that allow you to work remotely", "jobs": []},
+]}
+
+
+class TestZipRecruiterSearchResults:
+    """Its search pages list results as name + link; the link names the employer."""
+
+    def test_company_location_and_id_come_from_the_link(self):
+        jobs = extract_jobs(ZIP_LIST, source="ziprecruiter_harvest", page_url=ZIP_PAGE)
+        first = next(j for j in jobs if j["source_job_id"] == "4c007d00ffffbc8c")
+        assert first["company"] == "Lancesoft INC"
+        assert first["title"] == "Software Quality Engineer II"
+        assert first["location"] == "Lafayette, CO"
+        assert first["url"].startswith("https://www.ziprecruiter.com/c/Lancesoft-INC/")
+        assert len(jobs) == 2
+
+    def test_other_boards_do_not_guess_from_links(self):
+        assert extract_jobs(ZIP_LIST, source="indeed_harvest") == []
+
+    def test_learn_on_the_search_pages_needs_no_model(self, db):
+        db.add(HarvestSample(host="www.ziprecruiter.com", source_url=ZIP_PAGE,
+                             payload=ZIP_LIST, bytes=100, found=0))
+        db.commit()
+        out = harvest_recipes.learn(db, "www.ziprecruiter.com")
+        assert out["ok"] and "already reads" in out["reason"] and out["jobs"] == 2
+
+    def test_section_headings_are_not_offered_as_job_titles(self):
+        found = harvest_recipes.title_candidates([ZIP_HOME])
+        assert "For you" not in found and "Our top picks for you" not in found
+        assert found == ["Backend Engineer"]

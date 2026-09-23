@@ -607,13 +607,32 @@ def title_candidates(payloads: list, limit: int = 12) -> list[str]:
                 and not text.startswith(("http", "/", "{", "urn:"))
                 and not _LOOKS_LIKE_ID.match(text) and text.count(" ") <= 14)
 
+    from app.services import harvest as _h
+
+    identifying = {k.lower() for k in (_h._URL_KEYS + _h._ID_KEYS + _h._COMPANY_KEYS)} \
+        | {"jid", "jobid", "href", "slug", "hiringorganization"}
+    # LinkedIn puts the company in a card's subtitle, which makes these
+    # company keys there — and a page section's caption everywhere else.
+    identifying -= {"subtitle", "primarysubtitle", "name"}
+
+    def is_posting(node: dict) -> bool:
+        # A job carries something that identifies or places it — a link, an
+        # id, an employer — and is not itself a list of other things. A page
+        # section ("For you", "Remote jobs") has a title and holds the jobs,
+        # which is exactly what a posting does not.
+        if any(isinstance(v, list) and v and isinstance(v[0], dict) for v in node.values()):
+            return False
+        return any(str(k).lower() in identifying for k in node)
+
     def walk(node, depth=0):
         if len(found) >= limit or depth > 30:
             return
         if isinstance(node, dict):
+            posting = is_posting(node)
             for key, value in node.items():
                 name = str(key)
-                if isinstance(value, str) and (name.lower() in strong or _TITLE_LIKE_KEY.search(name)):
+                if isinstance(value, str) and posting and (
+                        name.lower() in strong or _TITLE_LIKE_KEY.search(name)):
                     text = value.strip()
                     if plausible(text) and text.lower() not in seen:
                         seen.add(text.lower())
@@ -627,6 +646,19 @@ def title_candidates(payloads: list, limit: int = 12) -> list[str]:
     for payload in sorted(payloads or [], key=jobbiness, reverse=True):
         walk(payload)
     return found[:limit]
+
+
+def builtin_reads(sample, host: str = "") -> int:
+    """How many jobs the built-in reader gets from a stored sample, as the site's own source."""
+    from app.services.harvest import extract_jobs, source_for_url
+
+    page = sample.source_url or ""
+    try:
+        return len(extract_jobs(sample.payload,
+                                source=source_for_url(page or f"https://{host}/"),
+                                page_url=page))
+    except Exception:
+        return 0
 
 
 def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> dict:
@@ -649,12 +681,7 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
     # JobPosting most recently), so a host can land on this list for a payload
     # it now reads — and a recipe for that would be a second copy of code that
     # already works. Its samples are cleared so the host leaves the list.
-    from app.services.harvest import extract_jobs
-
-    readable = sum(
-        len(extract_jobs(row.payload, page_url=row.source_url or ""))
-        for row in samples
-    )
+    readable = sum(builtin_reads(row, host) for row in samples)
     if readable:
         harvest_samples.clear(db, host)
         db.commit()

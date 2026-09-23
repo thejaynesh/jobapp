@@ -417,6 +417,7 @@ def show_harvest_samples(request: Request, host: str, db: Session = Depends(get_
             "bytes": row.bytes,
             "created_at": row.created_at,
             "jobbiness": harvest_recipes.jobbiness(row.payload),
+            "reads": harvest_recipes.builtin_reads(row, host),
             "titles": harvest_recipes.title_candidates([row.payload], 6),
             "preview": text[:15000],
             "cut": len(text) > 15000,

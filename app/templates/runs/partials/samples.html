@@ -30,9 +30,13 @@
   {% for sample in samples %}
   <details class="border-t border-gray-200 py-1">
     <summary class="cursor-pointer text-gray-600">
-      <span class="{% if sample.jobbiness %}text-green-700{% else %}text-gray-400{% endif %}">
-        {% if sample.jobbiness %}{{ sample.jobbiness }} job-like fields{% else %}no job fields — probably analytics{% endif %}
+      {% if sample.reads %}
+      <span class="text-green-700 font-medium">built-in reader gets {{ sample.reads }} job{{ '' if sample.reads == 1 else 's' }} — press Learn to clear it</span>
+      {% else %}
+      <span class="{% if sample.jobbiness %}text-amber-700{% else %}text-gray-400{% endif %}">
+        {% if sample.jobbiness %}{{ sample.jobbiness }} job-like fields, not read yet{% else %}no job fields — probably analytics{% endif %}
       </span>
+      {% endif %}
       &middot; {{ "%.1f"|format((sample.bytes or 0) / 1000) }} KB
       &middot; <span class="font-mono text-gray-400 break-all">{{ (sample.source_url or '')[:90] }}</span>
     </summary>

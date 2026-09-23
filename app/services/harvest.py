@@ -905,6 +905,62 @@ def _from_job_posting(node: dict, source: str, page_url: str = "",
     }
 
 
+# Boards whose job links spell the posting out. A search page's schema.org
+# `ItemList` gives each result a name and a link and nothing else — no
+# company — so without this every result is a title with no employer, and
+# dropped. ZipRecruiter's links carry all of it:
+#
+#   /c/Lancesoft-INC/Job/Software-Quality-Engineer-II/-in-Lafayette,CO?jid=4c00…
+_LINK_PATTERNS = {
+    "ziprecruiter_harvest": re.compile(
+        r"/c/(?P<company>[^/]+)/Job/(?P<title>[^/]+)/-in-(?P<location>[^/?#]+)"
+    ),
+}
+_LINK_ID_PARAMS = {"ziprecruiter_harvest": "jid"}
+
+
+def _from_link(url: str, name: str, source: str) -> dict | None:
+    """A job from a result link on a board in `_LINK_PATTERNS`, or None."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    pattern = _LINK_PATTERNS.get(source)
+    if not pattern or not url:
+        return None
+    if url.startswith("/") and not url.startswith("//"):
+        url = f"{_BOARD_ORIGIN.get(source, '')}{url}"
+    match = pattern.search(url)
+    if not match:
+        return None
+
+    def words(part: str) -> str:
+        return re.sub(r"\s+", " ", unquote(part).replace("-", " ")).strip()
+
+    company = words(match.group("company"))
+    title = name or words(match.group("title"))
+    location = re.sub(r",\s*", ", ", unquote(match.group("location")).replace("-", " ")).strip()
+    param = _LINK_ID_PARAMS.get(source)
+    job_id = ""
+    if param:
+        job_id = (parse_qs(urlparse(url).query).get(param) or [""])[0]
+    if not company or not title:
+        return None
+    return {
+        "source": source,
+        "source_job_id": job_id or None,
+        "url": url,
+        "title": title,
+        "company": company,
+        "location": location,
+        "description": "",
+        "is_remote": "remote" in location.lower() or "remote" in title.lower(),
+        "experience_level": parse_experience_level(title, ""),
+    }
+
+
+def _is_list_item(node) -> bool:
+    return isinstance(node, dict) and str(node.get("@type") or "").lower() == "listitem"
+
+
 def extract_jobs(payload, source: str = HARVEST_SOURCE,
                  refused: dict | None = None, page_url: str = "") -> list[dict]:
     """
@@ -937,6 +993,18 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE,
         if job:
             found[job["source_job_id"] or job["url"]] = job
     seen_postings = {id(node) for node in postings}
+
+    # Search results as a schema.org ItemList, on a board whose links say
+    # who is hiring. A result that wraps a full JobPosting was read above.
+    if source in _LINK_PATTERNS:
+        for node in _walk(payload):
+            if not _is_list_item(node) or _is_job_posting(node.get("item")):
+                continue
+            item = node.get("item") if isinstance(node.get("item"), dict) else node
+            job = _from_link(_text(item.get("url") or node.get("url")),
+                             _text(item.get("name") or node.get("name")), source)
+            if job:
+                found.setdefault(job["source_job_id"] or job["url"], job)
 
     for node, company in _walk_scoped(payload):
         if id(node) in seen_postings:
