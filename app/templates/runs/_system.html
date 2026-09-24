@@ -253,6 +253,35 @@
           {% endfor %}
         </dl>
 
+        {# Whether parallel lanes are running, and if not, why. A lane holds
+           its leases for as long as it works, so leased tasks per site is what
+           is open right now. #}
+        {% set working = system.agent.leased_sites or [] %}
+        {% set waiting = system.agent.queued_sites or [] %}
+        <div class="text-[11px] mb-2">
+          <p class="text-gray-600">
+            <span class="font-medium">Working on now</span>
+            <span class="text-gray-400">({{ working|length }} of {{ system.agent.lane_limit }} site{{ '' if system.agent.lane_limit == 1 else 's' }} at a time)</span>:
+            {% for row in working %}<span class="font-mono">{{ row.site }}</span> <span class="text-gray-400">{{ row.count }}</span>{% if not loop.last %} · {% endif %}{% else %}<span class="text-gray-400">nothing</span>{% endfor %}
+          </p>
+          {% if waiting %}
+          <p class="text-gray-500">
+            <span class="font-medium">Waiting</span>:
+            {% for row in waiting %}<span class="font-mono">{{ row.site }}</span> <span class="text-gray-400">{{ row.count }}</span>{% if not loop.last %} · {% endif %}{% endfor %}
+          </p>
+          {% set other_sites = waiting|rejectattr('site', 'in', working|map(attribute='site')|list)|list %}
+          {% if system.agent.lane_limit > 1 and working|length < system.agent.lane_limit and not other_sites %}
+          <p class="text-amber-700">
+            Every waiting page is on a site that already has a window, so the
+            other lane{{ '' if system.agent.lane_limit - working|length == 1 else 's' }}
+            {{ 'has' if system.agent.lane_limit - working|length == 1 else 'have' }} nothing to do —
+            one site never gets two windows at once, since that is what a bot
+            looks like. Crawl another board to fill it.
+          </p>
+          {% endif %}
+          {% endif %}
+        </div>
+
         {% if system.agent.last_agent %}
           <p class="text-[11px] text-gray-500">
             {% if system.agent.last_agent.polled %}Last polled by{% else %}Last claimed work as{% endif %}

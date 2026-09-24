@@ -175,6 +175,67 @@ def _interleave_sites(candidates: list[BrowserTask], limit: int) -> list[Browser
     return chosen
 
 
+def _candidate_query(kinds, exclude_sites, window: int, now):
+    """Queued work, best first, leaving out the sites named."""
+    stmt = (
+        select(BrowserTask)
+        .where(BrowserTask.status == "queued", BrowserTask.expires_at > now)
+        .order_by(BrowserTask.priority.desc(), BrowserTask.created_at.asc())
+        .limit(window)
+        # The claim is atomic because of these two: FOR UPDATE takes the rows,
+        # SKIP LOCKED means a second agent asking at the same moment walks past
+        # them to the next available work instead of waiting or duplicating.
+        .with_for_update(skip_locked=True)
+    )
+    # Coalesced: a task with no URL (a ping) would otherwise compare as NULL,
+    # and NOT NULL filters it out along with the busy site.
+    url = func.coalesce(BrowserTask.payload["url"].astext, "")
+    for site in exclude_sites or []:
+        if site == "_":
+            # The lane for URL-less work. Not a LIKE pattern: `_` is the
+            # single-character wildcard, and `%://_/%` is not "no URL".
+            stmt = stmt.where(url != "")
+            continue
+        # In the query, not only after it: a busy site with a deep backlog
+        # would otherwise fill the whole candidate window and hide every other
+        # site's work behind it.
+        stmt = stmt.where(~url.ilike(f"%://{site}/%"), ~url.ilike(f"%.{site}/%"))
+    if kinds:
+        unknown = [k for k in kinds if k not in TASK_KINDS]
+        if unknown:
+            raise TaskError(f"Unknown task kind(s): {', '.join(sorted(unknown))}")
+        stmt = stmt.where(BrowserTask.kind.in_(kinds))
+    return stmt
+
+
+def _one_site_per_lane(db, kinds, exclude_sites, lanes: int, per_lane: int,
+                       now) -> list[BrowserTask]:
+    """
+    Work for up to `lanes` different sites, `per_lane` pages each.
+
+    What the extension actually needs when it has free lanes: a site each.
+    The round-robin over one window could not give it that. A crawl queues a
+    board's pages together — 120 LinkedIn searches, created in the same
+    second — so any window short of 120 rows held one site, the batch was one
+    site, and the second lane sat empty until the next poll a minute later.
+    Here each lane gets its own query, with every site already chosen left
+    out, so a deep backlog on one board cannot hide the next board's work.
+    """
+    chosen: list[BrowserTask] = []
+    taken = [s.lower() for s in (exclude_sites or [])]
+    for _ in range(max(1, lanes)):
+        rows = list(db.execute(
+            _candidate_query(kinds, taken, per_lane * _LEASE_WINDOW, now)
+        ).scalars().all())
+        rows = [t for t in rows if _site_of(t) not in taken]
+        if not rows:
+            break
+        site = _site_of(rows[0])
+        chosen.extend([t for t in rows if _site_of(t) == site][:per_lane])
+        taken.append(site)
+    return chosen
+
+
 def lease(
     db,
     kinds: list[str] | None = None,
@@ -182,6 +243,7 @@ def lease(
     agent_id: str = "",
     limit: int = 1,
     exclude_sites: list[str] | None = None,
+    lanes: int | None = None,
 ) -> list[BrowserTask]:
     """
     Claim up to `limit` queued tasks for `agent_id`.
@@ -196,38 +258,20 @@ def lease(
     limit = max(1, min(int(limit), int(getattr(settings, "AGENT_MAX_LEASE_BATCH", 10))))
     now = _now()
 
-    # A wider window than we will hand out, so the batch can mix sites: the
-    # extension works one page per site at a time, and a batch of ten pages all
-    # on one board would leave its other lanes idle behind them.
-    stmt = (
-        select(BrowserTask)
-        .where(BrowserTask.status == "queued", BrowserTask.expires_at > now)
-        .order_by(BrowserTask.priority.desc(), BrowserTask.created_at.asc())
-        .limit(limit * _LEASE_WINDOW)
-        # The claim is atomic because of these two: FOR UPDATE takes the rows,
-        # SKIP LOCKED means a second agent asking at the same moment walks past
-        # them to the next available work instead of waiting or duplicating.
-        .with_for_update(skip_locked=True)
-    )
-    for site in exclude_sites or []:
-        # In the query, not only after it: a busy site with a deep backlog
-        # would otherwise fill the whole candidate window and hide every other
-        # site's work behind it.
-        # Coalesced: a task with no URL (a ping) would otherwise compare as
-        # NULL, and NOT NULL filters it out along with the busy site.
-        url = func.coalesce(BrowserTask.payload["url"].astext, "")
-        stmt = stmt.where(~url.ilike(f"%://{site}/%"), ~url.ilike(f"%.{site}/%"))
-    if kinds:
-        unknown = [k for k in kinds if k not in TASK_KINDS]
-        if unknown:
-            raise TaskError(f"Unknown task kind(s): {', '.join(sorted(unknown))}")
-        stmt = stmt.where(BrowserTask.kind.in_(kinds))
-
-    candidates = list(db.execute(stmt).scalars().all())
-    if exclude_sites:
-        skip = {site.lower() for site in exclude_sites}
-        candidates = [t for t in candidates if _site_of(t) not in skip]
-    tasks = _interleave_sites(candidates, limit)
+    if lanes:
+        # An extension that says how many lanes it has free gets a site for
+        # each. See `_one_site_per_lane`.
+        lanes = max(1, min(int(lanes), 4))
+        tasks = _one_site_per_lane(db, kinds, exclude_sites, lanes,
+                                   max(1, limit // lanes), now)
+    else:
+        # An older extension: one window, mixed round-robin, as before.
+        stmt = _candidate_query(kinds, exclude_sites, limit * _LEASE_WINDOW, now)
+        candidates = list(db.execute(stmt).scalars().all())
+        if exclude_sites:
+            skip = {site.lower() for site in exclude_sites}
+            candidates = [t for t in candidates if _site_of(t) not in skip]
+        tasks = _interleave_sites(candidates, limit)
     for task in tasks:
         task.status = "leased"
         task.agent_id = agent_id or None
@@ -374,7 +418,9 @@ def recent(db, limit: int = 10) -> list[BrowserTask]:
 
 
 def record_agent_seen(db, agent_id: str, kinds: list[str] | None,
-                      harvest_sites: list[str] | None = None) -> None:
+                      harvest_sites: list[str] | None = None,
+                      busy_sites: list[str] | None = None,
+                      lane_limit: int | None = None) -> None:
     """
     Note that an agent asked for work, and what it said it could run.
 
@@ -428,6 +474,11 @@ def record_agent_seen(db, agent_id: str, kinds: list[str] | None,
         # Those want completely different fixes and only the browser knows
         # which one applies.
         "harvest_sites": sorted(harvest_sites or []),
+        # The sites it had a page open on when it asked, and how many it may
+        # have. The only way to see from here whether parallel lanes are
+        # actually running, rather than configured.
+        "busy_sites": sorted(busy_sites or []),
+        "lane_limit": lane_limit,
         "at": _now().isoformat(),
     }
     data = dict(profile.data or {})
@@ -481,6 +532,8 @@ def last_agent(db) -> dict | None:
             "at": seen["at"],
             "kinds": seen.get("kinds") or [],
             "polled": True,
+            "busy_sites": seen.get("busy_sites") or [],
+            "lane_limit": seen.get("lane_limit"),
         }
 
     task = (
@@ -575,6 +628,32 @@ def known_agents(db) -> list[dict]:
         return []
     rows = [entry for entry in stored.values() if isinstance(entry, dict)]
     return sorted(rows, key=lambda entry: entry.get("at") or "", reverse=True)
+
+
+def tasks_by_site(db, status: str = "queued", limit: int = 8) -> list[dict]:
+    """
+    Tasks in one status per site, most first.
+
+    `queued`: parallel lanes can only run as many sites as have work waiting.
+    With every waiting page on one board there is one window, by design — two
+    pages of the same site at once is what a script looks like.
+
+    `leased`: what the extension is working on right now, per site — the
+    ground truth for "are two lanes running", since a lane holds its leases
+    open with heartbeats for as long as it works.
+    """
+    query = db.query(BrowserTask.payload["url"].astext).filter(
+        BrowserTask.status == status)
+    if status == "queued":
+        query = query.filter(BrowserTask.expires_at > _now())
+    rows = query.limit(20000).all()
+    counts: dict[str, int] = {}
+    for (url,) in rows:
+        task = BrowserTask(payload={"url": url or ""})
+        site = _site_of(task)
+        counts[site] = counts.get(site, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: -item[1])[:limit]
+    return [{"site": site, "count": count} for site, count in ranked]
 
 
 def queue_stats(db) -> dict:

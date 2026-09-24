@@ -408,3 +408,71 @@ class TestABatchMixesSites:
         batch = browser_tasks.lease(db, ["ping"], agent_id="x", limit=1,
                                     exclude_sites=["linkedin.com"])
         assert len(batch) == 1
+
+
+class TestOneSitePerLane:
+    """
+    Two lanes, and a crawl that queued 120 LinkedIn searches before one
+    Indeed page. The old batch was a window of the queue, so it was all
+    LinkedIn and the second lane sat empty until the next poll.
+    """
+
+    def _page(self, db, url, n, priority=0):
+        task = browser_tasks.enqueue(db, "browse_page", {"url": url}, priority=priority)
+        task.created_at = _now() - timedelta(seconds=1000 - n)
+        db.commit()
+        return task
+
+    def test_each_free_lane_gets_a_different_site(self, db):
+        for n in range(120):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}", n)
+        indeed = self._page(db, "https://www.indeed.com/jobs?q=a", 500)
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=6, lanes=2)
+        sites = {browser_tasks._site_of(t) for t in batch}
+        assert sites == {"linkedin.com", "indeed.com"}
+        assert indeed.id in {t.id for t in batch}
+        # Three pages for the LinkedIn lane, in its own order.
+        linkedin = [t.payload["url"] for t in batch if "linkedin" in t.payload["url"]]
+        assert linkedin == [f"https://www.linkedin.com/jobs/search/?p={n}" for n in range(3)]
+
+    def test_busy_sites_are_left_out(self, db):
+        for n in range(10):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}", n)
+        self._page(db, "https://www.indeed.com/jobs?q=a", 50)
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=3,
+                                    lanes=1, exclude_sites=["indeed.com"])
+        assert {browser_tasks._site_of(t) for t in batch} == {"linkedin.com"}
+
+    def test_one_site_with_work_is_one_lane(self, db):
+        for n in range(10):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}", n)
+        batch = browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=6, lanes=2)
+        assert len(batch) == 3
+
+    def test_zero_lanes_reports_presence_and_leases_nothing(self, client, db, monkeypatch):
+        from app.config import settings
+        from app.models.profile import Profile
+
+        monkeypatch.setattr(settings, "AGENT_TOKEN", "tok")
+        db.add(Profile(data={}))
+        db.commit()
+        self._page(db, "https://www.indeed.com/jobs?q=a", 1)
+        body = client.post("/api/agent/lease", headers={"Authorization": "Bearer tok"},
+                           json={"kinds": ["browse_page"], "agent_id": "laptop",
+                                 "lanes": 0, "max": 1, "wait": 0,
+                                 "busy_sites": ["linkedin.com", "dice.com"]}).json()
+        assert body["tasks"] == []
+        db.expire_all()
+        seen = browser_tasks.last_agent(db)
+        assert seen["busy_sites"] == ["dice.com", "linkedin.com"]
+
+    def test_the_runs_page_shows_what_is_running_and_waiting(self, client, db):
+        from app.models.profile import Profile
+
+        db.add(Profile(data={}))
+        db.commit()
+        for n in range(3):
+            self._page(db, f"https://www.linkedin.com/jobs/search/?p={n}", n)
+        browser_tasks.lease(db, ["browse_page"], agent_id="x", limit=1, lanes=1)
+        assert browser_tasks.tasks_by_site(db, "leased") == [{"site": "linkedin.com", "count": 1}]
+        assert browser_tasks.tasks_by_site(db, "queued") == [{"site": "linkedin.com", "count": 2}]

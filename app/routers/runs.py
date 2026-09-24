@@ -179,6 +179,15 @@ def _agent_context(db: Session) -> dict:
                 "agent_window": AGENT_WINDOW_DAYS}
 
 
+def _lane_limit() -> int:
+    from app.services.tunables import current
+
+    try:
+        return int(current("browse_parallel_sites"))
+    except Exception:
+        return 1
+
+
 def _system_context(db: Session) -> dict:
     """
     The state of the subsystems that have no page of their own.
@@ -223,6 +232,11 @@ def _system_context(db: Session) -> dict:
             "queue": browser_tasks.queue_stats(db),
             "recent": browser_tasks.recent(db, 8),
             "last_agent": browser_tasks.last_agent(db),
+            # Per site, so "why only one window?" has an answer on the page:
+            # either one site holds all the waiting work, or it does not.
+            "leased_sites": browser_tasks.tasks_by_site(db, "leased"),
+            "queued_sites": browser_tasks.tasks_by_site(db, "queued"),
+            "lane_limit": _lane_limit(),
             "configured": bool((settings.AGENT_TOKEN or "").strip()),
             "browse": browse_plan.status(db),
             # What the browser has actually opened. Without this a crawl was

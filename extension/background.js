@@ -154,12 +154,28 @@ const waitingForSlot = [];
 
 function setParallelSites(n) {
   const value = Math.max(1, Math.min(4, Number(n) || 1));
+  if (value !== parallelSites) {
+    // Remembered, because this worker is thrown away whenever Chrome decides
+    // it has been idle, and the next one started at 1 again — so the first
+    // lease after every restart asked for one lane's worth of work.
+    chrome.storage.local.set({ parallelSites: value }).catch(() => {});
+  }
   parallelSites = value;
   // Raising the cap should free waiters now, not at the next release.
   while (running < parallelSites && waitingForSlot.length) {
     running += 1;
     waitingForSlot.shift()();
   }
+}
+
+let parallelSitesLoaded = false;
+async function loadParallelSites() {
+  if (parallelSitesLoaded) return;
+  parallelSitesLoaded = true;
+  try {
+    const stored = await chrome.storage.local.get({ parallelSites: 1 });
+    setParallelSites(stored.parallelSites);
+  } catch (_) { /* keep the default */ }
 }
 
 function acquireSlot() {
@@ -1591,6 +1607,18 @@ function keepLeasesAlive(pending, agent, leaseSeconds) {
 // ---------------------------------------------------------------------------
 
 let polling = false;
+// A poll asked for while one was already out. It used to be dropped, so a
+// lane finishing during another lane's lease request left its slot empty
+// until the next alarm, up to a minute later.
+let pollAgain = false;
+// Task kinds that open a window. The others (following a redirect, fetching
+// JSON) run in the background, and counting them as a lane left a window slot
+// empty while a Jooble link was followed.
+const WINDOW_KINDS = new Set(["browse_page", "pass_check"]);
+// Lanes that open windows. `parallelSites` bounds these; background lanes
+// are bounded separately so they cannot pile up.
+const windowSites = new Set();
+const MAX_BACKGROUND_LANES = 2;
 // Sites with a lane running right now. A lane is one site's pages, worked one
 // after another; each lane that finishes asks for more work at once, for a
 // site nobody is busy with, instead of waiting for every other lane to finish.
@@ -1601,16 +1629,23 @@ const activeSites = new Set();
 async function pollOnce() {
   // Only the lease request is exclusive. Two at once would ask for the same
   // free slots twice; the lanes themselves run on regardless.
-  if (polling) return;
+  if (polling) {
+    pollAgain = true;
+    return;
+  }
   polling = true;
 
   try {
     const config = await getConfig();
     if (!config.enabled || !config.serverUrl || !config.token) return;
+    await loadParallelSites();
 
-    // Every slot busy: nothing to ask for. A lane finishing calls back here.
-    const free = parallelSites - activeSites.size;
-    if (free <= 0) return;
+    // Free window lanes, and never more lanes in all than the windows plus a
+    // couple of background ones.
+    const free = Math.max(0, Math.min(
+      parallelSites - windowSites.size,
+      parallelSites + MAX_BACKGROUND_LANES - activeSites.size,
+    ));
 
     const id = await agentId();
     const kinds = await supportedKinds();
@@ -1624,8 +1659,13 @@ async function pollOnce() {
     const lease = await api("/api/agent/lease", {
       kinds,
       agent_id: id,
-      // A few pages for each free lane.
-      max: Math.max(3, free * 3),
+      // A few pages for each free lane, and one site per lane: the server
+      // picks a different site for each (a single window of the queue was
+      // usually all one board, and the second lane waited a minute).
+      // `lanes: 0` with every slot busy is a presence report — it tells the
+      // Runs page what is running — and leases nothing.
+      max: Math.max(1, free * 3),
+      lanes: free,
       // Long-poll only when idle. With lanes running, a lane that finishes
       // will ask again, so holding a request open would only delay it.
       wait: activeSites.size ? 0 : 25,
@@ -1642,8 +1682,14 @@ async function pollOnce() {
       kinds,
     });
 
-    // How many sites may run side by side, from the server's setting.
-    if (lease.parallel_sites) setParallelSites(lease.parallel_sites);
+    // How many sites may run side by side, from the server's setting. A
+    // raise means lanes this request did not ask for — ask again at once
+    // rather than leaving them empty until a lane finishes.
+    if (lease.parallel_sites) {
+      const before = parallelSites;
+      setParallelSites(lease.parallel_sites);
+      if (parallelSites > before) pollAgain = true;
+    }
     if (!tasks || tasks.length === 0) return;
 
     // One lane per site: a site's pages stay in order, one after another, with
@@ -1657,18 +1703,45 @@ async function pollOnce() {
     }
     for (const [key, laneTasks] of lanes) {
       activeSites.add(key);
+      if (laneTasks.some((task) => WINDOW_KINDS.has(task.kind))) {
+        windowSites.add(key);
+      }
       // Deliberately not awaited: the lease request is done, and the next one
       // should be free to go out as soon as any lane has room.
       runLane(key, laneTasks, id, lease.lease_seconds);
     }
+    keepWorkerAwake();
   } catch (error) {
     await setStatus({ lastError: String(error && error.message ? error.message : error) });
   } finally {
     polling = false;
+    if (pollAgain) {
+      pollAgain = false;
+      setTimeout(() => pollOnce(), 0);
+    }
   }
 
   // If slots are still free (the server had work for fewer sites than we have
   // lanes), the next alarm will ask again; nothing to chain here.
+}
+
+// Chrome stops an idle extension worker after thirty seconds without an
+// extension event or API call, and everything in memory goes with it: the
+// lanes, the slots, the pages half-visited. A browse pauses twenty seconds
+// between pages and a heartbeat is only a fetch, so a quiet stretch in every
+// lane at once was enough. A cheap API call every twenty seconds while any
+// lane runs keeps the worker alive for exactly as long as there is work.
+let awakeTimer = null;
+function keepWorkerAwake() {
+  if (awakeTimer || activeSites.size === 0) return;
+  awakeTimer = setInterval(() => {
+    if (activeSites.size === 0) {
+      clearInterval(awakeTimer);
+      awakeTimer = null;
+      return;
+    }
+    chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 20000);
 }
 
 async function runLane(key, tasks, id, leaseSeconds) {
@@ -1708,6 +1781,7 @@ async function runLane(key, tasks, id, leaseSeconds) {
   } finally {
     stopHeartbeat();
     activeSites.delete(key);
+    windowSites.delete(key);
   }
   await setStatus({ lastCompleted: done, lastTaskAt: new Date().toISOString() });
   // This lane's slot is free. More work probably waits, and the next alarm is

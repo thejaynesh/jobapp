@@ -99,11 +99,12 @@ def _max_poll_seconds() -> int:
 
 
 def _lease_once(db: Session, kinds: list[str], agent_id: str, limit: int,
-                exclude_sites: list[str] | None = None) -> list[dict]:
+                exclude_sites: list[str] | None = None,
+                lanes: int | None = None) -> list[dict]:
     """One atomic attempt to claim work. Serialized inside the threadpool call
     so no ORM object escapes into the event loop still attached to a session."""
     tasks = browser_tasks.lease(db, kinds or None, agent_id=agent_id, limit=limit,
-                                exclude_sites=exclude_sites)
+                                exclude_sites=exclude_sites, lanes=lanes)
     return [task.as_dict() for task in tasks]
 
 
@@ -146,6 +147,14 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         limit = max(1, int(limit))
     except (TypeError, ValueError):
         limit = 1
+    # How many lanes the extension has free. Zero is a presence report from an
+    # extension whose lanes are all busy: it has nothing to ask for, but what
+    # it is working on is the only way this side can show that the lanes run.
+    lanes = body.get("lanes")
+    try:
+        lanes = None if lanes is None else max(0, int(lanes))
+    except (TypeError, ValueError):
+        lanes = None
 
     try:
         wait = float(body.get("wait", _max_poll_seconds()))
@@ -158,17 +167,22 @@ async def lease(request: Request, db: Session = Depends(get_db)):
     try:
         await run_in_threadpool(
             browser_tasks.record_agent_seen, db, agent_id, kinds, harvest_sites,
+            exclude_sites, _parallel_sites(),
         )
     except Exception as exc:
         # Presence is a diagnostic, not the job. Failing to note it must not
         # stop an agent that is asking for work from getting any.
         logger.warning("agent: could not record presence: %s", exc)
 
+    if lanes == 0:
+        return {"tasks": [], "lease_seconds": browser_tasks._lease_seconds(),
+                "parallel_sites": _parallel_sites()}
+
     deadline = time.monotonic() + wait
     while True:
         try:
             tasks = await run_in_threadpool(_lease_once, db, kinds, agent_id, limit,
-                                            exclude_sites)
+                                            exclude_sites, lanes)
         except TaskError as exc:
             return _bad_request(exc)
 
