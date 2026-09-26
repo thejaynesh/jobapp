@@ -186,6 +186,9 @@ _BOARD_ORIGIN = {
 _COMPANY_KEYS = (
     "companyName", "company", "companyUrn", "primarySubtitle", "subtitle",
     "employerName", "truncatedCompany",           # Indeed / Glassdoor
+    # Glassdoor's search card: the name shown on the card. Its `employer`
+    # object is null for a confidential posting, and this is not.
+    "employerNameFromSearch",
     "hiringOrganization", "employer",
     # Indeed's GraphQL job: `employer` there is an object of ids and logos,
     # and the name the card shows is this.
@@ -205,6 +208,7 @@ _DESCRIPTION_KEYS = (
     "description", "jobDescription", "descriptionText",
     "snippet", "jobDescriptionText",              # Indeed
     "descriptionFragments", "jobDescriptionHtml",  # Glassdoor
+    "descriptionFragmentsText",
 )
 _URL_KEYS = (
     "jobPostingUrl", "applyUrl", "companyApplyUrl", "url", "link",
@@ -247,6 +251,9 @@ _SALARY_KEYS = (
     # no pay at all.
     "salaryRange",
     "compensationBreakdown",
+    # Glassdoor: `{p10, p50, p90}`, the tenth to ninetieth percentile of the
+    # band, beside `payPeriod`. Hourly bands fall under the annual floor.
+    "payPeriodAdjustedPay",
 )
 
 # Boards that state pay in minor units, and the divisor to get currency out.
@@ -276,9 +283,9 @@ _SALARY_SCALE = {
 # dropped rather than written down as a salary, which is the same trade the
 # rest of this module makes: no number beats a wrong one.
 _MIN_PLAUSIBLE_ANNUAL = 10_000
-_SALARY_MIN_KEYS = ("minSalary", "min", "minValue", "minAmount", "from")
-_SALARY_MAX_KEYS = ("maxSalary", "max", "maxValue", "maxAmount", "to")
-_CURRENCY_KEYS = ("currencyCode", "currency", "currencyIso")
+_SALARY_MIN_KEYS = ("minSalary", "min", "minValue", "minAmount", "from", "p10")
+_SALARY_MAX_KEYS = ("maxSalary", "max", "maxValue", "maxAmount", "to", "p90")
+_CURRENCY_KEYS = ("currencyCode", "currency", "currencyIso", "payCurrency")
 
 # LinkedIn ids arrive as bare numbers or wrapped in an urn.
 _URN_ID_RE = re.compile(r"(\d{6,})")

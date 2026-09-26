@@ -597,6 +597,12 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
                 if (/^(next|next page|next \u203a|\u203a|\u00bb|\u2192|>)$/i.test(label)) {
                   return el;
                 }
+                // A board that grows its list in place — Glassdoor's "Show
+                // more jobs". Forward only by construction: pressing it adds
+                // results and never takes you back.
+                if (/^(show|load|see|view) more( jobs| results)?$/i.test(label)) {
+                  return el;
+                }
               }
               return null;
             };
@@ -682,6 +688,10 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
               if (!control) break;   // the last page, or no control we can see
 
               const before = fingerprint();
+              // Links on the page before the click. A "Show more" button keeps
+              // the first results where they were and adds more below, so the
+              // head of the list never changes — only its length does.
+              const linksBefore = document.querySelectorAll("a[href]").length;
               try {
                 control.click();
               } catch (_) {
@@ -695,7 +705,11 @@ async function visitInTab(url, settleMs, passes, pauseMs, maxPages,
               let turned = false;
               for (let waited = 0; waited < 6000; waited += 250) {
                 await new Promise((r) => setTimeout(r, 250));
-                if (fingerprint() !== before) { turned = true; break; }
+                if (fingerprint() !== before ||
+                    document.querySelectorAll("a[href]").length > linksBefore + 3) {
+                  turned = true;
+                  break;
+                }
               }
               if (!turned) break;
 

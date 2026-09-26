@@ -90,7 +90,7 @@ class Board:
                  page_param=None, page_size=25, page_base=0,
                  feed_setting=None, scroll_passes=None, click_pages=None,
                  alt_hosts=(), submit_search=False, needs_reader=False,
-                 page_path=None):
+                 page_path=None, click_selector=None):
         self.key = key
         # Only planned while some browser reports reading this host. The
         # extension refuses to open a page on a site whose box is unticked, so
@@ -115,6 +115,10 @@ class Board:
         # every visit harvested the first page and nothing else, while
         # reporting a perfectly healthy scroll.
         self.click_pages = click_pages
+        # The control to press for the next batch, when the board's own markup
+        # is known. A learned recipe still wins; the extension's generic guess
+        # ("Next", an arrow) applies when neither says anything.
+        self.click_selector = click_selector
         # Whether this board needs its search submitting before it will show a
         # full list. A fourth thing that can go wrong, and it looks exactly
         # like a board with nothing to show: the page loads, renders a handful
@@ -328,9 +332,13 @@ BOARDS = BOARDS + (
     Board(
         "glassdoor", "glassdoor.com", "Glassdoor",
         search="https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}&locKeyword={loc}&fromAge=7",
-        # "Show more jobs" loads the next batch in place, over the API the
-        # interceptor already reads; there is no page-two URL.
-        scroll_passes=30,
+        # "Show more jobs" loads the next thirty in place, over the API the
+        # interceptor already reads; there is no page-two URL. It is a button,
+        # not an infinite list, so scrolling alone stopped at the first thirty
+        # — the board has to be told to press it.
+        scroll_passes=6,
+        click_pages=10,
+        click_selector="button[data-test='load-more']",
         needs_reader=True,
     ),
     Board(
@@ -943,6 +951,11 @@ def _click_selector(url: str, db=None) -> str:
     learned = _learned(db, url)
     if learned and learned.get("mode") == "click":
         return str(learned.get("selector") or "")[:200]
+    if learned:
+        return ""
+    board = board_for(url)
+    if board is not None and board.click_selector:
+        return str(board.click_selector)[:200]
     return ""
 
 
