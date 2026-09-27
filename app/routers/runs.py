@@ -64,6 +64,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
         runs = recent_runs(db, limit)
         totals = source_totals(db, ROLLUP_WINDOW)
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: history unavailable: %s", exc)
         runs, totals = [], []
 
@@ -85,6 +86,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             .all()
         )
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: board leaderboard unavailable: %s", exc)
 
     from app.tasks.fetch import fetch_state as state
@@ -148,6 +150,7 @@ def _enrichment_context(db: Session) -> dict:
             "linkedin_state": enrichment_history.linkedin_state(db),
         }
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: enrichment history unavailable: %s", exc)
         return {
             "enrichment_runs": [], "enrichment_totals": {},
@@ -174,6 +177,7 @@ def _agent_context(db: Session) -> dict:
             "agent_window": AGENT_WINDOW_DAYS,
         }
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: agent events unavailable: %s", exc)
         return {"agent_events": None, "agent_list": [],
                 "agent_window": AGENT_WINDOW_DAYS}
@@ -186,6 +190,24 @@ def _lane_limit() -> int:
         return int(current("browse_parallel_sites"))
     except Exception:
         return 1
+
+
+def _recover(db: Session) -> None:
+    """
+    Put the session back into a usable state after a panel's query failed.
+
+    Each panel on this page is loaded in its own try block so that one broken
+    subsystem cannot take the page down with it. That promise held for Python
+    errors and broke for database ones: a failed statement leaves the session
+    in a failed transaction, the except swallowed the error, and every later
+    query on the same session raised PendingRollbackError — so the page died
+    anyway, one panel later. A Postgres restart during a deploy did exactly
+    that. Rolling back here is what makes "degrade to a note" true.
+    """
+    try:
+        db.rollback()
+    except Exception:
+        pass
 
 
 def _system_context(db: Session) -> dict:
@@ -209,6 +231,7 @@ def _system_context(db: Session) -> dict:
 
         context["pipeline"] = pipeline.status(db)
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: pipeline status unavailable: %s", exc)
         context["errors"].append(f"pipeline: {exc}")
 
@@ -221,6 +244,7 @@ def _system_context(db: Session) -> dict:
             "progress": provider_check.progress(record),
         }
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: provider check state unavailable: %s", exc)
 
     try:
@@ -262,6 +286,7 @@ def _system_context(db: Session) -> dict:
             "crawl_recipes": crawl_recipes.listing(db, limit=10),
         }
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: agent status unavailable: %s", exc)
         context["errors"].append(f"agent queue: {exc}")
 
@@ -270,6 +295,7 @@ def _system_context(db: Session) -> dict:
 
         context["pool"] = pool_status()
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: pool status unavailable: %s", exc)
 
     try:
@@ -277,17 +303,20 @@ def _system_context(db: Session) -> dict:
 
         context["backups"] = backups.status(db)
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: backup status unavailable: %s", exc)
 
     try:
         context["mailbox"] = mailbox.status(db)
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: mailbox status unavailable: %s", exc)
         context["errors"].append(f"mailbox: {exc}")
 
     try:
         context["corpus"] = interview_corpus.coverage(db)
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: corpus coverage unavailable: %s", exc)
         context["errors"].append(f"interview corpus: {exc}")
 
@@ -776,6 +805,7 @@ def _compare_context(request: Request, db: Session, queued: dict | None = None) 
     try:
         record = load_state(db)
     except Exception as exc:
+        _recover(db)
         logger.warning("runs: comparison state unavailable: %s", exc)
         record = None
 
