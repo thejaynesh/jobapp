@@ -18,6 +18,9 @@ services:
     #
     # `work_mem` is per sort or hash *per query*, so it multiplies by
     # concurrency; 16MB is deliberately modest next to the rest.
+    # Second only to the web app, which spends most of a page load waiting on
+    # it. Starving the database starves the page just the same.
+    cpu_shares: 1536
     command: >
       postgres
       -c shared_buffers=2GB
@@ -64,10 +67,34 @@ services:
   # and declare no build of their own, so `docker compose build` builds and
   # exports once. The name is local and unversioned on purpose — nothing pushes
   # this anywhere, and `up -d` runs after `build` in every path that deploys.
+  # CPU, on a two-core machine
+  # ------------------------
+  # Nothing here had a limit or a priority, so a fetch cycle, a matching pass,
+  # headless Chromium and the page you were loading all queued for the same two
+  # cores as equals. At 100% the page waits its turn, Caddy gives up on it, and
+  # the portal answers 502 — while the work that caused it was work nobody was
+  # waiting on.
+  #
+  # Two levers, both per service:
+  #
+  #   cpu_shares  who wins when the cores are contended. Only matters under
+  #               load, and costs nothing when the machine is idle. The web
+  #               app and Postgres (which the web app waits on) come first;
+  #               background work takes what is left.
+  #   cpus        a hard ceiling. The workers are capped so that together they
+  #               can never take the whole machine, however much work is
+  #               queued: a pass takes longer, and the portal stays up.
+  #
+  # The ceilings are environment settings (`WORKER_CPUS`,
+  # `INTERACTIVE_WORKER_CPUS`) because they describe the machine rather than a
+  # preference — a bigger VPS wants bigger numbers. Change them in `.env` and
+  # re-run `docker compose up -d`.
   web:
     build: .
     image: jobapp-app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    # First call on the CPU: this is what a person is waiting on.
+    cpu_shares: 2048
     volumes:
       - storage_data:/storage
     # No `ports:` on purpose — the proxy reaches this over the internal network
@@ -86,6 +113,11 @@ services:
     # Built by `web`. See the note there.
     image: jobapp-app
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=25 -Q batch -n batch@%h
+    # Fetching, matching, enrichment and the Playwright browser tier: the bulk
+    # of the load, none of it urgent. Lowest priority, and never more than
+    # this share of the machine — see the CPU note on `web`.
+    cpus: ${WORKER_CPUS:-0.8}
+    cpu_shares: 256
     volumes:
       - storage_data:/storage
     env_file: .env
@@ -116,6 +148,10 @@ services:
     # Built by `web`. See the note there.
     image: jobapp-app
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q interactive -n interactive@%h
+    # Somebody pressed a button for this, so it outranks the batch worker, but
+    # not the page they are looking at while it runs.
+    cpus: ${INTERACTIVE_WORKER_CPUS:-0.6}
+    cpu_shares: 512
     volumes:
       - storage_data:/storage
     env_file: .env
