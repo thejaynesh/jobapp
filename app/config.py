@@ -770,6 +770,10 @@ class Settings(BaseSettings):
     # generation is the one step whose output a human actually reads and the
     # only one that never got a second look. See `services.self_review`.
     SELF_REVIEW_ENABLED: bool = True
+    # Words aimed for in a drafted answer to a long application question, from
+    # the extension's panel (`services.answer_drafts`). Editable on the
+    # settings page; a form's own character limit always wins.
+    ANSWER_DRAFT_WORDS: int = 150
 
     # What the browser extension did. Rows are small — a kind, a host and a few
     # counts — so this keeps far more than the LLM log, which carries whole

@@ -229,3 +229,64 @@ def test_the_question_key_matches_the_servers():
         "do you have a non compete agreement"
     assert normalize_question("Are you open to hybrid work? (Required)") == \
         "are you open to hybrid work"
+
+
+LONG_FORM = """
+<form>
+  <label for="why">Why do you want to work at Globex?</label>
+  <textarea id="why" maxlength="600"></textarea>
+  <label for="proud">Tell us about a project you are proud of</label>
+  <textarea id="proud"></textarea>
+  <label for="said">Anything else we should know?</label>
+  <textarea id="said">Already answered by hand.</textarea>
+  <label for="gender">Gender (optional)</label>
+  <textarea id="gender"></textarea>
+  <label for="hidden">Hidden question text here</label>
+  <textarea id="hidden" style="display:none"></textarea>
+</form>
+"""
+
+
+class TestLongQuestions:
+    def test_it_finds_the_empty_long_questions(self, page):
+        load(page, LONG_FORM)
+        found = page.evaluate(
+            "() => JobAppAutofill.longQuestions().map(q => [q.question, q.maxChars])")
+        assert found == [["Why do you want to work at Globex?", 600],
+                         ["Tell us about a project you are proud of", None]]
+
+    def test_put_types_it_the_way_a_framework_believes(self, page):
+        load(page, LONG_FORM)
+        page.evaluate("""() => {
+            window.seen = [];
+            document.querySelector('#why').addEventListener('input', e => seen.push(e.target.value));
+        }""")
+        ok = page.evaluate("""() => {
+            const q = JobAppAutofill.longQuestions()[0];
+            return JobAppAutofill.put(q.field, 'Because of Kafka.');
+        }""")
+        assert ok is True
+        assert value(page, "#why") == "Because of Kafka."
+        assert page.evaluate("() => seen") == ["Because of Kafka."]
+        assert "solid" in page.eval_on_selector("#why", "el => el.style.outline")
+
+    def test_put_never_overwrites_what_the_user_typed(self, page):
+        load(page, LONG_FORM)
+        ok = page.evaluate("""() => {
+            const q = JobAppAutofill.longQuestions()[0];
+            q.field.value = 'My own words.';
+            return JobAppAutofill.put(q.field, 'A draft.');
+        }""")
+        assert ok is False
+        assert value(page, "#why") == "My own words."
+
+    def test_a_drafted_answer_is_not_remembered(self, page):
+        # Remembered answers are short, reusable facts; a "why us" is about one
+        # company, and one the model wrote is not the user's answer to keep.
+        load(page, LONG_FORM)
+        page.evaluate("""() => {
+            const q = JobAppAutofill.longQuestions()[0];
+            JobAppAutofill.put(q.field, 'Because of Kafka.');
+        }""")
+        answers = page.evaluate("() => JobAppAutofill.collectAnswers()")
+        assert all(a["answer"] != "Because of Kafka." for a in answers)

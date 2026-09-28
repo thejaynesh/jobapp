@@ -9,9 +9,10 @@ worded the same way. job_app_filler and autograph (open-source autofill
 extensions) keep the same kind of store in the browser; this keeps it on the
 user's own server, where the profile page lists it and one click forgets it.
 
-Only short answers: the extension does not offer long-form text, which is
-usually about one company ("Why do you want to work here?"), and this refuses
-anything that looks like a credential or identity document, whoever sends it.
+Only short answers: long-form text is usually about one company ("Why do you
+want to work here?"), so it is drafted fresh for each form instead
+(`answer_drafts`) and never kept here; and this refuses anything that looks
+like a credential or identity document, whoever sends it.
 """
 
 import re

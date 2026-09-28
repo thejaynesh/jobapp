@@ -782,6 +782,15 @@ TUNABLES.extend([
              "the first draft.",
     ),
     Tunable(
+        key="answer_draft_words", env="ANSWER_DRAFT_WORDS", kind="int",
+        minimum=30, maximum=600, group="Documents",
+        label="Drafted answers: length (words)",
+        help="What the extension aims for when it drafts an answer to a long "
+             "question on an application form. A form that states its own "
+             "character limit always wins. Longer is more to edit down; the "
+             "draft is never put in the form until you press to put it there.",
+    ),
+    Tunable(
         key="doc_description_chars", env="DOC_DESCRIPTION_CHARS", kind="int",
         minimum=2000, maximum=100000, group="Documents",
         label="Description used for writing (characters)",

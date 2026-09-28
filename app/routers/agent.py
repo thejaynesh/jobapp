@@ -486,6 +486,32 @@ async def autofill_fields(db: Session = Depends(get_db)):
     return await run_in_threadpool(_autofill_fields, db)
 
 
+def _draft_answer(db: Session, body: dict) -> dict:
+    from app.services import answer_drafts
+
+    return answer_drafts.draft(
+        db,
+        url=str(body.get("url") or ""),
+        question=body.get("question"),
+        max_chars=body.get("max_chars"),
+        posting=body.get("posting"),
+    )
+
+
+@router.post("/draft-answer")
+async def draft_answer(request: Request, db: Session = Depends(get_db)):
+    """
+    A draft answer to one long question on the form on screen.
+
+    Pressed, never automatic, and one question per call: a writing model can
+    take the better part of a minute, and the extension's service worker is
+    not kept alive indefinitely for one reply. What comes back is shown for
+    editing; it reaches the form only when the user puts it there.
+    """
+    body = await _json_body(request)
+    return await run_in_threadpool(_draft_answer, db, body)
+
+
 def _resume(db: Session, url: str) -> dict:
     """
     The current resume for the posting on screen, as bytes the page can attach.

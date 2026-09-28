@@ -258,6 +258,24 @@ what the fill wrote, not what your profile already covers, not long-form text
 ("Why do you want to work here?" is about one company), and never a password,
 identity number, date of birth or bank detail — the server refuses those too.
 
+#### Drafted answers to the long questions
+
+The questions autofill cannot answer and remembering deliberately does not keep
+— "Why do you want to work here?", "Tell us about a project you are proud of" —
+get **Draft answers to N long questions**. Each empty long-text box on the form
+is sent, one at a time, with the posting, to the model you chose for writing
+documents; the draft comes back in an editable box in the panel, with its
+length against the form's own limit. **Put in form** is the only way it reaches
+the page, and it never replaces text you typed there yourself.
+
+Two things are decided on the server, not left to the model. A question asking
+you to declare something about yourself — work authorisation, sponsorship, pay,
+self-identification, criminal history, start date, references — is never
+drafted: it says so and leaves the box to you. And a figure in a draft that is
+in neither your profile nor the posting is named under it, so an invented
+"40%" is something you are told about rather than something you submit. The
+length aimed for is **Settings → Documents → Drafted answers: length**.
+
 #### Attaching your resume
 
 **Attach resume** puts the tailored PDF into the form's file input. This is the
@@ -346,6 +364,7 @@ surface to find.
 | `GET /api/agent/autofill-fields` | The profile values a form asks for — a fixed list, not the profile |
 | `POST /api/agent/remember-answers` | Keep answers you typed into questions the profile does not cover. `{answers: [{question, answer}]}` |
 | `POST /api/agent/prepare` | Save a posting and open an application for it. `{url, posting}` |
+| `POST /api/agent/draft-answer` | Draft one long form question for you to edit. `{url, question, max_chars, posting}` |
 
 A lease is exclusive and time-limited. If this browser closes mid-task the lease
 lapses and the task returns to the queue for whoever asks next — no attempt is

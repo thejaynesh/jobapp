@@ -497,12 +497,48 @@
     return textFields().length + radioGroups().length + listboxButtons().length >= 3;
   }
 
+  /**
+   * The long questions still waiting for an answer — "Why do you want to work
+   * here?" — as `[{question, field, maxChars}]`, for the panel to offer a
+   * draft of. Empty, visible text areas that ask something; never one a
+   * profile rule answers, never self-identification, never anything
+   * sensitive (the server refuses declarations as well).
+   */
+  function longQuestions() {
+    const found = [];
+    for (const field of document.querySelectorAll("textarea")) {
+      if (field.disabled || field.readOnly || !visible(field)) continue;
+      if (field.value && field.value.trim()) continue;
+      const question = questionText(field);
+      if (!question || question.length < 8) continue;
+      const haystack = `${question} ${describe(field)}`.toLowerCase();
+      if (SENSITIVE_RE.test(haystack) || EEO_RE.test(haystack)) continue;
+      if (FIELD_RULES.some(([, pattern]) => pattern.test(haystack))) continue;
+      found.push({ question, field, maxChars: field.maxLength > 0 ? field.maxLength : null });
+    }
+    return found;
+  }
+
+  /**
+   * Put text the user accepted into a field: typed the way a framework will
+   * believe, and outlined like everything else this fills. Refuses a field
+   * that has text in it now — the user's own typing is never overwritten.
+   */
+  function put(field, text) {
+    if (field.value && field.value.trim()) return false;
+    setValue(field, text);
+    mark(field);
+    return true;
+  }
+
   globalThis.JobAppAutofill = {
     fill,
     watch,
     collectAnswers,
     describe,
     looksLikeAForm,
+    longQuestions,
     normalizeQuestion,
+    put,
   };
 })();

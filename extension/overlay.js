@@ -63,6 +63,13 @@
     button.secondary { background: #fff; color: #2563eb; }
     button.action:disabled { opacity: .55; cursor: default; }
     a { color: #2563eb; }
+    .draft { border-top: 1px solid #e5e7eb; margin-top: 10px; padding-top: 8px; }
+    .draft .q { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+    .draft textarea {
+      width: 100%; box-sizing: border-box; min-height: 130px; resize: vertical;
+      font: inherit; font-size: 12px; line-height: 1.45; color: #111;
+      border: 1px solid #d1d5db; border-radius: 6px; padding: 6px;
+    }
   `;
 
   let root = null;
@@ -150,11 +157,11 @@
 
   const RELOADED = "The extension was reloaded — refresh this page to use the panel.";
 
-  async function ask(path, body) {
+  async function ask(path, body, timeoutMs) {
     if (!connected()) return { error: RELOADED };
     return await new Promise((resolve) => {
       try {
-        chrome.runtime.sendMessage({ type: "overlay-api", path, body }, (reply) => {
+        chrome.runtime.sendMessage({ type: "overlay-api", path, body, timeoutMs }, (reply) => {
           if (chrome.runtime.lastError) {
             resolve({ error: chrome.runtime.lastError.message });
             return;
@@ -211,6 +218,7 @@
       line(box, "Not in your tracker yet.");
       addPrepare(box, serverUrl, "Save and write documents");
       addFillButton(box);
+      addDraftButton(box);
       return;
     }
 
@@ -268,6 +276,7 @@
     }
 
     addFillButton(box);
+    addDraftButton(box);
     addResumeButton(box);
     addAppliedButton(box, application);
   }
@@ -582,6 +591,119 @@
       );
     });
     box.append(button);
+  }
+
+  // -------------------------------------------------------------------------
+  // Drafted answers to the long questions
+  // -------------------------------------------------------------------------
+
+  // A writing model can take most of a minute for one answer.
+  const DRAFT_TIMEOUT_MS = 90000;
+
+  /**
+   * Offer drafts for the long questions on the form ("Why do you want to work
+   * here?"). One request per question, in order, each shown in an editable box
+   * as it arrives. Nothing goes into the form until "Put in form" is pressed
+   * on a draft the user has read — and never over text they typed themselves.
+   */
+  function addDraftButton(box) {
+    if (!autofill() || !autofill().longQuestions) return;
+    const labelFor = (count) => `Draft answers to ${count} long question${count === 1 ? "" : "s"}`;
+    const count = autofill().longQuestions().length;
+    if (!count) return;
+    const button = document.createElement("button");
+    button.className = "action secondary";
+    button.textContent = labelFor(count);
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const posting = readPosting();
+      const questions = autofill().longQuestions();
+      for (const [index, item] of questions.entries()) {
+        button.textContent = `Drafting ${index + 1} of ${questions.length}…`;
+        await draftOne(box, item, posting);
+      }
+      // Counted again: an answer put in the form is no longer waiting.
+      const left = autofill().longQuestions().length;
+      button.textContent = left ? labelFor(left) : "No long questions left";
+      button.disabled = !left;
+    });
+    box.append(button);
+  }
+
+  async function draftOne(box, item, posting) {
+    const card = document.createElement("div");
+    card.className = "draft";
+    const question = document.createElement("div");
+    question.className = "q";
+    question.textContent = item.question.length > 160 ? `${item.question.slice(0, 157)}…` : item.question;
+    card.append(question);
+    const status = line(card, "Drafting…");
+    box.append(card);
+
+    const reply = await ask("/api/agent/draft-answer", {
+      url: location.href,
+      question: item.question,
+      max_chars: item.maxChars,
+      posting,
+    }, DRAFT_TIMEOUT_MS);
+    const data = reply.data || {};
+    if (reply.error || !data.ok) {
+      status.textContent = data.declaration
+        ? `Left for you: ${data.detail}`
+        : reply.error || data.detail || "No draft this time.";
+      note("draft_answer", { drafted: false, declaration: Boolean(data.declaration) },
+           Boolean(data.declaration));
+      return;
+    }
+    status.remove();
+
+    const editor = document.createElement("textarea");
+    editor.value = data.answer;
+    card.append(editor);
+    const meta = line(card, "");
+    const count = () => {
+      const words = editor.value.trim().split(/\s+/).filter(Boolean).length;
+      meta.textContent = item.maxChars
+        ? `${words} words · ${editor.value.length} of ${item.maxChars} characters`
+        : `${words} words`;
+    };
+    count();
+    editor.addEventListener("input", count);
+    if ((data.unsupported_figures || []).length) {
+      line(card, `Check these figures — they are not in your profile or the posting: ` +
+                 `${data.unsupported_figures.join(", ")}.`);
+    }
+
+    const put = document.createElement("button");
+    put.className = "action";
+    put.textContent = "Put in form";
+    put.addEventListener("click", () => {
+      const text = editor.value.trim();
+      if (!text) return;
+      if (item.maxChars && text.length > item.maxChars) {
+        meta.textContent = `Over the form's ${item.maxChars}-character limit — shorten it first.`;
+        return;
+      }
+      const edited = text !== data.answer.trim();
+      if (!autofill().put(item.field, text)) {
+        line(card, "That box has text in it now, so it was left alone — copy this in by hand if you want it.");
+        note("draft_answer", { drafted: true, put: false, reason: "field not empty" }, false);
+        return;
+      }
+      note("draft_answer", { drafted: true, put: true, edited });
+      editor.remove();
+      put.remove();
+      discard.remove();
+      meta.textContent = "In the form, outlined in blue. Read it there before you submit.";
+    });
+    const discard = document.createElement("button");
+    discard.className = "action secondary";
+    discard.textContent = "Discard";
+    discard.addEventListener("click", () => {
+      note("draft_answer", { drafted: true, put: false });
+      card.remove();
+    });
+    card.append(put, discard);
   }
 
   /**

@@ -43,6 +43,7 @@ KINDS = (
     "attach_resume",
     "mark_applied",
     "prepare",          # "save and write documents" from the overlay
+    "draft_answer",     # a long form question drafted, and whether it went in
     "error",            # the extension caught something worth reporting
     "other",
 )

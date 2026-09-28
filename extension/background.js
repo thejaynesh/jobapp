@@ -1979,13 +1979,17 @@ async function syncOverlayScripts() {
  * is running on. So the panel asks, this fetches, and the token never enters
  * the page's process.
  */
-async function overlayApi(path, body) {
+async function overlayApi(path, body, timeoutMs) {
   const config = await getConfig();
   if (!config.serverUrl || !config.token) {
     return { error: "Set your server URL and token in the extension options." };
   }
   try {
-    const data = await api(path, body);
+    // The panel may ask for longer than the default (a drafted answer), never
+    // for more than two minutes.
+    const data = await api(path, body, {
+      timeoutMs: Math.min(Number(timeoutMs) || 40000, 120000),
+    });
     return { data, serverUrl: config.serverUrl };
   } catch (error) {
     return { error: error.message, serverUrl: config.serverUrl };
@@ -2289,7 +2293,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === "overlay-api") {
     if (!sender.tab) return false;
-    overlayApi(message.path, message.body).then(sendResponse);
+    overlayApi(message.path, message.body, message.timeoutMs).then(sendResponse);
     return true;
   }
   if (message?.type === "overlay-event") {
