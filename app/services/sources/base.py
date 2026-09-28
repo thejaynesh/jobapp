@@ -1,6 +1,8 @@
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -186,9 +188,41 @@ def in_united_states(location: str | None) -> bool:
     return bool(match and match.group(1) in _US_STATES)
 
 
-def board_workers() -> int:
+# The settings a fetch cycle is running under — `settings` with the settings
+# page's overrides on top — for the helpers every adapter calls itself.
+#
+# `_run_all_adapters` hands each adapter the overlay as `cfg` where it reads a
+# value directly, but a dozen board adapters ask `board_workers()` on their own,
+# and threading `cfg` through all twelve signatures for one number is how a
+# setting ends up wired into eleven of them. Set once per cycle; read here.
+_CYCLE_CFG: ContextVar = ContextVar("source_cycle_cfg", default=None)
+
+
+@contextmanager
+def cycle_settings(cfg):
+    """Make `cfg` what `board_workers()` and friends read, for this block."""
+    token = _CYCLE_CFG.set(cfg)
+    try:
+        yield cfg
+    finally:
+        _CYCLE_CFG.reset(token)
+
+
+def cycle_cfg():
+    """The running cycle's settings overlay, or plain `settings` outside one."""
+    cfg = _CYCLE_CFG.get()
+    if cfg is not None:
+        return cfg
     from app.config import settings
-    return getattr(settings, "ATS_BOARD_FETCH_WORKERS", DEFAULT_BOARD_WORKERS)
+    return settings
+
+
+def board_workers() -> int:
+    try:
+        return max(1, int(getattr(cycle_cfg(), "ATS_BOARD_FETCH_WORKERS",
+                                  DEFAULT_BOARD_WORKERS)))
+    except (TypeError, ValueError):
+        return DEFAULT_BOARD_WORKERS
 
 
 # Browser-ish headers. Several ATS careers pages answer a bare httpx request

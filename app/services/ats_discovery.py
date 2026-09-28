@@ -314,7 +314,6 @@ ATS_CONFIG_FIELDS = {
 # more generous than when each slug cost a serial round trip.
 MAX_TOTAL_SLUGS_PER_ATS = 300
 TOTAL_SLUG_CAPS = {
-    "workday": 30,          # searches × per-job detail calls per tenant
     "smartrecruiters": 80,  # per-posting detail calls per company
     "bamboohr": 80,         # per-posting detail calls per company
     # Two host shapes tried per slug, and a full HTML page parsed each time.
@@ -323,18 +322,29 @@ TOTAL_SLUG_CAPS = {
     "jobvite": 120,
 }
 
+# Caps that are a setting of their own rather than a constant here. Workday was
+# 30 tenants a cycle — for the ATS behind 27% of US new-grad postings and
+# 30–38% of large employers, with ~1,100 registered tenants never polled. It is
+# on the settings page now, next to the concurrency that makes it affordable.
+_CAP_SETTINGS = {"workday": ("WORKDAY_MAX_TENANTS", 150)}
 
-def _total_cap(ats: str) -> int:
-    from app.config import settings
 
-    default = getattr(settings, "ATS_MAX_SLUGS_PER_ATS", MAX_TOTAL_SLUGS_PER_ATS)
+def _total_cap(ats: str, cfg=None) -> int:
+    """This ATS's per-cycle board budget, from `cfg` (the cycle's settings)."""
+    if cfg is None:
+        from app.config import settings as cfg
+
+    default = int(getattr(cfg, "ATS_MAX_SLUGS_PER_ATS", MAX_TOTAL_SLUGS_PER_ATS))
+    setting = _CAP_SETTINGS.get(ats)
+    if setting:
+        return max(0, int(getattr(cfg, setting[0], setting[1])))
     capped = TOTAL_SLUG_CAPS.get(ats)
     return min(capped, default) if capped is not None else default
 
 
-def slug_caps() -> dict[str, int]:
+def slug_caps(cfg=None) -> dict[str, int]:
     """The per-cycle slug budget for each ATS."""
-    return {ats: _total_cap(ats) for ats in ATS_CONFIG_FIELDS}
+    return {ats: _total_cap(ats, cfg) for ats in ATS_CONFIG_FIELDS}
 
 
 def configured_ats_slugs(cfg) -> dict[str, list[str]]:
@@ -369,7 +379,7 @@ def build_ats_slugs(
 
     result: dict[str, list[str]] = {}
     for ats in ATS_CONFIG_FIELDS:
-        cap = _total_cap(ats)
+        cap = _total_cap(ats, cfg)
         seen: set[str] = set()
         merged: list[str] = []
         if registry is not None:

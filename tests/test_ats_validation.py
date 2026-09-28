@@ -122,9 +122,17 @@ class TestSeedsAndAssembly:
 
     def test_build_uses_tighter_cap_for_expensive_ats(self):
         from app.services.ats_discovery import build_ats_slugs, TOTAL_SLUG_CAPS
-        many = ",".join(f"t{i}:wd1:Site" for i in range(60))
-        result = build_ats_slugs(self._cfg(WORKDAY_TENANTS=many))
-        assert len(result["workday"]) == TOTAL_SLUG_CAPS["workday"]
+        many = ",".join(f"co{i}" for i in range(200))
+        result = build_ats_slugs(self._cfg(SMARTRECRUITERS_COMPANY_SLUGS=many))
+        assert len(result["smartrecruiters"]) == TOTAL_SLUG_CAPS["smartrecruiters"]
+
+    def test_workdays_tenant_cap_is_its_own_setting(self):
+        from app.services.ats_discovery import build_ats_slugs
+        many = ",".join(f"t{i}:wd1:Site" for i in range(260))
+        assert len(build_ats_slugs(self._cfg(WORKDAY_TENANTS=many,
+                                             WORKDAY_MAX_TENANTS=200))["workday"]) == 200
+        assert len(build_ats_slugs(self._cfg(WORKDAY_TENANTS=many,
+                                             WORKDAY_MAX_TENANTS=25))["workday"]) == 25
 
 
 class TestWorkdayDiscovery:

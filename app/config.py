@@ -445,7 +445,12 @@ class Settings(BaseSettings):
     ATS_LIST_HARVEST: bool = True  # harvest company slugs from community job lists
     ATS_BOARD_REGISTRY: bool = True  # persist discovered boards and rank them by yield
     ATS_MAX_SLUGS_PER_ATS: int = 300  # per-cycle slug budget per ATS (tighter caps still apply)
-    ATS_BOARD_FETCH_WORKERS: int = 8  # concurrent per-company board fetches
+    # Concurrent board fetches, per ATS. Board requests are network-bound and
+    # each ATS is a different host, so this is about politeness per host, not
+    # CPU. Was 8, with 30 Workday tenants a cycle; see WORKDAY_MAX_TENANTS.
+    ATS_BOARD_FETCH_WORKERS: int = 16
+    # Workday tenants polled per boards cycle. Each costs up to ~40 requests.
+    WORKDAY_MAX_TENANTS: int = 150
     ATS_BOARD_MAX_EMPTY_CYCLES: int = 8  # retire a discovered board after this many silent cycles
     # Discovery reads a slug out of a link and files it as a company, which is
     # a guess. Probing before polling is what stops `greenhouse/linkedin` and

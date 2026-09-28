@@ -68,6 +68,37 @@ def _fetch_detail(tenant: str, host: str, site: str, path: str) -> dict:
         return {}
 
 
+def _detail_paths(postings: list[dict], queries: list[str], budget: int) -> set[str]:
+    """
+    Which postings get their one detail request: the titles matching wants,
+    first.
+
+    Workday's search is loose — "Software Engineer" brings back Sales Engineer
+    and Engineering Manager — and the budget used to go in listing order, so
+    it went to postings the title gate discards minutes later while the ones
+    it keeps arrived without a description. Ranked the way enrichment ranks
+    its own targets (`enrichment.select_targets`): a match on a specific word
+    first, then anything the filter would pass, then the rest. Nothing is
+    dropped, only described later; enrichment reads Workday's detail API for
+    whatever survives matching. Falls back to listing order if the matcher
+    cannot be consulted.
+    """
+    ordered = list(postings)
+    try:
+        from app.services.matcher import _title_matches_roles, title_priority_match
+
+        def tier(posting: dict) -> int:
+            title = posting.get("title") or ""
+            if title_priority_match(title, queries):
+                return 0
+            return 1 if _title_matches_roles(title, queries) else 2
+
+        ordered.sort(key=tier)  # stable: listing order within a tier
+    except Exception as exc:  # pragma: no cover — an import cycle would be a bug
+        logger.warning("Workday: title gate unavailable (%s); describing in order", exc)
+    return {p["externalPath"] for p in ordered[:max(0, budget)]}
+
+
 def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
     """
     Fetch bounded pages from Workday sites, trying each role before deeper pages.
@@ -122,15 +153,14 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
                     and offset // _PAGE_SIZE + 1 < _MAX_PAGES_PER_QUERY):
                 pending.append((query, next_offset))
 
-        details_fetched = 0
+        described = _detail_paths(postings, queries, _MAX_DETAILS_PER_TENANT)
         for item in postings:
             path = item["externalPath"]
             title = (item.get("title") or "").strip()
 
             detail: dict = {}
-            if details_fetched < _MAX_DETAILS_PER_TENANT:
+            if path in described:
                 detail = _fetch_detail(tenant, host, site, path)
-                details_fetched += 1
 
             description = _STRIP_TAGS.sub(" ", detail.get("jobDescription") or "").strip()
             location = (detail.get("location") or item.get("locationsText") or "").strip()

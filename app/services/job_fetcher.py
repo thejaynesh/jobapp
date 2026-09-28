@@ -240,6 +240,28 @@ def _run_all_adapters(
     manual: bool | None = None, not_due: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """
+    `_run_adapters` under this cycle's settings.
+
+    Adapters read most values off `cfg`, but the board adapters each ask
+    `sources.base.board_workers()` for their concurrency on their own; this
+    is what makes that answer the settings page's rather than the env's.
+    """
+    from app.services.sources.base import cycle_settings
+
+    with cycle_settings(cfg):
+        return _run_adapters(
+            roles, locations, cfg, ats_slugs, loc_prefs, only=only,
+            resting=resting, manual=manual, not_due=not_due,
+        )
+
+
+def _run_adapters(
+    roles: list[str], locations: list[str], cfg,
+    ats_slugs: dict | None = None, loc_prefs: dict | None = None,
+    only: set[str] | None = None, resting: dict | None = None,
+    manual: bool | None = None, not_due: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """
     Call all enabled adapters and return (all_jobs, source_stats).
     source_stats: {source: {"count": N, "errors": [...], "enabled": bool}}
     ats_slugs: final slug list per ATS (configured + seeds + discovered), built
@@ -1188,6 +1210,11 @@ def fetch_and_save_jobs(
     # Validate/auto-fix the configured ATS slugs (cached per slug on the profile),
     # then assemble the final slug map: configured + verified seeds + discovered.
     from app.services.ats_discovery import build_ats_slugs, configured_ats_slugs, slug_caps
+    # The settings page's overrides, for the board budget below as much as for
+    # the adapters: the caps and the concurrency are preferences, not facts
+    # about the deployment.
+    from app.services.tunables import effective_settings
+    cycle_cfg = effective_settings(profile.data)
     slug_cache = None
     slug_report: dict = {}
     validated_configured = None
@@ -1236,19 +1263,19 @@ def fetch_and_save_jobs(
                         boards.validate_pending(
                             db,
                             limit=tunable_value(profile.data, "ats_board_validate_per_cycle"),
-                            workers=settings.ATS_BOARD_FETCH_WORKERS,
+                            workers=cycle_cfg.ATS_BOARD_FETCH_WORKERS,
                         )
                     db.commit()
                 except Exception as exc:
                     logger.error("job_fetcher: board validation failed: %s", exc)
                     db.rollback()
-            registry_boards = boards.registry_slugs(db, slug_caps())
+            registry_boards = boards.registry_slugs(db, slug_caps(cycle_cfg))
         except Exception as exc:
             logger.error("job_fetcher: board registry unavailable: %s", exc)
             registry_boards = None
 
     ats_slugs = build_ats_slugs(
-        settings, discovered_ats, validated_configured, registry_boards
+        cycle_cfg, discovered_ats, validated_configured, registry_boards
     )
 
     # Adapters handle their own failures and return [], so the reason a source

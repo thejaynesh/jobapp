@@ -210,6 +210,31 @@ TUNABLES: list[Tunable] = [
              "cycles only.",
     ),
     Tunable(
+        key="workday_max_tenants", env="WORKDAY_MAX_TENANTS", kind="int",
+        minimum=0, maximum=2000, group="Company boards",
+        label="Workday companies per cycle",
+        help="Workday hosts about a quarter of US new-grad postings and most "
+             "large employers. Each company costs up to ~40 requests. Higher "
+             "reaches more companies per boards run and makes the run longer; "
+             "a quarter of the slots always go to the least recently polled.",
+    ),
+    Tunable(
+        key="ats_max_slugs_per_ats", env="ATS_MAX_SLUGS_PER_ATS", kind="int",
+        minimum=10, maximum=5000, group="Company boards",
+        label="Boards per ATS per cycle",
+        help="How many Greenhouse, Lever, Ashby… boards a boards run polls for "
+             "each ATS (Workday has its own setting above). Most cost one "
+             "request each. Higher reaches the registry's long tail sooner.",
+    ),
+    Tunable(
+        key="ats_board_fetch_workers", env="ATS_BOARD_FETCH_WORKERS", kind="int",
+        minimum=1, maximum=64, group="Company boards",
+        label="Boards fetched at once",
+        help="Concurrent requests per ATS during a boards run. Each ATS is its "
+             "own host, so this is politeness per host, not load on this "
+             "server. Lower if an ATS starts answering 429.",
+    ),
+    Tunable(
         key="ats_board_validate_per_cycle", env="ATS_BOARD_VALIDATE_PER_CYCLE",
         kind="int", minimum=0, maximum=5000, group="Company boards",
         label="New boards checked per cycle",
