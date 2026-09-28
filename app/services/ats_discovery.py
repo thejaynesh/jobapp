@@ -93,8 +93,48 @@ _WORKDAY_RE = re.compile(
     re.I,
 )
 
-# All ATS kinds we can fetch directly (patterned single-slug ones plus workday).
-ALL_ATS = frozenset(ATS_PATTERNS) | {"workday"}
+# ATSes whose board is a careers *host* — often the employer's own domain —
+# rather than a slug on the vendor's. Each pattern reads one posting link and
+# returns the board spec its adapter takes. They are deliberately specific to
+# the URL shape each platform emits, because the host alone says nothing; and
+# a host that is a job board rather than an employer is refused whatever the
+# path looks like (`_employer_host`). Every board found still has to pass its
+# validation probe before it is polled.
+_HOST_BOARD_PATTERNS: list[tuple[str, re.Pattern, "callable"]] = [
+    # …oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26007181
+    ("oracle", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.oraclecloud\.com)"
+        r"/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([A-Za-z0-9_]+)", re.I),
+     lambda m: f"{m.group(1).lower()}:{m.group(2)}"),
+    # SuccessFactors Career Site Builder: /job/<Title-Slug>/<9-10 digit id>/
+    ("successfactors", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/job/[^/\s\"'<>?#]+/\d{6,12}/", re.I),
+     lambda m: m.group(1).lower()),
+    # Phenom: /us/en/job/R-275650/…
+    ("phenom", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/([a-z]{2})/([a-z]{2})/job/[A-Za-z0-9_-]+",
+        re.I),
+     lambda m: f"{m.group(1).lower()}/{m.group(2).lower()}/{m.group(3).lower()}"),
+    # Eightfold: {company}.eightfold.ai, or a custom host's /careers/job/<long id>
+    ("eightfold", re.compile(r"https?://([a-z0-9-]+\.eightfold\.ai)/careers", re.I),
+     lambda m: m.group(1).lower()),
+    ("eightfold", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/careers/job/\d{10,}", re.I),
+     lambda m: m.group(1).lower()),
+]
+
+
+def _employer_host(host: str) -> bool:
+    """False for a job board or search engine that merely links to postings."""
+    from app.services.company_domain import AGGREGATOR_HOSTS
+
+    host = host.lower().split(":", 1)[0]
+    return not any(host == d or host.endswith(f".{d}") for d in AGGREGATOR_HOSTS)
+
+
+# All ATS kinds we can fetch directly (patterned single-slug ones plus workday
+# and the host-based ones).
+ALL_ATS = frozenset(ATS_PATTERNS) | {"workday"} | {a for a, _, _ in _HOST_BOARD_PATTERNS}
 
 # Things that match the URL patterns but are not a company board.
 #
@@ -138,6 +178,11 @@ def _extract_slugs(text: str) -> dict[str, set[str]]:
         tenant, host, site = match.group(1).lower(), match.group(2).lower(), match.group(3)
         if site.lower() not in _SLUG_BLOCKLIST:
             found.setdefault("workday", set()).add(f"{tenant}:{host}:{site}")
+    for ats, pattern, spec_of in _HOST_BOARD_PATTERNS:
+        for match in pattern.finditer(text):
+            spec = spec_of(match)
+            if _employer_host(spec.split("/", 1)[0]):
+                found.setdefault(ats, set()).add(spec)
     return found
 
 
@@ -154,13 +199,18 @@ def discover_from_jobs(raw_jobs: list[dict]) -> dict[str, set[str]]:
     """
     found: dict[str, set[str]] = {}
     for job in raw_jobs:
-        if job.get("source") in ALL_ATS:
-            continue  # a job fetched from an ATS shouldn't rediscover itself
+        # A job fetched from an ATS shouldn't rediscover its own board — but it
+        # can name another one. A Phenom site's postings apply through the
+        # Workday or SuccessFactors board behind it, and that board is worth
+        # polling directly.
+        own = job.get("source") if job.get("source") in ALL_ATS else None
         text = "\n".join(filter(None, (
-            job.get("url"), job.get("apply_url"), job.get("description"),
+            job.get("url"), job.get("apply_url"),
+            job.get("description") if own is None else None,
         )))
         for ats, slugs in _extract_slugs(text).items():
-            found.setdefault(ats, set()).update(slugs)
+            if ats != own:
+                found.setdefault(ats, set()).update(slugs)
     return found
 
 
@@ -306,6 +356,10 @@ ATS_CONFIG_FIELDS = {
     "teamtailor": "TEAMTAILOR_COMPANY_SLUGS",
     "jobvite": "JOBVITE_COMPANY_SLUGS",
     "personio": "PERSONIO_COMPANY_SLUGS",
+    "oracle": "ORACLE_BOARDS",
+    "successfactors": "SUCCESSFACTORS_BOARDS",
+    "phenom": "PHENOM_BOARDS",
+    "eightfold": "EIGHTFOLD_BOARDS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -320,6 +374,13 @@ TOTAL_SLUG_CAPS = {
     "icims": 60,
     "teamtailor": 120,
     "jobvite": 120,
+    # Large employers: a few list requests, then up to 20 descriptions (Oracle);
+    # one feed of up to tens of megabytes (SuccessFactors); a search per role at
+    # 10–50 a page, then up to 15 descriptions (Eightfold, Phenom).
+    "oracle": 150,
+    "successfactors": 80,
+    "phenom": 80,
+    "eightfold": 60,
 }
 
 # Caps that are a setting of their own rather than a constant here. Workday was

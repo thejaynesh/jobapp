@@ -39,7 +39,8 @@ WITH catalog(source, expected_group) AS (
     ('jobspresso','api'), ('google_jobs','api'), ('simplify','api'), ('greenhouse','boards'), ('lever','boards'), ('ashby','boards'),
     ('smartrecruiters','boards'), ('workable','boards'), ('recruitee','boards'),
     ('workday','boards'), ('icims','boards'), ('bamboohr','boards'), ('teamtailor','boards'),
-    ('jobvite','boards'), ('personio','boards'), ('wellfound','browser'),
+    ('jobvite','boards'), ('personio','boards'), ('oracle','boards'),
+    ('successfactors','boards'), ('phenom','boards'), ('eightfold','boards'), ('wellfound','browser'),
     ('dice','browser'), ('handshake','browser')
 ), recent AS (
   SELECT s.*, f.started_at, f."group" AS run_group

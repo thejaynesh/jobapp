@@ -412,6 +412,13 @@ class Settings(BaseSettings):
     JOBVITE_COMPANY_SLUGS: str = ""
     PERSONIO_COMPANY_SLUGS: str = ""
     WORKDAY_TENANTS: str = ""  # comma-separated tenant:host:site, e.g. nvidia:wd5:NVIDIAExternalCareerSite
+    # Large employers' careers platforms, by careers host. Found automatically
+    # from posting links and community lists; these are for boards you want
+    # polled regardless.
+    ORACLE_BOARDS: str = ""          # host:site, e.g. egug.fa.us2.oraclecloud.com:CX_1
+    SUCCESSFACTORS_BOARDS: str = ""  # careers host, e.g. careers.qorvo.com
+    PHENOM_BOARDS: str = ""          # host/country/lang, e.g. careers.mastercard.com/us/en
+    EIGHTFOLD_BOARDS: str = ""       # careers host, e.g. qualcomm.eightfold.ai
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     CAREERJET_AFFID: str = ""

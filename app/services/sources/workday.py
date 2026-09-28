@@ -9,6 +9,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    rank_by_title,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,31 +72,16 @@ def _fetch_detail(tenant: str, host: str, site: str, path: str) -> dict:
 def _detail_paths(postings: list[dict], queries: list[str], budget: int) -> set[str]:
     """
     Which postings get their one detail request: the titles matching wants,
-    first.
+    first (`base.rank_by_title`).
 
     Workday's search is loose — "Software Engineer" brings back Sales Engineer
     and Engineering Manager — and the budget used to go in listing order, so
     it went to postings the title gate discards minutes later while the ones
-    it keeps arrived without a description. Ranked the way enrichment ranks
-    its own targets (`enrichment.select_targets`): a match on a specific word
-    first, then anything the filter would pass, then the rest. Nothing is
-    dropped, only described later; enrichment reads Workday's detail API for
-    whatever survives matching. Falls back to listing order if the matcher
-    cannot be consulted.
+    it keeps arrived without a description. Nothing is dropped, only described
+    later; enrichment reads Workday's detail API for whatever survives
+    matching.
     """
-    ordered = list(postings)
-    try:
-        from app.services.matcher import _title_matches_roles, title_priority_match
-
-        def tier(posting: dict) -> int:
-            title = posting.get("title") or ""
-            if title_priority_match(title, queries):
-                return 0
-            return 1 if _title_matches_roles(title, queries) else 2
-
-        ordered.sort(key=tier)  # stable: listing order within a tier
-    except Exception as exc:  # pragma: no cover — an import cycle would be a bug
-        logger.warning("Workday: title gate unavailable (%s); describing in order", exc)
+    ordered = rank_by_title(postings, queries, lambda p: p.get("title"))
     return {p["externalPath"] for p in ordered[:max(0, budget)]}
 
 

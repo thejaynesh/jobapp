@@ -96,12 +96,17 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
         "recruitee", "workday", "icims", "bamboohr", "teamtailor", "jobvite",
         "personio",
+        # Large employers' careers platforms, read by careers host.
+        "oracle", "successfactors", "phenom", "eightfold",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
 }
 
 ALL_GROUPS = tuple(SOURCE_GROUPS)
+
+# Board adapters that take the cycle's role queries.
+_SEARCHED_BOARDS = frozenset({"oracle", "successfactors", "phenom", "eightfold"})
 
 
 def group_sources(group: str | None) -> set[str] | None:
@@ -459,6 +464,10 @@ def _run_adapters(
         ("teamtailor", "app.services.sources.teamtailor"),
         ("jobvite", "app.services.sources.jobvite"),
         ("personio", "app.services.sources.personio"),
+        ("oracle", "app.services.sources.oracle"),
+        ("successfactors", "app.services.sources.successfactors"),
+        ("phenom", "app.services.sources.phenom"),
+        ("eightfold", "app.services.sources.eightfold"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):
@@ -466,7 +475,10 @@ def _run_adapters(
             ats_fetch = importlib.import_module(fetch_path).fetch
             stats.setdefault(ats_name, {"count": 0, "errors": [], "enabled": True})
             try:
-                jobs = ats_fetch(company_slugs=slugs)
+                # The large-employer platforms search, or gate a whole feed,
+                # by the roles; the rest return a company's every opening.
+                jobs = (ats_fetch(company_slugs=slugs, queries=roles)
+                        if ats_name in _SEARCHED_BOARDS else ats_fetch(company_slugs=slugs))
                 _record(stats, ats_name, jobs)
                 all_jobs.extend(jobs)
             except Exception as exc:

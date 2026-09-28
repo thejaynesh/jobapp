@@ -43,7 +43,8 @@ def _nim_models(db: Session) -> list[str]:
 TRIGGERABLE_SOURCES = [
     "adzuna", "jsearch", "google_jobs", "simplify", "linkedin", "greenhouse", "lever", "ashby",
     "smartrecruiters", "workable", "recruitee", "workday", "icims",
-    "bamboohr", "teamtailor", "jobvite", "personio", "jooble",
+    "bamboohr", "teamtailor", "jobvite", "personio",
+    "oracle", "successfactors", "phenom", "eightfold", "jooble",
     "careerjet", "findwork", "usajobs", "hiringcafe", "ycombinator",
     "indeed", "remotive", "arbeitnow", "remoteok",
     "weworkremotely", "themuse", "himalayas", "jobicy", "hnhiring",

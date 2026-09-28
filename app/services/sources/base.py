@@ -164,6 +164,77 @@ def posted_at_from_age(text: str | None, now=None) -> str | None:
     return (now - timedelta(days=days)).isoformat()
 
 
+def rank_by_title(items: list, queries: list[str], title_of) -> list:
+    """
+    `items` with the titles matching wants first, for spending a detail budget.
+
+    Three tiers, the way enrichment ranks its own targets
+    (`enrichment.select_targets`): a match on a specific word, then anything
+    the matcher's filter would pass, then the rest. Stable within a tier.
+    Nothing is dropped. Falls back to the given order if the matcher cannot be
+    consulted.
+    """
+    if not queries:
+        return list(items)
+    try:
+        from app.services.matcher import _title_matches_roles, title_priority_match
+    except Exception as exc:  # pragma: no cover — an import cycle would be a bug
+        logger.warning("title ranking unavailable (%s); keeping order", exc)
+        return list(items)
+
+    def tier(item) -> int:
+        title = title_of(item) or ""
+        if title_priority_match(title, queries):
+            return 0
+        return 1 if _title_matches_roles(title, queries) else 2
+
+    return sorted(items, key=tier)
+
+
+def passing_titles(items: list, queries: list[str], title_of) -> list:
+    """
+    The items whose title the matcher's filter would accept.
+
+    For the big-employer feeds that return a company's *every* opening — two
+    thousand at L3Harris, most of them in finance and HR — where storing the
+    rest only for the matcher to file them as `title_mismatch` is pure
+    ballast. Keyword-searched sources get the same effect from the search.
+    Falls open: no queries, or a matcher that cannot be consulted, keeps all.
+    """
+    if not queries:
+        return list(items)
+    try:
+        from app.services.matcher import _title_matches_roles
+    except Exception as exc:  # pragma: no cover
+        logger.warning("title gate unavailable (%s); keeping all", exc)
+        return list(items)
+    return [item for item in items if _title_matches_roles(title_of(item) or "", queries)]
+
+
+# Labels that are part of a careers host rather than the employer's name.
+_HOST_NOISE = frozenset({
+    "www", "careers", "career", "jobs", "job", "apply", "hiring", "work",
+    "join", "talent", "recruiting", "eightfold", "ai", "com", "net", "org",
+    "io", "co", "us",
+})
+
+
+def company_from_host(host: str) -> str:
+    """
+    A readable employer name out of a careers host, as a last resort.
+
+    `qualcomm.eightfold.ai` → "Qualcomm", `apply.careers.microsoft.com` →
+    "Microsoft", `careers.mastercard.com` → "Mastercard". Only used when the
+    board registry has no name for the board: a board filed under a real name
+    keeps it (see `job_fetcher._name_board_jobs`).
+    """
+    labels = [p for p in (host or "").lower().split(".") if p]
+    for label in labels:
+        if label not in _HOST_NOISE and not label.startswith("wd"):
+            return label.replace("-", " ").title()
+    return host
+
+
 _US_STATES = frozenset({
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
     "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",

@@ -109,6 +109,12 @@ _WORKDAY_URL = re.compile(
     r"([A-Za-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[A-Za-z-]+/)?"
     r"([A-Za-z0-9_-]+)(/job/[^?#]+)", re.I,
 )
+# Oracle Recruiting Cloud. The posting page is an empty single-page app, so
+# without this the only route to the text was the model reading a shell.
+_ORACLE_URL = re.compile(
+    r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.oraclecloud\.com)/hcmUI/CandidateExperience/"
+    r"[A-Za-z_-]+/sites/([A-Za-z0-9_]+)/job/([A-Za-z0-9]+)", re.I,
+)
 
 
 def _get_json(client: httpx.Client, url: str) -> dict | list | None:
@@ -232,6 +238,24 @@ def _workday(client: httpx.Client, tenant: str, host: str, site: str,
     )
 
 
+def _oracle(client: httpx.Client, host: str, site: str, job_id: str) -> Extraction:
+    from app.services.sources.oracle import description_of
+
+    data = _get_json(
+        client,
+        f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
+        f'?expand=all&onlyData=true&finder=ById;Id="{job_id}",siteNumber={site}',
+    )
+    items = (data or {}).get("items") if isinstance(data, dict) else None
+    record = items[0] if items else {}
+    return Extraction(
+        description=description_of(record),
+        method="ats_api",
+        posted_at=record.get("ExternalPostedStartDate"),
+        details={"location": record.get("PrimaryLocation") or ""},
+    )
+
+
 def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     """The posting's JSON, when the URL says which ATS is hosting it."""
     for pattern, call in (
@@ -249,6 +273,9 @@ def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     match = _WORKDAY_URL.search(url)
     if match:
         return _workday(client, *match.groups())
+    match = _ORACLE_URL.search(url)
+    if match:
+        return _oracle(client, *match.groups())
     return Extraction()
 
 
@@ -257,7 +284,7 @@ def looks_like_ats(url: str) -> bool:
     return any(
         pattern.search(url or "")
         for pattern in (_GREENHOUSE_EMBED, _GREENHOUSE_URL, _LEVER_URL, _ASHBY_URL,
-                        _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL)
+                        _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL)
     )
 
 
