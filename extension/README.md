@@ -171,6 +171,14 @@ an application.
 It asks for the named boards only — LinkedIn jobs, Greenhouse, Lever, Ashby,
 Workday, Workable, SmartRecruiters, Recruitee — rather than a wildcard.
 
+**Also on other application systems** is a second checkbox, with a permission
+of its own: iCIMS, Taleo, Oracle, SuccessFactors, Eightfold, Avature, UKG,
+Dayforce, Paylocity, BambooHR, Jobvite, JazzHR, Breezy, Rippling, Pinpoint,
+Teamtailor, Personio and Gem. It is separate so the first list never changes:
+the panel runs only where you granted access, and a longer first list would
+have switched it off on every existing install at update until someone
+re-ticked it. Both lists live in `overlay_hosts.js`.
+
 #### Filling a form
 
 On a page with several empty fields, the panel offers **Fill this form**. It

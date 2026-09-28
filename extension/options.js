@@ -10,6 +10,7 @@
  */
 
 import { HARVEST_SITES } from "./sites.js";
+import { OVERLAY_CORE, OVERLAY_MORE } from "./overlay_hosts.js";
 
 // ── Collapsible sections ──────────────────────────────────────────
 document.querySelectorAll(".section-head").forEach((btn) => {
@@ -116,6 +117,7 @@ const els = {
   useTabs: document.getElementById("useTabs"),
   solveChecks: document.getElementById("solveChecks"),
   overlay: document.getElementById("overlay"),
+  overlayMore: document.getElementById("overlay-more"),
   save: document.getElementById("save"),
   test: document.getElementById("test"),
   message: document.getElementById("message"),
@@ -139,20 +141,10 @@ const BROAD_HOSTS = { origins: ["https://*/*", "http://*/*"] };
 /** Harvest needs one site, not the web. Asked for separately for that reason. */
 const HARVEST_HOSTS = { origins: ["https://www.linkedin.com/*"] };
 
-/** Where the overlay draws. Named boards rather than a wildcard. */
-const OVERLAY_HOSTS = {
-  origins: [
-    "https://www.linkedin.com/jobs/*",
-    "https://boards.greenhouse.io/*",
-    "https://job-boards.greenhouse.io/*",
-    "https://jobs.lever.co/*",
-    "https://jobs.ashbyhq.com/*",
-    "https://*.myworkdayjobs.com/*",
-    "https://apply.workable.com/*",
-    "https://jobs.smartrecruiters.com/*",
-    "https://*.recruitee.com/*",
-  ],
-};
+/** Where the overlay draws. Named boards rather than a wildcard; see overlay_hosts.js. */
+const OVERLAY_HOSTS = { origins: OVERLAY_CORE };
+/** The other application systems, asked for by a checkbox of their own. */
+const OVERLAY_MORE_HOSTS = { origins: OVERLAY_MORE };
 
 function say(text, kind = "ok") {
   els.message.textContent = text;
@@ -173,7 +165,7 @@ function originPattern(url) {
 
 async function load() {
   const stored = await chrome.storage.local.get({
-    serverUrl: "", token: "", enabled: false, overlay: false,
+    serverUrl: "", token: "", enabled: false, overlay: false, overlayMore: false,
     useTabs: true, solveChecks: true, agentId: "", status: {}, events: [],
     ...Object.fromEntries(HARVEST_SITES.map((site) => [site.storageKey, false])),
   });
@@ -193,6 +185,8 @@ async function load() {
   }
   els.overlay.checked =
     stored.overlay && (await chrome.permissions.contains(OVERLAY_HOSTS));
+  els.overlayMore.checked =
+    stored.overlayMore && (await chrome.permissions.contains(OVERLAY_MORE_HOSTS));
   els.useTabs.checked = stored.useTabs;
   els.solveChecks.checked = stored.solveChecks;
   els.harvestStatus.textContent = stored.status.lastHarvest
@@ -325,6 +319,17 @@ async function save() {
   } else if (!els.overlay.checked && hasOverlay && !els.resolveLinks.checked) {
     await chrome.permissions.remove(OVERLAY_HOSTS);
   }
+  // The extra sites: only with the panel on, and asked for on their own so
+  // declining them leaves the core boards as they were.
+  const wantMore = els.overlay.checked && els.overlayMore.checked;
+  const hasMore = await chrome.permissions.contains(OVERLAY_MORE_HOSTS);
+  if (wantMore && !hasMore) {
+    if (!(await chrome.permissions.request(OVERLAY_MORE_HOSTS))) {
+      els.overlayMore.checked = false;
+    }
+  } else if (!wantMore && hasMore && !els.resolveLinks.checked) {
+    await chrome.permissions.remove(OVERLAY_MORE_HOSTS);
+  }
 
   await chrome.storage.local.set({
     ...Object.fromEntries(
@@ -334,6 +339,7 @@ async function save() {
       ]),
     ),
     overlay: els.overlay.checked,
+    overlayMore: els.overlay.checked && els.overlayMore.checked,
     useTabs: els.useTabs.checked,
     solveChecks: els.solveChecks.checked,
   });
