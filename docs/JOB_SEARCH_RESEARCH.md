@@ -26,13 +26,31 @@ has tests from the captured response shapes.
 | 1. Poll more Workday tenants | Tenant cap 30 → 150 and workers 8 → 16, both on the settings page. Detail requests go to titles the matcher wants. Every Workday company's other career sites come from its robots.txt (Salesforce's `Futureforce_NewGradRoles`). 565 verified sites of large US employers are seeded. | "Poll five times the Workday tenants…", "Find every Workday site a company runs…" |
 | 2. SimplifyJobs as a source | `simplify` source; listings files mined for boards uncapped and named; dead list dropped. | "Ingest SimplifyJobs' postings…" |
 | 3. Oracle Recruiting Cloud | `oracle` board adapter plus enrichment reader. | "Read Oracle, SuccessFactors, Phenom and Eightfold…" |
-| 4. Common Crawl discovery | `services.commoncrawl`, walked on an hourly due-check across 13 ATS hosts. | "Find company boards in Common Crawl's URL index" |
+| 4. Common Crawl discovery | `services.commoncrawl`, walked on an hourly due-check across 19 ATS hosts. | "Find company boards in Common Crawl's URL index", "Recognise the posting links discovery was dropping" |
 | 5. LinkedIn apply link | Not possible any more; see §6. | – |
 | 6. Eightfold, Phenom, SuccessFactors | All three, plus iCIMS careers-home (Jibe) sites. | as 3, and "Read iCIMS careers-home sites…" |
 | 7. Greenhouse list-first | Not done. It needs a measurement of where board time goes first, which needs production. | – |
 | 8. Work-authorization data | Not done. It only matters if sponsorship matters to you. | – |
 | 9. Commercial feed as a yardstick | Not done. It needs an account. | – |
-| 10. Long tail | Rippling and Pinpoint done, plus Amazon's own search. Taleo, Avature, UKG and Dayforce remain. | "Read Rippling and Pinpoint boards", "Read Amazon's careers search…" |
+| 10. Long tail | Rippling, Pinpoint, Taleo and JazzHR (every open posting, from its own sitemaps), plus Amazon's, TikTok's and Apple's own searches. Avature, Paylocity, UKG and Dayforce remain; see the recall table below. | "Read Rippling and Pinpoint boards", "Read Amazon's careers search…", "Read TikTok's…", "Read Apple's…", "Read JazzHR…", "Read Taleo career sections" |
+
+### Recall against SimplifyJobs, measured
+
+The 1,983 active new-grad and internship postings SimplifyJobs listed over
+the 60 days to 2026-09-28, by whether the host they link to is one we read:
+
+| | Recognised | Share |
+|---|---|---|
+| Before this work's second round | 1,359 | 69% |
+| After discovery fixes (Workday sites named "careers" or "2", `myworkdaysite.com`, EU Greenhouse and Lever, `jibeapply.com`) | 1,569 | 79% |
+| After TikTok, Apple and JazzHR | 1,790 | 90% |
+
+What remains, largest first: ByteDance (77; its API answers only its own
+page, so it is left alone), Tesla (11; bot-protected), Taleo sections without
+a search portal, and a long tail of employer domains. 257 of those domains
+wrap Greenhouse behind `?gh_jid=`, and the careers-site sniffer now finds the
+board for 212 of them ("Find the Greenhouse board behind employers' own
+careers sites"), 191 of them boards we had no other way to learn.
 
 ## The short version
 
