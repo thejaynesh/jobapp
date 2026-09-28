@@ -148,7 +148,7 @@ def _enrichment_context(db: Session) -> dict:
         return {
             "enrichment_runs": enrichment_history.recent_runs(db, DEFAULT_RUNS_SHOWN),
             "enrichment_totals": enrichment_history.totals(db, ROLLUP_WINDOW),
-            "enrichment_backlog": enrichment_history.backlog(db),
+            "enrichment_backlog": enrichment_history.backlog_snapshot(),
             "linkedin_state": enrichment_history.linkedin_state(db),
         }
     except Exception as exc:

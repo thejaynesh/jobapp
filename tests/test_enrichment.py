@@ -724,12 +724,17 @@ class TestEnrichmentPanel:
         db.commit()
         assert "careers.acme.com" in client.get("/runs").text
 
-    def test_the_backlog_gives_the_numbers_a_denominator(self, client, db):
+    def test_the_backlog_gives_the_numbers_a_denominator(self, client, db, monkeypatch):
         db.add(self._run())
         db.add(_job(description=None, url="https://x/20",
                     source_urls=["https://x/20"]))
         db.commit()
 
+        # The worker computes this ahead of a page load; a cold page no longer
+        # waits for a description scan to produce its denominator.
+        from app.services import enrichment_history
+        counts = enrichment_history.backlog(db, refresh=True)
+        monkeypatch.setattr(enrichment_history, "_cached_backlog", lambda: counts)
         body = client.get("/runs").text
         assert "still have a thin or missing description" in body
 

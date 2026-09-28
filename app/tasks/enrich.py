@@ -29,6 +29,51 @@ _EMPTY = {
 }
 
 
+@celery_app.task(
+    name="app.tasks.enrich.refresh_backlog",
+    soft_time_limit=540,
+    time_limit=600,
+    acks_late=False,
+)
+def refresh_backlog() -> dict:
+    """Refresh dashboard counts on the batch queue, with one scan at a time."""
+    from sqlalchemy import text
+
+    from app.services import enrichment_history as history
+
+    # Unlike ingestion, optional dashboard counts must stop if Redis cannot
+    # protect them from overlapping or store their result.
+    try:
+        lock = history._backlog_client().lock(
+            history.BACKLOG_LOCK_KEY, timeout=660, blocking_timeout=0
+        )
+        if not lock.acquire(blocking=False):
+            return {"skipped_reason": "already running"}
+    except Exception as exc:
+        logger.warning("refresh_backlog: cache unavailable: %s", exc)
+        return {"skipped_reason": "cache unavailable"}
+
+    try:
+        cached = history._cached_backlog()
+        if cached is not None:
+            return cached
+        db = SessionLocal()
+        try:
+            # Worker CPU quotas do not constrain queries inside Postgres.
+            # This optional count must not take both VPS cores in parallel,
+            # or run indefinitely while the host is throttling the VM.
+            db.execute(text("SET LOCAL max_parallel_workers_per_gather = 0"))
+            db.execute(text("SET LOCAL statement_timeout = '180s'"))
+            return history.backlog(db, refresh=True)
+        finally:
+            db.close()
+    finally:
+        try:
+            lock.release()
+        except Exception as exc:
+            logger.warning("refresh_backlog: could not release cache lock: %s", exc)
+
+
 # Under 29 minutes, like matching: with late acks the broker redelivers
 # anything unacknowledged after its visibility timeout, so a task allowed to
 # run longer would be handed to a second worker while the first still has it.

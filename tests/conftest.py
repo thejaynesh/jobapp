@@ -182,6 +182,17 @@ def _no_profile_unless_the_test_has_one(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _backlog_cache_off_by_default(monkeypatch):
+    """Route tests must not publish real backlog refresh tasks to Redis."""
+    from app.services import enrichment_history
+
+    def unavailable():
+        raise ConnectionError("backlog cache is isolated in tests")
+
+    monkeypatch.setattr(enrichment_history, "_backlog_client", unavailable)
+
+
+@pytest.fixture(autouse=True)
 def _auth_disabled_by_default(monkeypatch):
     """
     Route tests exercise their own subject, not the front door.

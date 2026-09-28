@@ -8,7 +8,18 @@
     </p>
   </div>
 
-  {% if enrichment_backlog and (enrichment_backlog.thin or enrichment_backlog.rescuable) %}
+  {% if enrichment_backlog.unavailable %}
+  <p class="text-xs text-gray-500 mb-3">
+    Backlog counts are not available yet. They update in the background when
+    a worker is available.
+  </p>
+  {% elif enrichment_backlog.stale %}
+  <p class="text-xs text-gray-500 mb-3">
+    Showing the last available backlog counts while they refresh in the background.
+  </p>
+  {% endif %}
+
+  {% if enrichment_backlog and not enrichment_backlog.unavailable and (enrichment_backlog.thin or enrichment_backlog.rescuable) %}
   <p class="text-xs text-gray-500 mb-3">
     <span class="font-medium text-gray-700">{{ "{:,}".format(enrichment_backlog.thin) }}</span>
     jobs still have a thin or missing description

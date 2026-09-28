@@ -161,23 +161,40 @@ def _waiting(db: Session, thin) -> int:
 # table rewrite that wants its own change.
 BACKLOG_KEY = "jobapp:enrichment:backlog"
 BACKLOG_TTL_SECONDS = 600
+BACKLOG_LAST_KEY = "jobapp:enrichment:backlog:last"
+BACKLOG_LAST_TTL_SECONDS = 86400
+BACKLOG_REQUEST_KEY = "jobapp:enrichment:backlog:requested"
+BACKLOG_LOCK_KEY = "jobapp:enrichment:backlog:running"
+
+
+def _backlog_client():
+    import redis
+
+    from app.config import settings
+
+    return redis.Redis.from_url(
+        settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2
+    )
 
 
 def _cached_backlog() -> dict | None:
+    return _read_backlog(BACKLOG_KEY)
+
+
+def _read_backlog(key: str) -> dict | None:
     try:
         import json
 
-        import redis
-
-        from app.config import settings
-
-        raw = redis.Redis.from_url(
-            settings.REDIS_URL, socket_timeout=2
-        ).get(BACKLOG_KEY)
-        return json.loads(raw) if raw else None
+        raw = _backlog_client().get(key)
+        counts = json.loads(raw) if raw else None
+        if isinstance(counts, dict) and all(
+            type(counts.get(name)) is int and counts[name] >= 0
+            for name in ("thin", "waiting", "rescuable")
+        ):
+            return counts
+        return None
     except Exception as exc:
-        # A cache that cannot be reached must not cost the panel its numbers,
-        # and must not cost them slowly either — hence the short timeout.
+        # A cache outage must not turn a page load into a full-table scan.
         logger.debug("enrichment_history: backlog cache unavailable: %s", exc)
         return None
 
@@ -186,15 +203,41 @@ def _store_backlog(counts: dict) -> None:
     try:
         import json
 
-        import redis
-
-        from app.config import settings
-
-        redis.Redis.from_url(settings.REDIS_URL, socket_timeout=2).setex(
-            BACKLOG_KEY, BACKLOG_TTL_SECONDS, json.dumps(counts)
-        )
+        payload = json.dumps(counts)
+        with _backlog_client().pipeline() as pipe:
+            pipe.setex(BACKLOG_KEY, BACKLOG_TTL_SECONDS, payload)
+            # Keep the last successful count visible while a worker refreshes
+            # it. Never replace it with zeros after a failed query.
+            pipe.setex(BACKLOG_LAST_KEY, BACKLOG_LAST_TTL_SECONDS, payload)
+            pipe.execute()
     except Exception as exc:
         logger.debug("enrichment_history: could not cache the backlog: %s", exc)
+
+
+def backlog_snapshot() -> dict:
+    """Read the panel's counts without ever querying the jobs table."""
+    cached = _cached_backlog()
+    if cached is not None:
+        return {**cached, "stale": False}
+
+    previous = _read_backlog(BACKLOG_LAST_KEY)
+    try:
+        # Gate requests across web processes. Keep the marker after failures
+        # too, so refreshing the page cannot repeatedly publish to a broken
+        # broker. Expiring queued tasks avoids accumulating old refreshes
+        # behind a long fetch cycle. The task also locks actual execution.
+        if _backlog_client().set(
+            BACKLOG_REQUEST_KEY, "1", nx=True, ex=BACKLOG_TTL_SECONDS
+        ):
+            from app.tasks.enrich import refresh_backlog
+
+            refresh_backlog.apply_async(retry=False, expires=BACKLOG_TTL_SECONDS)
+    except Exception as exc:
+        logger.debug("enrichment_history: could not request backlog refresh: %s", exc)
+
+    if previous is not None:
+        return {**previous, "stale": True}
+    return {"unavailable": True}
 
 
 def backlog(db: Session, refresh: bool = False) -> dict:
@@ -207,7 +250,9 @@ def backlog(db: Session, refresh: bool = False) -> dict:
 
     Cached for `BACKLOG_TTL_SECONDS`, because the count is a two-minute
     sequential scan over every description on the table — see `BACKLOG_KEY`.
-    Pass `refresh` to pay for it deliberately.
+    Pass `refresh` to pay for it deliberately. Web requests must use
+    `backlog_snapshot` instead: even one cache miss can exceed the proxy's
+    timeout, and simultaneous misses used to repeat the same scan.
     """
     from sqlalchemy import or_
 
