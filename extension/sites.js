@@ -111,10 +111,16 @@ export const HARVEST_SITES = [
     matches: ["https://*.monster.com/*"],
   },
   {
+    // `otta` and `harvestOtta` kept so existing installs keep their tick: Otta
+    // is part of Welcome to the Jungle now and otta.com redirects there.
     id: "otta",
-    label: "Otta / Welcome to the Jungle",
+    label: "Welcome to the Jungle (incl. Otta)",
     storageKey: "harvestOtta",
     matches: ["https://otta.com/*", "https://*.welcometothejungle.com/*"],
+    note:
+      "Answers a datacenter IP with a challenge, so browsing is the only way " +
+      "its listings are seen. Its search results come from Algolia, which the " +
+      "reader follows without any extra permission.",
   },
   {
     id: "jobright",

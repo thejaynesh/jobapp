@@ -352,6 +352,23 @@ BOARDS = BOARDS + (
         scroll_passes=30,
         needs_reader=True,
     ),
+    # Welcome to the Jungle (which Otta is now part of). Its pages answer a
+    # server with an AWS WAF challenge; a browser gets the real search, whose
+    # results arrive from Algolia and are read on the way past — see
+    # `harvest._from_wttj`. The keyword and page are what its own search box
+    # writes into the address. Location is not in the template on purpose:
+    # the board filters on a place name *and* coordinates that have to agree,
+    # which a location string from the profile cannot supply — the same
+    # reason Greenhouse has a feed setting. If this stops finding anything,
+    # the Harvest by site panel says "Forwarding, never finds jobs".
+    Board(
+        "wttj", "welcometothejungle.com", "Welcome to the Jungle",
+        search="https://www.welcometothejungle.com/en/jobs?query={q}",
+        # Ordinal pages from 1, as on Handshake.
+        page_param="page", page_size=1, page_base=1,
+        alt_hosts=("otta.com",),
+        needs_reader=True,
+    ),
 )
 
 BOARDS_BY_KEY = {board.key: board for board in BOARDS}
@@ -704,8 +721,10 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None,
                 # Nothing to search for. Its entry pages are already queued
                 # above; a search board with no query is just the homepage.
                 continue
+            # A template with no place in it is one search per role, not one
+            # per location — the same URL four times over otherwise.
             for role in roles[:6]:
-                for location in locations:
+                for location in (locations if "{loc}" in search else [""]):
                     first = search.format(
                         q=quote_plus(role), loc=quote_plus(location),
                     )

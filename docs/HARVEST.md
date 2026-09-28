@@ -267,6 +267,35 @@ Two details make it work, both in `_normalize`:
 That last point is the one worth remembering. A harvested posting is one job,
 once. A slug found on this board is a permanent new source.
 
+### Boards whose search lives on someone else's host
+
+Welcome to the Jungle (and Otta, now part of it) renders its search from
+Algolia: the page asks `csekhvms53-dsn.algolia.net`, not its own domain. Three
+things had to be true for those results to arrive, and none was:
+
+- **The interceptor has to forward them.** The path is `/1/indexes/*/queries`,
+  which names no job, and the host is not the board's. `namesAJob` now counts
+  any Algolia host as a search endpoint — it only runs on pages whose reader
+  you ticked, which are job boards — and `objectID`, which every Algolia hit
+  carries, counts as job-shaped.
+- **The server has to file them under the board.** A payload is filed under
+  the host it came from, so the Algolia hosts for WTTJ's application id are in
+  `HARVEST_SOURCES` as `wttj_harvest`. Without that they would be counted as
+  LinkedIn's, which is the fallback.
+- **Something has to read a hit.** Its title is `name`, its employer is a
+  nested `organization`, and it has no URL — only the employer's slug and the
+  job's, which `_from_wttj` builds the posting address from. It runs only on
+  `wttj_harvest` payloads, because the address it builds is on WTTJ's domain.
+
+The description is not in a hit. The posting page carries it in a JobPosting
+block, and because the domain is a harvest host, enrichment sends a browser to
+that page rather than trying from the server, which WTTJ answers with a
+challenge.
+
+The crawl plan has a `wttj` board (`browse_plan.BOARDS`), searched by keyword
+only: WTTJ filters on a place name and coordinates that must agree, which a
+location string from the profile cannot supply.
+
 ### Pacing
 
 This drives a real browser through a logged-in session, and volume plus rhythm
