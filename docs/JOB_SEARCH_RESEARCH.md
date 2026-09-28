@@ -16,6 +16,24 @@ reproduce it.
 
 ---
 
+## Status: what has been built from this (2026-09-28)
+
+Each item below was checked against a live site before it was written, and
+has tests from the captured response shapes.
+
+| Recommendation | Built | Commit subject |
+|---|---|---|
+| 1. Poll more Workday tenants | Tenant cap 30 → 150 and workers 8 → 16, both on the settings page. Detail requests go to titles the matcher wants. Every Workday company's other career sites come from its robots.txt (Salesforce's `Futureforce_NewGradRoles`). 565 verified sites of large US employers are seeded. | "Poll five times the Workday tenants…", "Find every Workday site a company runs…" |
+| 2. SimplifyJobs as a source | `simplify` source; listings files mined for boards uncapped and named; dead list dropped. | "Ingest SimplifyJobs' postings…" |
+| 3. Oracle Recruiting Cloud | `oracle` board adapter plus enrichment reader. | "Read Oracle, SuccessFactors, Phenom and Eightfold…" |
+| 4. Common Crawl discovery | `services.commoncrawl`, walked on an hourly due-check across 13 ATS hosts. | "Find company boards in Common Crawl's URL index" |
+| 5. LinkedIn apply link | Not possible any more; see §6. | – |
+| 6. Eightfold, Phenom, SuccessFactors | All three, plus iCIMS careers-home (Jibe) sites. | as 3, and "Read iCIMS careers-home sites…" |
+| 7. Greenhouse list-first | Not done. It needs a measurement of where board time goes first, which needs production. | – |
+| 8. Work-authorization data | Not done. It only matters if sponsorship matters to you. | – |
+| 9. Commercial feed as a yardstick | Not done. It needs an account. | – |
+| 10. Long tail | Rippling and Pinpoint done, plus Amazon's own search. Taleo, Avature, UKG and Dayforce remain. | "Read Rippling and Pinpoint boards", "Read Amazon's careers search…" |
+
 ## The short version
 
 The systems that come closest to "every job" (hiring.cafe, Fantastic.jobs,
@@ -41,7 +59,7 @@ US employers, and weak on (2) and (3). The ranked list:
 | 2 | **Ingest SimplifyJobs `listings.json` as a job source**, not only as a slug list | 7,575 active postings across the new-grad and internship files, 722 posted in the last 7 days, ~89% US, dated, with direct ATS apply URLs. One request per file. We currently only regex its README for company slugs. | S |
 | 3 | **Add an Oracle Recruiting Cloud adapter** | 479 active new-grad and intern postings apply through Oracle (measured), with 176 distinct Oracle hosts across the files' full history. 7–10% of large US employers (reported). It is an open JSON endpoint, and we have no adapter. | M |
 | 4 | **Discover boards from Common Crawl's URL index** | One aggregator found ~95,000 company identifiers this way (reported). The first 3,000 index rows for one Greenhouse host held 212 distinct boards (measured). | M |
-| 5 | **Read LinkedIn's employer apply link** from detail pages we already fetch | Two open-source implementations read it from `<code id="applyUrl">`. It gives both a real apply URL and a new board for discovery, with zero new requests. Needs one live check on our endpoint first. | S |
+| 5 | ~~Read LinkedIn's employer apply link~~ | Checked live: LinkedIn no longer exposes it to logged-out visitors (§6). Dropped. | – |
 | 6 | **Adapters for the big-employer ATSes**: Eightfold (PCSX), Phenom (`/widgets`), SuccessFactors (`sitemal.xml`) | Together ~30% of S&P 500 careers sites (reported). Each has a documented public JSON or XML route; SuccessFactors' feed even carries full descriptions. Covers Microsoft, PayPal, Morgan Stanley, Cisco, Mastercard and others. | M each |
 | 7 | **Fetch descriptions after screening, not up front**, for Greenhouse | We request `content=true` (every description) from every Greenhouse board on every poll. Other systems list first and describe later. This is likely where board-run time goes; measure first. | S |
 | 8 | **Employer work-authorization data** (USCIS H-1B Employer Data Hub, DOL LCA disclosures, E-Verify) | Public, downloadable, US-specific. Shows sponsorship history per employer and doubles as a company list. SimplifyJobs' own sponsorship flag is useless (99.7% "Other", measured). *Only if sponsorship matters to you.* | M |
@@ -270,12 +288,13 @@ beside its README. The README is what we parse today, for slugs only.
 - **LinkedIn guest API.** We already use it. JobSpy reports rate limiting
   "around the 10th page with one IP", and requests are capped at `start` 1000.
   Our adapter's pacing and detail budget are already tuned around that.
-  - **The one addition:** read the employer apply link. JobSpy parses
-    `<code id="applyUrl">` from the public job page, and OSApplyTrack reads the
-    `?url=` inside it. Whether the `jobs-guest/jobs/api/jobPosting/{id}`
-    fragment we fetch carries the same element needs one check against a real
-    response. If it does, every described LinkedIn job gains a real apply URL
-    and, often, a new ATS board for the registry, at no extra request cost.
+  - **The employer apply link is no longer there (checked 2026-09-28).**
+    JobSpy parses `<code id="applyUrl">` from the public job page, and
+    OSApplyTrack reads the `?url=` inside it. Six live postings, fetched both
+    through the `jobs-guest/jobs/api/jobPosting/{id}` fragment we use and as
+    full `/jobs/view/{id}` pages, carried no `applyUrl`. The offsite Apply
+    button now opens a sign-in modal. Logged out, the link is gone; don't build
+    on it.
 - **Google Jobs.** Now read through SerpApi. JobSpy scrapes Google's results
   page and its `async/callback:550` pagination directly: keyless arrays,
   fragile, and quickly blocked. SerpApi is the right trade.
