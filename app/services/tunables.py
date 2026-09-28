@@ -277,6 +277,18 @@ TUNABLES: list[Tunable] = [
              "About 740 companies match typical engineering roles at once.",
     ),
     Tunable(
+        key="avature_max_details", env="AVATURE_MAX_DETAILS", kind="int",
+        minimum=0, maximum=500, group="Company boards",
+        label="Avature: posting pages per portal per cycle",
+        help="Avature portals (Bloomberg, Koch, Harman, TotalEnergies…) list "
+             "every open posting in a sitemap, with its title. New postings "
+             "whose titles match your roles are read, newest first, up to this "
+             "many per portal each cycle; one already stored is not read "
+             "again, so the rest arrive over the next cycles. 0 reads none, "
+             "which leaves the portals doing nothing but closing postings "
+             "that disappear.",
+    ),
+    Tunable(
         key="ats_sniff_career_sites", env="ATS_SNIFF_CAREER_SITES", kind="bool",
         group="Company boards", label="Look behind employer careers sites",
         help="Many postings live on an employer's own site that wraps "

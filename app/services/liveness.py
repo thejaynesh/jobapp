@@ -107,6 +107,11 @@ def check_url(url: str, client: httpx.Client) -> LivenessResult:
     if final != url:
         original_path = urlparse(url).path.rstrip("/")
         final_parsed = urlparse(final)
+        # Avature, on its own hosts and employers' alike, sends a posting it
+        # no longer has to the portal's error page: /careers/JobDetail/… →
+        # /careers/Error.
+        if "/JobDetail/" in original_path and final_parsed.path.rstrip("/").endswith("/Error"):
+            return LivenessResult("closed", "the portal redirected the posting to its error page")
         if (
             _host_matches(final_parsed.hostname or "", _REDIRECT_MEANS_CLOSED_HOSTS)
             and original_path

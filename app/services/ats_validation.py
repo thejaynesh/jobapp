@@ -151,6 +151,30 @@ def _probe_taleo(spec: str) -> bool:
         return False
 
 
+def _probe_avature(spec: str) -> bool:
+    """
+    A portal is a board when its robots.txt names its sitemap, the sitemap
+    lists postings, and one of the newest opens without a login — which is
+    what keeps internal-mobility portals out. A tenant behind a bot challenge
+    is not a board we read.
+    """
+    from app.services.sources.avature import Blocked, detail, parse_spec, sitemap
+
+    parsed = parse_spec(spec)
+    if not parsed:
+        return False
+    try:
+        entries = sitemap(*parsed)
+        if not entries:
+            return False
+        newest = sorted(entries, key=lambda e: e.get("lastmod") or "", reverse=True)[:3]
+        return any(detail(entry["url"]) for entry in newest)
+    except Blocked:
+        return False
+    except httpx.HTTPStatusError:
+        return False
+
+
 def _probe_oracle(spec: str) -> bool:
     from app.services.sources.oracle import list_page, parse_spec
 
@@ -276,6 +300,7 @@ PROBES = {
     "pinpoint": _probe_pinpoint,
     "taleo": _probe_taleo,
     "paylocity": _probe_paylocity,
+    "avature": _probe_avature,
 }
 
 

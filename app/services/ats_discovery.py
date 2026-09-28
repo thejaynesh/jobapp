@@ -164,6 +164,14 @@ _HOST_BOARD_PATTERNS: list[tuple[str, re.Pattern, "callable"]] = [
         r"https?://([a-z0-9-]+)\.taleo\.net/careersection/([A-Za-z0-9_]+)/"
         r"(?:jobdetail|jobsearch|moresearch|joblist)\.ftl", re.I),
      lambda m: f"{m.group(1).lower()}/{m.group(2)}"),
+    # Avature: {tenant}.avature.net/[{locale}/]{portal}/JobDetail/… — the
+    # locale dropped, since every language's sitemap lists the same postings.
+    # Internal-mobility, sandbox and template portals are not boards.
+    ("avature", re.compile(
+        r"https?://((?!sandbox)[a-z0-9-]+)\.avature\.net/(?:[a-z]{2}_[A-Z]{2}/)?"
+        r"((?![A-Za-z0-9_-]*(?:internal|sandbox|example|tobedeleted|test))[A-Za-z0-9_-]+)"
+        r"/(?:JobDetail|SearchJobs)\b", re.I),
+     lambda m: f"{m.group(1).lower()}.avature.net/{m.group(2)}"),
     # Eightfold: {company}.eightfold.ai, or a custom host's /careers/job/<long id>
     ("eightfold", re.compile(r"https?://([a-z0-9-]+\.eightfold\.ai)/careers", re.I),
      lambda m: m.group(1).lower()),
@@ -483,6 +491,7 @@ ATS_CONFIG_FIELDS = {
     "pinpoint": "PINPOINT_COMPANY_SLUGS",
     "taleo": "TALEO_BOARDS",
     "paylocity": "PAYLOCITY_COMPANY_IDS",
+    "avature": "AVATURE_BOARDS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -510,6 +519,8 @@ TOTAL_SLUG_CAPS = {
     "taleo": 60,
     # One page each, but thousands of small employers; yield decides which.
     "paylocity": 200,
+    # Two small requests for the sitemap, then a page per new matching posting.
+    "avature": 80,
 }
 
 # Caps that are a setting of their own rather than a constant here. Workday was

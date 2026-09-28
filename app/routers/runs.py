@@ -44,7 +44,7 @@ TRIGGERABLE_SOURCES = [
     "adzuna", "jsearch", "google_jobs", "simplify", "amazon", "tiktok", "apple", "jazzhr", "linkedin", "greenhouse", "lever", "ashby",
     "smartrecruiters", "workable", "recruitee", "workday", "icims",
     "bamboohr", "teamtailor", "jobvite", "personio",
-    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "pinpoint", "taleo", "paylocity", "jooble",
+    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "pinpoint", "taleo", "paylocity", "avature", "jooble",
     "careerjet", "findwork", "usajobs", "hiringcafe", "ycombinator",
     "indeed", "remotive", "arbeitnow", "remoteok",
     "weworkremotely", "themuse", "himalayas", "jobicy", "hnhiring",

@@ -28,6 +28,20 @@ SEED_ATS_SLUGS: dict[str, list[str]] = {
         "posthog", "cursor", "perplexity", "vanta", "mercury", "clever", "zip",
         "hightouch", "sierra", "docker", "modal", "elevenlabs",
     ],
+    # Avature portals of US employers, each checked on 2026-09-28 the way
+    # registry validation checks one: a sitemap named in robots.txt, and a
+    # posting from it that opens without a login.
+    "avature": [
+        "bloomberg.avature.net/careers", "koch.avature.net/careers",
+        "koch.avature.net/CollegeRecruiting", "harmanglobal.avature.net/careers",
+        "mantech.avature.net/careers", "insperity.avature.net/careers",
+        "tql.avature.net/TQLexternalcareers", "forvis.avature.net/campuscareers",
+        "broadinstitute.avature.net/careers", "unifi.avature.net/careers",
+        "radpartners.avature.net/careersmarketplace", "nva.avature.net/jobs",
+        "missionpethealth.avature.net/careersmarketplace", "cdcn.avature.net/careers",
+        "intercaretherapy.avature.net/careers", "onecall.avature.net/careers",
+        "bradyplus.avature.net/careersmarketplace",
+    ],
     "workday": [
         "nvidia:wd5:NVIDIAExternalCareerSite",
         "salesforce:wd12:External_Career_Site",

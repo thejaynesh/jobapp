@@ -424,6 +424,10 @@ class Settings(BaseSettings):
     RIPPLING_COMPANY_SLUGS: str = ""  # ats.rippling.com/<slug>
     PINPOINT_COMPANY_SLUGS: str = ""  # <slug>.pinpointhq.com
     PAYLOCITY_COMPANY_IDS: str = ""  # the id in recruiting.paylocity.com/Recruiting/Jobs/All/<id>
+    AVATURE_BOARDS: str = ""         # host/portal, e.g. bloomberg.avature.net/careers
+    # New postings matching the roles whose pages an Avature portal is asked
+    # for each cycle (`sources.avature`). Editable on the settings page.
+    AVATURE_MAX_DETAILS: int = 25
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     CAREERJET_AFFID: str = ""

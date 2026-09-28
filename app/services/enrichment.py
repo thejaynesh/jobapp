@@ -137,6 +137,11 @@ _TALEO_HISTORY = re.compile(r'(?:name|id)="initialHistory"[^>]*value="([^"]*)"')
 _APPLE_URL = re.compile(
     r"https?://jobs\.apple\.com/[a-z]{2}-[a-z]{2}/details/(\d+)(?:/([A-Za-z0-9-]+))?", re.I,
 )
+# Avature. No API; the posting page is labelled fields (`sources.avature`).
+_AVATURE_URL = re.compile(
+    r"https?://[a-z0-9-]+\.avature\.net/(?:[a-z]{2}_[A-Z]{2}/)?[A-Za-z0-9_-]+"
+    r"/JobDetail/(?:[^\s\"'<>?#/]+/)?\d+", re.I,
+)
 _ORACLE_URL = re.compile(
     r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.oraclecloud\.com)/hcmUI/CandidateExperience/"
     r"[A-Za-z_-]+/sites/([A-Za-z0-9_]+)/job/([A-Za-z0-9]+)", re.I,
@@ -387,6 +392,28 @@ def _apple(client: httpx.Client, position_id: str, slug: str | None) -> Extracti
     )
 
 
+def _avature(client: httpx.Client, url: str) -> Extraction:
+    from app.services.sources.avature import parse_detail
+
+    resp = client.get(url, follow_redirects=True)
+    # A closed posting lands on the portal's Error page, an internal one on Login.
+    if "/JobDetail/" not in resp.url.path:
+        return Extraction()
+    resp.raise_for_status()
+    page = parse_detail(resp.text)
+    if not page or not page["description"]:
+        return Extraction()
+    details = {"location": page["location"]} if page["location"] else {}
+    if page["employment_type"]:
+        details["employment_type"] = page["employment_type"]
+    return Extraction(
+        description=clean(page["description"]),
+        method="ats_api",
+        posted_at=page["posted_at"],
+        details=details,
+    )
+
+
 def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     """The posting's JSON, when the URL says which ATS is hosting it."""
     for pattern, call in (
@@ -419,6 +446,9 @@ def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     match = _DAYFORCE_URL.search(url)
     if match:
         return _dayforce(client, *match.groups())
+    match = _AVATURE_URL.search(url)
+    if match:
+        return _avature(client, match.group(0))
     return Extraction()
 
 
@@ -428,7 +458,7 @@ def looks_like_ats(url: str) -> bool:
         pattern.search(url or "")
         for pattern in (_GREENHOUSE_EMBED, _GREENHOUSE_URL, _LEVER_URL, _ASHBY_URL,
                         _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL,
-                        _APPLE_URL, _TALEO_URL, _UKG_URL, _DAYFORCE_URL)
+                        _APPLE_URL, _TALEO_URL, _UKG_URL, _DAYFORCE_URL, _AVATURE_URL)
     )
 
 

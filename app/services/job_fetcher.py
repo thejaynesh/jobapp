@@ -108,6 +108,8 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         # JazzHR: its sitemaps name every open posting, so no registry needed.
         "jazzhr",
         "taleo", "paylocity",
+        # Avature: each portal's sitemap lists its every open posting.
+        "avature",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
@@ -122,13 +124,14 @@ ALL_GROUPS = tuple(SOURCE_GROUPS)
 # SmartRecruiters' first hundred…) list a slice, and say nothing about the rest.
 FULL_FEED_BOARDS = frozenset({
     "greenhouse", "lever", "ashby", "recruitee", "pinpoint", "paylocity",
-    "bamboohr", "personio", "workable",
+    "bamboohr", "personio", "workable", "avature",
 })
 VANISHED_NOTE = "no longer listed on its board"
 
 # Board adapters that take the cycle's role queries.
 _SEARCHED_BOARDS = frozenset({
     "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "taleo",
+    "avature",
 })
 
 
@@ -496,6 +499,7 @@ def _run_adapters(
         ("pinpoint", "app.services.sources.pinpoint"),
         ("taleo", "app.services.sources.taleo"),
         ("paylocity", "app.services.sources.paylocity"),
+        ("avature", "app.services.sources.avature"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):
