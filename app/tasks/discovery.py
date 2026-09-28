@@ -59,6 +59,16 @@ def discover_boards(force: bool = False) -> dict:
             except Exception as exc:
                 db.rollback()
                 logger.warning("discovery: board validation failed: %s", exc)
+        # The websites of YC companies that are hiring, a batch an hour.
+        if value(data, "yc_discovery_enabled"):
+            from app.services import yc_discovery
+
+            try:
+                report["yc"] = yc_discovery.run(
+                    db, int(value(data, "yc_discovery_per_hour") or 0))
+            except Exception as exc:
+                db.rollback()
+                logger.warning("discovery: YC company sites failed: %s", exc)
         if not force and not value(data, "commoncrawl_enabled"):
             return {**report, "skipped": True, "detail": "switched off"}
         return {**report, **commoncrawl.run(

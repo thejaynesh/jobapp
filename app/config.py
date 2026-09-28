@@ -473,6 +473,10 @@ class Settings(BaseSettings):
     # cycle took weeks to reach. Editable on the settings page.
     ATS_BOARD_VALIDATE_PER_CYCLE: int = 400
     ATS_BOARD_VALIDATE_HOURLY: int = 300  # the same probe on the hourly discovery tick
+    # Hiring YC companies' websites, looked behind for their boards on the
+    # hourly discovery tick (`services.yc_discovery`). Settings page.
+    YC_DISCOVERY_ENABLED: bool = True
+    YC_DISCOVERY_PER_HOUR: int = 40
     # Company boards from Common Crawl's URL index (`services.commoncrawl`):
     # index pages read per walk (~15,000 URLs each), and how often a walk runs.
     # A walk resumes where the last stopped and restarts on each new crawl.

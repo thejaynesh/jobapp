@@ -225,6 +225,17 @@ def _board_validation_off_by_default(monkeypatch):
     monkeypatch.setattr(settings, "ATS_BOARD_VALIDATION", False)
 
 
+@pytest.fixture(autouse=True)
+def _yc_discovery_off_by_default(monkeypatch):
+    """
+    YC company discovery reads a directory from yc-oss and looks behind the
+    websites in it, on every discovery tick. Off here for the reason board
+    validation is: a test of the tick must not reach the internet by default.
+    `tests/test_yc_discovery.py` switches it on, with the network stubbed.
+    """
+    monkeypatch.setattr(settings, "YC_DISCOVERY_ENABLED", False)
+
+
 @pytest.fixture
 def client(db):
     from app.main import app

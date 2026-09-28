@@ -370,6 +370,22 @@ TUNABLES: list[Tunable] = [
              "and unprobed boards are never polled.",
     ),
     Tunable(
+        key="yc_discovery_enabled", env="YC_DISCOVERY_ENABLED", kind="bool",
+        group="Company boards", label="Look behind the sites of hiring YC companies",
+        help="Y Combinator's directory lists about 1,500 companies as hiring, "
+             "each with its website. Most run a Greenhouse, Lever or Ashby "
+             "board no posting of ours has linked to; each website is looked "
+             "behind once for it, on the hourly tick, and the list is re-read "
+             "weekly.",
+    ),
+    Tunable(
+        key="yc_discovery_per_hour", env="YC_DISCOVERY_PER_HOUR", kind="int",
+        minimum=0, maximum=500, group="Company boards",
+        label="YC sites looked behind per hour",
+        help="A few requests each. 40 works through the list in about a day and "
+             "a half; 0 pauses it.",
+    ),
+    Tunable(
         key="ats_board_validate_hourly", env="ATS_BOARD_VALIDATE_HOURLY",
         kind="int", minimum=0, maximum=5000, group="Company boards",
         label="New boards checked per hour",
