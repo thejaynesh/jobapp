@@ -80,6 +80,14 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
         # would register the tracker itself as a company board.
         re.compile(r"jobs\.jobvite\.com/(?:careers/)?([A-Za-z0-9_-]{2,})", re.I),
     ],
+    "rippling": [
+        # ats.rippling.com/<slug>/jobs/<id>, past any locale segment (/en-US/).
+        re.compile(r"ats\.rippling\.com/(?:api/v2/board/)?(?:[a-z]{2}-[A-Za-z]{2}/)?"
+                   r"([A-Za-z0-9_-]{2,})(?:/|$)", re.I),
+    ],
+    "pinpoint": [
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.pinpointhq\.com", re.I),
+    ],
     "personio": [
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio\.(?:de|com)", re.I),
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio-int\.com", re.I),
@@ -369,6 +377,8 @@ ATS_CONFIG_FIELDS = {
     "phenom": "PHENOM_BOARDS",
     "eightfold": "EIGHTFOLD_BOARDS",
     "jibe": "JIBE_BOARDS",
+    "rippling": "RIPPLING_COMPANY_SLUGS",
+    "pinpoint": "PINPOINT_COMPANY_SLUGS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry

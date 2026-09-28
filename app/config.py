@@ -420,6 +420,8 @@ class Settings(BaseSettings):
     PHENOM_BOARDS: str = ""          # host/country/lang, e.g. careers.mastercard.com/us/en
     EIGHTFOLD_BOARDS: str = ""       # careers host, e.g. qualcomm.eightfold.ai
     JIBE_BOARDS: str = ""            # iCIMS careers-home host, e.g. careers.amd.com
+    RIPPLING_COMPANY_SLUGS: str = ""  # ats.rippling.com/<slug>
+    PINPOINT_COMPANY_SLUGS: str = ""  # <slug>.pinpointhq.com
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     CAREERJET_AFFID: str = ""

@@ -212,6 +212,24 @@ def _probe_jibe(host: str) -> bool:
             and isinstance(data.get("totalCount"), int))
 
 
+def _probe_rippling(slug: str) -> bool:
+    r = httpx.get(f"https://ats.rippling.com/api/v2/board/{slug}/jobs",
+                  params={"page": 0, "pageSize": 1}, timeout=_TIMEOUT)
+    try:
+        return r.status_code == 200 and isinstance(r.json().get("items"), list)
+    except (ValueError, AttributeError):
+        return False
+
+
+def _probe_pinpoint(slug: str) -> bool:
+    r = httpx.get(f"https://{slug}.pinpointhq.com/postings.json", timeout=_TIMEOUT,
+                  follow_redirects=True)
+    try:
+        return r.status_code == 200 and isinstance(r.json().get("data"), list)
+    except (ValueError, AttributeError):
+        return False
+
+
 PROBES = {
     "greenhouse": _probe_greenhouse,
     "lever": _probe_lever,
@@ -230,6 +248,8 @@ PROBES = {
     "phenom": _probe_phenom,
     "eightfold": _probe_eightfold,
     "jibe": _probe_jibe,
+    "rippling": _probe_rippling,
+    "pinpoint": _probe_pinpoint,
 }
 
 

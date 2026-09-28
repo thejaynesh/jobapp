@@ -100,6 +100,7 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "personio",
         # Large employers' careers platforms, read by careers host.
         "oracle", "successfactors", "phenom", "eightfold", "jibe",
+        "rippling", "pinpoint",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
@@ -108,7 +109,9 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
 ALL_GROUPS = tuple(SOURCE_GROUPS)
 
 # Board adapters that take the cycle's role queries.
-_SEARCHED_BOARDS = frozenset({"oracle", "successfactors", "phenom", "eightfold", "jibe"})
+_SEARCHED_BOARDS = frozenset({
+    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling",
+})
 
 
 def group_sources(group: str | None) -> set[str] | None:
@@ -471,6 +474,8 @@ def _run_adapters(
         ("phenom", "app.services.sources.phenom"),
         ("eightfold", "app.services.sources.eightfold"),
         ("jibe", "app.services.sources.jibe"),
+        ("rippling", "app.services.sources.rippling"),
+        ("pinpoint", "app.services.sources.pinpoint"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):
