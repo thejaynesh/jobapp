@@ -13,7 +13,7 @@ celery_app = Celery(
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
         "app.tasks.match_eval", "app.tasks.backup", "app.tasks.archive",
-        "app.tasks.browse", "app.tasks.discovery",
+        "app.tasks.browse", "app.tasks.discovery", "app.tasks.sponsorship",
     ],
 )
 
@@ -91,6 +91,7 @@ celery_app.conf.update(
         "app.tasks.backfill.*": {"queue": "batch"},
         "app.tasks.backup.*": {"queue": "batch"},
         "app.tasks.discovery.*": {"queue": "batch"},
+        "app.tasks.sponsorship.*": {"queue": "batch"},
         "app.tasks.descriptions.*": {"queue": "batch"},
         "app.tasks.liveness.*": {"queue": "batch"},
         "app.tasks.links.*": {"queue": "batch"},
@@ -199,6 +200,12 @@ celery_app.conf.beat_schedule = {
     "discover-boards": {
         "task": "app.tasks.discovery.discover_boards",
         "schedule": celery_schedule(3600),
+    },
+    # Employers' H-1B filings from DOL's disclosure files. Daily, and a single
+    # page read unless DOL has published a quarter since the last run.
+    "refresh-h1b-history": {
+        "task": "app.tasks.sponsorship.refresh_h1b_history",
+        "schedule": celery_schedule(24 * 3600),
     },
     "take-backup": {
         "task": "app.tasks.backup.take_backup",

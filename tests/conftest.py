@@ -177,6 +177,23 @@ def _slug_harvest_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _h1b_history_off_by_default(monkeypatch):
+    """
+    Job cards look up the employer's H-1B filings, through a per-process cache
+    that opens its own database session when stale. In the suite that session
+    is the application's, not the test's, so every route test rendering a card
+    would reach for a database it does not own. The cards render as though no
+    filings were loaded; `tests/test_sponsorship_history.py` loads its own.
+    """
+    from app.services import sponsorship_history
+
+    monkeypatch.setattr(sponsorship_history, "_reader", lambda db=None: None)
+    sponsorship_history.reset_cache()
+    yield
+    sponsorship_history.reset_cache()
+
+
+@pytest.fixture(autouse=True)
 def _age_cutoff_off_by_default(monkeypatch):
     """
     The jobs list's age window, off unless a test is about it.

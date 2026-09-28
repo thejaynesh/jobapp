@@ -155,6 +155,20 @@
         {% else %}No sponsorship{% endif %}
       </span>
       {% endif %}
+      {# The employer's H-1B record, from DOL's disclosure files. Advisory,
+         like the posting's own words above: it never filters or scores. #}
+      {% set h1b = h1b_history(job.company) %}
+      {% if h1b and h1b.certified %}
+      <span title="{{ h1b.names | join('; ') }}{% if h1b.more_names %} and {{ h1b.more_names }} more{% endif %}: {{ '{:,}'.format(h1b.certified) }} certified H-1B applications, {{ h1b.period }}, {{ '{:,}'.format(h1b.computer) }} of them for computer occupations"
+        class="text-xs px-2 py-1 rounded font-medium cursor-help bg-emerald-50 text-emerald-700">
+        H-1B: {{ '{:,}'.format(h1b.certified) }} filed
+      </span>
+      {% elif h1b and h1b.needs_sponsorship %}
+      <span title="No certified H-1B applications under this name, {{ h1b.period }}. The employer may file under another name."
+        class="text-xs px-2 py-1 rounded font-medium cursor-help bg-amber-50 text-amber-700">
+        No H-1B filings found
+      </span>
+      {% endif %}
       {% if job.source %}
       <span class="text-xs px-2 py-1 rounded font-medium
         {% if job.source == 'adzuna' %}bg-orange-50 text-orange-600

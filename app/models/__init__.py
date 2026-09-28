@@ -14,3 +14,4 @@ from app.models.llm_call import LLMCall
 from app.models.crawl_recipe import CrawlRecipe, CrawlSample
 from app.models.harvest_recipe import HarvestRecipe, HarvestSample
 from app.models.linked_account import LinkedAccount
+from app.models.h1b_filing import H1bFiling

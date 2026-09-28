@@ -799,6 +799,10 @@ class Settings(BaseSettings):
 
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
+    # Employers' H-1B filings from DOL's public disclosure data, shown on each
+    # job (`services.sponsorship_history`). Editable on the settings page.
+    H1B_HISTORY_ENABLED: bool = True
+    H1B_HISTORY_QUARTERS: int = 4
     # How far back the jobs list looks, in days since the job was *fetched*.
     #
     # Distinct from MAX_JOB_AGE_DAYS above, which is a fetch-time gate on

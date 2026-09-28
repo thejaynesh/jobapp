@@ -88,6 +88,26 @@ TUNABLES: list[Tunable] = [
              "date, and only to new fetches — it won't clear what's stored.",
     ),
     Tunable(
+        key="h1b_history_enabled", env="H1B_HISTORY_ENABLED", kind="bool",
+        group="Filtering", label="Show H-1B filing history per employer",
+        help="Each job shows how many H-1B labor condition applications its "
+             "employer had certified lately, from the Department of Labor's "
+             "public disclosure files, and how many were for computer "
+             "occupations. If your screening answers say you will need "
+             "sponsorship, an employer with none on file under its name is "
+             "marked too. Shown, never filtered or scored. Off stops the "
+             "daily check for new DOL files and hides it.",
+    ),
+    Tunable(
+        key="h1b_history_quarters", env="H1B_HISTORY_QUARTERS", kind="int",
+        minimum=1, maximum=12, group="Filtering",
+        label="H-1B history: fiscal quarters counted",
+        help="How many of the latest federal fiscal quarters the counts cover. "
+             "4 is a year, which takes in the March filing season whenever it "
+             "falls; 1 is only the newest quarter, which can miss it. More "
+             "quarters means an older quarter is downloaded the first time.",
+    ),
+    Tunable(
         key="dashboard_max_age_days", env="DASHBOARD_MAX_AGE_DAYS", kind="int",
         minimum=0, maximum=3650, group="Filtering",
         label="Hide jobs older than (days)",
