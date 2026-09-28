@@ -283,6 +283,7 @@
       box,
       "Fills what it recognises and stops. It never submits — you read it and press apply.",
     );
+    addRememberButton(box);
   }
 
   /**
@@ -470,196 +471,28 @@
   }
 
   // -------------------------------------------------------------------------
-  // Autofill
+  // Autofill — the matching and typing live in autofill.js
   // -------------------------------------------------------------------------
 
-  /**
-   * Which profile value belongs in a field, worked out from how it is labelled.
-   *
-   * Matched against the field's `autocomplete`, `name`, `id`, `placeholder`,
-   * `aria-label` and its visible label text, all at once. Every ATS names these
-   * differently — Greenhouse ships `job_application[first_name]`, Workday ships
-   * a generated id and a label — so no single attribute is reliable and the
-   * union of them is much harder to defeat than any one.
-   *
-   * Order matters. `first_name` must be tested before `name`, and `linkedin`
-   * before `website`, because the looser pattern would otherwise swallow the
-   * field the stricter one wanted.
-   */
-  /**
-   * The two sponsorship phrasings, kept apart because forms ask both.
-   *
-   * "Will you require sponsorship?" and "Are you authorized to work without
-   * sponsorship?" want opposite answers to the same fact, and a field that
-   * matches both — "authorized to work without requiring sponsorship" is real
-   * and common — is one where filling either answer has even odds of being a
-   * false statement on an employer's form. Those are left blank; see
-   * `valueFor`.
-   */
-  const SPONSORSHIP_RE = /(require|need|request).{0,30}sponsor|sponsor.{0,30}(require|need|now or in the future)/i;
-  const AUTHORIZATION_RE = /(legally[\s_-]*authoriz|authoriz.{0,20}to work|work[\s_-]*authoriz|eligible to work|right to work)/i;
+  const autofill = () => globalThis.JobAppAutofill;
 
-  const FIELD_RULES = [
-    ["first_name", /(^|[^a-z])(first[\s_-]*name|given[\s_-]*name|fname)/i],
-    ["last_name", /(^|[^a-z])(last[\s_-]*name|family[\s_-]*name|surname|lname)/i],
-    ["email", /e-?mail/i],
-    ["phone", /(phone|mobile|telephone|contact[\s_-]*number)/i],
-    ["linkedin", /linked[\s_-]*in/i],
-    ["github", /(github|git[\s_-]*hub)/i],
-    ["website", /(website|portfolio|personal[\s_-]*site|blog)/i],
-    ["school", /(school|university|college|institution)/i],
-    ["degree", /degree/i],
-    ["field_of_study", /(field[\s_-]*of[\s_-]*study|major|discipline)/i],
-    ["location", /(city|location|address|where.*based)/i],
-    // The screening questions, before the loose name rule below. Each is
-    // answered once on the profile's Screening tab; blank there stays blank
-    // here, because a guessed answer on a legal declaration is worse than an
-    // empty box — the empty box gets noticed.
-    ["sponsorship_required", SPONSORSHIP_RE],
-    ["work_authorization", AUTHORIZATION_RE],
-    ["start_date", /(start[\s_-]*date|when.*(can|could).*start|availability|notice[\s_-]*period|earliest.*(start|availability))/i],
-    ["salary_expectation", /(salary|compensation|pay).*(expect|desired|require|range)|expected[\s_-]*(salary|compensation)|desired[\s_-]*(salary|compensation|pay)/i],
-    ["referral_source", /(how did you hear|hear about us|referral[\s_-]*source|where did you (find|hear))/i],
-    ["full_name", /(^|[^a-z])(full[\s_-]*name|your[\s_-]*name|name)/i],
-  ];
-
-  /** Everything a field is described by, as one lowercase haystack. */
   function describe(field) {
-    const bits = [
-      field.getAttribute("autocomplete"),
-      field.name,
-      field.id,
-      field.getAttribute("placeholder"),
-      field.getAttribute("aria-label"),
-    ];
-
-    // The visible label, which on Workday is the only thing that says anything.
-    if (field.id) {
-      // `CSS` here is the global, not this file's stylesheet — which is why
-      // that constant is called PANEL_CSS. Shadowing it made `CSS.escape`
-      // a property of a template string, so reading the label of any field
-      // with an id threw and took the whole fill with it.
-      const label = document.querySelector(`label[for="${CSS.escape(field.id)}"]`);
-      if (label) bits.push(label.textContent);
-    }
-    const wrapping = field.closest("label");
-    if (wrapping) bits.push(wrapping.textContent);
-
-    return bits.filter(Boolean).join(" ").slice(0, 400).toLowerCase();
+    return autofill() ? autofill().describe(field) : "";
   }
 
-  function valueFor(field, values) {
-    const haystack = describe(field);
-    if (!haystack) return null;
-    // A question that is about sponsorship AND about authorization is asking
-    // one of them inverted, and there is no way to tell which. Either answer
-    // has even odds of being a false statement on an employer's form.
-    if (SPONSORSHIP_RE.test(haystack) && AUTHORIZATION_RE.test(haystack)) {
-      return null;
-    }
-    for (const [key, pattern] of FIELD_RULES) {
-      if (pattern.test(haystack) && values[key]) return [key, values[key]];
-    }
-    return null;
+  function looksLikeAForm() {
+    return Boolean(autofill()) && autofill().looksLikeAForm();
   }
 
-  /**
-   * Set a value the way a framework will believe.
-   *
-   * React and Angular track the input's value internally and ignore a plain
-   * assignment, so the field looks filled and submits empty — the worst
-   * possible failure here. Writing through the native setter and then
-   * dispatching the events a real keystroke produces is what makes the
-   * framework accept it.
-   */
-  function setValue(field, value) {
-    const proto =
-      field instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    if (setter) setter.call(field, value);
-    else field.value = value;
+  let stopWatching = null;
 
-    field.dispatchEvent(new Event("input", { bubbles: true }));
-    field.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  /**
-   * Choose the option that matches a written answer. False when none does.
-   *
-   * Dropdowns are where the screening answers actually live — "Will you
-   * require sponsorship?" is a `<select>` far more often than a text box — and
-   * they are also where a wrong answer is most dangerous, because it looks
-   * deliberate. So the matching is strict and refuses ties: exact text or
-   * value, then a prefix ("Yes" against "Yes, I will require sponsorship"),
-   * and nothing looser. Anything ambiguous is left for the user.
-   */
-  function chooseOption(select, value) {
-    const want = normalize(value);
-    if (!want) return false;
-
-    const options = Array.from(select.options).filter((option, index) => {
-      if (option.disabled) return false;
-      // The placeholder row. Selecting it is the same as answering nothing,
-      // and on a required field it is worse — it looks answered.
-      if (index === 0 && !normalize(option.value)) return false;
-      return Boolean(normalize(option.textContent) || normalize(option.value));
-    });
-
-    const tiers = [
-      (option) =>
-        normalize(option.textContent) === want || normalize(option.value) === want,
-      (option) =>
-        want.startsWith(normalize(option.textContent)) ||
-        normalize(option.textContent).startsWith(want),
-    ];
-    for (const matches of tiers) {
-      const hits = options.filter(matches);
-      // Exactly one, or it is a guess. Two options starting with "yes" means
-      // the form is distinguishing something this cannot see.
-      if (hits.length === 1) {
-        const setter = Object.getOwnPropertyDescriptor(
-          HTMLSelectElement.prototype,
-          "value",
-        )?.set;
-        if (setter) setter.call(select, hits[0].value);
-        else select.value = hits[0].value;
-        select.dispatchEvent(new Event("input", { bubbles: true }));
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function normalize(text) {
-    return (text || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-  }
-
-  function fillableFields() {
-    return Array.from(
-      document.querySelectorAll("input, textarea, select"),
-    ).filter((field) => {
-      if (field.disabled || field.readOnly) return false;
-      if (field.type && /hidden|password|file|submit|button|checkbox|radio/i.test(field.type)) {
-        return false;
-      }
-      // Never overwrite something already answered. A half-completed form is
-      // the common case, and clobbering an answer is worse than skipping it.
-      // For a dropdown "already answered" means anything but the placeholder,
-      // since a select always reports some value.
-      if (field instanceof HTMLSelectElement) {
-        if (field.selectedIndex > 0 && normalize(field.value)) return false;
-      } else if (field.value && field.value.trim()) {
-        return false;
-      }
-      const box = field.getBoundingClientRect();
-      return box.width > 0 && box.height > 0;
-    });
+  function summarize(report) {
+    const parts = [];
+    const profile = report.filled.length - report.remembered - report.declined;
+    if (profile > 0) parts.push(`${profile} from your profile`);
+    if (report.remembered) parts.push(`${report.remembered} you answered before`);
+    if (report.declined) parts.push(`${report.declined} self-identification declined`);
+    return parts.join(", ");
   }
 
   async function fillForm(box, button) {
@@ -675,28 +508,7 @@
     }
 
     const values = reply.data || {};
-    const filled = [];
-    const skipped = [];
-    for (const field of fillableFields()) {
-      const match = valueFor(field, values);
-      if (!match) continue;
-      if (field instanceof HTMLSelectElement) {
-        // A dropdown whose options do not clearly contain the answer is left
-        // alone and reported. Picking the nearest option is how you end up
-        // declaring the wrong work authorization.
-        if (!chooseOption(field, match[1])) {
-          skipped.push(match[0]);
-          continue;
-        }
-      } else {
-        setValue(field, match[1]);
-      }
-      // Marked rather than merely filled: you are about to submit this to an
-      // employer, so what a machine wrote must be obvious at a glance.
-      field.style.outline = "2px solid #2563eb";
-      field.style.outlineOffset = "1px";
-      filled.push(match[0]);
-    }
+    const report = await autofill().fill(values);
 
     button.disabled = false;
     button.textContent = "Fill this form";
@@ -705,28 +517,71 @@
     // from the server's side, because both make exactly one call.
     note(
       "autofill",
-      { filled: filled.length, skipped: skipped.length, fields: filled },
-      filled.length > 0,
+      { filled: report.filled.length, skipped: report.skipped.length,
+        remembered: report.remembered, fields: report.filled },
+      report.filled.length > 0,
     );
     line(
       box,
-      filled.length
-        ? `Filled ${filled.length}: ${filled.join(", ")}. Outlined in blue — check them, then submit yourself.`
+      report.filled.length
+        ? `Filled ${report.filled.length} (${summarize(report)}). Outlined in blue — check them, then submit yourself.`
         : "Nothing matched. Either the fields are already filled, or this form names them in a way I do not recognise.",
     );
-    if (skipped.length) {
+    if (report.skipped.length) {
       line(
         box,
-        `Left for you: ${skipped.join(", ")} — none of the dropdown options ` +
+        `Left for you: ${report.skipped.join(", ")} — none of the options ` +
           "clearly matched your answer, and picking the nearest one is how a " +
           "form ends up declaring something you did not say.",
       );
     }
+
+    // Multi-step forms (Workday) draw the next step into the same page, so
+    // keep filling what appears — empty fields only — for a while.
+    if (stopWatching) stopWatching();
+    const progress = line(box, "Watching for the next step of this form.");
+    let later = 0;
+    stopWatching = autofill().watch(values, (more) => {
+      later += more.filled.length;
+      progress.textContent = `Filled ${later} more as the form went on.`;
+      note("autofill", { filled: more.filled.length, skipped: more.skipped.length,
+                         remembered: more.remembered, fields: more.filled, step: true },
+           more.filled.length > 0);
+    });
   }
 
-  /** Whether this page looks like something worth offering to fill. */
-  function looksLikeAForm() {
-    return fillableFields().length >= 3;
+  /**
+   * Remember what the user typed into questions nothing else could answer, so
+   * the next form that asks in the same words is filled the same way. Pressed,
+   * never automatic: the answers go to the user's own server, and only when
+   * they say so.
+   */
+  function addRememberButton(box) {
+    if (!looksLikeAForm()) return;
+    const button = document.createElement("button");
+    button.className = "action secondary";
+    button.textContent = "Remember my answers";
+    button.addEventListener("click", async () => {
+      const answers = autofill().collectAnswers();
+      if (!answers.length) {
+        line(box, "No answers of your own on this page to remember yet.");
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "Saving…";
+      const reply = await ask("/api/agent/remember-answers", { answers });
+      button.disabled = false;
+      button.textContent = "Remember my answers";
+      const saved = (reply.data || {}).saved;
+      note("remember_answers", { offered: answers.length, saved: saved || 0 }, !reply.error);
+      line(
+        box,
+        reply.error ||
+          `Remembered ${saved} answer${saved === 1 ? "" : "s"}. The next form that ` +
+          "asks the same question gets the same answer; your profile lists them.",
+      );
+    });
+    box.append(button);
   }
 
   /**

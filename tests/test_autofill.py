@@ -123,7 +123,10 @@ class TestWhatItWithholds:
             # written on the profile's Screening tab *in order* to be typed
             # into forms, which is not true of anything else in the profile.
             "work_authorization", "sponsorship_required", "start_date",
-            "salary_expectation", "referral_source",
+            "salary_expectation", "referral_source", "eeo_self_identification",
+            # Answers the user typed into forms and asked to have remembered,
+            # going back to forms: the same test as the screening answers.
+            "remembered",
         }
 
     def test_the_narrative_stays_home(self, agent, profile):

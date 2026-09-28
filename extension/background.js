@@ -1945,7 +1945,8 @@ const OVERLAY_SCRIPTS = [
   {
     id: "jobapp-overlay",
     matches: OVERLAY_MATCHES,
-    js: ["overlay.js"],
+    // autofill.js first: it defines `JobAppAutofill`, which the panel calls.
+    js: ["autofill.js", "overlay.js"],
     runAt: "document_idle",
   },
 ];
@@ -1955,16 +1956,23 @@ async function syncOverlayScripts() {
     (await chrome.storage.local.get({ overlay: false })).overlay &&
     (await chrome.permissions.contains(OVERLAY_HOSTS));
   let registered = false;
+  let upToDate = false;
   try {
-    registered =
-      (await chrome.scripting.getRegisteredContentScripts({ ids: ["jobapp-overlay"] }))
-        .length > 0;
+    const [current] = await chrome.scripting.getRegisteredContentScripts({
+      ids: ["jobapp-overlay"],
+    });
+    registered = Boolean(current);
+    // A registration from an older version, with an older file list, is
+    // replaced: it would keep injecting the panel without autofill.js.
+    upToDate =
+      registered &&
+      JSON.stringify(current.js || []) === JSON.stringify(OVERLAY_SCRIPTS[0].js);
   } catch (_) {
     registered = false;
   }
 
   try {
-    if (wanted && !registered) {
+    if (wanted && !upToDate) {
       await chrome.scripting
         .unregisterContentScripts({ ids: ["jobapp-overlay"] })
         .catch(() => {});

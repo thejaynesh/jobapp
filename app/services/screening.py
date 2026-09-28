@@ -61,6 +61,15 @@ FIELDS = [
         "exactly why it should not be typed out by hand again.",
         "Company careers page",
     ),
+    (
+        "eeo_self_identification",
+        "Voluntary self-identification",
+        "US forms ask gender, race, veteran status and disability, always "
+        "optionally. Write “Decline to self-identify” and each is answered "
+        "with the form's own decline option; anything else is left for you, "
+        "since one answer cannot be right for all four.",
+        "Decline to self-identify",
+    ),
 ]
 
 KEYS = [key for key, _, _, _ in FIELDS]
