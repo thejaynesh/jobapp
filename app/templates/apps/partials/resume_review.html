@@ -21,6 +21,8 @@
 </div>
 {% endif %}
 
+{% with checks = resume_review.checks, noun = "resume" %}{% include "apps/partials/content_checks.html" %}{% endwith %}
+
 <details class="mt-3 border border-gray-200 rounded">
   <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this resume</summary>
   <form hx-post="/apps/{{ app.id }}/docs/{{ current_resume.id }}/edit-resume"

@@ -111,6 +111,8 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
             "resume_review": document_edit.review(resumes[0].content) if resumes else None,
             "letter_body": (((cover_letters[0].content or {}).get("context") or {})
                             .get("cover_letter_body") if cover_letters else None),
+            "letter_checks": ((cover_letters[0].content or {}).get("checks") or []
+                              if cover_letters else []),
             # The page embeds the outreach panel partial, so it needs the same
             # context that /outreach/apps/{id}/panel builds.
             **panel_context(db, app_obj),

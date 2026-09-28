@@ -1223,6 +1223,19 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         ", ".join(ats["missing"]) or "none",
     )
 
+    # What the drafts say that the profile does not — moved skills, figures,
+    # years, a changed employer or date — named on the review panel.
+    from app.services import content_checks
+
+    resume_checks = content_checks.check_resume(resume_ctx, profile_data, keywords, job)
+    letter_checks = content_checks.check_letter(cover_body, profile_data, keywords, job)
+    if resume_checks or letter_checks:
+        logger.info(
+            "generate_documents %s: %d resume and %d letter finding(s) against the profile: %s",
+            application.id, len(resume_checks), len(letter_checks),
+            "; ".join(f["detail"] for f in (resume_checks + letter_checks)[:5]),
+        )
+
     generated_by = ", ".join(collect_llm_log()) or None
 
     resume_doc = ApplicationDocument(
@@ -1232,7 +1245,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_resume),
         generation_feedback=feedback,
         generated_by=generated_by,
-        content=document_content.resume(resume_ctx, ats, profile_data),
+        content=document_content.resume(resume_ctx, ats, profile_data, checks=resume_checks),
     )
     _set_only_current(db, application.id, DocType.resume, resume_doc)
     db.add(resume_doc)
@@ -1252,7 +1265,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_cl),
         generation_feedback=feedback,
         generated_by=generated_by,
-        content=document_content.cover_letter(cl_ctx),
+        content=document_content.cover_letter(cl_ctx, checks=letter_checks, keywords=keywords),
     )
     _set_only_current(db, application.id, DocType.cover_letter, cl_doc)
     db.add(cl_doc)

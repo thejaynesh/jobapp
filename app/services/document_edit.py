@@ -88,9 +88,17 @@ def _output_path(application, doc_type: DocType, version: int):
     return _OUTPUT_DIR / str(application.id) / f"{application.id}_{name}_v{version}.pdf"
 
 
+def _profile_for_documents(db) -> dict:
+    from app.models.profile import Profile
+    from app.services.profile_service import for_documents
+
+    profile = db.query(Profile).first()
+    return for_documents(profile.data if profile else {})
+
+
 def save_resume(db, application, previous: ApplicationDocument, form) -> ApplicationDocument:
     """Apply the form to `previous` and save the result as the current resume."""
-    from app.services import document_content
+    from app.services import content_checks, document_content
     from app.services.doc_generator import _next_version, compile_resume_one_page
 
     content = previous.content or {}
@@ -102,10 +110,13 @@ def save_resume(db, application, previous: ApplicationDocument, form) -> Applica
                         _next_version(db, application.id, DocType.resume))
     compiled = compile_resume_one_page(ctx, path)
     keywords = (content.get("ats") or {}).get("keywords") or []
+    checks = content_checks.check_resume(ctx, _profile_for_documents(db), keywords,
+                                         application.job)
     new_content = {
         **content,
         "context": ctx,
         "ats": document_content.ats_check(compiled, keywords, ctx),
+        "checks": content_checks.carried_over(checks, content.get("checks")),
         "edited_from": previous.version,
     }
     return _save(db, application, previous, DocType.resume, compiled, new_content)
@@ -113,6 +124,7 @@ def save_resume(db, application, previous: ApplicationDocument, form) -> Applica
 
 def save_letter(db, application, previous: ApplicationDocument, body: str) -> ApplicationDocument:
     """Save an edited letter body as the current cover letter."""
+    from app.services import content_checks
     from app.services.doc_generator import _next_version, compile_pdf, render_latex
 
     content = previous.content or {}
@@ -123,8 +135,12 @@ def save_letter(db, application, previous: ApplicationDocument, body: str) -> Ap
     path = _output_path(application, DocType.cover_letter,
                         _next_version(db, application.id, DocType.cover_letter))
     compiled = compile_pdf(render_latex("cover_letter.tex.j2", ctx), path)
-    return _save(db, application, previous, DocType.cover_letter, compiled,
-                 {**content, "context": ctx, "edited_from": previous.version})
+    checks = content_checks.check_letter(ctx["cover_letter_body"], _profile_for_documents(db),
+                                         content.get("keywords") or [], application.job)
+    return _save(db, application, previous, DocType.cover_letter, compiled, {
+        **content, "context": ctx, "edited_from": previous.version,
+        "checks": content_checks.carried_over(checks, content.get("checks")),
+    })
 
 
 def review(content: dict | None) -> dict | None:
@@ -155,4 +171,5 @@ def review(content: dict | None) -> dict | None:
         "skills": skills_as_text(ctx.get("skills") or {}),
         "sections": sections,
         "ats": content.get("ats") or {},
+        "checks": content.get("checks") or [],
     }

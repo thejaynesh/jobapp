@@ -176,6 +176,7 @@
                 title="AI model(s) that generated this document">{{ current_cl.generated_by }}</span>
           {% endif %}
         </div>
+        {% with checks = letter_checks, noun = "letter" %}{% include "apps/partials/content_checks.html" %}{% endwith %}
         {% if letter_body is not none %}
         <details class="mt-3 border border-gray-200 rounded">
           <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this letter</summary>
