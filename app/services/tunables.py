@@ -370,6 +370,16 @@ TUNABLES: list[Tunable] = [
              "and unprobed boards are never polled.",
     ),
     Tunable(
+        key="workday_rate_limit_cooldown", env="WORKDAY_RATE_LIMIT_COOLDOWN",
+        kind="int", minimum=0, maximum=300, group="Company boards",
+        label="Workday rest after a rate limit (seconds)",
+        help="Most Workday tenants share a few servers (wd1, wd5…), so a 429 "
+             "to one is a warning for all of them. The server then rests this "
+             "long, or as long as it asks, while the others carry on; one that "
+             "keeps refusing is left until the next cycle. 0 ignores rate "
+             "limits and moves on, as before.",
+    ),
+    Tunable(
         key="greenhouse_descriptions_on_demand", env="GREENHOUSE_DESCRIPTIONS_ON_DEMAND",
         kind="bool", group="Company boards", label="Greenhouse descriptions on demand",
         help="Read each Greenhouse board without its posting text, and fetch "

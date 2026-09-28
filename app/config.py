@@ -480,6 +480,9 @@ class Settings(BaseSettings):
     # Greenhouse boards listed without their text, which is then fetched only
     # for postings not already stored with it (`sources.greenhouse`). Settings.
     GREENHOUSE_DESCRIPTIONS_ON_DEMAND: bool = True
+    # Seconds a Workday cluster (wd1, wd5…) rests after it answers 429, when it
+    # sends no Retry-After of its own. Settings page.
+    WORKDAY_RATE_LIMIT_COOLDOWN: int = 60
     # Company boards from Common Crawl's URL index (`services.commoncrawl`):
     # index pages read per walk (~15,000 URLs each), and how often a walk runs.
     # A walk resumes where the last stopped and restarts on each new crawl.
