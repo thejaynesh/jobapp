@@ -346,18 +346,27 @@ def _ukg(client: httpx.Client, host: str, tenant: str, board: str,
     )
 
 
+def dayforce_posting(html: str) -> dict | None:
+    """The posting a Dayforce page carries in its Next.js data, or None."""
+    match = _NEXT_DATA.search(html or "")
+    if not match:
+        return None
+    try:
+        queries = (((json.loads(match.group(1)).get("props") or {}).get("pageProps") or {})
+                   .get("dehydratedState") or {}).get("queries") or []
+    except (ValueError, AttributeError):
+        return None
+    data = next((((q.get("state") or {}).get("data")) for q in queries
+                 if isinstance(q, dict) and (q.get("queryKey") or [None])[0] == "jobs"), None)
+    return data if isinstance(data, dict) else None
+
+
 def _dayforce(client: httpx.Client, language: str, namespace: str, board: str,
               posting: str) -> Extraction:
     resp = client.get(f"https://jobs.dayforcehcm.com/{language}/{namespace}/{board}/jobs/{posting}")
     resp.raise_for_status()
-    match = _NEXT_DATA.search(resp.text)
-    if not match:
-        return Extraction()
-    queries = (((json.loads(match.group(1)).get("props") or {}).get("pageProps") or {})
-               .get("dehydratedState") or {}).get("queries") or []
-    data = next((((q.get("state") or {}).get("data")) for q in queries
-                 if (q.get("queryKey") or [None])[0] == "jobs"), None)
-    if not isinstance(data, dict):
+    data = dayforce_posting(resp.text)
+    if not data:
         return Extraction()
     content = data.get("jobPostingContent") or {}
     description = clean("\n\n".join(content.get(k) or "" for k in (

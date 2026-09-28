@@ -128,7 +128,41 @@ def check_url(url: str, client: httpx.Client) -> LivenessResult:
     marker = closed_marker(response.text)
     if marker:
         return LivenessResult("closed", f'the page says "{marker}"')
+    expired = stated_expiry(final, response.text)
+    if expired:
+        return LivenessResult("closed", f"the posting expired on {expired:%b %d, %Y}")
     return LivenessResult("open")
+
+
+def stated_expiry(url: str, html: str) -> datetime | None:
+    """
+    When the posting's own system says it expired, if that has passed.
+
+    Dayforce keeps serving an expired posting's page, whole and with a 200 —
+    the only sign is `postingExpiryTimestampUTC` in its data: the two postings
+    SimplifyJobs linked had expired in March and April and read as open in
+    September (measured 2026-09-28). Only Dayforce, whose system enforces the
+    date, and never an evergreen posting. A JSON-LD `validThrough` is not
+    trusted the same way: employers fill it in by rote and keep taking
+    applications past it.
+    """
+    if not _host_matches(urlparse(url).hostname or "", ("dayforcehcm.com",)):
+        return None
+    from app.services.enrichment import dayforce_posting
+
+    data = dayforce_posting(html)
+    if not data or data.get("isEvergreen"):
+        return None
+    raw = data.get("postingExpiryTimestampUTC")
+    if not raw:
+        return None
+    try:
+        expiry = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry if expiry < datetime.now(timezone.utc) else None
 
 
 def closed_marker(html: str) -> str:

@@ -161,9 +161,9 @@ class TestUkg:
 DAYFORCE_URL = "https://jobs.dayforcehcm.com/en-US/texasfarm/CANDIDATEPORTAL/jobs/634"
 
 
-def dayforce_page():
+def dayforce_page(**extra):
     posting = {"jobPostingId": 634, "jobTitle": "Software Developer Intern",
-               "postingStartTimestampUTC": "2026-03-09T05:00:00+00:00",
+               "postingStartTimestampUTC": "2026-03-09T05:00:00+00:00", **extra,
                "jobPostingContent": {"jobDescriptionHeader": "<p>The Voice of Texas Agriculture.</p>",
                                      "jobDescription": "<p>Write C# services.</p>",
                                      "jobDescriptionFooter": "<p>EOE.</p>"},
@@ -185,6 +185,41 @@ def test_a_dayforce_posting_page_is_read():
     assert found.posted_at == "2026-03-09T05:00:00+00:00"
     assert found.details == {"location": "Waco, TX, US", "employment_type": "Internship"}
     assert client.get.call_args[0][0] == DAYFORCE_URL
+
+
+class TestADayforcePostingPastItsExpiry:
+    """Dayforce serves an expired posting whole, with a 200; its data says so."""
+
+    def check(self, url=DAYFORCE_URL, **extra):
+        response = MagicMock(status_code=200, text=dayforce_page(**extra), url=url,
+                             headers={"content-type": "text/html; charset=utf-8"})
+        client = MagicMock()
+        client.get.return_value = response
+        return liveness.check_url(url, client)
+
+    def test_is_closed(self):
+        result = self.check(postingExpiryTimestampUTC="2026-04-27T04:59:00+00:00",
+                            isEvergreen=False)
+        assert result.state == "closed" and "expired on Apr 27, 2026" in result.note
+
+    def test_one_that_expires_later_is_open(self):
+        assert self.check(postingExpiryTimestampUTC="2999-01-01T00:00:00+00:00").state == "open"
+
+    def test_an_evergreen_posting_never_expires(self):
+        assert self.check(postingExpiryTimestampUTC="2026-04-27T04:59:00+00:00",
+                          isEvergreen=True).state == "open"
+
+    def test_no_expiry_stated_is_open(self):
+        assert self.check().state == "open"
+
+    def test_only_dayforce_is_taken_at_its_word(self):
+        result = self.check(url="https://careers.example.com/jobs/634",
+                            postingExpiryTimestampUTC="2026-04-27T04:59:00+00:00")
+        assert result.state == "open"
+
+    def test_the_description_is_still_read(self):
+        client = _client(dayforce_page(postingExpiryTimestampUTC="2026-04-27T04:59:00+00:00"))
+        assert "Write C# services." in enrichment.enrich_one(client, DAYFORCE_URL).description
 
 
 def test_a_closed_paylocity_posting_is_closed():
