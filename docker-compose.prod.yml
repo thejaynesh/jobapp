@@ -18,6 +18,14 @@ services:
     #
     # `work_mem` is per sort or hash *per query*, so it multiplies by
     # concurrency; 16MB is deliberately modest next to the rest.
+    #
+    # `jit=off`: Postgres compiles any query its planner costs above 100,000,
+    # and the jobs page's queries cost about a million — an OR with an EXISTS
+    # the planner cannot estimate — so each page load spent ~300 ms compiling
+    # queries that then ran in 60. Measured on 150,000 rows: the list query
+    # 647 ms with JIT against 146 ms without, the hidden-jobs count 243 against
+    # 47. Nothing in this app runs long enough for compiled code to pay back.
+    #
     # Second only to the web app, which spends most of a page load waiting on
     # it. Starving the database starves the page just the same.
     cpu_shares: 1536
@@ -27,6 +35,7 @@ services:
       -c effective_cache_size=5GB
       -c work_mem=16MB
       -c maintenance_work_mem=512MB
+      -c jit=off
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
