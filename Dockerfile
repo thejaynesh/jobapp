@@ -14,10 +14,15 @@ RUN apt-get update && apt-get install -y \
     texlive-latex-base \
     texlive-fonts-recommended \
     texlive-latex-extra \
+    lmodern \
     curl \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
+# `lmodern` is the outline form of the resume's font. Without it pdflatex
+# draws T1 Computer Modern as bitmaps, and an ATS reads "Exp erience" out of
+# the PDF (see the note in templates/latex/resume.tex.j2).
+#
 # Fail the build here rather than at 3am on the first backup. A missing pg_dump
 # is a broken image, and finding that out from a backup job that has silently
 # never run is the failure this whole feature exists to prevent.

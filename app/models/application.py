@@ -126,6 +126,10 @@ class ApplicationDocument(Base):
     path: Mapped[str] = mapped_column(String, nullable=False)
     generation_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    # What this version says and the checks run on it: the tailored summary,
+    # bullets, skills and letter, and the keyword coverage read back out of
+    # the PDF. None for documents written before it existed (0047).
+    content: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

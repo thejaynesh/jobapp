@@ -1,6 +1,16 @@
 \documentclass[11pt,letterpaper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
+% Text an ATS can read back out. T1 Computer Modern with no outline
+% version installed is drawn as bitmap (Type 3) fonts, which carry no
+% characters at all: "Experience" came back as "Exp erience" and
+% "efficient" as "e\x1ecien t". Latin Modern is the same design in
+% outline form; glyphtounicode then maps ligatures ("fi", "ffi") back
+% to their letters. Guarded so a TeX without lmodern still compiles —
+% the check read back from the PDF says when that happened.
+\IfFileExists{lmodern.sty}{\usepackage{lmodern}}{}
+\input{glyphtounicode}
+\pdfgentounicode=1
 \usepackage[margin=1in]{geometry}
 \pagestyle{empty}
 

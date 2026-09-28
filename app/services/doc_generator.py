@@ -1207,14 +1207,21 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
                 )
                 present, missing = _keyword_coverage(resume_ctx, keywords)
 
-    logger.info(
-        "generate_documents %s: ATS keyword coverage %d/%d — missing: %s",
-        application.id, len(present), len(present) + len(missing), ", ".join(missing) or "none",
-    )
     resume_version = _next_version(db, application.id, DocType.resume)
     resume_filename = f"{application.id}_resume_v{resume_version}.pdf"
     resume_path = _OUTPUT_DIR / str(application.id) / resume_filename
     compiled_resume = compile_resume_one_page(resume_ctx, resume_path)
+
+    # The coverage that counts: read back out of the PDF a parser will get,
+    # after the one-page trim, rather than from the context the trim cut.
+    from app.services import document_content
+
+    ats = document_content.ats_check(compiled_resume, keywords, resume_ctx)
+    logger.info(
+        "generate_documents %s: ATS keyword coverage %d/%d (read from %s) — missing: %s",
+        application.id, len(ats["present"]), len(keywords), ats["read_from"],
+        ", ".join(ats["missing"]) or "none",
+    )
 
     generated_by = ", ".join(collect_llm_log()) or None
 
@@ -1225,6 +1232,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_resume),
         generation_feedback=feedback,
         generated_by=generated_by,
+        content=document_content.resume(resume_ctx, ats, profile_data),
     )
     _set_only_current(db, application.id, DocType.resume, resume_doc)
     db.add(resume_doc)
@@ -1244,6 +1252,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_cl),
         generation_feedback=feedback,
         generated_by=generated_by,
+        content=document_content.cover_letter(cl_ctx),
     )
     _set_only_current(db, application.id, DocType.cover_letter, cl_doc)
     db.add(cl_doc)
