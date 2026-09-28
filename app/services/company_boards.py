@@ -14,7 +14,7 @@ ones are retired, so the per-cycle budget keeps going to companies that hire.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm import Session
@@ -64,6 +64,13 @@ def is_blocked_slug(slug: str) -> bool:
     return text.split(":", 1)[0] in SLUG_BLOCKLIST
 
 
+_REPLAY_TOUCH_INTERVAL = timedelta(hours=20)
+
+
+def _aware(moment: datetime) -> datetime:
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def record_boards(
     db: Session,
     found: dict[str, list[str] | set[str]],
@@ -87,7 +94,10 @@ def record_boards(
     legacy profile blob) — those say nothing new each cycle, and reviving from
     them would resurrect every retired board forever.
     """
-    wanted: set[tuple[str, str]] = set()
+    # Keyed without case: ATSes read board names case-blind (Workday's
+    # `External_Career_Site` and `external_career_site` are one site), and a
+    # list that lower-cases them must not register every one a second time.
+    wanted: dict[tuple[str, str], tuple[str, str]] = {}
     blocked = 0
     for ats, slugs in found.items():
         for raw in (slugs or []):
@@ -97,7 +107,7 @@ def record_boards(
             if is_blocked_slug(slug):
                 blocked += 1
                 continue
-            wanted.add((ats, slug))
+            wanted.setdefault((ats, slug.lower()), (ats, slug))
     if blocked:
         logger.info(
             "company_boards: refused %d slug(s) that name a job board or a URL "
@@ -116,11 +126,12 @@ def record_boards(
         .filter(CompanyBoard.ats.in_({ats for ats, _ in wanted}))
         .all()
     )
-    index = {(board.ats, board.slug): board for board in existing}
+    index = {(board.ats, board.slug.lower()): board for board in existing}
 
     new_count = 0
-    for ats, slug in sorted(wanted):
-        board = index.get((ats, slug))
+    for key in sorted(wanted):
+        ats, slug = wanted[key]
+        board = index.get(key)
         if board is None:
             # A guessed slug is not polled until something has asked its ATS
             # whether it is real. Slugs the user configured and the curated
@@ -141,11 +152,16 @@ def record_boards(
                 inactive_reason=None if trusted else AWAITING_VALIDATION,
             )
             db.add(board)
-            index[(ats, slug)] = board
+            index[key] = board
             new_count += 1
             continue
 
-        board.last_seen_at = now
+        # A replayed list says the same thing every cycle; touching tens of
+        # thousands of rows to record that is a write storm for nothing, so a
+        # replay refreshes a board at most daily. A fresh sighting always does.
+        if revive or board.last_seen_at is None or \
+                now - _aware(board.last_seen_at) >= _REPLAY_TOUCH_INTERVAL:
+            board.last_seen_at = now
         named = (names or {}).get((ats, slug)) or company
         if named and not board.company:
             board.company = named

@@ -472,6 +472,7 @@ class Settings(BaseSettings):
     # the community lists alone name a few thousand boards, which at 150 a
     # cycle took weeks to reach. Editable on the settings page.
     ATS_BOARD_VALIDATE_PER_CYCLE: int = 400
+    ATS_BOARD_VALIDATE_HOURLY: int = 300  # the same probe on the hourly discovery tick
     # Company boards from Common Crawl's URL index (`services.commoncrawl`):
     # index pages read per walk (~15,000 URLs each), and how often a walk runs.
     # A walk resumes where the last stopped and restarts on each new crawl.
@@ -564,13 +565,24 @@ class Settings(BaseSettings):
     # held — 1,724 distinct Workday sites across the two, measured 2026-09-28.
     # `ReaVNaiL/New-Grad-2025` was dropped when it began answering 404, and
     # `pittcsc`/`Ouckah` because they now mirror lists already here.
+    #
+    # The `<ats>_companies.json` files are job-board-aggregator's registry
+    # (github.com/Feashliaa/job-board-aggregator, MIT, harvested from Common
+    # Crawl across several snapshots): 46,644 boards we had no other way to
+    # know on 2026-09-28, each probed before it is polled.
     # Editable on the settings page.
     SLUG_HARVEST_URLS: str = (
         "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json,"
         "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json,"
         "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md,"
         "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/README.md,"
-        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md"
+        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/workday_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/greenhouse_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/lever_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/ashby_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/bamboohr_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/icims_companies.json"
     )
     # Amazon's own careers search (`sources.amazon`), per role, in the profile's
     # countries (the US when none). 100 postings a page.

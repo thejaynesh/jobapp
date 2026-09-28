@@ -298,9 +298,10 @@ TUNABLES: list[Tunable] = [
         group="Company boards", label="Community lists to mine for boards",
         help="Comma-separated URLs of job lists whose links name company "
              "boards (Greenhouse, Workday, Oracle…). A .json URL is read as a "
-             "SimplifyJobs listings file, including rows it no longer shows. "
-             "Every board found is probed before it is polled. Read on board "
-             "cycles only.",
+             "SimplifyJobs listings file, including rows it no longer shows; "
+             "an <ats>_companies.json file, or any URL written ats=URL, as a "
+             "JSON list of that ATS's board names. Every board found is probed "
+             "before it is polled. Read on board cycles only.",
     ),
     Tunable(
         key="workday_site_discovery", env="WORKDAY_SITE_DISCOVERY", kind="bool",
@@ -367,6 +368,16 @@ TUNABLES: list[Tunable] = [
              "probe is one small request. Higher gets thousands of list-found "
              "boards polling within days rather than weeks; 0 stops probing, "
              "and unprobed boards are never polled.",
+    ),
+    Tunable(
+        key="ats_board_validate_hourly", env="ATS_BOARD_VALIDATE_HOURLY",
+        kind="int", minimum=0, maximum=5000, group="Company boards",
+        label="New boards checked per hour",
+        help="The same probe, on the hourly discovery tick rather than only on "
+             "board cycles. The community lists name about 50,000 boards; at "
+             "400 a board cycle they would take weeks to start polling, and "
+             "300 an hour takes about a week. 0 leaves probing to board "
+             "cycles.",
     ),
     Tunable(
         key="google_jobs_enabled", env="GOOGLE_JOBS_ENABLED", kind="bool",

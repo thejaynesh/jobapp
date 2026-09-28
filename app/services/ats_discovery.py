@@ -330,6 +330,40 @@ def harvest_slugs_from_lists(urls: list[str], existing: dict | None = None) -> d
     return merged
 
 
+# A list of board names for one ATS, as some aggregators publish their
+# registries: a JSON array, one board per entry. The ATS comes from an explicit
+# `ats=` prefix on the configured URL, or from a `<ats>_companies.json` file
+# name (github.com/Feashliaa/job-board-aggregator, MIT).
+_SLUG_LIST_FILE = re.compile(r"/([a-z]+)_companies\.json(?:$|\?)", re.I)
+_LIST_SLUG = re.compile(r"^[a-z0-9][a-z0-9_.-]{1,80}$", re.I)
+_LIST_WORKDAY = re.compile(r"^([a-z0-9-]{2,})[|:](wd\d+)[|:]([A-Za-z0-9_-]+)$", re.I)
+
+
+def _slug_list_ats(entry: str) -> tuple[str | None, str]:
+    """(ats, url) for a configured list entry: the ATS when it is a slug list."""
+    head, sep, rest = entry.partition("=")
+    if sep and head.strip().lower() in ALL_ATS and rest.strip().startswith("http"):
+        return head.strip().lower(), rest.strip()
+    match = _SLUG_LIST_FILE.search(entry)
+    if match and match.group(1).lower() in ALL_ATS:
+        return match.group(1).lower(), entry
+    return None, entry
+
+
+def slugs_from_list(ats: str, entries) -> set[str]:
+    """The boards a slug list names, in the spec each adapter takes."""
+    found: set[str] = set()
+    for entry in entries if isinstance(entries, list) else []:
+        text = str(entry.get("slug") if isinstance(entry, dict) else entry or "").strip()
+        if ats == "workday":
+            match = _LIST_WORKDAY.match(text)
+            if match and match.group(3).lower() not in _WORKDAY_NOT_SITES:
+                found.add(f"{match.group(1).lower()}:{match.group(2).lower()}:{match.group(3)}")
+        elif _LIST_SLUG.match(text) and text.lower() not in _SLUG_BLOCKLIST:
+            found.add(text.lower())
+    return found
+
+
 def _note_career_link(career_links: dict, link: str, company: str) -> None:
     from app.services.ats_sniffer import company_host
 
@@ -366,12 +400,22 @@ def harvest_boards_from_lists(
     sit on an employer's own site: `{host: {"url", "company"}}`, one posting
     per host, one carrying a Greenhouse `gh_jid` when there is one. Those are
     for `ats_sniffer`, which can often find the board behind them.
+
+    A slug list — `greenhouse=https://…`, or a `<ats>_companies.json` file —
+    is a JSON array of board names for that ATS (`slugs_from_list`).
     """
     found: dict[str, set[str]] = {}
     names: dict[tuple[str, str], str] = {}
-    for url in urls:
+    for entry in urls:
+        list_ats, url = _slug_list_ats(entry)
         try:
-            if url.lower().split("?", 1)[0].endswith(".json"):
+            if list_ats:
+                resp = httpx.get(url, timeout=60, follow_redirects=True)
+                resp.raise_for_status()
+                before = sum(len(v) for v in found.values())
+                found.setdefault(list_ats, set()).update(slugs_from_list(list_ats, resp.json()))
+                added = sum(len(v) for v in found.values()) - before
+            elif url.lower().split("?", 1)[0].endswith(".json"):
                 from app.services.sources.simplify import rows
 
                 before = sum(len(v) for v in found.values())
