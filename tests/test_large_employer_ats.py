@@ -297,14 +297,74 @@ def test_the_fetcher_hands_them_the_roles(monkeypatch):
     from app.config import settings
 
     seen = {}
-    for name in ("oracle", "successfactors", "phenom", "eightfold"):
+    for name in ("oracle", "successfactors", "phenom", "eightfold", "jibe"):
         monkeypatch.setattr(f"app.services.sources.{name}.fetch",
                             lambda company_slugs, queries=None, _n=name: seen.setdefault(
                                 _n, (company_slugs, queries)) and [])
     slugs = {"oracle": [f"{ORACLE}:CX_1"], "successfactors": ["careers.qorvo.com"],
-             "phenom": ["careers.mastercard.com/us/en"], "eightfold": ["qualcomm.eightfold.ai"]}
+             "phenom": ["careers.mastercard.com/us/en"], "eightfold": ["qualcomm.eightfold.ai"],
+             "jibe": ["careers.amd.com"]}
     _, stats = job_fetcher._run_all_adapters(
         ["Software Engineer"], ["Remote"], settings, slugs, {},
-        only={"oracle", "successfactors", "phenom", "eightfold"})
+        only={"oracle", "successfactors", "phenom", "eightfold", "jibe"})
     assert seen == {k: (v, ["Software Engineer"]) for k, v in slugs.items()}
     assert all(stats[k]["enabled"] for k in slugs)
+
+
+# --- iCIMS careers-home (Jibe) ------------------------------------------------
+
+def _jibe_rows():
+    return [{"data": {"title": t, "req_id": str(86800 + i), "slug": str(86800 + i),
+                      "hiring_organization": "Advanced Micro Devices, Inc",
+                      "full_location": "San Jose, California",
+                      "posted_date": "2026-06-17T15:34:00+0000", "employment_type": "FULL_TIME",
+                      "description": "<p>WHAT YOU DO AT AMD CHANGES EVERYTHING</p>",
+                      "qualifications": "<ul><li>C++</li></ul>",
+                      "apply_url": f"https://careers-amd.icims.com/jobs/{86800 + i}/login"}}
+            for i, t in enumerate(["Security Software Engineer", "Software Engineer 2",
+                                   "Accounts Payable Clerk"])]
+
+
+class TestJibe:
+    def test_search_pages_with_the_crawl_delay_kept(self, monkeypatch):
+        from app.services.sources import jibe
+
+        calls, sleeps = [], []
+
+        def get(url, params=None, **kw):
+            calls.append(dict(params or {}))
+            page, limit = int(params["page"]), int(params["limit"])
+            rows = _jibe_rows()[(page - 1) * limit: page * limit]
+            return _resp(url, json_body={"jobs": rows, "totalCount": 3, "count": len(rows)})
+        monkeypatch.setattr(httpx, "get", get)
+        monkeypatch.setattr(jibe.time, "sleep", sleeps.append)
+        monkeypatch.setattr(jibe, "_PAGE_SIZE", 2)
+        jobs = jibe.fetch(["careers.amd.com"], Q)
+        assert [c["page"] for c in calls] == [1, 2]
+        assert sleeps == [jibe.CRAWL_DELAY_SECONDS]
+        # The clerk role fails the title gate.
+        assert {j["title"] for j in jobs} == {"Security Software Engineer", "Software Engineer 2"}
+        job = jobs[0]
+        assert job["company"] == "Advanced Micro Devices, Inc"
+        assert job["url"] == "https://careers.amd.com/careers-home/jobs/86800"
+        assert job["apply_url"] == "https://careers-amd.icims.com/jobs/86800/login"
+        assert "C++" in job["description"] and job["employment_type"] == "full_time"
+
+    def test_validation_wants_jibes_own_shape(self, monkeypatch):
+        monkeypatch.setattr(httpx, "get", lambda url, **kw: _resp(
+            url, json_body={"jobs": [], "totalCount": 0}))
+        assert probe_board("jibe", "careers.amd.com").exists
+        monkeypatch.setattr(httpx, "get", lambda url, **kw: _resp(url, json_body={"ok": 1}))
+        assert not probe_board("jibe", "example.com").exists
+        monkeypatch.setattr(httpx, "get", lambda url, **kw: _resp(url, text="<html>"))
+        assert not probe_board("jibe", "example.com").exists
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://careers.amd.com/jobs/88877?icims=1", {"jibe": {"careers.amd.com"}}),
+    ("https://careers.amd.com/careers-home/jobs/86806", {"jibe": {"careers.amd.com"}}),
+    # Without the marker, /jobs/<id> is too common a shape to claim.
+    ("https://careers.amd.com/jobs/88877", {}),
+])
+def test_jibe_sites_are_found_in_posting_links(url, expected):
+    assert extract_slugs(url) == expected

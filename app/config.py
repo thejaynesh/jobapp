@@ -419,6 +419,7 @@ class Settings(BaseSettings):
     SUCCESSFACTORS_BOARDS: str = ""  # careers host, e.g. careers.qorvo.com
     PHENOM_BOARDS: str = ""          # host/country/lang, e.g. careers.mastercard.com/us/en
     EIGHTFOLD_BOARDS: str = ""       # careers host, e.g. qualcomm.eightfold.ai
+    JIBE_BOARDS: str = ""            # iCIMS careers-home host, e.g. careers.amd.com
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     CAREERJET_AFFID: str = ""

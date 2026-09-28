@@ -115,6 +115,14 @@ _HOST_BOARD_PATTERNS: list[tuple[str, re.Pattern, "callable"]] = [
         r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/([a-z]{2})/([a-z]{2})/job/[A-Za-z0-9_-]+",
         re.I),
      lambda m: f"{m.group(1).lower()}/{m.group(2).lower()}/{m.group(3).lower()}"),
+    # iCIMS careers-home ("Jibe") sites: /careers-home/jobs/<id>, or /jobs/<id>
+    # carrying the `icims` marker SimplifyJobs adds to them.
+    ("jibe", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/careers-home/jobs/\d+", re.I),
+     lambda m: m.group(1).lower()),
+    ("jibe", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/jobs/\d+/?\?(?:[^\s\"'<>]*&)?icims=1", re.I),
+     lambda m: m.group(1).lower()),
     # Eightfold: {company}.eightfold.ai, or a custom host's /careers/job/<long id>
     ("eightfold", re.compile(r"https?://([a-z0-9-]+\.eightfold\.ai)/careers", re.I),
      lambda m: m.group(1).lower()),
@@ -360,6 +368,7 @@ ATS_CONFIG_FIELDS = {
     "successfactors": "SUCCESSFACTORS_BOARDS",
     "phenom": "PHENOM_BOARDS",
     "eightfold": "EIGHTFOLD_BOARDS",
+    "jibe": "JIBE_BOARDS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -381,6 +390,8 @@ TOTAL_SLUG_CAPS = {
     "successfactors": 80,
     "phenom": 80,
     "eightfold": 60,
+    # A five-second crawl delay per site, so fewer sites a cycle.
+    "jibe": 40,
 }
 
 # Caps that are a setting of their own rather than a constant here. Workday was

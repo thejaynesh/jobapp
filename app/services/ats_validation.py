@@ -196,6 +196,22 @@ def _probe_eightfold(host: str) -> bool:
     return bool(rows) or total > 0
 
 
+def _probe_jibe(host: str) -> bool:
+    """The site answers the careers-home search in its own shape."""
+    from app.services.sources.jibe import _HEADERS
+
+    resp = httpx.get(f"https://{host}/api/jobs", params={"page": 1, "limit": 1},
+                     headers=_HEADERS, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        return False
+    try:
+        data = resp.json()
+    except ValueError:
+        return False
+    return (isinstance(data, dict) and isinstance(data.get("jobs"), list)
+            and isinstance(data.get("totalCount"), int))
+
+
 PROBES = {
     "greenhouse": _probe_greenhouse,
     "lever": _probe_lever,
@@ -213,6 +229,7 @@ PROBES = {
     "successfactors": _probe_successfactors,
     "phenom": _probe_phenom,
     "eightfold": _probe_eightfold,
+    "jibe": _probe_jibe,
 }
 
 
