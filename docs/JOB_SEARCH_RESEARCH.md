@@ -71,21 +71,13 @@ the GPL-3.0 ones, only ideas.
 | [andriuskleinas/job-tracker](https://github.com/andriuskleinas/job-tracker) (MIT), [Eugene-Mokrushin/job-grabber](https://github.com/Eugene-Mokrushin/job-grabber), [str58290/Job_Application_Tracker_Extension](https://github.com/str58290/Job_Application_Tracker_Extension) | Extensions that clip a posting from the page, or walk a search's result cards. | Nothing new: our harvest reads the page's own API responses rather than its markup, and the panel's "Save" reads JSON-LD first. | – |
 | [Pickle-Pixel/ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot), AIHawk, [GodsScion/Auto_job_applier_linkedIn](https://github.com/GodsScion/Auto_job_applier_linkedIn) | Agents that submit applications unattended. | Deliberately nothing. The fill here stops short of submitting, and the reasons in the extension README stand. | – |
 
-Still open from this round:
+Then the three left open, done the same day:
 
-- **Greenhouse descriptions on demand.** `?content=true` is 5.4 MB for
-  Stripe's board against 0.44 MB without (measured). career-radar lists
-  first and fetches descriptions later. Every board job is stored today,
-  descriptions included, so a job that would match a role added later is
-  already whole; trimming that is a trade-off to measure, not a clear win.
-- **Rate-limit cooldown per Workday cluster.** career-radar cools a whole
-  `wdN` host for a minute after a 429, because most tenants share `wd1` and
-  `wd5`. We stop an adapter on a blocking status; per-cluster cooldown would
-  let the other clusters carry on.
-- **The panel on more ATS hosts.** autograph fills 21 ATSes; the panel runs on
-  seven. Adding hosts widens the permission it asks for, so existing installs
-  would lose the panel until they grant it again. That needs a migration in
-  the options page first.
+| Item | What was built | Measured | Commit subject |
+|---|---|---|---|
+| Greenhouse descriptions on demand | Boards listed without their text; text fetched only for postings not already stored with it — per posting when few, the board once when most is new. Every job still arrives whole. | A steady-state cycle over five boards (2,074 postings, five new) read 1.79 MB instead of 23 MB. | "Read Greenhouse boards without their text…" |
+| Per-cluster Workday cooldown | A 429 rests that `wdN` cluster for its Retry-After (or a settings-page default); requests to it wait, the refused search is asked again once, other clusters carry on, and a cluster refusing three times is left for the cycle. | – | "Rest a Workday cluster after it rate-limits us…" |
+| The panel on more ATS hosts | Eighteen more application systems, offered by a second checkbox with its own permission, so the original nine — pinned by a test — never change and no existing install loses the panel on update. | Tested by loading the service worker in Node under a stubbed `chrome`. | "Offer the panel on eighteen more application systems…" |
 
 ## The short version
 
