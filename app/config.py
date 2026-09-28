@@ -386,6 +386,15 @@ class Settings(BaseSettings):
     # Pages per query/location search. Each page is one call against a small
     # monthly quota, so this multiplies spend directly.
     JSEARCH_NUM_PAGES: int = 1
+    # Google's job results, through SerpApi (serpapi.com). The key is the
+    # secret; the rest are preferences, editable on the settings page. Each
+    # page is one search against a monthly quota (250 on the free plan), so
+    # the defaults — 8 searches, at most once a day — fit inside it.
+    SERPAPI_API_KEY: str = ""
+    GOOGLE_JOBS_ENABLED: bool = True
+    GOOGLE_JOBS_MAX_SEARCHES: int = 8
+    GOOGLE_JOBS_PAGES: int = 1
+    GOOGLE_JOBS_INTERVAL_HOURS: int = 24
     LINKEDIN_SESSION_COOKIE: str = ""
     HANDSHAKE_SESSION_COOKIE: str = ""
     GREENHOUSE_COMPANY_SLUGS: str = ""
@@ -403,6 +412,22 @@ class Settings(BaseSettings):
     JOBVITE_COMPANY_SLUGS: str = ""
     PERSONIO_COMPANY_SLUGS: str = ""
     WORKDAY_TENANTS: str = ""  # comma-separated tenant:host:site, e.g. nvidia:wd5:NVIDIAExternalCareerSite
+    # Large employers' careers platforms, by careers host. Found automatically
+    # from posting links and community lists; these are for boards you want
+    # polled regardless.
+    TALEO_BOARDS: str = ""           # tenant/section, e.g. textron/textron
+    ORACLE_BOARDS: str = ""          # host:site, e.g. egug.fa.us2.oraclecloud.com:CX_1
+    SUCCESSFACTORS_BOARDS: str = ""  # careers host, e.g. careers.qorvo.com
+    PHENOM_BOARDS: str = ""          # host/country/lang, e.g. careers.mastercard.com/us/en
+    EIGHTFOLD_BOARDS: str = ""       # careers host, e.g. qualcomm.eightfold.ai
+    JIBE_BOARDS: str = ""            # iCIMS careers-home host, e.g. careers.amd.com
+    RIPPLING_COMPANY_SLUGS: str = ""  # ats.rippling.com/<slug>
+    PINPOINT_COMPANY_SLUGS: str = ""  # <slug>.pinpointhq.com
+    PAYLOCITY_COMPANY_IDS: str = ""  # the id in recruiting.paylocity.com/Recruiting/Jobs/All/<id>
+    AVATURE_BOARDS: str = ""         # host/portal, e.g. bloomberg.avature.net/careers
+    # New postings matching the roles whose pages an Avature portal is asked
+    # for each cycle (`sources.avature`). Editable on the settings page.
+    AVATURE_MAX_DETAILS: int = 25
     JOOBLE_API_KEY: str = ""
     FINDWORK_API_KEY: str = ""
     CAREERJET_AFFID: str = ""
@@ -417,9 +442,11 @@ class Settings(BaseSettings):
     # Y Combinator's public role pages (a fixed taxonomy, not search queries).
     YC_ENABLED: bool = True
     YC_ROLES: str = ""             # blank uses sources.ycombinator.DEFAULT_ROLES
-    # Built In publishes JobPosting structured data on city hub pages — free,
-    # no key, and descriptions come included.
+    # Built In's search pages — free, no key. Cards carry title, employer,
+    # location, age and pay; each posting page carries JobPosting structured
+    # data, which is where enrichment gets the description.
     BUILTIN_ENABLED: bool = True
+    BUILTIN_MAX_PAGES: int = 3     # 25 cards a page, per search and per role
 
     # A source that has failed every run for this many cycles is skipped rather
     # than called again — an expired key answers identically forever, and the
@@ -434,13 +461,45 @@ class Settings(BaseSettings):
     ATS_LIST_HARVEST: bool = True  # harvest company slugs from community job lists
     ATS_BOARD_REGISTRY: bool = True  # persist discovered boards and rank them by yield
     ATS_MAX_SLUGS_PER_ATS: int = 300  # per-cycle slug budget per ATS (tighter caps still apply)
-    ATS_BOARD_FETCH_WORKERS: int = 8  # concurrent per-company board fetches
+    # Concurrent board fetches, per ATS. Board requests are network-bound and
+    # each ATS is a different host, so this is about politeness per host, not
+    # CPU. Was 8, with 30 Workday tenants a cycle; see WORKDAY_MAX_TENANTS.
+    ATS_BOARD_FETCH_WORKERS: int = 16
+    # How many sources a fetch cycle reads at once (`job_fetcher._run_in_lanes`).
+    # Each reads its own hosts, so they do not compete; 1 reads them one after
+    # another as before. Editable on the settings page.
+    FETCH_SOURCE_CONCURRENCY: int = 6
+    # Workday tenants polled per boards cycle. Each costs up to ~40 requests.
+    WORKDAY_MAX_TENANTS: int = 150
     ATS_BOARD_MAX_EMPTY_CYCLES: int = 8  # retire a discovered board after this many silent cycles
     # Discovery reads a slug out of a link and files it as a company, which is
     # a guess. Probing before polling is what stops `greenhouse/linkedin` and
     # `greenhouse/appcast` from spending the budget real companies compete for.
     ATS_BOARD_VALIDATION: bool = True
-    ATS_BOARD_VALIDATE_PER_CYCLE: int = 150
+    # New boards probed per boards cycle. A probe is one cheap request, and
+    # the community lists alone name a few thousand boards, which at 150 a
+    # cycle took weeks to reach. Editable on the settings page.
+    ATS_BOARD_VALIDATE_PER_CYCLE: int = 400
+    ATS_BOARD_VALIDATE_HOURLY: int = 300  # the same probe on the hourly discovery tick
+    # Hiring YC companies' websites, looked behind for their boards on the
+    # hourly discovery tick (`services.yc_discovery`). Settings page.
+    YC_DISCOVERY_ENABLED: bool = True
+    YC_DISCOVERY_PER_HOUR: int = 40
+    # Greenhouse boards listed without their text, which is then fetched only
+    # for postings not already stored with it (`sources.greenhouse`). Settings.
+    GREENHOUSE_DESCRIPTIONS_ON_DEMAND: bool = True
+    # Seconds a Workday cluster (wd1, wd5…) rests after it answers 429, when it
+    # sends no Retry-After of its own. Settings page.
+    WORKDAY_RATE_LIMIT_COOLDOWN: int = 60
+    # Company boards from Common Crawl's URL index (`services.commoncrawl`):
+    # index pages read per walk (~15,000 URLs each), and how often a walk runs.
+    # A walk resumes where the last stopped and restarts on each new crawl.
+    # Read each registered Workday tenant's robots.txt (monthly) for the rest
+    # of its career sites — new-grad and internship sites are often separate.
+    WORKDAY_SITE_DISCOVERY: bool = True
+    COMMONCRAWL_ENABLED: bool = True
+    COMMONCRAWL_PAGES_PER_RUN: int = 20
+    COMMONCRAWL_INTERVAL_HOURS: int = 24
 
     # Aggregators (Adzuna, Jooble, Careerjet) link to their own redirect page
     # rather than the employer. Following those once per new posting yields the
@@ -518,15 +577,55 @@ class Settings(BaseSettings):
     # Every URL here was checked to return 200 before being added; four
     # plausible-looking ones did not and are deliberately absent, because a
     # dead list costs a request and a warning line every single cycle forever.
+    #
+    # SimplifyJobs is read from its listings files rather than its READMEs: the
+    # README shows only visible rows, and the file keeps every row it has ever
+    # held — 1,724 distinct Workday sites across the two, measured 2026-09-28.
+    # `ReaVNaiL/New-Grad-2025` was dropped when it began answering 404, and
+    # `pittcsc`/`Ouckah` because they now mirror lists already here.
+    #
+    # The `<ats>_companies.json` files are job-board-aggregator's registry
+    # (github.com/Feashliaa/job-board-aggregator, MIT, harvested from Common
+    # Crawl across several snapshots): 46,644 boards we had no other way to
+    # know on 2026-09-28, each probed before it is polled.
+    # Editable on the settings page.
     SLUG_HARVEST_URLS: str = (
-        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
-        "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"
+        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json,"
+        "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json,"
         "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md,"
         "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/README.md,"
         "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md,"
-        "https://raw.githubusercontent.com/pittcsc/Summer2026-Internships/dev/README.md,"
-        "https://raw.githubusercontent.com/ReaVNaiL/New-Grad-2025/main/README.md,"
-        "https://raw.githubusercontent.com/Ouckah/Summer2025-Internships/main/README.md"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/workday_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/greenhouse_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/lever_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/ashby_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/bamboohr_companies.json,"
+        "https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data/icims_companies.json"
+    )
+    # Amazon's own careers search (`sources.amazon`), per role, in the profile's
+    # countries (the US when none). 100 postings a page.
+    AMAZON_ENABLED: bool = True
+    AMAZON_MAX_PAGES: int = 2
+    # TikTok's own careers search (`sources.tiktok`), per role, in the profile's
+    # countries. Editable on the settings page.
+    TIKTOK_ENABLED: bool = True
+    TIKTOK_MAX_PAGES: int = 5
+    # Apple's own careers search (`sources.apple`), per role, in the profile's
+    # countries; the matching titles get their full description. Editable on
+    # the settings page.
+    APPLE_ENABLED: bool = True
+    APPLE_MAX_PAGES: int = 3
+    APPLE_MAX_DETAILS: int = 20
+    # JazzHR (`sources.jazzhr`): companies with new postings matching the roles,
+    # found in JazzHR's own sitemaps. Editable on the settings page.
+    JAZZHR_ENABLED: bool = True
+    JAZZHR_MAX_COMPANIES: int = 150
+    # SimplifyJobs' postings as a job source (see `sources.simplify`). New-grad
+    # only by default; add the internships file on the settings page to see
+    # internships too.
+    SIMPLIFY_ENABLED: bool = True
+    SIMPLIFY_LISTINGS_URLS: str = (
+        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"
     )
 
     # ---- Enrichment ------------------------------------------------------
@@ -602,9 +701,9 @@ class Settings(BaseSettings):
     STORAGE_PATH: str = "/storage"
     DOCS_OUTPUT_DIR: str = "/storage"
     MIN_MATCH_SCORE: int = 70
-    # Kept for the combined cycle and for anything still reading it; the
-    # scheduled work is the three group intervals below.
-    FETCH_INTERVAL_HOURS: int = 5
+    # FETCH_INTERVAL_HOURS used to be here, read by nothing: the scheduled work
+    # is the three group intervals below. An older `.env` still setting it
+    # loads fine (`extra="ignore"`).
 
     # ---- Fetch groups ----------------------------------------------------
     # One 47-minute task fetched everything, so an API source that could
@@ -641,6 +740,10 @@ class Settings(BaseSettings):
     # re-queue themselves keep the queue moving and make progress durable:
     # a restart loses at most one batch.
     MATCH_MAX_JOBS_PER_TASK: int = 25
+    # Jobs whose model calls are in flight at once within a batch
+    # (`matcher._match_concurrently`); starts are still paced to the RPM limit.
+    # Editable on the settings page.
+    MATCH_CONCURRENCY: int = 4
     # An application whose generation has been running longer than this had its
     # worker killed — Celery lost the task, and nothing was ever going to
     # retry it. The sweeper re-queues those.
@@ -667,6 +770,10 @@ class Settings(BaseSettings):
     # generation is the one step whose output a human actually reads and the
     # only one that never got a second look. See `services.self_review`.
     SELF_REVIEW_ENABLED: bool = True
+    # Words aimed for in a drafted answer to a long application question, from
+    # the extension's panel (`services.answer_drafts`). Editable on the
+    # settings page; a form's own character limit always wins.
+    ANSWER_DRAFT_WORDS: int = 150
 
     # What the browser extension did. Rows are small — a kind, a host and a few
     # counts — so this keeps far more than the LLM log, which carries whole
@@ -704,6 +811,13 @@ class Settings(BaseSettings):
 
     MIN_KEYWORD_SKILLS: int = 2
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
+    # Employers' H-1B filings from DOL's public disclosure data, shown on each
+    # job (`services.sponsorship_history`). Editable on the settings page.
+    H1B_HISTORY_ENABLED: bool = True
+    H1B_HISTORY_QUARTERS: int = 4
+    # The days of postings the daily coverage check looks back over
+    # (`services.source_yield`). Editable on the settings page.
+    RECALL_WINDOW_DAYS: int = 30
     # How far back the jobs list looks, in days since the job was *fetched*.
     #
     # Distinct from MAX_JOB_AGE_DAYS above, which is a fetch-time gate on
@@ -735,11 +849,40 @@ class Settings(BaseSettings):
     # silently wasting an application. Conservative by design: only a 404, an
     # explicit "no longer accepting applications", or a known ATS bouncing to
     # its board index counts — ambiguity never closes a job.
+    #
+    # Only verdicts that are due are checked, and in order of what they are
+    # worth (`liveness.candidates`), so the per-sweep number is a ceiling, not
+    # a quota. It was 200 every 12 hours — 1,200 jobs kept fresh on a 3-day
+    # recheck — which a matched backlog outgrows; 1,000 every 6 hours keeps
+    # 12,000. Editable on the settings page.
     LIVENESS_ENABLED: bool = True
-    LIVENESS_INTERVAL_HOURS: int = 12
-    LIVENESS_MAX_PER_CYCLE: int = 200   # postings checked per sweep
+    LIVENESS_INTERVAL_HOURS: int = 6
+    LIVENESS_MAX_PER_CYCLE: int = 1000  # postings checked per sweep, at most
     LIVENESS_WORKERS: int = 8
     LIVENESS_RECHECK_DAYS: int = 3      # how long a verdict stands before re-checking
 
 
 settings = Settings()
+
+
+def live():
+    """
+    `settings` with the settings page's overrides on top: read a tunable as
+    `live().THE_ENV_NAME`, never as `settings.THE_ENV_NAME`, which is the
+    environment alone and silently ignores the page. See `tunables.live`.
+
+    Here rather than only there because this module imports nothing of the
+    app's, so any module can import it without a cycle.
+    """
+    import sys
+
+    module = sys.modules.get("app.services.tunables")
+    if module is not None and not hasattr(module, "live"):
+        # `tunables` is still being imported and its own declarations asked —
+        # the model-role choices it builds at import reach the providers. The
+        # environment, which is what those snapshots always used; the page
+        # rebuilds them per render.
+        return settings
+    from app.services.tunables import live as _live
+
+    return _live()

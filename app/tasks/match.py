@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 from app.celery_app import celery_app
-from app.config import settings
+from app.config import live
 from app.database import SessionLocal
 from app.services.fetch_lock import acquire, release
 from app.services.matcher import match_all_new_jobs
@@ -45,7 +45,7 @@ def match_jobs(limit: int | None = None) -> dict[str, Any]:
     job comes back rate-limited and stays `new` — and chaining there would spin
     against a wall, so it stops and lets the schedule retry in a few minutes.
     """
-    batch = limit or max(1, settings.MATCH_MAX_JOBS_PER_TASK)
+    batch = limit or max(1, live().MATCH_MAX_JOBS_PER_TASK)
 
     # Two beat ticks, a fetch tail-call and a manual trigger can all land at
     # once; overlapping passes would score the same jobs twice and double the

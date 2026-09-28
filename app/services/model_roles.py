@@ -66,9 +66,10 @@ ROLES: tuple[Role, ...] = (
     ),
     Role(
         "generate", "Writing documents",
-        "Your CV and covering letters. A handful of calls a day, and the one "
-        "place where the output is read by a person — worth the best model you "
-        "have configured.",
+        "Your CV, covering letters and the answers the extension drafts for "
+        "long form questions. A handful of calls a day, and the one place "
+        "where the output is read by a person — worth the best model you have "
+        "configured.",
         prefer=("anthropic", "gemini", "freeinference", "nim"),
     ),
     Role(

@@ -1,4 +1,5 @@
 import os
+import threading
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -134,12 +135,50 @@ def db():
     session = TestSessionLocal(
         bind=connection, join_transaction_mode="create_savepoint"
     )
+    # Settings read without a profile to hand (`tunables.live()`,
+    # `tunables.current()`) open a session of their own in production, which
+    # cannot see this test's uncommitted profile. Read them from this one, so
+    # a test that stores an override sees it take effect. Without autoflush,
+    # so asking for a setting never flushes the caller's pending rows early.
+    from app.services import tunables
+
+    lock = threading.Lock()
+
+    def _profile_from_this_session() -> dict:
+        from app.models.profile import Profile
+
+        try:
+            with lock, session.no_autoflush:
+                profile = session.query(Profile).first()
+                return dict(profile.data or {}) if profile else {}
+        except Exception:
+            return {}
+
+    previous = tunables._load_profile_data
+    tunables._load_profile_data = _profile_from_this_session
     try:
         yield session
     finally:
+        tunables._load_profile_data = previous
         session.close()
         transaction.rollback()
         connection.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_profile_unless_the_test_has_one(monkeypatch):
+    """
+    A test without the `db` fixture reads the environment's values only.
+
+    `tunables.live()` and `tunables.current()` would otherwise open
+    `SessionLocal` — the development database named in `.env`, whose profile
+    is whatever was last saved there, so a test would pass or fail on the
+    state of somebody's local settings page. `db` replaces this with a read
+    of its own session.
+    """
+    from app.services import tunables
+
+    monkeypatch.setattr(tunables, "_load_profile_data", lambda: {})
 
 
 @pytest.fixture(autouse=True)
@@ -174,6 +213,53 @@ def _slug_harvest_off_by_default(monkeypatch):
     HTTP call stubbed.
     """
     monkeypatch.setattr(settings, "ATS_LIST_HARVEST", False)
+
+
+@pytest.fixture(autouse=True)
+def _matching_one_job_at_a_time_by_default(monkeypatch):
+    """
+    A matching pass scores several jobs at once in production
+    (`MATCH_CONCURRENCY`), through `matcher._match_concurrently`, which calls
+    the screen/evaluate/file steps rather than `match_job`. The tests of the
+    pass itself — its counters, its pacing sleep, its chaining — fake
+    `match_job` and assert on the one-at-a-time loop, so that is the loop they
+    get. `tests/test_match_concurrency.py` sets its own value and tests the
+    other.
+    """
+    monkeypatch.setattr(settings, "MATCH_CONCURRENCY", 1)
+
+
+@pytest.fixture(autouse=True)
+def _enrichment_on_fetch_off_by_default(monkeypatch):
+    """
+    A fetch cycle enriches the thin postings it just stored, over the network.
+
+    `ENRICH_ON_FETCH` defaults to on, so any test that runs
+    `fetch_and_save_jobs` with an empty description — every list-row source,
+    SimplifyJobs' among them — asked the real ATS for the posting. One did,
+    and stored WeRide's actual job description, because the fixture used a
+    real Lever URL; with a made-up one the same test would have passed or
+    failed on whether a 404 came back. Enrichment has its own tests, which
+    mock its seam.
+    """
+    monkeypatch.setattr(settings, "ENRICH_ON_FETCH", False)
+
+
+@pytest.fixture(autouse=True)
+def _h1b_history_off_by_default(monkeypatch):
+    """
+    Job cards look up the employer's H-1B filings, through a per-process cache
+    that opens its own database session when stale. In the suite that session
+    is the application's, not the test's, so every route test rendering a card
+    would reach for a database it does not own. The cards render as though no
+    filings were loaded; `tests/test_sponsorship_history.py` loads its own.
+    """
+    from app.services import sponsorship_history
+
+    monkeypatch.setattr(sponsorship_history, "_reader", lambda db=None: None)
+    sponsorship_history.reset_cache()
+    yield
+    sponsorship_history.reset_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -223,6 +309,17 @@ def _board_validation_off_by_default(monkeypatch):
     .py` exercises the validation logic directly with the probe stubbed.
     """
     monkeypatch.setattr(settings, "ATS_BOARD_VALIDATION", False)
+
+
+@pytest.fixture(autouse=True)
+def _yc_discovery_off_by_default(monkeypatch):
+    """
+    YC company discovery reads a directory from yc-oss and looks behind the
+    websites in it, on every discovery tick. Off here for the reason board
+    validation is: a test of the tick must not reach the internet by default.
+    `tests/test_yc_discovery.py` switches it on, with the network stubbed.
+    """
+    monkeypatch.setattr(settings, "YC_DISCOVERY_ENABLED", False)
 
 
 @pytest.fixture

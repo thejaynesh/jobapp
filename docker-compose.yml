@@ -5,6 +5,9 @@ services:
       POSTGRES_USER: jobapp
       POSTGRES_PASSWORD: jobapp
       POSTGRES_DB: jobapp
+    # Off for the reason docker-compose.prod.yml gives: compiling the jobs
+    # page's queries cost more than running them.
+    command: postgres -c jit=off
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

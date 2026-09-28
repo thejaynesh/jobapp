@@ -12,9 +12,8 @@ It runs two task kinds today:
 | `resolve_link` | Follows an aggregator redirect to the employer's real apply page. | **Resolve job links** ticked |
 | `fetch_json` | Fetches a public JSON endpoint the server is blocked from — Reddit refuses datacenter IPs outright. | **Resolve job links** ticked |
 
-It also harvests passively and draws an on-page overlay — see below. Autofill is
-item 9 and slots into `HANDLERS` in `background.js` without changing anything
-else.
+It also harvests passively and draws an on-page overlay that fills application
+forms — see below.
 
 ## Installing
 
@@ -172,13 +171,31 @@ an application.
 It asks for the named boards only — LinkedIn jobs, Greenhouse, Lever, Ashby,
 Workday, Workable, SmartRecruiters, Recruitee — rather than a wildcard.
 
+**Also on other application systems** is a second checkbox, with a permission
+of its own: iCIMS, Taleo, Oracle, SuccessFactors, Eightfold, Avature, UKG,
+Dayforce, Paylocity, BambooHR, Jobvite, JazzHR, Breezy, Rippling, Pinpoint,
+Teamtailor, Personio and Gem. It is separate so the first list never changes:
+the panel runs only where you granted access, and a longer first list would
+have switched it off on every existing install at update until someone
+re-ticked it. Both lists live in `overlay_hosts.js`.
+
 #### Filling a form
 
 On a page with several empty fields, the panel offers **Fill this form**. It
 matches each field against your profile using everything the field is described
-by at once — `autocomplete`, `name`, `id`, `placeholder`, `aria-label`, and the
-visible label — because every ATS names them differently and no single attribute
-is reliable.
+by at once — `autocomplete`, `name`, `id`, `placeholder`, `aria-label`,
+`aria-labelledby`, Workday's `data-automation-id`, and the visible label —
+because every ATS names them differently and no single attribute is reliable.
+
+It answers text boxes, `<select>` dropdowns, **radio-button questions** (most
+yes/no screening questions are radios), and the **custom dropdowns** Workday and
+others draw as a button that opens a list. On a multi-step form it keeps going:
+Workday draws each step into the same page, so after a fill the panel watches
+for new fields for fifteen minutes and fills those too — empty ones only.
+
+The matching and typing live in `autofill.js`, apart from the panel, so they
+can be run on their own against fixture forms in a real browser
+(`tests/test_autofill_browser.py`).
 
 Three rules it will not break:
 
@@ -216,6 +233,48 @@ empty box does not:
   you authorized to work without requiring sponsorship?" is real and common —
   **is skipped entirely.** The two are asked inverted from each other, and there
   is no way to tell from the field which way round this one means it.
+
+#### Voluntary self-identification
+
+US forms ask gender, race, veteran status and disability, always optionally.
+Write **Decline to self-identify** in *Voluntary self-identification* on the
+Screening tab and each of those is answered with the form's own decline option
+("I don't wish to answer", "I prefer not to answer"). Anything else written
+there is not used: one answer cannot be right for all four questions. A question
+with no decline option is left for you and named in the panel.
+
+#### Remembered answers
+
+Every form asks a few questions nothing on your profile covers — "Are you open
+to hybrid work?", "Do you have a non-compete?". Answer one yourself, press
+**Remember my answers**, and the next form asking it in the same words is
+filled the same way. The idea is from job_app_filler and autograph, open-source
+autofill extensions that keep the same kind of store in the browser; here it
+lives on your server, and **Profile → Screening** lists every one with a
+**Forget** button.
+
+What is offered for remembering is only what you typed or chose yourself: not
+what the fill wrote, not what your profile already covers, not long-form text
+("Why do you want to work here?" is about one company), and never a password,
+identity number, date of birth or bank detail — the server refuses those too.
+
+#### Drafted answers to the long questions
+
+The questions autofill cannot answer and remembering deliberately does not keep
+— "Why do you want to work here?", "Tell us about a project you are proud of" —
+get **Draft answers to N long questions**. Each empty long-text box on the form
+is sent, one at a time, with the posting, to the model you chose for writing
+documents; the draft comes back in an editable box in the panel, with its
+length against the form's own limit. **Put in form** is the only way it reaches
+the page, and it never replaces text you typed there yourself.
+
+Two things are decided on the server, not left to the model. A question asking
+you to declare something about yourself — work authorisation, sponsorship, pay,
+self-identification, criminal history, start date, references — is never
+drafted: it says so and leaves the box to you. And a figure in a draft that is
+in neither your profile nor the posting is named under it, so an invented
+"40%" is something you are told about rather than something you submit. The
+length aimed for is **Settings → Documents → Drafted answers: length**.
 
 #### Attaching your resume
 
@@ -303,7 +362,9 @@ surface to find.
 | `POST /api/agent/link` | Hand over a board's own credential. `{site, api_key, refresh_token}` — see below |
 | `GET /api/agent/job-context?url=` | What we know about a posting: score, flags, whether you applied |
 | `GET /api/agent/autofill-fields` | The profile values a form asks for — a fixed list, not the profile |
+| `POST /api/agent/remember-answers` | Keep answers you typed into questions the profile does not cover. `{answers: [{question, answer}]}` |
 | `POST /api/agent/prepare` | Save a posting and open an application for it. `{url, posting}` |
+| `POST /api/agent/draft-answer` | Draft one long form question for you to edit. `{url, question, max_chars, posting}` |
 
 A lease is exclusive and time-limited. If this browser closes mid-task the lease
 lapses and the task returns to the queue for whoever asks next — no attempt is

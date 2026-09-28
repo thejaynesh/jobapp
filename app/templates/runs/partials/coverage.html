@@ -1,0 +1,77 @@
+{# Coverage: how much of what SimplifyJobs lists our own readers reach, and
+   what each source finds that no other does (`services.source_yield`). #}
+<div id="coverage" class="bg-white border border-gray-200 rounded-lg p-4 mb-8 shadow-sm">
+  <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+    <h2 class="text-base font-semibold text-gray-800">Coverage</h2>
+    <button hx-post="/runs/coverage" hx-target="#coverage" hx-swap="outerHTML"
+      class="text-xs px-3 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">
+      Measure now
+    </button>
+  </div>
+  {% set latest = coverage.latest if coverage else None %}
+  {% if not latest %}
+  <p class="text-xs text-gray-400">
+    Not measured yet. It runs once a day, from the database alone, and needs the
+    SimplifyJobs source on: its postings are the sample.
+  </p>
+  {% else %}
+  <p class="text-sm text-gray-700 mb-1">
+    {% if latest.roles_total %}
+    Of the <span class="font-medium">{{ "{:,}".format(latest.roles_total) }}</span> open
+    SimplifyJobs postings matching your roles in the last {{ latest.window_days }} days,
+    another of our sources found
+    <span class="font-semibold {% if latest.roles_share is not none and latest.roles_share >= 80 %}text-green-700{% elif latest.roles_share is not none and latest.roles_share >= 50 %}text-amber-700{% else %}text-red-600{% endif %}">{{ latest.roles_share }}%</span>
+    ({{ "{:,}".format(latest.roles_found) }}).
+    {% else %}
+    No open SimplifyJobs postings matching your roles in the last {{ latest.window_days }} days.
+    {% endif %}
+  </p>
+  <p class="text-xs text-gray-400 mb-3">
+    All titles: {{ "{:,}".format(latest.found) }} of {{ "{:,}".format(latest.total) }}{% if latest.share is not none %} ({{ latest.share }}%){% endif %};
+    {{ "{:,}".format(latest.recognised) }} are on a system we have a reader for.
+    Measured {{ latest.date }}.
+  </p>
+  {% if coverage.history and coverage.history | length > 1 %}
+  <p class="text-xs text-gray-500 mb-3">
+    Matching your roles, by day:
+    {% for h in coverage.history[-14:] %}<span class="inline-block mr-2" title="{{ h.date }}: {{ h.roles_found }} of {{ h.roles_total }}">{{ h.date[5:] }} <span class="font-medium">{{ h.roles_share if h.roles_share is not none else "–" }}{% if h.roles_share is not none %}%{% endif %}</span></span>{% endfor %}
+  </p>
+  {% endif %}
+  {% if latest.missed %}
+  <p class="text-xs text-gray-500 mb-1">Missed postings matching your roles, by where they are:</p>
+  <p class="text-xs text-gray-600 mb-4">
+    {% for where, n in latest.missed %}<span class="inline-block mr-3"><span class="font-medium">{{ where }}</span> {{ n }}</span>{% endfor %}
+  </p>
+  {% endif %}
+  {% if latest.per_source %}
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="text-left px-4 py-2">Source</th>
+          <th class="text-right px-4 py-2">Listed</th>
+          <th class="text-right px-4 py-2" title="Listed by this source and no other">Only here</th>
+          <th class="text-right px-4 py-2">Matched</th>
+          <th class="text-right px-4 py-2" title="Matched, and listed by this source and no other">Matched, only here</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100 bg-white">
+        {% for s in latest.per_source %}
+        <tr>
+          <td class="px-4 py-2 font-medium text-gray-700">{{ s.source }}</td>
+          <td class="px-4 py-2 text-right text-gray-600">{{ "{:,}".format(s.seen) }}</td>
+          <td class="px-4 py-2 text-right text-gray-600">{{ "{:,}".format(s.only_here) }}</td>
+          <td class="px-4 py-2 text-right text-gray-600">{{ "{:,}".format(s.matched) }}</td>
+          <td class="px-4 py-2 text-right {% if s.matched_only_here %}text-green-700 font-medium{% else %}text-gray-400{% endif %}">{{ "{:,}".format(s.matched_only_here) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="text-xs text-gray-400 mt-2">
+      Jobs first seen in the last {{ latest.window_days }} days. "Only here" is what
+      the source alone brought in; a source with none there is repeating the others.
+    </p>
+  </div>
+  {% endif %}
+  {% endif %}
+</div>

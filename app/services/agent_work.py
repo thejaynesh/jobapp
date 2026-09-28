@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_
 
-from app.config import settings
+from app.config import live
 from app.models.browser_task import BrowserTask
 from app.models.job import Job
 
@@ -48,7 +48,7 @@ _RETRY_AFTER_DAYS = 7
 
 
 def _max_queued() -> int:
-    return max(0, int(getattr(settings, "AGENT_LINK_RESOLVE_MAX_QUEUED", 100)))
+    return max(0, int(getattr(live(), "AGENT_LINK_RESOLVE_MAX_QUEUED", 100)))
 
 
 # ---------------------------------------------------------------------------

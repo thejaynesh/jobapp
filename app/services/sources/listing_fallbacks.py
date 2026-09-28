@@ -172,6 +172,15 @@ class _CardReader(HTMLParser):
                     self.stack[-2][1] = field = "location"
                 elif "fa-house-building" in classes:
                     self.stack[-2][1] = field = "mode"
+                elif "fa-sack-dollar" in classes:
+                    self.stack[-2][1] = field = "salary"
+                elif "fa-trophy" in classes:
+                    self.stack[-2][1] = field = "level"
+                elif "fa-clock" in classes:
+                    # Here the icon sits *inside* the text's own span, and the
+                    # row beside it holds a hidden "Saved" badge — so the field
+                    # is the span, not the row.
+                    self.stack[-1][1] = field = "age"
         else:
             if tag == "div" and {"header", "left"}.issubset(classes):
                 field = "location"
@@ -201,6 +210,13 @@ class _CardReader(HTMLParser):
                     self._finish()
                 break
 
+    def _first(self, key: str) -> str:
+        """
+        A field's first fragment. Built In prints pay and level twice per card
+        (a desktop row and a mobile one), so the joined text is two copies.
+        """
+        return next((p.strip() for p in self.fields.get(key, []) if p.strip()), "")
+
     def _finish(self):
         title = _text(self.fields.get("title", []))
         company = _text(self.fields.get("company", []))
@@ -211,8 +227,70 @@ class _CardReader(HTMLParser):
         )))
         path = urlsplit(self.link).path.strip("/").split("/")
         job_id = path[-1] if self.source == "builtin" else f"{self.slug}:{path[1]}"
-        self.jobs[self.link] = _job(self.source, self.slug, title, self.link,
-                                    location, job_id, company)
+        job = _job(self.source, self.slug, title, self.link, location, job_id, company)
+        if self.source == "builtin":
+            job.update(_builtin_card_details(
+                place=_text(self.fields.get("location", [])),
+                age=self._first("age"), salary=self._first("salary"),
+                level=self._first("level"),
+            ))
+        self.jobs[self.link] = job
+
+
+# What a Built In card says about when, how much and how senior — all stated on
+# the card and all thrown away until now, which left the age filter blind to
+# every Built In posting until enrichment got round to it.
+_PAY_PERIODS = {"annually": "year", "hourly": "hour", "monthly": "month",
+                "weekly": "week", "daily": "day"}
+
+# "112K-160K Annually" — every band on the pages read so far.
+_BUILTIN_PAY = re.compile(
+    r"(?P<low>\d+(?:\.\d+)?)(?P<low_k>K?)(?:\s*-\s*(?P<high>\d+(?:\.\d+)?)(?P<high_k>K?))?"
+    r"\s+(?P<period>Annually|Hourly|Monthly|Weekly|Daily)\b",
+    re.I,
+)
+
+# The card's own seniority label. Stated by the board, so it beats reading the
+# title — a "Software Engineer II" says nothing a regex can use, and the card
+# says "Mid level".
+_BUILTIN_LEVELS = {
+    "internship": "entry", "entry level": "entry", "junior": "entry",
+    "mid level": "mid",
+    "senior level": "senior", "expert/leader": "senior",
+}
+
+
+def _builtin_card_details(place: str, age: str, salary: str, level: str,
+                          now=None) -> dict:
+    from app.services.sources.base import in_united_states, posted_at_from_age
+
+    details: dict = {}
+    posted = posted_at_from_age(age, now=now)
+    if posted:
+        details["posted_at"] = posted
+
+    stated = _BUILTIN_LEVELS.get((level or "").strip().lower())
+    if stated:
+        details["experience_level"] = stated
+
+    # The card never names a currency. For a US posting on a US board that is
+    # dollars; anywhere else it is a guess, and a band stored without its
+    # currency is worse than none — `enrich_from` only takes a band as a
+    # whole, so it would block the posting page's own (which does say) from
+    # ever landing. So outside the US this leaves pay to enrichment.
+    pay = _BUILTIN_PAY.search(salary or "")
+    if pay and in_united_states(place):
+        def amount(digits, k):
+            return float(digits) * (1000 if k else 1)
+
+        low = amount(pay.group("low"), pay.group("low_k"))
+        high = (amount(pay.group("high"), pay.group("high_k"))
+                if pay.group("high") else None)
+        details.update({
+            "salary_min": low, "salary_max": high, "salary_currency": "USD",
+            "salary_period": _PAY_PERIODS[pay.group("period").lower()],
+        })
+    return details
 
 
 def extract_listing_jobs(html: str, url: str, source: str, slug: str) -> list[dict]:

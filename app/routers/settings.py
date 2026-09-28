@@ -51,9 +51,16 @@ def _settings_context(profile) -> dict:
     }
 
 
-def _integrations_status() -> dict:
-    """Which external services are configured, grouped by purpose."""
-    from app.config import settings as cfg
+def _integrations_status(cfg=None) -> dict:
+    """
+    Which external services are configured, grouped by purpose. `cfg` is the
+    effective settings — the environment with the settings page's overrides —
+    so a source switched off here reads as off.
+    """
+    if cfg is None:
+        from app.config import live
+
+        cfg = live()
 
     def _has(val) -> bool:
         if isinstance(val, str):
@@ -75,6 +82,7 @@ def _integrations_status() -> dict:
             {"label": "LinkedIn", "ok": _has(cfg.LINKEDIN_SESSION_COOKIE)},
             {"label": "Adzuna", "ok": _has(cfg.ADZUNA_APP_ID) and _has(cfg.ADZUNA_APP_KEY)},
             {"label": "JSearch", "ok": _has(cfg.JSEARCH_API_KEY)},
+            {"label": "Google Jobs (SerpApi)", "ok": _has(cfg.SERPAPI_API_KEY)},
             {"label": "Jooble", "ok": _has(cfg.JOOBLE_API_KEY)},
             {"label": "FindWork", "ok": _has(cfg.FINDWORK_API_KEY)},
             {"label": "CareerJet", "ok": _has(cfg.CAREERJET_AFFID)},
@@ -89,6 +97,11 @@ def _integrations_status() -> dict:
             {"label": "Working Nomads", "ok": True, "builtin": True},
             {"label": "Built In", "ok": getattr(cfg, "BUILTIN_ENABLED", True), "builtin": True},
             {"label": "Jobspresso", "ok": True, "builtin": True},
+            {"label": "SimplifyJobs lists", "ok": getattr(cfg, "SIMPLIFY_ENABLED", True), "builtin": True},
+            {"label": "Amazon Jobs", "ok": getattr(cfg, "AMAZON_ENABLED", True), "builtin": True},
+            {"label": "TikTok Careers", "ok": getattr(cfg, "TIKTOK_ENABLED", True), "builtin": True},
+            {"label": "Apple Jobs", "ok": getattr(cfg, "APPLE_ENABLED", True), "builtin": True},
+            {"label": "JazzHR", "ok": getattr(cfg, "JAZZHR_ENABLED", True), "builtin": True},
         ],
         "outreach": [
             {"label": "Hunter.io", "ok": _has(cfg.HUNTER_IO_API_KEY)},
@@ -99,9 +112,15 @@ def _integrations_status() -> dict:
     }
 
 
-def _feature_flags() -> list[tuple]:
-    """Boolean feature flags from config, grouped by category."""
-    from app.config import settings as cfg
+def _feature_flags(cfg=None) -> list[tuple]:
+    """
+    Which switches are on, grouped by category, as a summary. Each is a
+    tunable, switched in the form above; `cfg` as above.
+    """
+    if cfg is None:
+        from app.config import live
+
+        cfg = live()
 
     return [
         ("Pipeline", [
@@ -146,9 +165,16 @@ def _feature_flags() -> list[tuple]:
     ]
 
 
-def _system_info() -> dict:
-    """Key system parameters the user should see at a glance."""
-    from app.config import settings as cfg
+def _system_info(cfg=None) -> dict:
+    """
+    Key system parameters the user should see at a glance — as they are in
+    effect, so a value changed above shows here too rather than the
+    environment's.
+    """
+    if cfg is None:
+        from app.config import live
+
+        cfg = live()
 
     return {
         "timezone": cfg.DISPLAY_TIMEZONE,
@@ -308,8 +334,11 @@ async def add_models(request: Request, provider: str, db: Session = Depends(get_
 
 
 def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
-    integrations = _integrations_status()
-    flags = _feature_flags()
+    from app.services.tunables import effective_settings
+
+    cfg = effective_settings(profile.data)
+    integrations = _integrations_status(cfg)
+    flags = _feature_flags(cfg)
     settings_ctx = _settings_context(profile)
 
     enabled_count = sum(
@@ -328,7 +357,7 @@ def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
         "slug_report": profile.data.get("ats_slug_report") or {},
         "integrations": integrations,
         "feature_flags": flags,
-        "system_info": _system_info(),
+        "system_info": _system_info(cfg),
         "summary": {
             "llm_count": sum(1 for i in integrations["llm"] if i["ok"]),
             "source_count": sum(1 for i in integrations["sources"] if i["ok"]),

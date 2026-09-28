@@ -14,7 +14,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from app.config import settings
+from app.config import live, settings
 # Quality-first multi-provider chat (Anthropic -> Gemini -> passed-in primary);
 # keeps the single-provider chat_completion signature.
 from app.llm.providers import generation_chat
@@ -219,7 +219,7 @@ def _jd(job_description: str) -> str:
     the same question ("enough description to hold the requirements section"),
     rather than a sixth independent number.
     """
-    limit = max(2000, int(getattr(settings, "DOC_DESCRIPTION_CHARS", 16000)))
+    limit = max(2000, int(getattr(live(), "DOC_DESCRIPTION_CHARS", 16000)))
     text = job_description or ""
     if len(text) <= limit:
         return text
@@ -1035,7 +1035,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
 
     api_key = settings.NVIDIA_NIM_API_KEY
     base_url = settings.NVIDIA_NIM_BASE_URL
-    model = settings.NVIDIA_NIM_MODEL
+    model = live().NVIDIA_NIM_MODEL
 
     # Track which provider/model actually serves each LLM call (fallback chain
     # means it can vary per call) so the generated docs record their author.

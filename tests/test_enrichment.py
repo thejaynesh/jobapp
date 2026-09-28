@@ -167,6 +167,24 @@ class TestJsonLd:
         )
         assert enrichment.json_ld_extraction(html).description == "Nested but found"
 
+    def test_an_escaped_plus_in_the_script_type_is_still_read(self):
+        # Built In's posting pages, verbatim in the attribute. A browser decodes
+        # it; a pattern looking for a literal `+` did not.
+        for spelling in ("&#x2B;", "&#43;", "&plus;"):
+            html = (
+                f'<script type="application/ld{spelling}json">'
+                '{"@context": "https://schema.org", "@graph": [{"@type": '
+                '"JobPosting", "title": "Software Engineer I", "description": '
+                '"<b>What you\'ll do</b>", "datePosted": "2026-09-27", '
+                '"baseSalary": {"currency": "USD", "value": {"minValue": 111613,'
+                ' "maxValue": 160000, "unitText": "YEAR"}}}]}'
+                "</script>"
+            )
+            found = enrichment.json_ld_extraction(html)
+            assert found.description == "What you'll do", spelling
+            assert found.posted_at == "2026-09-27"
+            assert found.details["salary_max"] == 160000
+
     def test_a_page_with_no_posting_block_yields_nothing(self):
         html = '<script type="application/ld+json">{"@type": "WebSite"}</script>'
         assert not enrichment.json_ld_extraction(html)

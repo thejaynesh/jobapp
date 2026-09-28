@@ -8,6 +8,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    saw_postings,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
         resp = httpx.get(_BASE.format(slug=slug), timeout=15)
         resp.raise_for_status()
         data = resp.json()
+        # Unlisted postings are not open to applicants, so they count as gone.
+        saw_postings(item.get("id") for item in data.get("jobs", [])
+                     if item.get("isListed") is not False)
 
         jobs = []
         for item in data.get("jobs", []):

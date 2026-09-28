@@ -12,7 +12,7 @@ import argparse
 import logging
 
 from app.celery_app import celery_app
-from app.config import settings
+from app.config import live
 from app.database import SessionLocal
 from app.services.fetch_lock import acquire, release
 
@@ -55,7 +55,7 @@ def enrich_jobs(limit: int | None = None, match_after: bool = True,
     on its own rather than re-fetching the same wall forever. `depth` is belt
     and braces on top of that.
     """
-    if not settings.ENRICH_ENABLED:
+    if not live().ENRICH_ENABLED:
         return {**_EMPTY, "skipped_reason": "disabled"}
 
     if not acquire(ttl=ENRICH_LOCK_TTL_SECONDS, key=ENRICH_LOCK_KEY):
@@ -79,7 +79,7 @@ def enrich_jobs(limit: int | None = None, match_after: bool = True,
         # exactly what the tail-call below dispatches, and a second entry would
         # mean two things queueing the matcher for the same reason.
         settled = requeue_settled_verdicts(
-            db, limit=max(1, int(getattr(settings, "RESCORE_MAX_PER_RUN", 1000)))
+            db, limit=max(1, int(getattr(live(), "RESCORE_MAX_PER_RUN", 1000)))
         )
 
         result = run(db, limit=limit)
@@ -116,12 +116,12 @@ def _chain_if_more(result, limit: int | None, match_after: bool, depth: int) -> 
     is the right place for "a few new jobs arrived" rather than "there is a
     backlog".
     """
-    if not settings.ENRICH_CHAIN_PASSES or not isinstance(result, dict):
+    if not live().ENRICH_CHAIN_PASSES or not isinstance(result, dict):
         return
     if result.get("skipped_reason"):
         return
 
-    ceiling = max(1, int(limit or settings.ENRICH_MAX_PER_RUN))
+    ceiling = max(1, int(limit or live().ENRICH_MAX_PER_RUN))
     # Only work this pass actually did. Queued browser tasks used to count
     # here, and that was wrong twice over: handing two hundred URLs to a queue
     # is a second's work, so a batch made entirely of walled-off hosts chained
@@ -131,7 +131,7 @@ def _chain_if_more(result, limit: int | None, match_after: bool, depth: int) -> 
     if result.get("attempted", 0) < ceiling:
         return
 
-    cap = max(0, int(settings.ENRICH_MAX_CHAINED_PASSES))
+    cap = max(0, int(live().ENRICH_MAX_CHAINED_PASSES))
     if depth + 1 >= cap:
         logger.info(
             "enrich_jobs: stopping after %d chained passes; the schedule picks "

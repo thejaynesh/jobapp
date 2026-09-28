@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 
 from app.models.job import Job, JobStatus
+from app.services import posting_identity
 from app.services.deduplication import (
     compute_dedupe_hash,
     enrich_from,
@@ -40,6 +41,8 @@ from app.services.deduplication import (
     find_existing_job,
     merge_description,
     merge_or_skip,
+    note_addresses,
+    note_source,
 )
 from app.services.descriptions import clean as clean_description
 from app.services.sources.base import parse_experience_level
@@ -69,8 +72,20 @@ HARVEST_SOURCES = {
     "builtin.com": "builtin_harvest",
     "simplyhired.com": "simplyhired_harvest",
     "monster.com": "monster_harvest",
-    "otta.com": "otta_harvest",
-    "welcometothejungle.com": "otta_harvest",
+    # Otta became part of Welcome to the Jungle and otta.com redirects there, so
+    # the two are one board and one source. It was `otta_harvest`; rows stored
+    # under that name keep it.
+    "otta.com": "wttj_harvest",
+    "welcometothejungle.com": "wttj_harvest",
+    # Where Welcome to the Jungle's search results actually come from: its own
+    # page asks Algolia, under WTTJ's application id, and a harvested payload is
+    # filed under the host it came *from* — so without these its results would
+    # land in LinkedIn's bucket, the same mistake as Tsenta's API host above.
+    # `-dsn` is the read host; the numbered ones are the client's fallbacks.
+    "csekhvms53-dsn.algolia.net": "wttj_harvest",
+    "csekhvms53-1.algolianet.com": "wttj_harvest",
+    "csekhvms53-2.algolianet.com": "wttj_harvest",
+    "csekhvms53-3.algolianet.com": "wttj_harvest",
     "jobright.ai": "jobright_harvest",
     "tsenta.com": "tsenta_harvest",
     # Tsenta's board is served by an API on a different domain entirely
@@ -1036,6 +1051,77 @@ def _from_hiring_cafe(node: dict, source: str) -> dict | None:
     }
 
 
+WTTJ_SOURCE = "wttj_harvest"
+
+# Where a Welcome to the Jungle posting lives: its employer's page, then the
+# job's own slug. Used by open-source readers of the same index (JobSpy) and
+# in WTTJ's own links; `en` rather than `fr` so the page reads in English.
+_WTTJ_POSTING = "https://www.welcometothejungle.com/en/companies/{company}/jobs/{job}"
+
+# Its remote policy. Only "full" means the job can be done from anywhere;
+# "partial" and "punctual" are hybrid, and counting them as remote would
+# contradict a search for remote work.
+_WTTJ_FULLY_REMOTE = {"full", "fulltime"}
+
+
+def _is_wttj_hit(node) -> bool:
+    """A search hit from WTTJ's index: a job name and slug under an employer."""
+    if not isinstance(node, dict):
+        return False
+    org = node.get("organization")
+    return (isinstance(org, dict)
+            and bool(_text(org.get("name"))) and bool(_text(org.get("slug")))
+            and bool(_text(node.get("name"))) and bool(_text(node.get("slug"))))
+
+
+def _wttj_location(node: dict) -> str:
+    office = node.get("office")
+    if not isinstance(office, dict):
+        offices = node.get("offices")
+        office = offices[0] if isinstance(offices, list) and offices else {}
+    if not isinstance(office, dict):
+        return ""
+    parts = [_text(office.get(key)) for key in ("city", "state")]
+    parts.append(_text(office.get("country")) or _text(office.get("country_code")))
+    return ", ".join(part for part in parts if part)
+
+
+def _from_wttj(node: dict, source: str) -> dict | None:
+    """
+    One Welcome to the Jungle search hit.
+
+    The generic reader cannot see these, for three reasons at once: the title
+    is `name` (the weakest alias there is), the employer sits in a nested
+    `organization` rather than beside it, and there is no URL — only the two
+    slugs a URL is built from. So every hit was read and dropped.
+
+    The description is left for enrichment: a hit is a card, and the posting
+    page (which a browser visit reads through its JobPosting block) is the
+    whole text.
+    """
+    org = node["organization"]
+    title = _text(node.get("name"))
+    company = _text(org.get("name"))
+    url = _WTTJ_POSTING.format(company=_text(org.get("slug")), job=_text(node.get("slug")))
+    job_id = _text(node.get("reference")) or _text(node.get("objectID")) or _text(node.get("id"))
+    location = _wttj_location(node)
+    remote = (_text(node.get("remote")).lower() in _WTTJ_FULLY_REMOTE
+              or _text(node.get("workplace_type")).lower() == "remote")
+    if remote:
+        location = f"Remote ({location})" if location else "Remote"
+    return {
+        "source": source,
+        "source_job_id": job_id or None,
+        "url": url,
+        "title": title,
+        "company": company,
+        "location": location,
+        "description": "",
+        "is_remote": remote,
+        "experience_level": parse_experience_level(title, ""),
+    }
+
+
 def _is_list_item(node) -> bool:
     return isinstance(node, dict) and str(node.get("@type") or "").lower() == "listitem"
 
@@ -1080,6 +1166,15 @@ def extract_jobs(payload, source: str = HARVEST_SOURCE,
                 found.setdefault(job["source_job_id"] or job["url"], job)
             seen_postings.add(id(node))
             seen_postings.add(id(node.get("job_information")))
+        # Only on WTTJ's own payloads: the URL is rebuilt on WTTJ's domain, and
+        # a hit-shaped object from any other board would be given an address
+        # there that does not exist.
+        elif source == WTTJ_SOURCE and _is_wttj_hit(node):
+            job = _from_wttj(node, source)
+            if job:
+                found.setdefault(job["source_job_id"] or job["url"], job)
+            seen_postings.add(id(node))
+            seen_postings.add(id(node["organization"]))
 
     # Search results as a schema.org ItemList, on a board whose links say
     # who is hiring. A result that wraps a full JobPosting was read above.
@@ -1134,8 +1229,11 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                source_job_id, dedupe_hash) -> str:
         """One posting, stored or merged. Returns the outcome to count."""
         source = data.get("source") or HARVEST_SOURCE
-        existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
+        apply_url = data.get("apply_url") or None
+        existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
+                                     apply_url=apply_url)
         if existing is not None:
+            note_source(existing, source)
             improved = enrich_from(existing, data)
             # The harvested copy usually carries a fuller description than the
             # guest API managed, which is the main reason this path exists.
@@ -1144,6 +1242,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                 and existing.source_job_id == source_job_id
                 and existing.source == source
             ):
+                note_addresses(existing, url, apply_url)
                 if merge_description(existing, description):
                     improved.append("description")
             else:
@@ -1156,13 +1255,14 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         # Already seen, judged and retired. Same reasoning as the fetcher's
         # check: an archived posting is one we have an answer about, and
         # re-inserting it buys a scoring call to reach that same answer again.
-        if was_archived(db, source, url, source_job_id, dedupe_hash):
+        if was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url):
             return "skipped"
 
         job = Job(
             source=source,
             source_job_id=source_job_id,
-            source_urls=[url],
+            source_urls=posting_identity.urls(url, apply_url),
+            seen_by=[source],
             title=title,
             company=company,
             location=location,

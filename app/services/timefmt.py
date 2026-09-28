@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.config import settings
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ _cache: dict[str, ZoneInfo] = {}
 
 def zone() -> ZoneInfo:
     """The configured display zone, falling back to UTC if it cannot be read."""
-    name = str(getattr(settings, "DISPLAY_TIMEZONE", "") or DEFAULT_ZONE).strip()
+    name = str(getattr(live(), "DISPLAY_TIMEZONE", "") or DEFAULT_ZONE).strip()
     if name in _cache:
         return _cache[name]
     try:

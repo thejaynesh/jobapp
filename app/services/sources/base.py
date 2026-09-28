@@ -1,7 +1,12 @@
+import contextvars
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Callable
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +68,57 @@ def raise_if_blocked(resp, source: str) -> None:
         )
 
 
+# What each board listed this cycle, for closing the postings it no longer
+# does (`job_fetcher._close_vanished`). A board adapter that reads a company's
+# whole listing in one response calls `saw_postings` inside its per-board
+# fetch; `fetch_boards_concurrently` files the report under (source, slug) —
+# but only for a board whose fetch returned without raising, since a board
+# that failed listed nothing and says nothing about what has closed.
+_SIGHTINGS: ContextVar = ContextVar("board_sightings", default=None)
+_sighting = threading.local()
+
+
+@contextmanager
+def collect_board_sightings():
+    """Collect `{(source, slug): {source_job_id, ...}}` for the block's board reads."""
+    store: dict[tuple[str, str], set[str]] = {}
+    token = _SIGHTINGS.set(store)
+    try:
+        yield store
+    finally:
+        _SIGHTINGS.reset(token)
+
+
+# Postings already stored with their text, per source, for adapters that can
+# list a board without the text and fetch it only for what is new
+# (`sources.greenhouse`). Loaded by the fetcher once per cycle; read by the
+# adapter in the calling thread, since it does not reach the board workers.
+_DESCRIBED: ContextVar = ContextVar("described_postings", default=None)
+
+
+@contextmanager
+def known_descriptions(by_source: dict[str, set[str]] | None):
+    token = _DESCRIBED.set(by_source or {})
+    try:
+        yield
+    finally:
+        _DESCRIBED.reset(token)
+
+
+def described(source: str) -> frozenset[str]:
+    """The `source_job_id`s of `source` already stored with a description."""
+    return frozenset((_DESCRIBED.get() or {}).get(source) or ())
+
+
+def saw_postings(ids) -> None:
+    """
+    Every posting the board being fetched lists, as the `source_job_id` the
+    adapter stores — including the ones it goes on to drop for age, since a
+    posting too old to keep is still open.
+    """
+    _sighting.ids = {str(i) for i in ids if i not in (None, "")}
+
+
 def fetch_boards_concurrently(
     slugs: list[str],
     fetch_one: Callable[[str], list[dict]],
@@ -81,19 +137,30 @@ def fetch_boards_concurrently(
     # Log under the ATS's own logger so per-slug failures are attributed to that
     # source rather than to this shared helper (see services.source_diagnostics).
     board_logger = logging.getLogger(f"{__package__}.{label.lower()}")
+    sightings = _SIGHTINGS.get()
+    lock = threading.Lock()
 
     def _guarded(slug: str) -> list[dict]:
+        _sighting.ids = None
         try:
             jobs = fetch_one(slug) or []
         except Exception as exc:
             board_logger.error("%s fetch error for slug '%s': %s", label, slug, exc)
             return []
+        listed = getattr(_sighting, "ids", None)
+        if sightings is not None and listed is not None:
+            with lock:
+                sightings[(label.lower(), slug)] = listed
         for job in jobs:
             job.setdefault("ats_slug", slug)
         return jobs
 
+    # Each board runs in a copy of this thread's context, so the cycle's
+    # settings (`cycle_settings`) reach it: a bare pool thread sees none, and
+    # every setting read there would go back to the profile.
+    parent = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(slugs)))) as pool:
-        results = list(pool.map(_guarded, slugs))
+        results = list(pool.map(lambda slug: parent.copy().run(_guarded, slug), slugs))
 
     jobs = [job for board_jobs in results for job in board_jobs]
     board_logger.info("%s: %d jobs across %d companies", label, len(jobs), len(slugs))
@@ -113,9 +180,7 @@ def age_cutoff(max_age_days=None):
     from datetime import datetime, timedelta, timezone
 
     if max_age_days is None:
-        from app.config import settings
-
-        max_age_days = getattr(settings, "MAX_JOB_AGE_DAYS", 30)
+        max_age_days = getattr(live(), "MAX_JOB_AGE_DAYS", 30)
     try:
         days = float(max_age_days)
     except (TypeError, ValueError):
@@ -125,9 +190,183 @@ def age_cutoff(max_age_days=None):
     return datetime.now(timezone.utc) - timedelta(days=days)
 
 
+# "2 Days Ago", "Reposted Yesterday", "18 hours ago", "30+ days ago", "a day
+# ago". Built In's cards and Google's job results both state age this way
+# rather than as a date.
+_RELATIVE_AGE = re.compile(
+    r"(?:(?P<n>\d+|an?)\+?\s+(?P<unit>minute|hour|day|week|month)s?\s+ago)"
+    r"|(?P<yesterday>yesterday)|(?P<today>today|just now|just posted)",
+    re.I,
+)
+_AGE_UNIT_DAYS = {"minute": 1 / 1440, "hour": 1 / 24, "day": 1, "week": 7, "month": 30}
+
+
+def posted_at_from_age(text: str | None, now=None) -> str | None:
+    """
+    An ISO timestamp from a relative age, or None when there is none to read.
+
+    Approximate by nature — "2 months ago" is taken as sixty days — which is
+    fine for what reads it: the age filter, which needs to know whether a
+    posting is days or months old. "30+ days ago" is read as thirty, the
+    youngest it could be, so the filter errs toward keeping it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    match = _RELATIVE_AGE.search(text or "")
+    if not match:
+        return None
+    if match.group("yesterday"):
+        days = 1.0
+    elif match.group("today"):
+        days = 0.0
+    else:
+        count = match.group("n").lower()
+        number = 1 if count in ("a", "an") else int(count)
+        days = number * _AGE_UNIT_DAYS[match.group("unit").lower()]
+    now = now or datetime.now(timezone.utc)
+    return (now - timedelta(days=days)).isoformat()
+
+
+def rank_by_title(items: list, queries: list[str], title_of) -> list:
+    """
+    `items` with the titles matching wants first, for spending a detail budget.
+
+    Three tiers, the way enrichment ranks its own targets
+    (`enrichment.select_targets`): a match on a specific word, then anything
+    the matcher's filter would pass, then the rest. Stable within a tier.
+    Nothing is dropped. Falls back to the given order if the matcher cannot be
+    consulted.
+    """
+    if not queries:
+        return list(items)
+    try:
+        from app.services.matcher import _title_matches_roles, title_priority_match
+    except Exception as exc:  # pragma: no cover — an import cycle would be a bug
+        logger.warning("title ranking unavailable (%s); keeping order", exc)
+        return list(items)
+
+    def tier(item) -> int:
+        title = title_of(item) or ""
+        if title_priority_match(title, queries):
+            return 0
+        return 1 if _title_matches_roles(title, queries) else 2
+
+    return sorted(items, key=tier)
+
+
+def passing_titles(items: list, queries: list[str], title_of) -> list:
+    """
+    The items whose title the matcher's filter would accept.
+
+    For the big-employer feeds that return a company's *every* opening — two
+    thousand at L3Harris, most of them in finance and HR — where storing the
+    rest only for the matcher to file them as `title_mismatch` is pure
+    ballast. Keyword-searched sources get the same effect from the search.
+    Falls open: no queries, or a matcher that cannot be consulted, keeps all.
+    """
+    if not queries:
+        return list(items)
+    try:
+        from app.services.matcher import _title_matches_roles
+    except Exception as exc:  # pragma: no cover
+        logger.warning("title gate unavailable (%s); keeping all", exc)
+        return list(items)
+    return [item for item in items if _title_matches_roles(title_of(item) or "", queries)]
+
+
+# Labels that are part of a careers host rather than the employer's name.
+_HOST_NOISE = frozenset({
+    "www", "careers", "career", "jobs", "job", "apply", "hiring", "work",
+    "join", "talent", "recruiting", "eightfold", "ai", "com", "net", "org",
+    "io", "co", "us",
+})
+
+
+def company_from_host(host: str) -> str:
+    """
+    A readable employer name out of a careers host, as a last resort.
+
+    `qualcomm.eightfold.ai` → "Qualcomm", `apply.careers.microsoft.com` →
+    "Microsoft", `careers.mastercard.com` → "Mastercard". Only used when the
+    board registry has no name for the board: a board filed under a real name
+    keeps it (see `job_fetcher._name_board_jobs`).
+    """
+    labels = [p for p in (host or "").lower().split(".") if p]
+    for label in labels:
+        if label not in _HOST_NOISE and not label.startswith("wd"):
+            return label.replace("-", " ").title()
+    return host
+
+
+_US_STATES = frozenset({
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+    "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+    "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+    "WV", "WI", "WY",
+})
+
+
+def in_united_states(location: str | None) -> bool:
+    """
+    Whether a location string plainly names a place in the US.
+
+    For deciding what currency an unlabelled pay band is in, so it only says
+    yes when the string does: "Austin, TX", "New York, NY 10001", "Remote,
+    United States". "Anywhere" and "2 Locations" are no, not a guess.
+    """
+    text = (location or "").strip()
+    if re.search(r"\b(?:united states|usa)\b", text, re.I):
+        return True
+    match = re.search(r",\s*([A-Z]{2})\b(?:\s+\d{5})?\s*$", text)
+    return bool(match and match.group(1) in _US_STATES)
+
+
+# The settings a fetch cycle is running under — `settings` with the settings
+# page's overrides on top — for the helpers every adapter calls itself.
+#
+# `_run_all_adapters` hands each adapter the overlay as `cfg` where it reads a
+# value directly, but a dozen board adapters ask `board_workers()` on their own,
+# and threading `cfg` through all twelve signatures for one number is how a
+# setting ends up wired into eleven of them. Set once per cycle; read here.
+_CYCLE_CFG: ContextVar = ContextVar("source_cycle_cfg", default=None)
+
+
+@contextmanager
+def cycle_settings(cfg):
+    """
+    Make `cfg` what `board_workers()` and friends read, for this block — and
+    what `tunables.live()` returns, so code anywhere inside the cycle reads
+    the overlay it started with rather than the profile again.
+    """
+    from app.services import tunables
+
+    token = _CYCLE_CFG.set(cfg)
+    try:
+        with tunables.bound(cfg):
+            yield cfg
+    finally:
+        _CYCLE_CFG.reset(token)
+
+
+def cycle_cfg():
+    """
+    The running cycle's settings overlay; outside one, the settings page's
+    values as they are now (`tunables.live()`).
+    """
+    cfg = _CYCLE_CFG.get()
+    if cfg is not None:
+        return cfg
+    from app.services import tunables
+    return tunables.live()
+
+
 def board_workers() -> int:
-    from app.config import settings
-    return getattr(settings, "ATS_BOARD_FETCH_WORKERS", DEFAULT_BOARD_WORKERS)
+    try:
+        return max(1, int(getattr(cycle_cfg(), "ATS_BOARD_FETCH_WORKERS",
+                                  DEFAULT_BOARD_WORKERS)))
+    except (TypeError, ValueError):
+        return DEFAULT_BOARD_WORKERS
 
 
 # Browser-ish headers. Several ATS careers pages answer a bare httpx request

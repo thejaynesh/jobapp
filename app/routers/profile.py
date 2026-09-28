@@ -10,6 +10,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.database import get_db
 from app.services.locations import REGION_OPTIONS, normalize_prefs
 from app.services.profile_service import get_or_create_profile
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,7 @@ def get_profile(request: Request, tab: str = "personal", db: Session = Depends(g
     if tab == "screening":
         from app.services import screening
 
-        context["screening_fields"] = screening.FIELDS
-        context["screening"] = screening.answers(profile.data)
+        context.update(_screening_context(profile.data))
     if tab == "ai prompt":
         context["preview"] = _preview(db)
     if tab == "check":
@@ -122,13 +122,38 @@ async def save_screening(request: Request, db: Session = Depends(get_db)):
     db.commit()
     return templates.TemplateResponse(
         "profile/partials/screening.html",
-        {
-            "request": request,
-            "profile": profile.data,
-            "screening_fields": screening.FIELDS,
-            "screening": screening.answers(profile.data),
-            "saved": True,
-        },
+        {"request": request, "profile": profile.data, "saved": True,
+         **_screening_context(profile.data)},
+    )
+
+
+def _screening_context(profile_data: dict) -> dict:
+    from app.services import remembered_answers, screening
+
+    remembered = sorted(
+        ((key, entry) for key, entry in remembered_answers.entries(profile_data).items()
+         if isinstance(entry, dict)),
+        key=lambda item: item[1].get("question", "").lower(),
+    )
+    return {
+        "screening_fields": screening.FIELDS,
+        "screening": screening.answers(profile_data),
+        "remembered": remembered,
+    }
+
+
+@router.post("/remembered/forget", response_class=HTMLResponse)
+async def forget_remembered(request: Request, db: Session = Depends(get_db)):
+    """Drop one remembered answer; the next form asking it is left for the user."""
+    from app.services import remembered_answers
+
+    form = await request.form()
+    profile = get_or_create_profile(db)
+    profile.data = remembered_answers.forget(profile.data or {}, str(form.get("key") or ""))
+    db.commit()
+    return templates.TemplateResponse(
+        "profile/partials/screening.html",
+        {"request": request, "profile": profile.data, **_screening_context(profile.data)},
     )
 
 
@@ -366,7 +391,7 @@ def narrative_generate_questions(request: Request, db: Session = Depends(get_db)
         db,
         api_key=settings.NVIDIA_NIM_API_KEY,
         base_url=settings.NVIDIA_NIM_BASE_URL,
-        model=settings.NVIDIA_NIM_MODEL,
+        model=live().NVIDIA_NIM_MODEL,
     )
     db.commit()
     return templates.TemplateResponse(
@@ -400,7 +425,7 @@ def regenerate_summary(request: Request, db: Session = Depends(get_db)):
         db,
         api_key=settings.NVIDIA_NIM_API_KEY,
         base_url=settings.NVIDIA_NIM_BASE_URL,
-        model=settings.NVIDIA_NIM_MODEL,
+        model=live().NVIDIA_NIM_MODEL,
     )
     db.commit()
     return templates.TemplateResponse(

@@ -14,12 +14,13 @@ ones are retired, so the per-cycle budget keeps going to companies that hire.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.company_board import CompanyBoard
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,8 @@ AWAITING_VALIDATION = "awaiting validation"
 
 
 def _validation_enabled() -> bool:
-    from app.config import settings
 
-    return bool(getattr(settings, "ATS_BOARD_VALIDATION", True))
+    return bool(getattr(live(), "ATS_BOARD_VALIDATION", True))
 
 
 def is_blocked_slug(slug: str) -> bool:
@@ -64,6 +64,13 @@ def is_blocked_slug(slug: str) -> bool:
     return text.split(":", 1)[0] in SLUG_BLOCKLIST
 
 
+_REPLAY_TOUCH_INTERVAL = timedelta(hours=20)
+
+
+def _aware(moment: datetime) -> datetime:
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def record_boards(
     db: Session,
     found: dict[str, list[str] | set[str]],
@@ -71,10 +78,15 @@ def record_boards(
     company: str | None = None,
     source_host: str | None = None,
     revive: bool = True,
+    names: dict[tuple[str, str], str] | None = None,
 ) -> int:
     """
     Upsert `{ats: [slug, ...]}` into the registry. Returns the number of boards
     seen for the first time.
+
+    `company` names every board in the batch; `names` names them one by one,
+    keyed by `(ats, slug)`, for a batch drawn from many employers at once (a
+    community list). A per-board name wins over the batch's.
 
     A board freshly linked from a posting is evidence the company is still
     hiring, so re-seeing one refreshes `last_seen_at` and revives it if it had
@@ -82,7 +94,10 @@ def record_boards(
     legacy profile blob) — those say nothing new each cycle, and reviving from
     them would resurrect every retired board forever.
     """
-    wanted: set[tuple[str, str]] = set()
+    # Keyed without case: ATSes read board names case-blind (Workday's
+    # `External_Career_Site` and `external_career_site` are one site), and a
+    # list that lower-cases them must not register every one a second time.
+    wanted: dict[tuple[str, str], tuple[str, str]] = {}
     blocked = 0
     for ats, slugs in found.items():
         for raw in (slugs or []):
@@ -92,7 +107,7 @@ def record_boards(
             if is_blocked_slug(slug):
                 blocked += 1
                 continue
-            wanted.add((ats, slug))
+            wanted.setdefault((ats, slug.lower()), (ats, slug))
     if blocked:
         logger.info(
             "company_boards: refused %d slug(s) that name a job board or a URL "
@@ -111,11 +126,12 @@ def record_boards(
         .filter(CompanyBoard.ats.in_({ats for ats, _ in wanted}))
         .all()
     )
-    index = {(board.ats, board.slug): board for board in existing}
+    index = {(board.ats, board.slug.lower()): board for board in existing}
 
     new_count = 0
-    for ats, slug in sorted(wanted):
-        board = index.get((ats, slug))
+    for key in sorted(wanted):
+        ats, slug = wanted[key]
+        board = index.get(key)
         if board is None:
             # A guessed slug is not polled until something has asked its ATS
             # whether it is real. Slugs the user configured and the curated
@@ -126,7 +142,7 @@ def record_boards(
             board = CompanyBoard(
                 ats=ats,
                 slug=slug,
-                company=company,
+                company=(names or {}).get((ats, slug)) or company,
                 origin=origin,
                 source_host=source_host,
                 first_seen_at=now,
@@ -136,13 +152,19 @@ def record_boards(
                 inactive_reason=None if trusted else AWAITING_VALIDATION,
             )
             db.add(board)
-            index[(ats, slug)] = board
+            index[key] = board
             new_count += 1
             continue
 
-        board.last_seen_at = now
-        if company and not board.company:
-            board.company = company
+        # A replayed list says the same thing every cycle; touching tens of
+        # thousands of rows to record that is a write storm for nothing, so a
+        # replay refreshes a board at most daily. A fresh sighting always does.
+        if revive or board.last_seen_at is None or \
+                now - _aware(board.last_seen_at) >= _REPLAY_TOUCH_INTERVAL:
+            board.last_seen_at = now
+        named = (names or {}).get((ats, slug)) or company
+        if named and not board.company:
+            board.company = named
         if source_host and not board.source_host:
             board.source_host = source_host
         # Re-seeing a board revives it, but only one that was retired for going
@@ -373,10 +395,11 @@ def record_fetch_results(
 
 
 def backfill_from_slugs(
-    db: Session, slugs_by_ats: dict[str, list[str]], origin: str
+    db: Session, slugs_by_ats: dict[str, list[str]], origin: str,
+    names: dict[tuple[str, str], str] | None = None,
 ) -> int:
     """Import a stored slug mapping (config, seeds, the legacy profile blob)."""
-    return record_boards(db, slugs_by_ats, origin=origin, revive=False)
+    return record_boards(db, slugs_by_ats, origin=origin, revive=False, names=names)
 
 
 def summary(db: Session) -> dict:
@@ -459,3 +482,92 @@ def reactivate(db: Session, board_id) -> CompanyBoard | None:
     board.consecutive_empty = 0
     logger.info("company_boards: reactivated %s/%s", board.ats, board.slug)
     return board
+
+
+WORKDAY_SITES_KEY = "workday_sites_scanned"
+# A tenant adds a career site rarely; once a month is plenty to notice.
+_WORKDAY_RESCAN_DAYS = 30
+
+
+def expand_workday_sites(db: Session, limit: int = 300, workers: int = 8) -> dict:
+    """
+    Register every career site of the Workday tenants the registry knows.
+
+    Discovery finds a tenant through one posting link, which names one site —
+    usually the main one. New-grad and internship roles often live on sites of
+    their own (`Futureforce_NewGradRoles`, `…-Early-Careers`), and nothing ever
+    linked us to those. The tenant's robots.txt lists every site
+    (`sources.workday.sites_for`), so each tenant is read once, then again a
+    month later; the sites found go through validation like any other board.
+
+    Which tenants were read, and when, lives on the profile under
+    `WORKDAY_SITES_KEY` — one short entry per tenant.
+    """
+    import copy
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+
+    from app.models.profile import Profile
+    from app.services.sources.workday import parse_tenant_spec, sites_for
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return {"scanned": 0, "new_boards": 0}
+    scanned = dict((profile.data or {}).get(WORKDAY_SITES_KEY) or {})
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_WORKDAY_RESCAN_DAYS)
+
+    def stale(key: str) -> bool:
+        try:
+            return datetime.fromisoformat(scanned[key]) < cutoff
+        except (KeyError, ValueError, TypeError):
+            return True
+
+    tenants: dict[str, str | None] = {}   # "tenant:host" → a company name
+    for slug, company in (
+        db.query(CompanyBoard.slug, CompanyBoard.company)
+        .filter(CompanyBoard.ats == "workday", CompanyBoard.active.is_(True))
+        .order_by(CompanyBoard.total_job_count.desc(), CompanyBoard.slug.asc())
+        .all()
+    ):
+        parsed = parse_tenant_spec(slug)
+        if not parsed:
+            continue
+        key = f"{parsed[0]}:{parsed[1]}"
+        if stale(key) and key not in tenants:
+            tenants[key] = company
+        if len(tenants) >= max(0, limit):
+            break
+    if not tenants:
+        return {"scanned": 0, "new_boards": 0}
+
+    def read(key: str):
+        tenant, host = key.split(":", 1)
+        try:
+            return key, sites_for(tenant, host)
+        except Exception as exc:
+            logger.info("company_boards: no robots.txt sites for %s: %s", key, exc)
+            return key, None
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tenants)))) as pool:
+        results = list(pool.map(read, tenants))
+
+    found: dict[str, set[str]] = {"workday": set()}
+    names: dict[tuple[str, str], str] = {}
+    now = datetime.now(timezone.utc).isoformat()
+    for key, sites in results:
+        scanned[key] = now
+        for site in sites or []:
+            spec = f"{key}:{site}"
+            found["workday"].add(spec)
+            if tenants.get(key):
+                names[("workday", spec)] = tenants[key]
+    new = record_boards(db, found, origin="workday-sites", revive=False, names=names)
+
+    db.refresh(profile)
+    data = copy.deepcopy(profile.data or {})
+    data[WORKDAY_SITES_KEY] = scanned
+    profile.data = data
+    db.flush()
+    logger.info("company_boards: read %d Workday tenants' sites, %d new sites",
+                len(results), new)
+    return {"scanned": len(results), "new_boards": new}

@@ -29,6 +29,7 @@
 // The sites harvesting can read. Shared with the options page rather than
 // written out in both — see sites.js for how to add one.
 import { HARVEST_SITES, siteForUrl } from "./sites.js";
+import { OVERLAY_CORE, OVERLAY_FILES, OVERLAY_MORE, overlayMatches } from "./overlay_hosts.js";
 
 const ALARM_NAME = "jobapp-poll";
 const DEFAULTS = {
@@ -1925,51 +1926,44 @@ async function syncHarvestScripts() {
 // ---------------------------------------------------------------------------
 
 /**
- * Job sites the overlay draws on. A list rather than a wildcard: it covers the
- * ATS boards where applications actually happen, and asking for those by name
- * is a smaller and more legible request than "every site you visit".
+ * Job sites the overlay draws on: the core boards, and — when their separate
+ * checkbox and permission are both on — the other application systems. The
+ * lists live in overlay_hosts.js, shared with the options page.
  */
-const OVERLAY_MATCHES = [
-  "https://www.linkedin.com/jobs/*",
-  "https://boards.greenhouse.io/*",
-  "https://job-boards.greenhouse.io/*",
-  "https://jobs.lever.co/*",
-  "https://jobs.ashbyhq.com/*",
-  "https://*.myworkdayjobs.com/*",
-  "https://apply.workable.com/*",
-  "https://jobs.smartrecruiters.com/*",
-  "https://*.recruitee.com/*",
-];
-const OVERLAY_HOSTS = { origins: OVERLAY_MATCHES };
-const OVERLAY_SCRIPTS = [
-  {
-    id: "jobapp-overlay",
-    matches: OVERLAY_MATCHES,
-    js: ["overlay.js"],
-    runAt: "document_idle",
-  },
-];
-
 async function syncOverlayScripts() {
-  const wanted =
-    (await chrome.storage.local.get({ overlay: false })).overlay &&
-    (await chrome.permissions.contains(OVERLAY_HOSTS));
-  let registered = false;
+  const stored = await chrome.storage.local.get({ overlay: false, overlayMore: false });
+  const matches = overlayMatches({
+    overlay: stored.overlay,
+    more: stored.overlayMore,
+    hasCore: await chrome.permissions.contains({ origins: OVERLAY_CORE }),
+    hasMore: await chrome.permissions.contains({ origins: OVERLAY_MORE }),
+  });
+  let current = null;
   try {
-    registered =
-      (await chrome.scripting.getRegisteredContentScripts({ ids: ["jobapp-overlay"] }))
-        .length > 0;
+    [current] = await chrome.scripting.getRegisteredContentScripts({
+      ids: ["jobapp-overlay"],
+    });
   } catch (_) {
-    registered = false;
+    current = null;
   }
+  // Replaced whenever its files or sites differ from what they should be: a
+  // registration from an older version lacks autofill.js, and one made before
+  // the extra sites were granted lacks them.
+  const upToDate =
+    Boolean(current) &&
+    Boolean(matches) &&
+    JSON.stringify(current.js || []) === JSON.stringify(OVERLAY_FILES) &&
+    JSON.stringify([...(current.matches || [])].sort()) === JSON.stringify([...matches].sort());
 
   try {
-    if (wanted && !registered) {
+    if (matches && !upToDate) {
       await chrome.scripting
         .unregisterContentScripts({ ids: ["jobapp-overlay"] })
         .catch(() => {});
-      await chrome.scripting.registerContentScripts(OVERLAY_SCRIPTS);
-    } else if (!wanted && registered) {
+      await chrome.scripting.registerContentScripts([
+        { id: "jobapp-overlay", matches, js: OVERLAY_FILES, runAt: "document_idle" },
+      ]);
+    } else if (!matches && current) {
       await chrome.scripting.unregisterContentScripts({ ids: ["jobapp-overlay"] });
     }
   } catch (error) {
@@ -1985,13 +1979,17 @@ async function syncOverlayScripts() {
  * is running on. So the panel asks, this fetches, and the token never enters
  * the page's process.
  */
-async function overlayApi(path, body) {
+async function overlayApi(path, body, timeoutMs) {
   const config = await getConfig();
   if (!config.serverUrl || !config.token) {
     return { error: "Set your server URL and token in the extension options." };
   }
   try {
-    const data = await api(path, body);
+    // The panel may ask for longer than the default (a drafted answer), never
+    // for more than two minutes.
+    const data = await api(path, body, {
+      timeoutMs: Math.min(Number(timeoutMs) || 40000, 120000),
+    });
     return { data, serverUrl: config.serverUrl };
   } catch (error) {
     return { error: error.message, serverUrl: config.serverUrl };
@@ -2295,7 +2293,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === "overlay-api") {
     if (!sender.tab) return false;
-    overlayApi(message.path, message.body).then(sendResponse);
+    overlayApi(message.path, message.body, message.timeoutMs).then(sendResponse);
     return true;
   }
   if (message?.type === "overlay-event") {

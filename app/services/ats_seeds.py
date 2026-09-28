@@ -28,6 +28,20 @@ SEED_ATS_SLUGS: dict[str, list[str]] = {
         "posthog", "cursor", "perplexity", "vanta", "mercury", "clever", "zip",
         "hightouch", "sierra", "docker", "modal", "elevenlabs",
     ],
+    # Avature portals of US employers, each checked on 2026-09-28 the way
+    # registry validation checks one: a sitemap named in robots.txt, and a
+    # posting from it that opens without a login.
+    "avature": [
+        "bloomberg.avature.net/careers", "koch.avature.net/careers",
+        "koch.avature.net/CollegeRecruiting", "harmanglobal.avature.net/careers",
+        "mantech.avature.net/careers", "insperity.avature.net/careers",
+        "tql.avature.net/TQLexternalcareers", "forvis.avature.net/campuscareers",
+        "broadinstitute.avature.net/careers", "unifi.avature.net/careers",
+        "radpartners.avature.net/careersmarketplace", "nva.avature.net/jobs",
+        "missionpethealth.avature.net/careersmarketplace", "cdcn.avature.net/careers",
+        "intercaretherapy.avature.net/careers", "onecall.avature.net/careers",
+        "bradyplus.avature.net/careersmarketplace",
+    ],
     "workday": [
         "nvidia:wd5:NVIDIAExternalCareerSite",
         "salesforce:wd12:External_Career_Site",
@@ -35,3 +49,16 @@ SEED_ATS_SLUGS: dict[str, list[str]] = {
         "workday:wd5:Workday",
     ],
 }
+
+
+# Large US employers' boards (see `ats_seeds_large`), merged in after the
+# hand-verified list above, and their company names for the registry rows.
+from app.services.ats_seeds_large import LARGE_EMPLOYER_BOARDS  # noqa: E402
+
+SEED_BOARD_NAMES: dict[tuple[str, str], str] = {}
+for _ats, _boards in LARGE_EMPLOYER_BOARDS.items():
+    _known = SEED_ATS_SLUGS.setdefault(_ats, [])
+    for _board, _company in _boards:
+        if _board not in _known:
+            _known.append(_board)
+        SEED_BOARD_NAMES[(_ats, _board)] = _company

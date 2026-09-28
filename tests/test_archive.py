@@ -232,7 +232,7 @@ class TestDeduplicationStillWorks:
     def test_the_fetcher_guards_the_same_way(self, db):
         # The fetcher's insert loop is inline in `fetch_and_save_jobs`, so it
         # is checked here by construction rather than driven end to end: both
-        # paths call the one guard with the same four arguments, and a future
+        # paths call the one guard with the same arguments, and a future
         # edit that drops it from one of them fails this.
         import inspect
 
@@ -240,8 +240,8 @@ class TestDeduplicationStillWorks:
 
         for module in (job_fetcher, harvest):
             source = inspect.getsource(module)
-            assert "was_archived(db, source, url, source_job_id, dedupe_hash)" \
-                in source, module.__name__
+            assert ("was_archived(db, source, url, source_job_id, dedupe_hash, "
+                    "apply_url=apply_url)") in source, module.__name__
 
 
 class TestATombstoneThatAlreadyExists:

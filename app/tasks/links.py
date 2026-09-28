@@ -19,7 +19,7 @@ import argparse
 import logging
 
 from app.celery_app import celery_app
-from app.config import settings
+from app.config import live
 from app.database import SessionLocal
 from app.services.link_resolver import retarget_tracker_links
 
@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 
 def _politeness() -> dict:
     return {
-        "workers": settings.LINK_RESOLVE_WORKERS,
-        "per_host": settings.LINK_RESOLVE_PER_HOST,
-        "host_delay": settings.LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
+        "workers": live().LINK_RESOLVE_WORKERS,
+        "per_host": live().LINK_RESOLVE_PER_HOST,
+        "host_delay": live().LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
     }
 
 

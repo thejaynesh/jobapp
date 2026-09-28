@@ -166,12 +166,21 @@ class TestGreenhouseAdapter:
                        "absolute_url": "https://greenhouse.io/stripe/1", "content": "desc"}]
         raw_airbnb = [{"id": 2, "title": "SRE", "location": {"name": "SF"},
                        "absolute_url": "https://greenhouse.io/airbnb/2", "content": "desc"}]
-        with patch("httpx.get", side_effect=[
-            self._mock_response(raw_stripe),
-            self._mock_response(raw_airbnb),
-        ]):
+        boards = {"stripe": raw_stripe, "airbnb": raw_airbnb}
+
+        def get(url, **kw):
+            # A board's list, or — for a posting not yet stored — its text.
+            slug = url.split("/boards/")[1].split("/")[0]
+            if "/jobs/" in url:
+                resp = MagicMock()
+                resp.json.return_value = {"content": "desc"}
+                return resp
+            return self._mock_response(boards[slug])
+
+        with patch("httpx.get", side_effect=get):
             results = fetch(company_slugs=["stripe", "airbnb"])
         assert len(results) == 2
+        assert {job["description"] for job in results} == {"desc"}
 
     def test_failed_slug_skipped(self):
         from app.services.sources.greenhouse import fetch

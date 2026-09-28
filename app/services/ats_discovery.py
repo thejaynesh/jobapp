@@ -40,11 +40,15 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
         # Embed widget: boards.greenhouse.io/embed/job_board?for=<slug>
         re.compile(r"greenhouse\.io/embed/job_board[^\"'\s]*[?&]for=([A-Za-z0-9_-]{2,})", re.I),
         re.compile(r"greenhouse\.io/(?:v1/)?boards/([A-Za-z0-9_-]{2,})", re.I),
-        re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
+        # EU-hosted boards (job-boards.eu.greenhouse.io) are served by the same
+        # API as every other, so they need nothing more than to be recognised.
+        re.compile(r"(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
     ],
     "lever": [
-        re.compile(r"jobs\.lever\.co/([A-Za-z0-9_-]{2,})", re.I),
-        re.compile(r"api\.lever\.co/v0/postings/([A-Za-z0-9_-]{2,})", re.I),
+        # jobs.eu.lever.co boards live only on api.eu.lever.co; the adapter
+        # falls back to it when the US API has never heard of a slug.
+        re.compile(r"jobs\.(?:eu\.)?lever\.co/([A-Za-z0-9_-]{2,})", re.I),
+        re.compile(r"api\.(?:eu\.)?lever\.co/v0/postings/([A-Za-z0-9_-]{2,})", re.I),
     ],
     "ashby": [
         re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.\-]{2,})", re.I),
@@ -80,6 +84,20 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
         # would register the tracker itself as a company board.
         re.compile(r"jobs\.jobvite\.com/(?:careers/)?([A-Za-z0-9_-]{2,})", re.I),
     ],
+    "rippling": [
+        # ats.rippling.com/<slug>/jobs/<id>, past any locale segment (/en-US/).
+        re.compile(r"ats\.rippling\.com/(?:api/v2/board/)?(?:[a-z]{2}-[A-Za-z]{2}/)?"
+                   r"([A-Za-z0-9_-]{2,})(?:/|$)", re.I),
+    ],
+    "pinpoint": [
+        re.compile(r"https?://([A-Za-z0-9-]{2,})\.pinpointhq\.com", re.I),
+    ],
+    # A board link names the company id; a posting link (/Jobs/Details/<n>)
+    # does not, so it is no use here.
+    "paylocity": [
+        re.compile(r"recruiting\.paylocity\.com/recruiting/jobs/all/"
+                   r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I),
+    ],
     "personio": [
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio\.(?:de|com)", re.I),
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio-int\.com", re.I),
@@ -88,13 +106,92 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
 
 # Workday boards need a tenant:host:site triple, extracted from URLs like
 # https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/...
+# or, for the tenants Workday serves from its shared host,
+# https://wd5.myworkdaysite.com/en-US/recruiting/microchiphr/External/job/...
+# — the same tenant answers on microchiphr.wd5.myworkdayjobs.com, so both
+# shapes give the spec the adapter already reads.
 _WORKDAY_RE = re.compile(
-    r"https?://([a-z0-9-]{2,})\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]{2,})",
+    r"https?://([a-z0-9-]{2,})\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]+)",
     re.I,
 )
+_WORKDAY_SITE_RE = re.compile(
+    r"https?://(wd\d+)\.myworkdaysite\.com/(?:[a-z]{2}-[A-Z]{2}/)?recruiting/"
+    r"([a-z0-9-]{2,})/([A-Za-z0-9_-]+)",
+    re.I,
+)
+# Paths on a Workday host that are not career sites. The site is judged
+# against these and nothing else: "careers", "search" and "External" are
+# ordinary site names (theocc:wd5:careers, expedia:wd108:search), and the
+# general slug blocklist, written for vendor slugs, was throwing them away.
+# Nor is there a length rule: Citi's main site, 2,000 postings, is "2".
+_WORKDAY_NOT_SITES = frozenset({"wday", "login", "robots", "userhome", "recruiting"})
 
-# All ATS kinds we can fetch directly (patterned single-slug ones plus workday).
-ALL_ATS = frozenset(ATS_PATTERNS) | {"workday"}
+# ATSes whose board is a careers *host* — often the employer's own domain —
+# rather than a slug on the vendor's. Each pattern reads one posting link and
+# returns the board spec its adapter takes. They are deliberately specific to
+# the URL shape each platform emits, because the host alone says nothing; and
+# a host that is a job board rather than an employer is refused whatever the
+# path looks like (`_employer_host`). Every board found still has to pass its
+# validation probe before it is polled.
+_HOST_BOARD_PATTERNS: list[tuple[str, re.Pattern, "callable"]] = [
+    # …oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26007181
+    ("oracle", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.oraclecloud\.com)"
+        r"/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([A-Za-z0-9_]+)", re.I),
+     lambda m: f"{m.group(1).lower()}:{m.group(2)}"),
+    # SuccessFactors Career Site Builder: /job/<Title-Slug>/<9-10 digit id>/
+    ("successfactors", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/job/[^/\s\"'<>?#]+/\d{6,12}/", re.I),
+     lambda m: m.group(1).lower()),
+    # Phenom: /us/en/job/R-275650/…
+    ("phenom", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/([a-z]{2})/([a-z]{2})/job/[A-Za-z0-9_-]+",
+        re.I),
+     lambda m: f"{m.group(1).lower()}/{m.group(2).lower()}/{m.group(3).lower()}"),
+    # iCIMS careers-home ("Jibe") sites: /careers-home/jobs/<id>, or /jobs/<id>
+    # carrying the `icims` marker SimplifyJobs adds to them.
+    ("jibe", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/careers-home/jobs/\d+", re.I),
+     lambda m: m.group(1).lower()),
+    ("jibe", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/jobs/\d+/?\?(?:[^\s\"'<>]*&)?icims=1", re.I),
+     lambda m: m.group(1).lower()),
+    # …and iCIMS's own host for them, which needs no marker: dish.jibeapply.com
+    ("jibe", re.compile(r"https?://([a-z0-9-]+\.jibeapply\.com)/jobs/\d+", re.I),
+     lambda m: m.group(1).lower()),
+    # Taleo: {tenant}.taleo.net/careersection/{section}/jobdetail.ftl?job=…
+    ("taleo", re.compile(
+        r"https?://([a-z0-9-]+)\.taleo\.net/careersection/([A-Za-z0-9_]+)/"
+        r"(?:jobdetail|jobsearch|moresearch|joblist)\.ftl", re.I),
+     lambda m: f"{m.group(1).lower()}/{m.group(2)}"),
+    # Avature: {tenant}.avature.net/[{locale}/]{portal}/JobDetail/… — the
+    # locale dropped, since every language's sitemap lists the same postings.
+    # Internal-mobility, sandbox and template portals are not boards.
+    ("avature", re.compile(
+        r"https?://((?!sandbox)[a-z0-9-]+)\.avature\.net/(?:[a-z]{2}_[A-Z]{2}/)?"
+        r"((?![A-Za-z0-9_-]*(?:internal|sandbox|example|tobedeleted|test))[A-Za-z0-9_-]+)"
+        r"/(?:JobDetail|SearchJobs)\b", re.I),
+     lambda m: f"{m.group(1).lower()}.avature.net/{m.group(2)}"),
+    # Eightfold: {company}.eightfold.ai, or a custom host's /careers/job/<long id>
+    ("eightfold", re.compile(r"https?://([a-z0-9-]+\.eightfold\.ai)/careers", re.I),
+     lambda m: m.group(1).lower()),
+    ("eightfold", re.compile(
+        r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/careers/job/\d{10,}", re.I),
+     lambda m: m.group(1).lower()),
+]
+
+
+def _employer_host(host: str) -> bool:
+    """False for a job board or search engine that merely links to postings."""
+    from app.services.company_domain import AGGREGATOR_HOSTS
+
+    host = host.lower().split(":", 1)[0]
+    return not any(host == d or host.endswith(f".{d}") for d in AGGREGATOR_HOSTS)
+
+
+# All ATS kinds we can fetch directly (patterned single-slug ones plus workday
+# and the host-based ones).
+ALL_ATS = frozenset(ATS_PATTERNS) | {"workday"} | {a for a, _, _ in _HOST_BOARD_PATTERNS}
 
 # Things that match the URL patterns but are not a company board.
 #
@@ -134,10 +231,17 @@ def _extract_slugs(text: str) -> dict[str, set[str]]:
                 slug = match.group(1).lower().rstrip(".")
                 if slug and slug not in _SLUG_BLOCKLIST:
                     found.setdefault(ats, set()).add(slug)
-    for match in _WORKDAY_RE.finditer(text):
-        tenant, host, site = match.group(1).lower(), match.group(2).lower(), match.group(3)
-        if site.lower() not in _SLUG_BLOCKLIST:
+    workday = [(m.group(1), m.group(2), m.group(3)) for m in _WORKDAY_RE.finditer(text)]
+    workday += [(m.group(2), m.group(1), m.group(3)) for m in _WORKDAY_SITE_RE.finditer(text)]
+    for tenant, host, site in workday:
+        tenant, host = tenant.lower(), host.lower()
+        if tenant not in _SLUG_BLOCKLIST and site.lower() not in _WORKDAY_NOT_SITES:
             found.setdefault("workday", set()).add(f"{tenant}:{host}:{site}")
+    for ats, pattern, spec_of in _HOST_BOARD_PATTERNS:
+        for match in pattern.finditer(text):
+            spec = spec_of(match)
+            if _employer_host(spec.split("/", 1)[0]):
+                found.setdefault(ats, set()).add(spec)
     return found
 
 
@@ -154,13 +258,18 @@ def discover_from_jobs(raw_jobs: list[dict]) -> dict[str, set[str]]:
     """
     found: dict[str, set[str]] = {}
     for job in raw_jobs:
-        if job.get("source") in ALL_ATS:
-            continue  # a job fetched from an ATS shouldn't rediscover itself
+        # A job fetched from an ATS shouldn't rediscover its own board — but it
+        # can name another one. A Phenom site's postings apply through the
+        # Workday or SuccessFactors board behind it, and that board is worth
+        # polling directly.
+        own = job.get("source") if job.get("source") in ALL_ATS else None
         text = "\n".join(filter(None, (
-            job.get("url"), job.get("apply_url"), job.get("description"),
+            job.get("url"), job.get("apply_url"),
+            job.get("description") if own is None else None,
         )))
         for ats, slugs in _extract_slugs(text).items():
-            found.setdefault(ats, set()).update(slugs)
+            if ats != own:
+                found.setdefault(ats, set()).update(slugs)
     return found
 
 
@@ -229,6 +338,121 @@ def harvest_slugs_from_lists(urls: list[str], existing: dict | None = None) -> d
     return merged
 
 
+# A list of board names for one ATS, as some aggregators publish their
+# registries: a JSON array, one board per entry. The ATS comes from an explicit
+# `ats=` prefix on the configured URL, or from a `<ats>_companies.json` file
+# name (github.com/Feashliaa/job-board-aggregator, MIT).
+_SLUG_LIST_FILE = re.compile(r"/([a-z]+)_companies\.json(?:$|\?)", re.I)
+_LIST_SLUG = re.compile(r"^[a-z0-9][a-z0-9_.-]{1,80}$", re.I)
+_LIST_WORKDAY = re.compile(r"^([a-z0-9-]{2,})[|:](wd\d+)[|:]([A-Za-z0-9_-]+)$", re.I)
+
+
+def _slug_list_ats(entry: str) -> tuple[str | None, str]:
+    """(ats, url) for a configured list entry: the ATS when it is a slug list."""
+    head, sep, rest = entry.partition("=")
+    if sep and head.strip().lower() in ALL_ATS and rest.strip().startswith("http"):
+        return head.strip().lower(), rest.strip()
+    match = _SLUG_LIST_FILE.search(entry)
+    if match and match.group(1).lower() in ALL_ATS:
+        return match.group(1).lower(), entry
+    return None, entry
+
+
+def slugs_from_list(ats: str, entries) -> set[str]:
+    """The boards a slug list names, in the spec each adapter takes."""
+    found: set[str] = set()
+    for entry in entries if isinstance(entries, list) else []:
+        text = str(entry.get("slug") if isinstance(entry, dict) else entry or "").strip()
+        if ats == "workday":
+            match = _LIST_WORKDAY.match(text)
+            if match and match.group(3).lower() not in _WORKDAY_NOT_SITES:
+                found.add(f"{match.group(1).lower()}:{match.group(2).lower()}:{match.group(3)}")
+        elif _LIST_SLUG.match(text) and text.lower() not in _SLUG_BLOCKLIST:
+            found.add(text.lower())
+    return found
+
+
+def _note_career_link(career_links: dict, link: str, company: str) -> None:
+    from app.services.ats_sniffer import company_host
+
+    host = company_host(link)
+    if not host or not _employer_host(host):
+        return
+    prior = career_links.get(host)
+    # A later row is a newer posting, likelier still open for the sniffer to
+    # confirm; a Greenhouse ID beats none at all.
+    if prior is None or "gh_jid=" in link or "gh_jid=" not in prior["url"]:
+        career_links[host] = {"url": link, "company": company}
+
+
+def harvest_boards_from_lists(
+    urls: list[str],
+    career_links: dict[str, dict] | None = None,
+) -> tuple[dict[str, set[str]], dict[tuple[str, str], str]]:
+    """
+    Every ATS board named by a set of community lists, uncapped, with names.
+
+    Returns `(found, names)`: `{ats: {slug}}`, and the company each board was
+    listed under where the list says, keyed by `(ats, slug)`.
+
+    Uncapped because the caller is the board registry, which validates each
+    board before polling it and ranks them by yield afterwards. The capped
+    `harvest_slugs_from_lists` fed the profile blob that predates the
+    registry, where a cap was the only thing keeping the list short — and
+    with it, one list's worth of Workday tenants was fifteen, forever.
+
+    A `.json` URL is read as a SimplifyJobs listings file, row by row, which
+    is where the company name comes from; anything else is read as text.
+
+    `career_links`, when given, collects the rows no pattern recognised that
+    sit on an employer's own site: `{host: {"url", "company"}}`, one posting
+    per host, one carrying a Greenhouse `gh_jid` when there is one. Those are
+    for `ats_sniffer`, which can often find the board behind them.
+
+    A slug list — `greenhouse=https://…`, or a `<ats>_companies.json` file —
+    is a JSON array of board names for that ATS (`slugs_from_list`).
+    """
+    found: dict[str, set[str]] = {}
+    names: dict[tuple[str, str], str] = {}
+    for entry in urls:
+        list_ats, url = _slug_list_ats(entry)
+        try:
+            if list_ats:
+                resp = httpx.get(url, timeout=60, follow_redirects=True)
+                resp.raise_for_status()
+                before = sum(len(v) for v in found.values())
+                found.setdefault(list_ats, set()).update(slugs_from_list(list_ats, resp.json()))
+                added = sum(len(v) for v in found.values()) - before
+            elif url.lower().split("?", 1)[0].endswith(".json"):
+                from app.services.sources.simplify import rows
+
+                before = sum(len(v) for v in found.values())
+                for row in rows(url):
+                    company = str(row.get("company_name") or "").strip()
+                    link = str(row.get("url") or "")
+                    extracted = _extract_slugs(link)
+                    for ats, slugs in extracted.items():
+                        found.setdefault(ats, set()).update(slugs)
+                        if company:
+                            for slug in slugs:
+                                names.setdefault((ats, slug), company)
+                    if career_links is not None and not extracted:
+                        _note_career_link(career_links, link, company)
+                added = sum(len(v) for v in found.values()) - before
+            else:
+                resp = httpx.get(url, timeout=30, follow_redirects=True)
+                resp.raise_for_status()
+                before = sum(len(v) for v in found.values())
+                for ats, slugs in _extract_slugs(resp.text).items():
+                    found.setdefault(ats, set()).update(slugs)
+                added = sum(len(v) for v in found.values()) - before
+        except Exception as exc:
+            logger.warning("board harvest failed for %s: %s", url, exc)
+            continue
+        logger.info("board harvest: %d boards from %s", added, url)
+    return found, names
+
+
 def merged_slugs(configured_csv: str, discovered: dict | None, ats: str) -> list[str]:
     """Configured (env) slugs first, then discovered ones, deduplicated."""
     result: list[str] = []
@@ -258,6 +482,16 @@ ATS_CONFIG_FIELDS = {
     "teamtailor": "TEAMTAILOR_COMPANY_SLUGS",
     "jobvite": "JOBVITE_COMPANY_SLUGS",
     "personio": "PERSONIO_COMPANY_SLUGS",
+    "oracle": "ORACLE_BOARDS",
+    "successfactors": "SUCCESSFACTORS_BOARDS",
+    "phenom": "PHENOM_BOARDS",
+    "eightfold": "EIGHTFOLD_BOARDS",
+    "jibe": "JIBE_BOARDS",
+    "rippling": "RIPPLING_COMPANY_SLUGS",
+    "pinpoint": "PINPOINT_COMPANY_SLUGS",
+    "taleo": "TALEO_BOARDS",
+    "paylocity": "PAYLOCITY_COMPANY_IDS",
+    "avature": "AVATURE_BOARDS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -266,27 +500,54 @@ ATS_CONFIG_FIELDS = {
 # more generous than when each slug cost a serial round trip.
 MAX_TOTAL_SLUGS_PER_ATS = 300
 TOTAL_SLUG_CAPS = {
-    "workday": 30,          # searches × per-job detail calls per tenant
     "smartrecruiters": 80,  # per-posting detail calls per company
     "bamboohr": 80,         # per-posting detail calls per company
     # Two host shapes tried per slug, and a full HTML page parsed each time.
     "icims": 60,
     "teamtailor": 120,
     "jobvite": 120,
+    # Large employers: a few list requests, then up to 20 descriptions (Oracle);
+    # one feed of up to tens of megabytes (SuccessFactors); a search per role at
+    # 10–50 a page, then up to 15 descriptions (Eightfold, Phenom).
+    "oracle": 150,
+    "successfactors": 80,
+    "phenom": 80,
+    "eightfold": 60,
+    # A five-second crawl delay per site, so fewer sites a cycle.
+    "jibe": 40,
+    # One page for the portal number, then a search per role at 25 a page.
+    "taleo": 60,
+    # One page each, but thousands of small employers; yield decides which.
+    "paylocity": 200,
+    # Two small requests for the sitemap, then a page per new matching posting.
+    "avature": 80,
 }
 
+# Caps that are a setting of their own rather than a constant here. Workday was
+# 30 tenants a cycle — for the ATS behind 27% of US new-grad postings and
+# 30–38% of large employers, with ~1,100 registered tenants never polled. It is
+# on the settings page now, next to the concurrency that makes it affordable.
+_CAP_SETTINGS = {"workday": ("WORKDAY_MAX_TENANTS", 150)}
 
-def _total_cap(ats: str) -> int:
-    from app.config import settings
 
-    default = getattr(settings, "ATS_MAX_SLUGS_PER_ATS", MAX_TOTAL_SLUGS_PER_ATS)
+def _total_cap(ats: str, cfg=None) -> int:
+    """This ATS's per-cycle board budget, from `cfg` (the cycle's settings)."""
+    if cfg is None:
+        from app.config import live
+
+        cfg = live()
+
+    default = int(getattr(cfg, "ATS_MAX_SLUGS_PER_ATS", MAX_TOTAL_SLUGS_PER_ATS))
+    setting = _CAP_SETTINGS.get(ats)
+    if setting:
+        return max(0, int(getattr(cfg, setting[0], setting[1])))
     capped = TOTAL_SLUG_CAPS.get(ats)
     return min(capped, default) if capped is not None else default
 
 
-def slug_caps() -> dict[str, int]:
+def slug_caps(cfg=None) -> dict[str, int]:
     """The per-cycle slug budget for each ATS."""
-    return {ats: _total_cap(ats) for ats in ATS_CONFIG_FIELDS}
+    return {ats: _total_cap(ats, cfg) for ats in ATS_CONFIG_FIELDS}
 
 
 def configured_ats_slugs(cfg) -> dict[str, list[str]]:
@@ -321,7 +582,7 @@ def build_ats_slugs(
 
     result: dict[str, list[str]] = {}
     for ats in ATS_CONFIG_FIELDS:
-        cap = _total_cap(ats)
+        cap = _total_cap(ats, cfg)
         seen: set[str] = set()
         merged: list[str] = []
         if registry is not None:

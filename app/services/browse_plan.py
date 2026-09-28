@@ -37,7 +37,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus, urlparse
 
-from app.config import settings
+from app.config import live, settings
 from app.services import browser_tasks
 
 logger = logging.getLogger(__name__)
@@ -352,6 +352,23 @@ BOARDS = BOARDS + (
         scroll_passes=30,
         needs_reader=True,
     ),
+    # Welcome to the Jungle (which Otta is now part of). Its pages answer a
+    # server with an AWS WAF challenge; a browser gets the real search, whose
+    # results arrive from Algolia and are read on the way past — see
+    # `harvest._from_wttj`. The keyword and page are what its own search box
+    # writes into the address. Location is not in the template on purpose:
+    # the board filters on a place name *and* coordinates that have to agree,
+    # which a location string from the profile cannot supply — the same
+    # reason Greenhouse has a feed setting. If this stops finding anything,
+    # the Harvest by site panel says "Forwarding, never finds jobs".
+    Board(
+        "wttj", "welcometothejungle.com", "Welcome to the Jungle",
+        search="https://www.welcometothejungle.com/en/jobs?query={q}",
+        # Ordinal pages from 1, as on Handshake.
+        page_param="page", page_size=1, page_base=1,
+        alt_hosts=("otta.com",),
+        needs_reader=True,
+    ),
 )
 
 BOARDS_BY_KEY = {board.key: board for board in BOARDS}
@@ -364,20 +381,20 @@ _BROWSABLE_HOSTS = tuple(
 
 
 def enabled() -> bool:
-    return bool(getattr(settings, "BROWSE_ENABLED", True))
+    return bool(getattr(live(), "BROWSE_ENABLED", True))
 
 
 def _limit(requested: int | None) -> int:
-    ceiling = int(getattr(settings, "BROWSE_MAX_QUEUED", 60))
+    ceiling = int(getattr(live(), "BROWSE_MAX_QUEUED", 60))
     return max(1, min(requested or ceiling, ceiling))
 
 
 def _retry_days() -> int:
-    return max(1, int(getattr(settings, "BROWSE_RETRY_DAYS", 30)))
+    return max(1, int(getattr(live(), "BROWSE_RETRY_DAYS", 30)))
 
 
 def _search_retry_hours() -> int:
-    return max(1, int(getattr(settings, "BROWSE_SEARCH_RETRY_HOURS", 6)))
+    return max(1, int(getattr(live(), "BROWSE_SEARCH_RETRY_HOURS", 6)))
 
 
 # Purposes whose pages are lists rather than postings. Named explicitly, and
@@ -449,13 +466,13 @@ def is_paused(url: str | None) -> bool:
 
 
 def _challenge_hours() -> int:
-    return max(1, int(getattr(settings, "BROWSE_CHALLENGE_BACKOFF_HOURS", 24)))
+    return max(1, int(getattr(live(), "BROWSE_CHALLENGE_BACKOFF_HOURS", 24)))
 
 
 def _max_challenge_hours() -> int:
     return max(
         _challenge_hours(),
-        int(getattr(settings, "BROWSE_CHALLENGE_MAX_BACKOFF_HOURS", 24 * 21)),
+        int(getattr(live(), "BROWSE_CHALLENGE_MAX_BACKOFF_HOURS", 24 * 21)),
     )
 
 
@@ -563,7 +580,7 @@ def blocked_hosts(db) -> set[str]:
 
 
 def _ratelimit_minutes() -> int:
-    return max(1, int(getattr(settings, "BROWSE_RATELIMIT_REST_MINUTES", 20)))
+    return max(1, int(getattr(live(), "BROWSE_RATELIMIT_REST_MINUTES", 20)))
 
 
 def resting_hosts(db) -> set[str]:
@@ -651,7 +668,7 @@ def is_blocked(host: str, blocked: set[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _depth() -> int:
-    return max(1, int(getattr(settings, "BROWSE_SEARCH_PAGES", 5)))
+    return max(1, int(getattr(live(), "BROWSE_SEARCH_PAGES", 5)))
 
 
 def search_urls(profile: dict | None, boards=None, depth: int | None = None,
@@ -704,8 +721,10 @@ def search_urls(profile: dict | None, boards=None, depth: int | None = None,
                 # Nothing to search for. Its entry pages are already queued
                 # above; a search board with no query is just the homepage.
                 continue
+            # A template with no place in it is one search per role, not one
+            # per location — the same URL four times over otherwise.
             for role in roles[:6]:
-                for location in locations:
+                for location in (locations if "{loc}" in search else [""]):
                     first = search.format(
                         q=quote_plus(role), loc=quote_plus(location),
                     )
@@ -858,7 +877,7 @@ def _scroll_passes(url: str, db=None) -> int:
         if board is not None and board.scroll_passes:
             asked = int(board.scroll_passes)
         else:
-            asked = max(1, int(getattr(settings, "BROWSE_SCROLL_PASSES", 25)))
+            asked = max(1, int(getattr(live(), "BROWSE_SCROLL_PASSES", 25)))
 
     if db is None:
         return asked
@@ -985,7 +1004,7 @@ def _scroll_pause_seconds(url: str, db=None) -> int:
         return 0
     if not tolerated_passes(db, _host_of(url)):
         return 0
-    return max(0, int(getattr(settings, "BROWSE_SCROLL_PAUSE_SECONDS", 2)))
+    return max(0, int(getattr(live(), "BROWSE_SCROLL_PAUSE_SECONDS", 2)))
 
 
 def _already_queued(db, urls: list[str], respect_cooloff: bool = True,
@@ -1122,8 +1141,8 @@ def enqueue(db, urls: list[str], limit: int | None = None,
                 "purpose": purpose,
                 # Told per task rather than read from the client's own config,
                 # so the pace is one decision made in one place.
-                "settle_seconds": int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6)),
-                "gap_seconds": int(getattr(settings, "BROWSE_GAP_SECONDS", 20)),
+                "settle_seconds": int(getattr(live(), "BROWSE_SETTLE_SECONDS", 6)),
+                "gap_seconds": int(getattr(live(), "BROWSE_GAP_SECONDS", 20)),
                 # Read back off the URL rather than passed down from the
                 # caller: `enqueue` takes a flat list, and a board that needs
                 # two hundred scrolls should get them whether its URLs came
@@ -1237,7 +1256,7 @@ def agent_seen_recently(db, hours: int | None = None) -> bool:
     from app.services import browser_tasks
 
     window = timedelta(hours=hours if hours is not None
-                       else int(getattr(settings, "BROWSE_AGENT_STALE_HOURS", 24)))
+                       else int(getattr(live(), "BROWSE_AGENT_STALE_HOURS", 24)))
     cutoff = datetime.now(timezone.utc) - window
 
     seen = browser_tasks.last_agent(db)
@@ -1291,7 +1310,7 @@ def scheduled_crawl(db, profile: dict | None) -> dict:
     drop_paused(db)
 
     waiting = status(db)["waiting"]
-    floor = max(0, int(getattr(settings, "BROWSE_TOPUP_BELOW", 10)))
+    floor = max(0, int(getattr(live(), "BROWSE_TOPUP_BELOW", 10)))
     if waiting > floor:
         return {"queued": 0, "skipped": "queue still draining", "waiting": waiting}
 
@@ -1309,7 +1328,7 @@ def scheduled_crawl(db, profile: dict | None) -> dict:
     # of the budget still goes to the backlog; a small guaranteed share keeps
     # discovery alive, which is what stops the backlog being the only thing
     # there will ever be.
-    reserve = max(0, int(getattr(settings, "BROWSE_SEARCH_RESERVE", 10)))
+    reserve = max(0, int(getattr(live(), "BROWSE_SEARCH_RESERVE", 10)))
     searched = crawl_searches(db, profile, limit=reserve,
                               priority=PRIORITY_SWEEP) if reserve else {"queued": 0}
 
@@ -1449,8 +1468,8 @@ def status(db) -> dict:
         )
         .count()
     )
-    gap = int(getattr(settings, "BROWSE_GAP_SECONDS", 20))
-    settle = int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6))
+    gap = int(getattr(live(), "BROWSE_GAP_SECONDS", 20))
+    settle = int(getattr(live(), "BROWSE_SETTLE_SECONDS", 6))
     paused = paused_hosts()
     return {
         "enabled": enabled(),
@@ -1475,7 +1494,7 @@ def status(db) -> dict:
             for board in BOARDS
         ],
         "gap_seconds": gap,
-        "max_per_run": int(getattr(settings, "BROWSE_MAX_QUEUED", 60)),
+        "max_per_run": int(getattr(live(), "BROWSE_MAX_QUEUED", 60)),
         # Stated because "60 pages" means nothing without it, and because the
         # number being large is the feature rather than a problem to fix.
         "eta_minutes": round(waiting * (gap + settle) / 60) if waiting else 0,

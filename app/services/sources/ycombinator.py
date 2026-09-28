@@ -14,6 +14,7 @@ import logging
 import httpx
 
 from app.services.sources.base import LISTING_HEADERS, jobs_from_listing
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,8 @@ DEFAULT_ROLES = (
 
 
 def _roles() -> list[str]:
-    from app.config import settings
 
-    configured = getattr(settings, "YC_ROLES", "") or ""
+    configured = getattr(live(), "YC_ROLES", "") or ""
     roles = [r.strip() for r in configured.split(",") if r.strip()]
     return roles or list(DEFAULT_ROLES)
 

@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import live, settings
 from app.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -41,9 +41,10 @@ def _nim_models(db: Session) -> list[str]:
 
 # Every source the fetcher knows about, for the manual-trigger picker.
 TRIGGERABLE_SOURCES = [
-    "adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby",
+    "adzuna", "jsearch", "google_jobs", "simplify", "amazon", "tiktok", "apple", "jazzhr", "linkedin", "greenhouse", "lever", "ashby",
     "smartrecruiters", "workable", "recruitee", "workday", "icims",
-    "bamboohr", "teamtailor", "jobvite", "personio", "jooble",
+    "bamboohr", "teamtailor", "jobvite", "personio",
+    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "pinpoint", "taleo", "paylocity", "avature", "jooble",
     "careerjet", "findwork", "usajobs", "hiringcafe", "ycombinator",
     "indeed", "remotive", "arbeitnow", "remoteok",
     "weworkremotely", "themuse", "himalayas", "jobicy", "hnhiring",
@@ -109,6 +110,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "run_group_filter": run_group,
             "run_groups": run_groups,
             "limit": limit,
+            "coverage": _coverage(db),
             **_agent_context(db),
             **_enrichment_context(db),
             **{k: v for k, v in _compare_context(request, db).items()
@@ -408,7 +410,6 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
     The proposal is validated against the stored samples before it is allowed
     to run, and the generic reader stays as the fallback either way.
     """
-    from app.config import settings as cfg
     from app.models.profile import Profile
     from app.services import harvest_recipes
     from app.services.tunables import value as tunable
@@ -592,7 +593,6 @@ def learn_crawl_recipe(request: Request, host: str = Form(""),
     model's prompt when one is still needed. `host` may be left blank, and is
     then taken from the first address.
     """
-    from app.config import settings as cfg
     from app.models.profile import Profile
     from app.services import crawl_recipes
     from app.services.tunables import value as tunable
@@ -731,6 +731,35 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
     )
 
 
+def _coverage(db: Session) -> dict | None:
+    from app.models.profile import Profile
+    from app.services.source_yield import STATE_KEY
+
+    try:
+        profile = db.query(Profile).first()
+    except Exception as exc:
+        _recover(db)
+        logger.warning("runs: coverage unavailable: %s", exc)
+        return None
+    return ((profile.data if profile else None) or {}).get(STATE_KEY)
+
+
+@router.post("/coverage", response_class=HTMLResponse)
+def measure_coverage_now(request: Request, db: Session = Depends(get_db)):
+    """The daily coverage check, now: a database read, a second or two."""
+    from app.tasks.recall import measure_and_store
+
+    try:
+        coverage = measure_and_store(db)
+    except Exception as exc:
+        _recover(db)
+        logger.error("runs: coverage check failed: %s", exc)
+        coverage = _coverage(db)
+    return templates.TemplateResponse(
+        "runs/partials/coverage.html", {"request": request, "coverage": coverage}
+    )
+
+
 @router.post("/match", response_class=HTMLResponse)
 def trigger_match(request: Request, db: Session = Depends(get_db)):
     """
@@ -853,7 +882,7 @@ def _compare_choices(db: Session) -> tuple[list[str], str]:
                if value != model_roles.AUTO]
     pinned = str(tunable(data, model_roles.tunable_key("match")) or model_roles.AUTO)
     current = plain(pinned) if pinned != model_roles.AUTO else \
-        str(tunable(data, "nvidia_nim_model") or settings.NVIDIA_NIM_MODEL)
+        str(tunable(data, "nvidia_nim_model") or live().NVIDIA_NIM_MODEL)
     if current in choices:
         choices.remove(current)
         choices.insert(0, current)

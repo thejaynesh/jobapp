@@ -31,7 +31,9 @@ def _probe_greenhouse(slug: str) -> bool:
 
 
 def _probe_lever(slug: str) -> bool:
-    r = httpx.get(f"https://api.lever.co/v0/postings/{slug}?limit=1&mode=json", timeout=_TIMEOUT)
+    from app.services.sources.lever import get_postings
+
+    r = get_postings(slug, "limit=1&mode=json", timeout=_TIMEOUT)
     return r.status_code == 200 and isinstance(r.json(), list)
 
 
@@ -127,6 +129,155 @@ def _probe_jobvite(slug: str) -> bool:
     return _probe_listing(f"https://jobs.jobvite.com/{slug}/search", "jobvite", slug)
 
 
+def _probe_paylocity(slug: str) -> bool:
+    from app.services.sources.paylocity import board
+
+    try:
+        return board(slug) is not None
+    except httpx.HTTPStatusError:
+        return False
+
+
+def _probe_taleo(spec: str) -> bool:
+    from app.services.sources.taleo import parse_spec, portal
+
+    parsed = parse_spec(spec)
+    if not parsed:
+        return False
+    # A section without a portal number has no search to call.
+    try:
+        return portal(*parsed) is not None
+    except httpx.HTTPStatusError:
+        return False
+
+
+def _probe_avature(spec: str) -> bool:
+    """
+    A portal is a board when its robots.txt names its sitemap, the sitemap
+    lists postings, and one of the newest opens without a login — which is
+    what keeps internal-mobility portals out. A tenant behind a bot challenge
+    is not a board we read.
+    """
+    from app.services.sources.avature import Blocked, detail, parse_spec, sitemap
+
+    parsed = parse_spec(spec)
+    if not parsed:
+        return False
+    try:
+        entries = sitemap(*parsed)
+        if not entries:
+            return False
+        newest = sorted(entries, key=lambda e: e.get("lastmod") or "", reverse=True)[:3]
+        return any(detail(entry["url"]) for entry in newest)
+    except Blocked:
+        return False
+    except httpx.HTTPStatusError:
+        return False
+
+
+def _probe_oracle(spec: str) -> bool:
+    from app.services.sources.oracle import list_page, parse_spec
+
+    parsed = parse_spec(spec)
+    if not parsed:
+        return False
+    # A real site answers with a search block, even with no openings in it.
+    # An error status is an answer — "no such site" — not a network fault, so
+    # it must not reach `probe_board`'s benefit of the doubt.
+    try:
+        rows, total = list_page(*parsed, offset=0, limit=1)
+    except (httpx.HTTPStatusError, ValueError):
+        return False
+    return total >= 0 and isinstance(rows, list)
+
+
+def _probe_successfactors(host: str) -> bool:
+    """
+    The site serves its `sitemal.xml` job feed.
+
+    Read as a stream and only as far as the channel header: the whole feed can
+    run to tens of megabytes, and the first few kilobytes decide.
+    """
+    from app.services.sources.base import LISTING_HEADERS
+    from app.services.sources.successfactors import feed_url
+
+    with httpx.stream("GET", feed_url(host), headers=LISTING_HEADERS,
+                      timeout=_TIMEOUT, follow_redirects=True) as resp:
+        if resp.status_code != 200:
+            return False
+        head = b""
+        for chunk in resp.iter_bytes():
+            head += chunk
+            if len(head) >= 4096:
+                break
+    head = head.lstrip()[:4096].lower()
+    return head.startswith(b"<?xml") and b"<rss" in head and b"base.google.com" in head
+
+
+def _probe_phenom(spec: str) -> bool:
+    """The site answers Phenom's own search call with a search block."""
+    from app.services.sources.phenom import _widgets, parse_spec
+
+    parsed = parse_spec(spec)
+    if not parsed:
+        return False
+    host, country, lang = parsed
+    try:
+        data = _widgets(host, {
+            "lang": f"{lang}_{country}", "country": country, "ddoKey": "refineSearch",
+            "pageName": "search-results", "from": 0, "size": 1, "jobs": True,
+            "keywords": "", "global": True, "selected_fields": {}, "siteType": "external",
+        })
+    except (httpx.HTTPStatusError, ValueError):
+        return False
+    block = data.get("refineSearch") if isinstance(data, dict) else None
+    return isinstance(block, dict) and block.get("status") == 200
+
+
+def _probe_eightfold(host: str) -> bool:
+    from app.services.sources.eightfold import search, tenant_domain
+
+    try:
+        rows, total = search(host, tenant_domain(host), "", 0)
+    except (httpx.HTTPStatusError, ValueError):
+        return False
+    return bool(rows) or total > 0
+
+
+def _probe_jibe(host: str) -> bool:
+    """The site answers the careers-home search in its own shape."""
+    from app.services.sources.jibe import _HEADERS
+
+    resp = httpx.get(f"https://{host}/api/jobs", params={"page": 1, "limit": 1},
+                     headers=_HEADERS, timeout=_TIMEOUT)
+    if resp.status_code != 200:
+        return False
+    try:
+        data = resp.json()
+    except ValueError:
+        return False
+    return (isinstance(data, dict) and isinstance(data.get("jobs"), list)
+            and isinstance(data.get("totalCount"), int))
+
+
+def _probe_rippling(slug: str) -> bool:
+    r = httpx.get(f"https://ats.rippling.com/api/v2/board/{slug}/jobs",
+                  params={"page": 0, "pageSize": 1}, timeout=_TIMEOUT)
+    try:
+        return r.status_code == 200 and isinstance(r.json().get("items"), list)
+    except (ValueError, AttributeError):
+        return False
+
+
+def _probe_pinpoint(slug: str) -> bool:
+    r = httpx.get(f"https://{slug}.pinpointhq.com/postings.json", timeout=_TIMEOUT,
+                  follow_redirects=True)
+    try:
+        return r.status_code == 200 and isinstance(r.json().get("data"), list)
+    except (ValueError, AttributeError):
+        return False
+
+
 PROBES = {
     "greenhouse": _probe_greenhouse,
     "lever": _probe_lever,
@@ -140,6 +291,16 @@ PROBES = {
     "teamtailor": _probe_teamtailor,
     "jobvite": _probe_jobvite,
     "personio": _probe_personio,
+    "oracle": _probe_oracle,
+    "successfactors": _probe_successfactors,
+    "phenom": _probe_phenom,
+    "eightfold": _probe_eightfold,
+    "jibe": _probe_jibe,
+    "rippling": _probe_rippling,
+    "pinpoint": _probe_pinpoint,
+    "taleo": _probe_taleo,
+    "paylocity": _probe_paylocity,
+    "avature": _probe_avature,
 }
 
 
@@ -181,8 +342,31 @@ def _dig(data, path):
     return data if isinstance(data, str) else None
 
 
+def _oracle_name(spec: str) -> str | None:
+    from app.services.sources.oracle import parse_spec, site_name
+
+    parsed = parse_spec(spec)
+    return (site_name(*parsed) or None) if parsed else None
+
+
+def _paylocity_name(slug: str) -> str | None:
+    from app.services.sources.paylocity import board
+
+    data = board(slug) or {}
+    return (data.get("ModuleTitle") or "").strip() or None
+
+
+# Boards whose company name comes from somewhere other than a JSON field.
+_NAME_FUNCS = {"oracle": _oracle_name, "paylocity": _paylocity_name}
+
+
 def board_company_name(ats: str, slug: str) -> str | None:
     """The company name the board's own API reports, when it reports one."""
+    if ats in _NAME_FUNCS:
+        try:
+            return _NAME_FUNCS[ats](slug)
+        except Exception:
+            return None
     endpoint = _NAME_ENDPOINTS.get(ats)
     if not endpoint:
         return None

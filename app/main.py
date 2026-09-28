@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 from app.services.activity_log import install_handler as _install_activity_handler
 _install_activity_handler()
 
+# Requests the web process makes (the overlay's enrichment, board probes) reuse
+# connections like the workers' do (`services.http_pool`).
+from app.services import http_pool as _http_pool
+_http_pool.install()
+
 _templates = build_templates()
 
 _HTTP_TITLES = {
@@ -334,6 +339,29 @@ async def add_request_id(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = rid
     return response
+
+
+class _SettingsReadOncePerRequest:
+    """
+    Each request reads the settings page's values at most once, on first use
+    (`tunables.read_once`) — a page of timestamps asks for the display zone
+    per timestamp. Outermost, so every endpoint and template runs inside it.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from app.services import tunables
+
+        with tunables.read_once():
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(_SettingsReadOncePerRequest)
 
 
 def _rid(request: Request) -> str:

@@ -29,4 +29,35 @@
   <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">
     Save
   </button>
+
+  {# Answers kept from forms, by the extension's "Remember my answers". Each
+     is typed back into a question asked in the same words; Forget stops that. #}
+  <div class="pt-4 border-t border-gray-200">
+    <h3 class="text-sm font-medium text-gray-700">Remembered answers</h3>
+    {% if remembered %}
+    <p class="text-xs text-gray-400 mt-1">
+      Kept when you pressed <span class="font-medium">Remember my answers</span>
+      on an application. A form asking the same question in the same words gets
+      the same answer.
+    </p>
+    <ul class="mt-2 divide-y divide-gray-100">
+      {% for key, entry in remembered %}
+      <li class="py-2 flex items-start justify-between gap-3 text-sm">
+        <div>
+          <div class="text-gray-700">{{ entry.question }}</div>
+          <div class="text-gray-500">{{ entry.answer }}</div>
+        </div>
+        <button type="button" hx-post="/profile/remembered/forget" hx-vals='{"key": {{ key|tojson }}}'
+                hx-target="closest form" hx-swap="outerHTML"
+                class="text-xs text-red-600 hover:underline shrink-0">Forget</button>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-xs text-gray-400 mt-1">
+      None yet. Answer a question on an application yourself, then press
+      <span class="font-medium">Remember my answers</span> in the extension's panel.
+    </p>
+    {% endif %}
+  </div>
 </form>

@@ -15,7 +15,7 @@ The combined entry point stays, because the manual trigger on `/runs` wants
 import logging
 
 from app.celery_app import celery_app
-from app.config import settings
+from app.config import live
 from app.database import SessionLocal
 from app.services.fetch_lock import LOCK_KEY, acquire, keepalive, release
 from app.services.job_fetcher import ALL_GROUPS, fetch_and_save_jobs
@@ -203,7 +203,7 @@ def dispatch_due_fetches() -> list[str]:
              "browser": fetch_browser_tier}
     queued = []
     for group, task in tasks.items():
-        if group == "browser" and not settings.BROWSER_TIER_ENABLED:
+        if group == "browser" and not live().BROWSER_TIER_ENABLED:
             continue
         try:
             if any_state((GROUP_LOCK_KEYS[group], LOCK_KEY)).get("running"):
@@ -249,7 +249,7 @@ def fetch_ats_boards() -> dict:
 @celery_app.task(name="app.tasks.fetch.fetch_browser_tier", bind=False, max_retries=0, acks_late=False)
 def fetch_browser_tier() -> dict:
     """Playwright. The most expensive thing here, and the least urgent."""
-    if not settings.BROWSER_TIER_ENABLED:
+    if not live().BROWSER_TIER_ENABLED:
         return {**_EMPTY, "skipped_reason": "disabled"}
     return _scheduled("browser")
 

@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import Integer
 
-from app.config import settings
+from app.config import live
 from app.models.agent_event import KINDS
 
 logger = logging.getLogger(__name__)
@@ -718,7 +718,7 @@ def prune(db, keep: int | None = None) -> int:
     from app.models.agent_event import AgentEvent
 
     keep = keep if keep is not None else int(
-        getattr(settings, "AGENT_EVENT_KEEP_ROWS", 20000)
+        getattr(live(), "AGENT_EVENT_KEEP_ROWS", 20000)
     )
     if keep <= 0:
         return 0

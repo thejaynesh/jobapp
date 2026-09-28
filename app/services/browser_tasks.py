@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from app.config import settings
+from app.config import live, settings
 from app.models.browser_task import TASK_KINDS, TASK_STATUSES, BrowserTask
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def _lease_seconds() -> int:
 
 
 def _ttl_hours() -> int:
-    return max(1, int(getattr(settings, "AGENT_TASK_TTL_HOURS", 24)))
+    return max(1, int(getattr(live(), "AGENT_TASK_TTL_HOURS", 24)))
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +566,7 @@ def prune(db, days: int | None = None) -> int:
     Returns how many were removed.
     """
     days = days if days is not None else int(
-        getattr(settings, "BROWSER_TASK_KEEP_DAYS", 14)
+        getattr(live(), "BROWSER_TASK_KEEP_DAYS", 14)
     )
     if days <= 0:
         return 0

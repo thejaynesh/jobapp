@@ -23,7 +23,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.config import settings
 from app.models.job import Job, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,10 @@ CLOSED_MARKERS = (
     "applications for this role are closed",
     "sorry, this job was removed",
     "job has expired",
+    # Paylocity's page for a closed posting, which it redirects to.
+    "that job does not exist or is not currently active",
+    # UKG renders a closed opportunity's page as before, and says so in its data.
+    '"opportunityisclosed":true',
 )
 
 # ATS hosts that answer a closed job by redirecting to the board index rather
@@ -103,6 +106,11 @@ def check_url(url: str, client: httpx.Client) -> LivenessResult:
     if final != url:
         original_path = urlparse(url).path.rstrip("/")
         final_parsed = urlparse(final)
+        # Avature, on its own hosts and employers' alike, sends a posting it
+        # no longer has to the portal's error page: /careers/JobDetail/… →
+        # /careers/Error.
+        if "/JobDetail/" in original_path and final_parsed.path.rstrip("/").endswith("/Error"):
+            return LivenessResult("closed", "the portal redirected the posting to its error page")
         if (
             _host_matches(final_parsed.hostname or "", _REDIRECT_MEANS_CLOSED_HOSTS)
             and original_path
@@ -119,7 +127,41 @@ def check_url(url: str, client: httpx.Client) -> LivenessResult:
     marker = closed_marker(response.text)
     if marker:
         return LivenessResult("closed", f'the page says "{marker}"')
+    expired = stated_expiry(final, response.text)
+    if expired:
+        return LivenessResult("closed", f"the posting expired on {expired:%b %d, %Y}")
     return LivenessResult("open")
+
+
+def stated_expiry(url: str, html: str) -> datetime | None:
+    """
+    When the posting's own system says it expired, if that has passed.
+
+    Dayforce keeps serving an expired posting's page, whole and with a 200 —
+    the only sign is `postingExpiryTimestampUTC` in its data: the two postings
+    SimplifyJobs linked had expired in March and April and read as open in
+    September (measured 2026-09-28). Only Dayforce, whose system enforces the
+    date, and never an evergreen posting. A JSON-LD `validThrough` is not
+    trusted the same way: employers fill it in by rote and keep taking
+    applications past it.
+    """
+    if not _host_matches(urlparse(url).hostname or "", ("dayforcehcm.com",)):
+        return None
+    from app.services.enrichment import dayforce_posting
+
+    data = dayforce_posting(html)
+    if not data or data.get("isEvergreen"):
+        return None
+    raw = data.get("postingExpiryTimestampUTC")
+    if not raw:
+        return None
+    try:
+        expiry = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry if expiry < datetime.now(timezone.utc) else None
 
 
 def closed_marker(html: str) -> str:
@@ -149,10 +191,30 @@ def _check_target(job) -> str:
 def candidates(db, limit: int, recheck_days: int) -> list:
     """
     Jobs worth checking this pass: the ones a person might actually apply to,
-    not yet known-closed, and not checked recently. Never-checked first, then
-    the ones whose last check is oldest.
+    not yet known-closed, and not checked recently.
+
+    In the order their verdict is worth most, which only matters when there
+    are more of them than one sweep checks:
+
+    1. Never checked. It is the one with no verdict at all.
+    2. Not yet applied to. Whether a posting you already applied to has closed
+       changes nothing you would do next.
+    3. Higher score first — the job you are likeliest to apply to.
+    4. Then the oldest verdict, then the newest posting.
+
+    It used to be the oldest verdict alone, so past the budget a 95 waited
+    behind every 71 that happened to be checked earlier.
     """
+    from sqlalchemy import case, exists, func
+
+    from app.models.application import Application, ApplicationStatus
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, recheck_days))
+    applied = exists().where(
+        Application.job_id == Job.id,
+        Application.status != ApplicationStatus.not_applied,
+    )
+    score = func.coalesce(Job.llm_score_deep, Job.llm_score)
     return (
         db.query(Job)
         .filter(
@@ -160,10 +222,23 @@ def candidates(db, limit: int, recheck_days: int) -> list:
             Job.closed_at.is_(None),
             (Job.liveness_checked_at.is_(None)) | (Job.liveness_checked_at < cutoff),
         )
-        .order_by(Job.liveness_checked_at.asc().nullsfirst(), Job.fetched_at.desc())
+        .order_by(
+            Job.liveness_checked_at.is_not(None),
+            case((applied, 1), else_=0),
+            score.desc().nulls_last(),
+            Job.liveness_checked_at.asc().nullsfirst(),
+            Job.fetched_at.desc(),
+        )
         .limit(max(1, limit))
         .all()
     )
+
+
+# Checks written back and committed together. A sweep that runs into its time
+# limit keeps every verdict up to the last batch, rather than losing the lot —
+# which is what writing back once at the end did, and a larger budget made
+# likelier.
+_BATCH = 50
 
 
 def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
@@ -174,23 +249,22 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
     "coverage" — see `coverage` for what that answers and why it is not one of
     the counters.
     """
-    limit = limit if limit is not None else settings.LIVENESS_MAX_PER_CYCLE
-    workers = workers if workers is not None else settings.LIVENESS_WORKERS
-    recheck_days = settings.LIVENESS_RECHECK_DAYS
+    from app.services.tunables import live
 
-    jobs = candidates(db, limit, recheck_days)
+    cfg = live()
+    limit = limit if limit is not None else cfg.LIVENESS_MAX_PER_CYCLE
+    workers = workers if workers is not None else cfg.LIVENESS_WORKERS
+
+    jobs = candidates(db, limit, cfg.LIVENESS_RECHECK_DAYS)
     counts = {"checked": 0, "closed": 0, "still_open": 0, "unknown": 0}
     if not jobs:
         # Reported on the empty run too, so the key is always there for a
         # caller to read rather than present only on the runs that did work.
-        counts["coverage"] = coverage(db)
+        counts["coverage"] = coverage(db, cfg)
         return counts
 
-    targets = [(job.id, _check_target(job)) for job in jobs]
-    now = datetime.now(timezone.utc)
-
-    # The network happens outside the ORM: check everything first, then write
-    # the outcomes back in one pass, so no transaction spans a slow site.
+    # The network happens outside the ORM: check a batch, then write its
+    # outcomes back and commit, so no transaction spans a slow site.
     from app.services.url_safety import EVENT_HOOKS
 
     with httpx.Client(
@@ -198,29 +272,28 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
         follow_redirects=True, max_redirects=10,
         event_hooks=EVENT_HOOKS,
     ) as client:
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(targets)))) as pool:
-            results = list(
-                pool.map(
-                    lambda t: (t[0], check_url(t[1], client) if t[1]
-                               else LivenessResult("unknown", "no URL stored")),
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
+            for start in range(0, len(jobs), _BATCH):
+                batch = jobs[start:start + _BATCH]
+                targets = [(job, _check_target(job)) for job in batch]
+                results = list(pool.map(
+                    lambda t: check_url(t[1], client) if t[1]
+                    else LivenessResult("unknown", "no URL stored"),
                     targets,
-                )
-            )
-
-    by_id = {job.id: job for job in jobs}
-    for job_id, result in results:
-        job = by_id[job_id]
-        counts["checked"] += 1
-        job.liveness_checked_at = now
-        if result.state == "closed":
-            job.closed_at = now
-            job.closed_note = result.note[:300]
-            counts["closed"] += 1
-        elif result.state == "open":
-            counts["still_open"] += 1
-        else:
-            counts["unknown"] += 1
-    db.commit()
+                ))
+                now = datetime.now(timezone.utc)
+                for (job, _), result in zip(targets, results):
+                    counts["checked"] += 1
+                    job.liveness_checked_at = now
+                    if result.state == "closed":
+                        job.closed_at = now
+                        job.closed_note = result.note[:300]
+                        counts["closed"] += 1
+                    elif result.state == "open":
+                        counts["still_open"] += 1
+                    else:
+                        counts["unknown"] += 1
+                db.commit()
 
     if counts["closed"]:
         logger.info(
@@ -233,26 +306,26 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
     # them together made "checked 2, closed 1" and "1,200 sustainable" the same
     # kind of number, and broke the test that says those four keys are the
     # whole result.
-    counts["coverage"] = coverage(db)
+    counts["coverage"] = coverage(db, cfg)
     if counts["coverage"]["sustainable"] is False:
-        # Said out loud, because the failure is silent otherwise. `candidates`
-        # orders never-checked first, so past the budget the oldest matched
-        # jobs simply stop being re-checked and keep showing a months-old
-        # "still open" — which is the state this module exists to remove,
-        # moved from "never checked" to "checked once".
+        # Said out loud, because the failure is silent otherwise. Past the
+        # budget, the lowest-priority jobs in `candidates` simply stop being
+        # re-checked and keep showing a months-old "still open" — which is the
+        # state this module exists to remove, moved from "never checked" to
+        # "checked once".
         logger.warning(
             "liveness: %d jobs worth checking against a budget of %d a day "
-            "(%d per sweep, every %dh) on a %d-day recheck — the oldest "
-            "verdicts will go stale. Raise LIVENESS_MAX_PER_CYCLE or shorten "
-            "LIVENESS_INTERVAL_HOURS.",
-            counts["worth_checking"], counts["daily_budget"],
-            settings.LIVENESS_MAX_PER_CYCLE, settings.LIVENESS_INTERVAL_HOURS,
-            settings.LIVENESS_RECHECK_DAYS,
+            "(%d per sweep, every %dh) on a %d-day recheck — the lowest-scored "
+            "verdicts will go stale. Raise \"Postings checked per sweep\" or "
+            "shorten \"Check every (hours)\" on the settings page.",
+            counts["coverage"]["worth_checking"], counts["coverage"]["daily_budget"],
+            cfg.LIVENESS_MAX_PER_CYCLE, cfg.LIVENESS_INTERVAL_HOURS,
+            cfg.LIVENESS_RECHECK_DAYS,
         )
     return counts
 
 
-def coverage(db) -> dict:
+def coverage(db, cfg=None) -> dict:
     """
     Whether the configured budget can actually keep every verdict fresh.
 
@@ -268,11 +341,15 @@ def coverage(db) -> dict:
     """
     from sqlalchemy import func
 
+    if cfg is None:
+        from app.services.tunables import live
+
+        cfg = live()
     per_day = (
-        settings.LIVENESS_MAX_PER_CYCLE
-        * max(1.0, 24.0 / max(1, settings.LIVENESS_INTERVAL_HOURS))
+        cfg.LIVENESS_MAX_PER_CYCLE
+        * max(1.0, 24.0 / max(1, cfg.LIVENESS_INTERVAL_HOURS))
     )
-    sustainable_population = per_day * max(1, settings.LIVENESS_RECHECK_DAYS)
+    sustainable_population = per_day * max(1, cfg.LIVENESS_RECHECK_DAYS)
     worth_checking = (
         db.query(func.count(Job.id))
         .filter(

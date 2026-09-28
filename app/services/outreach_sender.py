@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
-from app.config import settings
+from app.config import live, settings
 from app.models.outreach import OutreachMessage
 from app.services.outreach import candidate_email, candidate_name, mark_sent
 
@@ -34,12 +34,12 @@ class SendError(Exception):
 
 
 def sending_configured() -> bool:
-    return bool(settings.OUTREACH_SEND_ENABLED and settings.SMTP_HOST)
+    return bool(live().OUTREACH_SEND_ENABLED and settings.SMTP_HOST)
 
 
 def sending_blocked_reason() -> str:
     """Why the send button is disabled, or "" when it isn't."""
-    if not settings.OUTREACH_SEND_ENABLED:
+    if not live().OUTREACH_SEND_ENABLED:
         return "Email sending is turned off (set OUTREACH_SEND_ENABLED=true to enable it)."
     if not settings.SMTP_HOST:
         return "No SMTP server is configured (set SMTP_HOST and friends)."
@@ -68,7 +68,7 @@ def _from_address(profile_data: dict) -> tuple[str, str]:
 
 def _attachments(db, application) -> list[str]:
     """The current resume and cover letter PDFs, when they exist on disk."""
-    if not application or not settings.OUTREACH_ATTACH_DOCUMENTS:
+    if not application or not live().OUTREACH_ATTACH_DOCUMENTS:
         return []
     from app.models.application import ApplicationDocument
 
@@ -191,9 +191,9 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
             "That address is a pattern guess, not a confirmed one. Send it anyway "
             "only if you accept it may bounce."
         )
-    if sends_today(db) >= settings.OUTREACH_MAX_SENDS_PER_DAY:
+    if sends_today(db) >= live().OUTREACH_MAX_SENDS_PER_DAY:
         raise SendError(
-            f"Daily send limit reached ({settings.OUTREACH_MAX_SENDS_PER_DAY}). "
+            f"Daily send limit reached ({live().OUTREACH_MAX_SENDS_PER_DAY}). "
             "Try again tomorrow, or raise OUTREACH_MAX_SENDS_PER_DAY."
         )
 

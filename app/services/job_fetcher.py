@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import live, settings
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
+from app.services import posting_identity
 from app.services.deduplication import (
-    compute_dedupe_hash, enrich_from, find_existing_job, merge_description,
-    merge_or_skip, was_archived,
+    KnownPostings, compute_dedupe_hash, enrich_from, find_existing_job, ids_by_each_address,
+    merge_description, merge_or_skip, note_addresses, note_source, was_archived,
 )
 from app.services.descriptions import clean as clean_description
 
@@ -81,6 +82,18 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "hiringcafe", "ycombinator", "linkedin", "indeed", "remotive",
         "arbeitnow", "remoteok", "weworkremotely", "themuse", "himalayas",
         "jobicy", "hnhiring", "workingnomads", "builtin", "jobspresso",
+        # Metered, so it sits out the API runs inside its own interval — see
+        # `_sources_not_due`.
+        "google_jobs",
+        # SimplifyJobs' curated early-career postings: two files, one request
+        # each.
+        "simplify",
+        # Amazon's own careers search (search.json), full descriptions inline.
+        "amazon",
+        # TikTok's own careers search, likewise.
+        "tiktok",
+        # Apple's careers search: server-rendered pages, details for matches.
+        "apple",
         # Dice answers a plain HTTP request through its search API now, so it
         # left the browser tier — see `sources.dice.fetch_api`.
         "dice",
@@ -90,12 +103,37 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
         "recruitee", "workday", "icims", "bamboohr", "teamtailor", "jobvite",
         "personio",
+        # Large employers' careers platforms, read by careers host.
+        "oracle", "successfactors", "phenom", "eightfold", "jibe",
+        "rippling", "pinpoint",
+        # JazzHR: its sitemaps name every open posting, so no registry needed.
+        "jazzhr",
+        "taleo", "paylocity",
+        # Avature: each portal's sitemap lists its every open posting.
+        "avature",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
 }
 
 ALL_GROUPS = tuple(SOURCE_GROUPS)
+
+# Board adapters that list a company's whole board in one response, and say
+# so (`sources.base.saw_postings`). A stored posting such a read no longer
+# lists has gone from the board, and is closed then rather than whenever the
+# liveness sweep reaches it. The searched and capped boards (Workday, Oracle,
+# SmartRecruiters' first hundred…) list a slice, and say nothing about the rest.
+FULL_FEED_BOARDS = frozenset({
+    "greenhouse", "lever", "ashby", "recruitee", "pinpoint", "paylocity",
+    "bamboohr", "personio", "workable", "avature",
+})
+VANISHED_NOTE = "no longer listed on its board"
+
+# Board adapters that take the cycle's role queries.
+_SEARCHED_BOARDS = frozenset({
+    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "taleo",
+    "avature",
+})
 
 
 def group_sources(group: str | None) -> set[str] | None:
@@ -231,7 +269,135 @@ def _run_all_adapters(
     roles: list[str], locations: list[str], cfg,
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
     only: set[str] | None = None, resting: dict | None = None,
-    manual: bool | None = None,
+    manual: bool | None = None, not_due: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """
+    `_run_adapters` under this cycle's settings.
+
+    Adapters read most values off `cfg`, but the board adapters each ask
+    `sources.base.board_workers()` for their concurrency on their own; this
+    is what makes that answer the settings page's rather than the env's.
+    """
+    from app.services.sources.base import cycle_settings
+
+    try:
+        workers = max(1, int(getattr(cfg, "FETCH_SOURCE_CONCURRENCY", 1) or 1))
+    except (TypeError, ValueError):
+        workers = 1
+    with cycle_settings(cfg):
+        if workers == 1:
+            return _run_adapters(
+                roles, locations, cfg, ats_slugs, loc_prefs, only=only,
+                resting=resting, manual=manual, not_due=not_due,
+            )
+        return _run_in_lanes(
+            workers, roles, locations, cfg, ats_slugs, loc_prefs, only=only,
+            resting=resting, manual=manual, not_due=not_due,
+        )
+
+
+# The browser tier's sources share one Chromium launch, so they share a lane.
+_SHARED_LANES = (frozenset({"wellfound", "handshake"}),)
+# Started first, since a cycle can end no sooner than its longest source: the
+# board families with hundreds of sites each, then the searches that page.
+_SLOW_FIRST = (
+    "workday", "greenhouse", "jazzhr", "oracle", "avature", "successfactors",
+    "eightfold", "phenom", "icims", "smartrecruiters", "bamboohr", "lever",
+    "ashby", "linkedin", "simplify", "apple", "amazon", "tiktok", "builtin",
+)
+
+
+def _run_in_lanes(
+    workers: int, roles: list[str], locations: list[str], cfg,
+    ats_slugs: dict | None = None, loc_prefs: dict | None = None,
+    only: set[str] | None = None, resting: dict | None = None,
+    manual: bool | None = None, not_due: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """
+    `_run_adapters`, one source per lane, `workers` lanes at a time.
+
+    The sources were read one after another, so a board cycle took the sum of
+    every family's time — four hours on average — although each reads its own
+    hosts and none waits on another. Each lane is a whole `_run_adapters`
+    restricted to its sources, so every source runs exactly the code it ran
+    before; only the waiting is shared.
+
+    The cycle's context — its settings overlay, the stored descriptions, the
+    board sightings being collected — is copied into each lane's thread, which
+    would otherwise see none of it. The jobs are put back in the order the
+    sequential run produced them, so which source first stores a posting does
+    not come down to which lane finished first.
+    """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services.ats_discovery import build_ats_slugs
+
+    if ats_slugs is None:
+        ats_slugs = build_ats_slugs(cfg)
+    if manual is None:
+        manual = only is not None
+    # Every source there is, in the order the sequential run reaches them:
+    # asked of `_run_adapters` itself with nothing selected, which calls
+    # nothing and so stays in step with it by construction.
+    _, catalogue = _run_adapters(roles, locations, cfg, ats_slugs, loc_prefs, only=set(),
+                                 manual=manual, reset_caches=False, log_summary=False)
+    order = list(catalogue)
+    wanted = [s for s in order if only is None or s in only]
+
+    lanes: list[set[str]] = []
+    for shared in _SHARED_LANES:
+        together = {s for s in wanted if s in shared}
+        if together:
+            lanes.append(together)
+    lanes += [{s} for s in wanted if not any(s in shared for shared in _SHARED_LANES)]
+    lanes.sort(key=lambda lane: min(
+        (_SLOW_FIRST.index(s) if s in _SLOW_FIRST else len(_SLOW_FIRST)) for s in lane))
+
+    _reset_source_caches()
+
+    def lane_run(lane: set[str]):
+        return _run_adapters(roles, locations, cfg, ats_slugs, loc_prefs, only=lane,
+                             resting=resting, manual=manual, not_due=not_due,
+                             reset_caches=False, log_summary=False)
+
+    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(lanes))),
+                            thread_name_prefix="source") as pool:
+        futures = [(lane, pool.submit(contextvars.copy_context().run, lane_run, lane))
+                   for lane in lanes]
+        results = []
+        for lane, future in futures:
+            try:
+                results.append((lane, *future.result()))
+            except Exception as exc:
+                # `_run_adapters` records its sources' failures itself; this is
+                # the lane dying outright, which must not take the others with it.
+                logger.error("fetch: sources %s failed: %s", sorted(lane), exc)
+                results.append((lane, [], {s: {"count": 0, "errors": [str(exc)],
+                                               "enabled": True} for s in lane}))
+
+    rank = {source: i for i, source in enumerate(order)}
+    results.sort(key=lambda result: min(rank.get(s, len(rank)) for s in result[0]))
+    all_jobs: list[dict] = []
+    stats: dict = {}
+    for lane, jobs, lane_stats in results:
+        all_jobs.extend(jobs)
+        for source, entry in lane_stats.items():
+            # Each lane reports every other source as not run; the lane that
+            # ran a source is the one that knows about it.
+            if source in lane or source not in stats:
+                stats[source] = entry
+    stats = {s: stats[s] for s in sorted(stats, key=lambda s: rank.get(s, len(rank)))}
+    _log_fetch_summary(stats)
+    return all_jobs, stats
+
+
+def _run_adapters(
+    roles: list[str], locations: list[str], cfg,
+    ats_slugs: dict | None = None, loc_prefs: dict | None = None,
+    only: set[str] | None = None, resting: dict | None = None,
+    manual: bool | None = None, not_due: dict | None = None,
+    reset_caches: bool = True, log_summary: bool = True,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
@@ -258,10 +424,14 @@ def _run_all_adapters(
     # Arbeitnow feed are identical for every location, so re-downloading them
     # per location is pure waste). That caching must not outlive the cycle:
     # otherwise a manual re-trigger after an adapter change returns the old
-    # results and looks like the change did nothing.
-    _reset_source_caches()
+    # results and looks like the change did nothing. (Run in lanes, the caller
+    # resets them once, rather than each lane clearing another's mid-use.)
+    if reset_caches:
+        _reset_source_caches()
 
     resting = resting or {}
+    # Sources that ran recently enough to sit this cycle out: {source: why}.
+    not_due = not_due or {}
     started: dict[str, float] = {}
     if manual is None:
         manual = only is not None
@@ -301,6 +471,11 @@ def _run_all_adapters(
         # so resting never applied to any scheduled run at all.
         if _rests(source):
             _disable(source, _resting_reason(source))
+            return True
+        # A metered source inside its own interval. Also not on a manual run,
+        # for the same reason as resting: asking for it by name is the check.
+        if not manual and source in not_due:
+            _disable(source, not_due[source])
             return True
         # Every source asks this immediately before it starts, which makes it
         # the one place to start a clock without touching thirty branches.
@@ -350,6 +525,24 @@ def _run_all_adapters(
         )
     else:
         _disable("jsearch")
+
+    # --- Google Jobs: Google's job results, through SerpApi (metered) ---
+    if (getattr(cfg, "SERPAPI_API_KEY", "") and getattr(cfg, "GOOGLE_JOBS_ENABLED", True)
+            and not _skip("google_jobs")):
+        from app.services.sources.google_jobs import fetch_all as google_jobs_fetch
+        stats.setdefault("google_jobs", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = google_jobs_fetch(
+                api_key=cfg.SERPAPI_API_KEY, queries=roles, locations=locations,
+                max_searches=getattr(cfg, "GOOGLE_JOBS_MAX_SEARCHES", 8),
+                pages=getattr(cfg, "GOOGLE_JOBS_PAGES", 1),
+            )
+            _record(stats, "google_jobs", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "google_jobs", [], str(exc))
+    else:
+        _disable("google_jobs")
 
     greenhouse_slugs = ats_slugs.get("greenhouse") or []
     if greenhouse_slugs and not _skip("greenhouse"):
@@ -406,6 +599,16 @@ def _run_all_adapters(
         ("teamtailor", "app.services.sources.teamtailor"),
         ("jobvite", "app.services.sources.jobvite"),
         ("personio", "app.services.sources.personio"),
+        ("oracle", "app.services.sources.oracle"),
+        ("successfactors", "app.services.sources.successfactors"),
+        ("phenom", "app.services.sources.phenom"),
+        ("eightfold", "app.services.sources.eightfold"),
+        ("jibe", "app.services.sources.jibe"),
+        ("rippling", "app.services.sources.rippling"),
+        ("pinpoint", "app.services.sources.pinpoint"),
+        ("taleo", "app.services.sources.taleo"),
+        ("paylocity", "app.services.sources.paylocity"),
+        ("avature", "app.services.sources.avature"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):
@@ -413,13 +616,30 @@ def _run_all_adapters(
             ats_fetch = importlib.import_module(fetch_path).fetch
             stats.setdefault(ats_name, {"count": 0, "errors": [], "enabled": True})
             try:
-                jobs = ats_fetch(company_slugs=slugs)
+                # The large-employer platforms search, or gate a whole feed,
+                # by the roles; the rest return a company's every opening.
+                jobs = (ats_fetch(company_slugs=slugs, queries=roles)
+                        if ats_name in _SEARCHED_BOARDS else ats_fetch(company_slugs=slugs))
                 _record(stats, ats_name, jobs)
                 all_jobs.extend(jobs)
             except Exception as exc:
                 _record(stats, ats_name, [], str(exc))
         else:
             _disable(ats_name)
+
+    # --- JazzHR: companies with new postings matching the roles, from its sitemaps ---
+    if getattr(cfg, "JAZZHR_ENABLED", True) and roles and not _skip("jazzhr"):
+        from app.services.sources.jazzhr import fetch as jazzhr_fetch
+        stats.setdefault("jazzhr", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = jazzhr_fetch(queries=roles,
+                                max_companies=getattr(cfg, "JAZZHR_MAX_COMPANIES", None))
+            _record(stats, "jazzhr", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "jazzhr", [], str(exc))
+    else:
+        _disable("jazzhr")
 
     # --- Workday-hosted career sites (tenant:host:site triples) ---
     workday_tenants = ats_slugs.get("workday") or []
@@ -627,9 +847,80 @@ def _run_all_adapters(
     if getattr(cfg, "BUILTIN_ENABLED", True) and not _skip("builtin"):
         from app.services.sources.builtin import fetch as builtin_fetch
         _run_combos(stats, all_jobs, "builtin",
-                    lambda role: builtin_fetch(query=role), [(r,) for r in roles], _skip)
+                    lambda role: builtin_fetch(
+                        query=role, max_pages=getattr(cfg, "BUILTIN_MAX_PAGES", None)),
+                    [(r,) for r in roles], _skip)
     else:
         _disable("builtin")
+
+    # --- Amazon: its own careers search, per role and country ---
+    if getattr(cfg, "AMAZON_ENABLED", True) and not _skip("amazon"):
+        from app.services.sources.amazon import countries_for
+        from app.services.sources.amazon import fetch as amazon_fetch
+        _run_combos(
+            stats, all_jobs, "amazon",
+            lambda role, country: amazon_fetch(
+                query=role, country=country,
+                max_pages=getattr(cfg, "AMAZON_MAX_PAGES", None)),
+            [(r, c) for r in roles for c in countries_for(adzuna_country_codes)],
+            _skip,
+        )
+    else:
+        _disable("amazon")
+
+    # --- TikTok: its own careers search, per role, in the profile's countries ---
+    if getattr(cfg, "TIKTOK_ENABLED", True) and not _skip("tiktok"):
+        from app.services.sources import tiktok
+        try:
+            # One request for the cities TikTok hires in; every search is then
+            # restricted to those in the profile's countries.
+            cities = tiktok.city_codes(adzuna_country_codes)
+        except Exception as exc:
+            stats.setdefault("tiktok", {"count": 0, "errors": [], "enabled": True})
+            _record(stats, "tiktok", [], f"city list: {exc}")
+            cities = []
+        _run_combos(
+            stats, all_jobs, "tiktok",
+            lambda role: tiktok.fetch(query=role, cities=cities,
+                                      max_pages=getattr(cfg, "TIKTOK_MAX_PAGES", None)),
+            [(r,) for r in roles] if cities else [],
+            _skip,
+        )
+    else:
+        _disable("tiktok")
+
+    # --- Apple: its own careers search, per role and country ---
+    if getattr(cfg, "APPLE_ENABLED", True) and not _skip("apple"):
+        from app.services.sources import apple
+        _run_combos(
+            stats, all_jobs, "apple",
+            lambda role, location: apple.fetch(
+                query=role, location=location,
+                max_pages=getattr(cfg, "APPLE_MAX_PAGES", None),
+                max_details=getattr(cfg, "APPLE_MAX_DETAILS", None)),
+            [(r, c) for r in roles for c in apple.countries_for(adzuna_country_codes)],
+            _skip,
+        )
+    else:
+        _disable("apple")
+
+    # --- SimplifyJobs: curated US early-career postings, one file per list ---
+    simplify_urls = [
+        u.strip() for u in str(getattr(cfg, "SIMPLIFY_LISTINGS_URLS", "") or "").split(",")
+        if u.strip()
+    ]
+    if getattr(cfg, "SIMPLIFY_ENABLED", True) and simplify_urls and not _skip("simplify"):
+        from app.services.sources.simplify import fetch as simplify_fetch
+        stats.setdefault("simplify", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = simplify_fetch(simplify_urls,
+                                  max_age_days=getattr(cfg, "MAX_JOB_AGE_DAYS", None))
+            _record(stats, "simplify", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "simplify", [], str(exc))
+    else:
+        _disable("simplify")
 
     # --- Jobspresso: curated remote jobs RSS feed ---
     from app.services.sources.jobspresso import fetch as jobspresso_fetch
@@ -722,7 +1013,12 @@ def _run_all_adapters(
         if source in started and last is not None:
             entry["seconds"] = round(max(0.0, last - started[source]), 1)
 
-    # Log summary
+    if log_summary:
+        _log_fetch_summary(stats)
+    return all_jobs, stats
+
+
+def _log_fetch_summary(stats: dict) -> None:
     logger.info("=== fetch summary ===")
     for source, s in stats.items():
         status = "disabled" if not s["enabled"] else (
@@ -735,8 +1031,6 @@ def _run_all_adapters(
         logger.info("  %-12s %s%s", source, status, took)
         for err in s["errors"]:
             logger.warning("    └─ %s", err)
-
-    return all_jobs, stats
 
 
 def _resting_sources(db: Session) -> dict:
@@ -751,8 +1045,8 @@ def _resting_sources(db: Session) -> dict:
 
         resting = resting_sources(
             db,
-            threshold=settings.SOURCE_REST_AFTER_FAILURES,
-            retry_every=settings.SOURCE_REST_RETRY_EVERY,
+            threshold=live().SOURCE_REST_AFTER_FAILURES,
+            retry_every=live().SOURCE_REST_RETRY_EVERY,
         )
         if resting:
             logger.info(
@@ -765,15 +1059,111 @@ def _resting_sources(db: Session) -> dict:
         return {}
 
 
-def _known_urls(db: Session) -> set[str]:
-    """Every URL already attached to a stored job, listing or apply."""
+# Metered sources and the setting holding each one's minimum gap between runs.
+# The API group runs every couple of hours, which is right for a free feed and
+# ruinous for a search that spends a monthly quota: at the default cadence,
+# eight Google Jobs searches a run would spend a free SerpApi month in three
+# days.
+_MIN_INTERVAL_HOURS = {"google_jobs": "GOOGLE_JOBS_INTERVAL_HOURS"}
+
+
+def _sources_not_due(db: Session, cfg) -> dict[str, str]:
+    """
+    Metered sources that ran too recently to run again: {source: reason}.
+
+    Never fails the cycle. Not knowing when a source last ran costs one early
+    run of it, which is cheaper than losing the fetch to a history query.
+    """
+    from datetime import timedelta
+
+    from app.services.fetch_history import last_attempted
+
+    waiting: dict[str, str] = {}
+    now = datetime.now(timezone.utc)
+    for source, setting in _MIN_INTERVAL_HOURS.items():
+        try:
+            hours = float(getattr(cfg, setting, 0) or 0)
+            if hours <= 0:
+                continue
+            last = last_attempted(db, source)
+        except Exception as exc:
+            logger.warning("job_fetcher: could not read when %s last ran: %s", source, exc)
+            continue
+        if last is None:
+            continue
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        due = last + timedelta(hours=hours)
+        if due > now:
+            wait = max(1, round((due - now).total_seconds() / 3600))
+            waiting[source] = (
+                f"ran {max(0, round((now - last).total_seconds() / 3600))}h ago; "
+                f"runs at most every {hours:g}h to spare its quota, next in "
+                f"about {wait}h (a manual run ignores this)"
+            )
+    return waiting
+
+
+_LOOKUP_CHUNK = 500
+
+
+def _known_postings(db: Session, chunk: list[dict]):
+    """
+    The stored and archived rows this chunk of postings matches, looked up in
+    one pass, and the matched rows themselves loaded in one query. Loaded
+    whole: deferring the descriptions made every merge that compares text
+    fetch its row's description on its own, and the chunk ran slower than the
+    per-posting lookups it replaced (11 s against 8.3 s for 3,000). None when
+    the lookup fails; the loop then asks per posting, as it always did.
+    """
+    postings = []
+    for j in chunk:
+        try:
+            postings.append(
+                {"url": j.get("url", ""), "apply_url": j.get("apply_url"),
+                 "source": j.get("source", ""), "source_job_id": j.get("source_job_id"),
+                 "dedupe_hash": compute_dedupe_hash(j.get("company", ""), j.get("title", ""),
+                                                    j.get("location", ""), j.get("url", ""))})
+        except Exception:
+            # A posting that cannot even be hashed fails again in the loop,
+            # inside its own savepoint, where it is counted and named.
+            continue
+    try:
+        # Its own savepoint: a failed read must not roll back the inserts of
+        # the chunks before it that have not been committed yet.
+        with db.begin_nested():
+            known = KnownPostings(db, postings)
+            ids = set(known.by_address.values()) | set(known.by_pair.values()) \
+                | set(known.by_hash.values())
+            # Held on `known` for the chunk: the session keeps only weak
+            # references, and an unreferenced row would be read again by `db.get`.
+            known.rows = db.query(Job).filter(
+                Job.id.in_(list(ids))).all() if ids else []
+        return known
+    except Exception as exc:
+        logger.warning("job_fetcher: batched lookup failed, asking per posting: %s", exc)
+        return None
+
+
+def _known_urls(db: Session, urls) -> set[str]:
+    """
+    Which of these URLs are already on a stored job, as its listing, its apply
+    link or one of its sightings.
+
+    Asked about the candidates only. This used to read every URL of every
+    stored job into a set on every cycle — the whole table, arrays and all,
+    to answer a question about the handful of interstitial links a cycle
+    brings in. Each of the three lookups has an index (0038); for
+    `source_urls`, the candidates joined one by one against the GIN index is
+    the form it answers at any size (`deduplication.ids_by_each_address`).
+    """
+    wanted = [u for u in dict.fromkeys(urls) if u]
     known: set[str] = set()
-    for url, source_urls, apply_url in db.query(Job.url, Job.source_urls, Job.apply_url):
-        if url:
-            known.add(url)
-        if apply_url:
-            known.add(apply_url)
-        known.update(u for u in (source_urls or []) if u)
+    for start in range(0, len(wanted), 1000):
+        chunk = wanted[start:start + 1000]
+        known.update(u for (u,) in db.query(Job.url).filter(Job.url.in_(chunk)))
+        known.update(u for (u,) in db.query(Job.apply_url).filter(Job.apply_url.in_(chunk)))
+        known.update(ids_by_each_address(db, Job, chunk))
     return known
 
 
@@ -786,19 +1176,17 @@ def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
     """
     from app.services.link_resolver import is_interstitial, resolve_jobs
 
-    known = _known_urls(db)
-    fresh = [
-        job for job in raw_jobs
-        if (job.get("url") or "") not in known and is_interstitial(job.get("url") or "")
-    ]
+    candidates = [job for job in raw_jobs if is_interstitial(job.get("url") or "")]
+    known = _known_urls(db, {job.get("url") or "" for job in candidates})
+    fresh = [job for job in candidates if (job.get("url") or "") not in known]
     if not fresh:
         return None
     return resolve_jobs(
         fresh,
-        max_links=settings.LINK_RESOLVE_MAX_PER_CYCLE,
-        workers=settings.LINK_RESOLVE_WORKERS,
-        per_host=settings.LINK_RESOLVE_PER_HOST,
-        host_delay=settings.LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
+        max_links=live().LINK_RESOLVE_MAX_PER_CYCLE,
+        workers=live().LINK_RESOLVE_WORKERS,
+        per_host=live().LINK_RESOLVE_PER_HOST,
+        host_delay=live().LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
     )
 
 
@@ -868,7 +1256,7 @@ def _maybe_backfill_boards(db: Session, profile) -> dict | None:
     """
     import copy
 
-    if not settings.BOARD_BACKFILL_ON_START:
+    if not live().BOARD_BACKFILL_ON_START:
         return None
 
     state = (profile.data or {}).get("board_backfill") or {}
@@ -885,9 +1273,9 @@ def _maybe_backfill_boards(db: Session, profile) -> dict | None:
         with db.begin_nested():
             report = backfill_boards(
                 db,
-                max_links=settings.BOARD_BACKFILL_MAX_LINKS,
-                max_hosts=settings.BOARD_BACKFILL_MAX_HOSTS,
-                workers=settings.BOARD_BACKFILL_WORKERS,
+                max_links=live().BOARD_BACKFILL_MAX_LINKS,
+                max_hosts=live().BOARD_BACKFILL_MAX_HOSTS,
+                workers=live().BOARD_BACKFILL_WORKERS,
                 commit=False,
             )
         record = {"done": True, "at": datetime.now(timezone.utc).isoformat(),
@@ -911,6 +1299,7 @@ def _update_board_registry(
     source_stats: dict,
     resolve_stats,
     updated_data: dict,
+    career_links: dict | None = None,
 ) -> dict:
     """
     Fold this cycle's findings back into the board registry:
@@ -927,8 +1316,10 @@ def _update_board_registry(
 
     # Career sites that aren't a recognised ATS: sniff them for an embedded
     # board. The landing HTML from link resolution often answers for free.
-    if settings.ATS_SNIFF_CAREER_SITES:
-        stats["sniffed"] = _sniff_career_sites(db, raw_jobs, resolve_stats, updated_data)
+    from app.services.tunables import value as tunable_value
+    if tunable_value(updated_data, "ats_sniff_career_sites"):
+        stats["sniffed"] = _sniff_career_sites(db, raw_jobs, resolve_stats, updated_data,
+                                               career_links)
 
     # Per-board yield, so next cycle's budget favours boards that produce.
     for ats, attempted in (ats_slugs or {}).items():
@@ -947,15 +1338,19 @@ def _update_board_registry(
         boards.record_fetch_results(
             db, ats, attempted, per_slug,
             had_errors=bool((source_stats.get(ats) or {}).get("errors")),
-            max_empty_cycles=settings.ATS_BOARD_MAX_EMPTY_CYCLES,
+            max_empty_cycles=live().ATS_BOARD_MAX_EMPTY_CYCLES,
         )
 
     return stats
 
 
 def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
-                        updated_data: dict) -> int:
-    """Mine company careers sites for the ATS board behind them."""
+                        updated_data: dict, career_links: dict | None = None) -> int:
+    """
+    Mine company careers sites for the ATS board behind them: the sites this
+    cycle's postings link to, then those the community lists name
+    (`career_links`, host → a posting there and its company).
+    """
     from app.services import company_boards as boards
     from app.services.ats_discovery import ALL_ATS
     from app.services.ats_sniffer import company_host, sniff_hosts
@@ -968,6 +1363,7 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
     # straight at the employer's own site to begin with.
     hosts: dict[str, str] = {}   # host → landing HTML, "" meaning "go fetch it"
     host_company: dict[str, str] = {}
+    hints: dict[str, dict] = {}  # host → a posting there, for the sniffer to read
     for job in raw_jobs:
         if job.get("source") in ALL_ATS:
             continue  # already a board we poll directly
@@ -982,14 +1378,26 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
             hosts[host] = html or hosts.get(host, "")
         if job.get("company"):
             host_company.setdefault(host, job["company"])
+        if host not in hints or ("gh_jid=" in candidate and "gh_jid=" not in hints[host]["url"]):
+            hints[host] = {"url": candidate, "company": job.get("company") or ""}
+
+    for host, link in (career_links or {}).items():
+        if is_aggregator(link.get("url") or ""):
+            continue
+        hosts.setdefault(host, "")
+        hints.setdefault(host, link)
+        if link.get("company"):
+            host_company.setdefault(host, link["company"])
 
     if not hosts:
         return 0
 
+    from app.services.tunables import value as tunable_value
     merged, cache, per_host = sniff_hosts(
         hosts,
         updated_data.get("ats_sniff_cache"),
-        max_hosts=settings.ATS_SNIFF_MAX_HOSTS_PER_CYCLE,
+        max_hosts=int(tunable_value(updated_data, "ats_sniff_max_hosts_per_cycle") or 0),
+        hints=hints,
     )
     updated_data["ats_sniff_cache"] = cache
 
@@ -1021,7 +1429,7 @@ def fetch_and_save_jobs(
     if only is None:
         only = group_sources(group)
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0,
-              "dropped": 0, "sources": {}, "group": group or "all"}
+              "dropped": 0, "closed": 0, "sources": {}, "group": group or "all"}
 
     profile = db.query(Profile).first()
     if not profile:
@@ -1029,6 +1437,11 @@ def fetch_and_save_jobs(
         return counts
 
     roles: list[str] = profile.data.get("target_roles") or []
+
+    # The settings page's overrides on top of the environment: what every read
+    # below sees, and what the adapters are handed (`tunables.effective_settings`).
+    from app.services.tunables import effective_settings
+    cfg = effective_settings(profile.data)
 
     # Structured location preferences drive the search locations, Adzuna
     # country endpoints, and the region prefilter during matching.
@@ -1047,7 +1460,7 @@ def fetch_and_save_jobs(
     try:
         queries, query_cache = expand_search_queries(
             profile.data, settings.NVIDIA_NIM_API_KEY,
-            settings.NVIDIA_NIM_BASE_URL, settings.NVIDIA_NIM_MODEL,
+            settings.NVIDIA_NIM_BASE_URL, cfg.NVIDIA_NIM_MODEL,
         )
     except Exception as exc:
         logger.error("job_fetcher: query expansion failed: %s", exc)
@@ -1056,26 +1469,54 @@ def fetch_and_save_jobs(
         queries = list(roles)
 
     discovered_ats = (
-        profile.data.get("discovered_ats") if settings.ATS_AUTO_DISCOVERY else None
+        profile.data.get("discovered_ats") if cfg.ATS_AUTO_DISCOVERY else None
     )
 
-    # Harvest company ATS slugs from community job lists (e.g. the SimplifyJobs
-    # new-grad README) and fold them into the discovered set.
-    if settings.ATS_LIST_HARVEST and settings.SLUG_HARVEST_URLS:
+    # Company boards named by community job lists (SimplifyJobs' listings
+    # files, the new-grad READMEs). Every one goes to the board registry, which
+    # probes a board before polling it — so the lists are read whole. They used
+    # to be merged into the profile's discovered set, capped at 100 boards per
+    # ATS and fifteen for Workday, which a single list filled on its first read
+    # and nothing could ever add to again.
+    #
+    # Only on a cycle that polls boards: nothing else reads the registry, and
+    # the lists run to tens of megabytes, which every two-hourly API run was
+    # downloading to no purpose.
+    from app.services.tunables import value as tunable_value
+    harvested: dict = {}
+    harvested_names: dict = {}
+    # Employer-site links the lists name that no pattern recognised, for the
+    # career-site sniffer to look behind (see `ats_sniffer`).
+    harvested_links: dict = {}
+    polls_boards = only is None or bool(set(only) & SOURCE_GROUPS["boards"])
+    harvest_urls = [
+        u.strip() for u in str(tunable_value(profile.data, "slug_harvest_urls") or "").split(",")
+        if u.strip()
+    ]
+    if cfg.ATS_LIST_HARVEST and harvest_urls and polls_boards:
         try:
-            from app.services.ats_discovery import harvest_slugs_from_lists
-            harvest_urls = [u.strip() for u in settings.SLUG_HARVEST_URLS.split(",") if u.strip()]
-            discovered_ats = harvest_slugs_from_lists(harvest_urls, discovered_ats)
+            from app.services.ats_discovery import _merge_found, harvest_boards_from_lists
+            harvested, harvested_names = harvest_boards_from_lists(
+                harvest_urls, career_links=harvested_links)
+            if not cfg.ATS_BOARD_REGISTRY:
+                # No registry to validate them: the capped legacy merge.
+                merged = {ats: list(s or []) for ats, s in (discovered_ats or {}).items()}
+                _merge_found(merged, harvested)
+                discovered_ats = merged
         except Exception as exc:
-            logger.error("job_fetcher: slug harvest failed: %s", exc)
+            logger.error("job_fetcher: board harvest failed: %s", exc)
 
     # Validate/auto-fix the configured ATS slugs (cached per slug on the profile),
     # then assemble the final slug map: configured + verified seeds + discovered.
     from app.services.ats_discovery import build_ats_slugs, configured_ats_slugs, slug_caps
+    # The settings page's overrides, for the board budget below as much as for
+    # the adapters: the caps and the concurrency are preferences, not facts
+    # about the deployment.
+    cycle_cfg = cfg
     slug_cache = None
     slug_report: dict = {}
     validated_configured = None
-    if settings.ATS_SLUG_VALIDATION:
+    if cfg.ATS_SLUG_VALIDATION:
         try:
             from app.services.ats_validation import validate_configured_slugs
             validated_configured, slug_cache, slug_report = validate_configured_slugs(
@@ -1089,7 +1530,7 @@ def fetch_and_save_jobs(
     # the old profile blob are folded in on the way past.
     registry_boards = None
     backfill_report = None
-    if settings.ATS_BOARD_REGISTRY:
+    if cfg.ATS_BOARD_REGISTRY:
         try:
             from app.services import company_boards as boards
             # Savepoint, not the whole transaction: a registry problem must not
@@ -1097,9 +1538,15 @@ def fetch_and_save_jobs(
             with db.begin_nested():
                 if discovered_ats:
                     boards.backfill_from_slugs(db, discovered_ats, origin="discovered")
-                if settings.ATS_SEED_COMPANIES:
-                    from app.services.ats_seeds import SEED_ATS_SLUGS
-                    boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed")
+                if harvested:
+                    # Replayed every cycle, so it must not revive what the
+                    # registry retired — see `record_boards`.
+                    boards.record_boards(db, harvested, origin="list", revive=False,
+                                         names=harvested_names)
+                if cfg.ATS_SEED_COMPANIES:
+                    from app.services.ats_seeds import SEED_ATS_SLUGS, SEED_BOARD_NAMES
+                    boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed",
+                                               names=SEED_BOARD_NAMES)
                 if validated_configured:
                     boards.backfill_from_slugs(db, validated_configured, origin="configured")
             db.commit()
@@ -1109,25 +1556,25 @@ def fetch_and_save_jobs(
             # And before that selection too: a board nobody has confirmed
             # exists is not polled, so the per-ATS budget goes to companies
             # rather than to slugs scraped off an aggregator's own page.
-            if settings.ATS_BOARD_VALIDATION:
+            if cfg.ATS_BOARD_VALIDATION:
                 try:
                     with db.begin_nested():
                         boards.validate_pending(
                             db,
-                            limit=settings.ATS_BOARD_VALIDATE_PER_CYCLE,
-                            workers=settings.ATS_BOARD_FETCH_WORKERS,
+                            limit=tunable_value(profile.data, "ats_board_validate_per_cycle"),
+                            workers=cycle_cfg.ATS_BOARD_FETCH_WORKERS,
                         )
                     db.commit()
                 except Exception as exc:
                     logger.error("job_fetcher: board validation failed: %s", exc)
                     db.rollback()
-            registry_boards = boards.registry_slugs(db, slug_caps())
+            registry_boards = boards.registry_slugs(db, slug_caps(cycle_cfg))
         except Exception as exc:
             logger.error("job_fetcher: board registry unavailable: %s", exc)
             registry_boards = None
 
     ats_slugs = build_ats_slugs(
-        settings, discovered_ats, validated_configured, registry_boards
+        cycle_cfg, discovered_ats, validated_configured, registry_boards
     )
 
     # Adapters handle their own failures and return [], so the reason a source
@@ -1136,14 +1583,20 @@ def fetch_and_save_jobs(
     # search that genuinely had no matches.
     from app.services.source_diagnostics import SourceLogCapture, merge_into_stats
     try:
-        # The overlay is `settings` with the profile's UI overrides on top, so
-        # every adapter picks them up through the `cfg.X` reads it already does.
-        from app.services.tunables import effective_settings
-        cfg = effective_settings(profile.data)
-        with SourceLogCapture() as capture:
+        # The overlay (`cfg`, above) is `settings` with the profile's UI
+        # overrides on top, so every adapter picks them up through the `cfg.X`
+        # reads it already does.
+        from app.services.sources.base import collect_board_sightings, known_descriptions
+        described = {}
+        if getattr(cfg, "GREENHOUSE_DESCRIPTIONS_ON_DEMAND", True) and \
+                (only is None or "greenhouse" in only):
+            described["greenhouse"] = _described_ids(db, "greenhouse")
+        with SourceLogCapture() as capture, collect_board_sightings() as sightings, \
+                known_descriptions(described):
             raw_jobs, source_stats = _run_all_adapters(
                 queries, locations, cfg, ats_slugs, loc_prefs, only,
                 resting=_resting_sources(db), manual=manual,
+                not_due=_sources_not_due(db, cfg),
             )
         merge_into_stats(source_stats, capture.messages, capture.errors)
     except Exception as exc:
@@ -1157,13 +1610,13 @@ def fetch_and_save_jobs(
     # Follow aggregator redirect pages through to the employer's own apply link.
     # Only postings we haven't seen before are worth the round trip.
     resolve_stats = None
-    if settings.RESOLVE_APPLY_LINKS:
+    if cfg.RESOLVE_APPLY_LINKS:
         try:
             resolve_stats = _resolve_apply_links(db, raw_jobs)
         except Exception as exc:
             logger.error("job_fetcher: apply-link resolution failed: %s", exc)
 
-    if settings.ATS_BOARD_REGISTRY:
+    if cfg.ATS_BOARD_REGISTRY:
         try:
             counts["board_names"] = _name_board_jobs(db, raw_jobs)
         except Exception as exc:
@@ -1182,7 +1635,7 @@ def fetch_and_save_jobs(
 
     # Learn company ATS boards from the fetched jobs' links; the merged slug
     # list feeds the direct board fetches on the next cycle.
-    if settings.ATS_AUTO_DISCOVERY:
+    if cfg.ATS_AUTO_DISCOVERY:
         try:
             from app.services.ats_discovery import discover_ats_slugs
             updated_data["discovered_ats"] = discover_ats_slugs(raw_jobs, discovered_ats)
@@ -1190,12 +1643,12 @@ def fetch_and_save_jobs(
             logger.error("job_fetcher: ATS discovery failed: %s", exc)
 
     board_stats: dict = {}
-    if settings.ATS_BOARD_REGISTRY:
+    if cfg.ATS_BOARD_REGISTRY:
         try:
             with db.begin_nested():
                 board_stats = _update_board_registry(
                     db, raw_jobs, ats_slugs, source_stats,
-                    resolve_stats, updated_data,
+                    resolve_stats, updated_data, career_links=harvested_links,
                 )
             db.commit()
             from app.services.company_boards import summary
@@ -1206,7 +1659,7 @@ def fetch_and_save_jobs(
 
     # Hand what the server could not follow to the browser. Never blocks and
     # never fails the cycle: if no agent is listening the tasks simply expire.
-    if settings.RESOLVE_APPLY_LINKS:
+    if cfg.RESOLVE_APPLY_LINKS:
         try:
             from app.services.agent_work import enqueue_unresolved_links
             counts["links_queued_to_browser"] = enqueue_unresolved_links(db)
@@ -1281,7 +1734,14 @@ def fetch_and_save_jobs(
         )
         entry[outcome] += 1
 
-    for job_data in raw_jobs:
+    known: KnownPostings | None = None
+    for index, job_data in enumerate(raw_jobs):
+        # Which of the next chunk's postings are already stored, or archived,
+        # asked of the database once for the chunk (`KnownPostings`) rather
+        # than once per posting per question. A chunk that cannot be looked up
+        # this way falls back to asking posting by posting.
+        if index % _LOOKUP_CHUNK == 0:
+            known = _known_postings(db, raw_jobs[index:index + _LOOKUP_CHUNK])
         # Each job gets its own savepoint: a flush that fails (a constraint
         # violation, an over-long value) used to leave the session in a failed
         # state, so every job after it errored and the final commit lost the
@@ -1309,7 +1769,13 @@ def fetch_and_save_jobs(
                     continue
 
                 dedupe_hash = compute_dedupe_hash(company, title, location, url)
-                existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
+                if known is not None:
+                    existing_id = known.existing_id(source, url, source_job_id, dedupe_hash,
+                                                    apply_url=apply_url)
+                    existing = db.get(Job, existing_id) if existing_id is not None else None
+                else:
+                    existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
+                                                 apply_url=apply_url)
 
                 if existing is not None:
                     # What this sighting knows, in the shape the shared merge
@@ -1335,14 +1801,21 @@ def fetch_and_save_jobs(
                         and existing.source_job_id == source_job_id
                         and existing.source == source
                     )
+                    _note_board(existing, job_data)
+                    note_source(existing, source)
                     if same_row:
                         # The same posting again, not a cross-post: its URL is
-                        # already ours, so only the contents can be news.
+                        # already ours, so only the contents can be news —
+                        # and its canonical address, on a row stored before
+                        # there were any.
+                        note_addresses(existing, url, apply_url)
                         if merge_description(existing, description):
                             improved.append("description")
                     else:
                         improved += merge_or_skip(db, existing, url, description,
                                                   layer=3, data=sighting)
+                    if known is not None:
+                        known.remember(existing)
 
                     # "Merged" means the row got better, not that it was
                     # touched. It is the number the panel reports as "enriched",
@@ -1359,7 +1832,9 @@ def fetch_and_save_jobs(
                 # a scoring call, reaches the same verdict, and is archived
                 # again sixty days later. There is nothing to merge into — the
                 # description is what archiving discarded — so it is a skip.
-                if was_archived(db, source, url, source_job_id, dedupe_hash):
+                if (known.archived(source, url, source_job_id, dedupe_hash, apply_url=apply_url)
+                        if known is not None else
+                        was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url)):
                     counts["skipped"] += 1
                     _tally(source, "skipped")
                     continue
@@ -1367,7 +1842,11 @@ def fetch_and_save_jobs(
                 new_job = Job(
                     source=source,
                     source_job_id=source_job_id,
-                    source_urls=[url],
+                    # The URL as written, and the posting's canonical address
+                    # (`posting_identity`) that the next source's link to it
+                    # will share.
+                    source_urls=posting_identity.urls(url, apply_url),
+                    seen_by=[source],
                     title=title,
                     company=company,
                     location=location,
@@ -1391,10 +1870,13 @@ def fetch_and_save_jobs(
                     fetched_at=now,
                     posted_at=posted_at,
                     dedupe_hash=dedupe_hash,
+                    board=_board_key(job_data),
                     **_adapter_details(job_data),
                 )
                 db.add(new_job)
                 db.flush()
+                if known is not None:
+                    known.remember(new_job)
                 counts["inserted"] += 1
                 _tally(source, "inserted")
 
@@ -1431,6 +1913,14 @@ def fetch_and_save_jobs(
                 job_data.get("company") or "?", job_data.get("url") or "?", exc,
             )
 
+    # Postings their board no longer lists. After the loop, so a posting that
+    # moved (a new id for the same role) has had its new row stored first.
+    try:
+        with db.begin_nested():
+            counts["closed"] = _close_vanished(db, sightings)
+    except Exception as exc:
+        logger.error("job_fetcher: closing vanished postings failed: %s", exc)
+
     # Now, with the job loop finished and the commit one line away. Re-read
     # first: this cycle has been running for minutes and the agent poll, the
     # mailbox poller and a settings save all write this same blob — the copy
@@ -1461,12 +1951,12 @@ def fetch_and_save_jobs(
     # The landing HTML from link resolution goes in with it: those pages were
     # downloaded moments ago and thrown away after slug mining, and the job
     # description is sitting in them.
-    if settings.ENRICH_ENABLED and settings.ENRICH_ON_FETCH:
+    if cfg.ENRICH_ENABLED and cfg.ENRICH_ON_FETCH:
         try:
             from app.services.enrichment import run as enrich_run
             counts["enrichment"] = enrich_run(
                 db,
-                limit=settings.ENRICH_MAX_PER_FETCH,
+                limit=cfg.ENRICH_MAX_PER_FETCH,
                 landing_html=(resolve_stats.landing_html if resolve_stats else None),
             )
         except Exception as exc:
@@ -1501,6 +1991,96 @@ def fetch_and_save_jobs(
     return counts
 
 
+# A stored description shorter than this is read again rather than trusted.
+_DESCRIBED_MIN_CHARS = 200
+
+
+def _described_ids(db: Session, source: str) -> set[str]:
+    """
+    The postings of `source` there is no need to download the text of again:
+    stored with a real description, or archived (judged and retired; its text
+    was thrown away on purpose, and the save skips it anyway).
+    """
+    from sqlalchemy import func
+
+    from app.models.archived_job import ArchivedJob
+
+    stored = (
+        db.query(Job.source_job_id)
+        .filter(Job.source == source, Job.source_job_id.isnot(None),
+                func.length(Job.description) >= _DESCRIBED_MIN_CHARS)
+        .all()
+    )
+    archived = (
+        db.query(ArchivedJob.source_job_id)
+        .filter(ArchivedJob.source == source, ArchivedJob.source_job_id.isnot(None))
+        .all()
+    )
+    return {row[0] for row in stored} | {row[0] for row in archived}
+
+
+def _board_key(job_data: dict) -> str | None:
+    """`source:slug` for a posting read from a full-feed board, else None."""
+    source, slug = job_data.get("source"), job_data.get("ats_slug")
+    if source in FULL_FEED_BOARDS and slug and job_data.get("source_job_id"):
+        return f"{source}:{slug}"
+    return None
+
+
+def _note_board(existing: Job, job_data: dict) -> None:
+    """
+    File a stored posting under its board when this is that board's own
+    sighting of it — same source, same id. A row stored from another source
+    keeps that source's id, and comparing it against the board's would close it
+    wrongly. A posting its board lists again is reopened if its board closed it.
+    """
+    key = _board_key(job_data)
+    if not key or existing.source != job_data.get("source") \
+            or existing.source_job_id != str(job_data.get("source_job_id")):
+        return
+    if existing.board is None:
+        existing.board = key
+    if existing.closed_at is not None and existing.closed_note == VANISHED_NOTE:
+        existing.closed_at = None
+        existing.closed_note = None
+
+
+def _close_vanished(db: Session, sightings: dict) -> int:
+    """
+    Close the stored postings of each board read in full this cycle that the
+    read no longer listed. Returns how many.
+
+    Only boards that listed at least one posting: an empty answer is as likely
+    a hiccup as a company that stopped hiring, and closing every posting on the
+    strength of it is not a mistake worth risking — the liveness sweep checks
+    those one by one.
+    """
+    listed = {
+        f"{source}:{slug}": ids
+        for (source, slug), ids in (sightings or {}).items()
+        if source in FULL_FEED_BOARDS and ids
+    }
+    if not listed:
+        return 0
+    now = datetime.now(timezone.utc)
+    closed = 0
+    boards = sorted(listed)
+    for start in range(0, len(boards), 500):
+        rows = (
+            db.query(Job)
+            .filter(Job.closed_at.is_(None), Job.board.in_(boards[start:start + 500]))
+            .all()
+        )
+        for job in rows:
+            if job.source_job_id and job.source_job_id not in listed[job.board]:
+                job.closed_at = now
+                job.closed_note = VANISHED_NOTE
+                closed += 1
+    if closed:
+        logger.info("job_fetcher: closed %d postings their boards no longer list", closed)
+    return closed
+
+
 def _log_run_summary(counts: dict, source_stats: dict, per_source: dict,
                      resolve_stats, board_stats: dict, started_at: datetime) -> None:
     """
@@ -1512,9 +2092,10 @@ def _log_run_summary(counts: dict, source_stats: dict, per_source: dict,
     elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
     logger.info(
         "=== fetch cycle done in %.1fs — fetched=%d new=%d merged=%d dup=%d "
-        "stale=%d dropped=%d ===",
+        "stale=%d dropped=%d closed=%d ===",
         elapsed, counts["fetched"], counts["inserted"], counts["merged"],
         counts["skipped"], counts["stale"], counts.get("dropped", 0),
+        counts.get("closed", 0),
     )
     logger.info("  %-16s %-9s %7s %6s %7s  %s",
                 "SOURCE", "STATUS", "FETCHED", "NEW", "DUP", "REASON")

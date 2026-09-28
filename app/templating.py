@@ -32,7 +32,16 @@ def install(templates: Jinja2Templates) -> Jinja2Templates:
     # Callable rather than a value: the abbreviation changes with daylight
     # saving, and a string captured at import would say PST all summer.
     templates.env.globals["tz_label"] = label
+    # An employer's H-1B filings, for the job card. Cached per process, so a
+    # page of cards costs one read every ten minutes, not one per card.
+    templates.env.globals["h1b_history"] = _h1b_history
     return templates
+
+
+def _h1b_history(company):
+    from app.services.sponsorship_history import for_company
+
+    return for_company(company)
 
 
 def build(directory: str = "app/templates") -> Jinja2Templates:

@@ -35,6 +35,9 @@
   const INTERESTING =
     /(job|posting|search|hiring|career|vacanc|opening|listing|position|graphql)/i;
 
+  // Hosted search services a board may answer its searches from.
+  const SEARCH_HOSTS = /(^|\.)(algolia\.net|algolianet\.com)$/i;
+
   /**
    * Whether a URL's *endpoint* names a job, ignoring the host.
    *
@@ -50,6 +53,12 @@
   function namesAJob(url) {
     try {
       const parsed = new URL(url, location.href);
+      // A hosted search service answers a job board's searches from its own
+      // domain, under a path naming an index rather than a job
+      // (`/1/indexes/*/queries`). Welcome to the Jungle's results arrive this
+      // way. On a page whose reader is switched on, which is only ever a job
+      // board, a search response from one of these *is* the listing.
+      if (SEARCH_HOSTS.test(parsed.hostname)) return true;
       return INTERESTING.test(parsed.pathname + parsed.search);
     } catch (_) {
       // Not parseable as a URL. Fall back to the whole string rather than
@@ -66,8 +75,13 @@
   // pattern anchored on `"title"`, because the quote sits before `job`. A
   // board whose API answered in snake_case was invisible — the response
   // arrived, was read, matched nothing, and was dropped without trace.
+  //
+  // `objectID` is Algolia's: every hit carries one, whatever the board calls
+  // its title. Welcome to the Jungle's hits name the job `name` and nothing
+  // above, so without it a page of results could only leave as a probe —
+  // capped in number and in size, where a search response is neither.
   const SHAPE =
-    /"(title|jobTitle|job_title|jobtitle|companyName|company_name|employer_name|jobPostingId|job_id|position|positionTitle)"/i;
+    /"(title|jobTitle|job_title|jobtitle|companyName|company_name|employer_name|jobPostingId|job_id|position|positionTitle|objectID)"/i;
 
   // Near misses: JSON on a job-shaped URL that names none of the keys above.
   //

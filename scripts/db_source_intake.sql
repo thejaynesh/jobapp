@@ -36,10 +36,12 @@ WITH catalog(source, expected_group) AS (
     ('linkedin','api'), ('indeed','api'), ('remotive','api'), ('arbeitnow','api'),
     ('remoteok','api'), ('weworkremotely','api'), ('themuse','api'), ('himalayas','api'),
     ('jobicy','api'), ('hnhiring','api'), ('workingnomads','api'), ('builtin','api'),
-    ('jobspresso','api'), ('greenhouse','boards'), ('lever','boards'), ('ashby','boards'),
+    ('jobspresso','api'), ('google_jobs','api'), ('simplify','api'), ('amazon','api'), ('tiktok','api'), ('apple','api'), ('greenhouse','boards'), ('lever','boards'), ('ashby','boards'),
     ('smartrecruiters','boards'), ('workable','boards'), ('recruitee','boards'),
     ('workday','boards'), ('icims','boards'), ('bamboohr','boards'), ('teamtailor','boards'),
-    ('jobvite','boards'), ('personio','boards'), ('wellfound','browser'),
+    ('jobvite','boards'), ('personio','boards'), ('oracle','boards'),
+    ('successfactors','boards'), ('phenom','boards'), ('eightfold','boards'),
+    ('jibe','boards'), ('rippling','boards'), ('pinpoint','boards'), ('jazzhr','boards'), ('taleo','boards'), ('paylocity','boards'), ('avature','boards'), ('wellfound','browser'),
     ('dice','browser'), ('handshake','browser')
 ), recent AS (
   SELECT s.*, f.started_at, f."group" AS run_group

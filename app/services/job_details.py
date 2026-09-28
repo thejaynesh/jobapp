@@ -24,7 +24,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from app.config import settings
+from app.config import live, settings
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +287,7 @@ def extract(description: str, job_id=None) -> dict | None:
                 messages,
                 api_key=settings.NVIDIA_NIM_API_KEY,
                 base_url=settings.NVIDIA_NIM_BASE_URL,
-                model=settings.NVIDIA_NIM_MODEL,
+                model=live().NVIDIA_NIM_MODEL,
                 temperature=0.0,
                 max_tokens=1024,
                 role="extract",
@@ -409,6 +409,16 @@ def apply(job, details: dict) -> None:
         write(field, value)
 
     job.details_extracted_at = datetime.now(timezone.utc)
+
+
+# Every column `apply` can write, for copying an extraction made on a snapshot
+# of a job onto the job itself (`matcher._file`).
+WRITTEN_FIELDS = (
+    "salary_min", "salary_max", "salary_currency", "salary_period",
+    "salary_annual_min", "salary_annual_max", "employment_type", "required_years",
+    "required_skills", "nice_to_have_skills", "education_required", "benefits_note",
+    "language", "details_extracted_at",
+)
 
 
 def extract_and_apply(job) -> bool:

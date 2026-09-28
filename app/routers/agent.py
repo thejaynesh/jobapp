@@ -429,7 +429,7 @@ def _autofill_fields(db: Session) -> dict:
     education = (data.get("education") or [])
     latest = education[0] if education else {}
 
-    from app.services import screening
+    from app.services import remembered_answers, screening
 
     return {
         "first_name": first,
@@ -449,7 +449,30 @@ def _autofill_fields(db: Session) -> dict:
         # an employer, and a guessed answer is worse than an empty box because
         # the empty box gets noticed.
         **screening.answers(data),
+        # Questions the user answered by hand on an earlier form, keyed the
+        # way autofill.js keys a question. Their own answers, going back to
+        # forms like the ones they came from.
+        "remembered": remembered_answers.lookup(data),
     }
+
+
+def _remember_answers(db: Session, answers) -> dict:
+    from app.models.profile import Profile
+    from app.services import remembered_answers
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return {"ok": False, "saved": 0}
+    profile.data, saved = remembered_answers.remember(profile.data or {}, answers)
+    db.commit()
+    return {"ok": True, "saved": saved}
+
+
+@router.post("/remember-answers")
+async def remember_answers(request: Request, db: Session = Depends(get_db)):
+    """Keep the answers the user typed into questions the profile does not cover."""
+    body = await _json_body(request)
+    return await run_in_threadpool(_remember_answers, db, body.get("answers"))
 
 
 @router.get("/autofill-fields")
@@ -461,6 +484,32 @@ async def autofill_fields(db: Session = Depends(get_db)):
     values reach a page only when they have asked for them to be typed there.
     """
     return await run_in_threadpool(_autofill_fields, db)
+
+
+def _draft_answer(db: Session, body: dict) -> dict:
+    from app.services import answer_drafts
+
+    return answer_drafts.draft(
+        db,
+        url=str(body.get("url") or ""),
+        question=body.get("question"),
+        max_chars=body.get("max_chars"),
+        posting=body.get("posting"),
+    )
+
+
+@router.post("/draft-answer")
+async def draft_answer(request: Request, db: Session = Depends(get_db)):
+    """
+    A draft answer to one long question on the form on screen.
+
+    Pressed, never automatic, and one question per call: a writing model can
+    take the better part of a minute, and the extension's service worker is
+    not kept alive indefinitely for one reply. What comes back is shown for
+    editing; it reaches the form only when the user puts it there.
+    """
+    body = await _json_body(request)
+    return await run_in_threadpool(_draft_answer, db, body)
 
 
 def _resume(db: Session, url: str) -> dict:

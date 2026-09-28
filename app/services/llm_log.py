@@ -28,7 +28,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from app.config import settings
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +92,11 @@ def current_stage() -> str:
 
 
 def _enabled() -> bool:
-    return bool(getattr(settings, "LLM_LOG_ENABLED", True))
+    return bool(getattr(live(), "LLM_LOG_ENABLED", True))
 
 
 def _limit() -> int:
-    return max(500, int(getattr(settings, "LLM_LOG_MAX_CHARS", 20000)))
+    return max(500, int(getattr(live(), "LLM_LOG_MAX_CHARS", 20000)))
 
 
 def _clip(text: str | None) -> str | None:
@@ -248,7 +248,7 @@ def prune(db, keep: int | None = None) -> int:
     """
     from app.models.llm_call import LLMCall
 
-    keep = keep if keep is not None else int(getattr(settings, "LLM_LOG_KEEP_ROWS", 2000))
+    keep = keep if keep is not None else int(getattr(live(), "LLM_LOG_KEEP_ROWS", 2000))
     if keep <= 0:
         return 0
     total = db.query(LLMCall).count()

@@ -29,7 +29,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.config import settings
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +48,11 @@ MAX_DEPTH = 14
 
 
 def _keep() -> int:
-    return max(1, int(getattr(settings, "HARVEST_SAMPLES_PER_HOST", 5)))
+    return max(1, int(getattr(live(), "HARVEST_SAMPLES_PER_HOST", 5)))
 
 
 def _ttl_days() -> int:
-    return max(1, int(getattr(settings, "HARVEST_SAMPLE_TTL_DAYS", 30)))
+    return max(1, int(getattr(live(), "HARVEST_SAMPLE_TTL_DAYS", 30)))
 
 
 def trim(value, depth: int = 0):
@@ -131,7 +131,7 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
     """
     if not host or payload is None:
         return False
-    if not bool(getattr(settings, "HARVEST_SAMPLES_ENABLED", True)):
+    if not bool(getattr(live(), "HARVEST_SAMPLES_ENABLED", True)):
         return False
 
     try:

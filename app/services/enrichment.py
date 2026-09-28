@@ -33,6 +33,7 @@ so the backlog takes days rather than making anybody's afternoon unpleasant.
 """
 
 import json
+import contextvars
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +43,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.config import settings
+from app.config import live, settings
 from sqlalchemy.orm import selectinload
 
 from app.models.job import Job, JobStatus
@@ -91,13 +92,14 @@ class Extraction:
 # ---------------------------------------------------------------------------
 
 _GREENHOUSE_URL = re.compile(
-    r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_app\?for=)?"
+    r"(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io/(?:embed/job_app\?for=)?"
     r"([A-Za-z0-9_.-]+)/jobs/(\d+)", re.I,
 )
 _GREENHOUSE_EMBED = re.compile(
     r"greenhouse\.io/embed/job_app\?for=([A-Za-z0-9_.-]+)&(?:amp;)?token=(\d+)", re.I,
 )
-_LEVER_URL = re.compile(r"jobs\.lever\.co/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})", re.I)
+# The region prefix is captured: an EU board's postings are only on its API.
+_LEVER_URL = re.compile(r"jobs\.((?:eu\.)?)lever\.co/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})", re.I)
 _ASHBY_URL = re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})", re.I)
 _SMARTRECRUITERS_URL = re.compile(
     r"jobs\.smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", re.I
@@ -108,6 +110,42 @@ _WORKABLE_URL = re.compile(
 _WORKDAY_URL = re.compile(
     r"([A-Za-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[A-Za-z-]+/)?"
     r"([A-Za-z0-9_-]+)(/job/[^?#]+)", re.I,
+)
+# Oracle Recruiting Cloud. The posting page is an empty single-page app, so
+# without this the only route to the text was the model reading a shell.
+# UKG Pro Recruiting. Its search endpoint is disallowed in robots.txt; the
+# posting page is not, and embeds the whole opportunity as a constructor
+# argument.
+_UKG_URL = re.compile(
+    r"https?://(recruiting2?\.ultipro\.com)/([A-Za-z0-9]+)/JobBoard/([0-9a-f-]{36})/"
+    r"OpportunityDetail\?(?:[^#\s\"'<>]*&)?opportunityId=([0-9a-f-]{36})", re.I,
+)
+_UKG_DATA = re.compile(r"CandidateOpportunityDetail\((\{.*?\})\);", re.S)
+# Dayforce. Its search refuses a plain request; the posting page is rendered on
+# the server with the posting in its Next.js data.
+_DAYFORCE_URL = re.compile(
+    r"https?://jobs\.dayforcehcm\.com/([A-Za-z]{2}-[A-Za-z]{2})/([A-Za-z0-9_-]+)/"
+    r"([A-Za-z0-9_-]+)/jobs/(\d+)", re.I,
+)
+_NEXT_DATA = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
+# Taleo's detail page carries the posting URL-encoded in a hidden field.
+_TALEO_URL = re.compile(
+    r"https?://([a-z0-9-]+)\.taleo\.net/careersection/([A-Za-z0-9_]+)/jobdetail\.ftl"
+    r"\?(?:[^#\s\"'<>]*&)?job=([A-Za-z0-9]+)", re.I,
+)
+_TALEO_HISTORY = re.compile(r'(?:name|id)="initialHistory"[^>]*value="([^"]*)"')
+# Apple's detail page embeds the posting as its own hydration data; no API.
+_APPLE_URL = re.compile(
+    r"https?://jobs\.apple\.com/[a-z]{2}-[a-z]{2}/details/(\d+)(?:/([A-Za-z0-9-]+))?", re.I,
+)
+# Avature. No API; the posting page is labelled fields (`sources.avature`).
+_AVATURE_URL = re.compile(
+    r"https?://[a-z0-9-]+\.avature\.net/(?:[a-z]{2}_[A-Z]{2}/)?[A-Za-z0-9_-]+"
+    r"/JobDetail/(?:[^\s\"'<>?#/]+/)?\d+", re.I,
+)
+_ORACLE_URL = re.compile(
+    r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.oraclecloud\.com)/hcmUI/CandidateExperience/"
+    r"[A-Za-z_-]+/sites/([A-Za-z0-9_]+)/job/([A-Za-z0-9]+)", re.I,
 )
 
 
@@ -133,8 +171,8 @@ def _greenhouse(client: httpx.Client, slug: str, job_id: str) -> Extraction:
     )
 
 
-def _lever(client: httpx.Client, slug: str, posting_id: str) -> Extraction:
-    data = _get_json(client, f"https://api.lever.co/v0/postings/{slug}/{posting_id}")
+def _lever(client: httpx.Client, region: str, slug: str, posting_id: str) -> Extraction:
+    data = _get_json(client, f"https://api.{region.lower()}lever.co/v0/postings/{slug}/{posting_id}")
     if not isinstance(data, dict):
         return Extraction()
     # descriptionPlain is only the opening section; the lists that carry the
@@ -232,6 +270,160 @@ def _workday(client: httpx.Client, tenant: str, host: str, site: str,
     )
 
 
+def _oracle(client: httpx.Client, host: str, site: str, job_id: str) -> Extraction:
+    from app.services.sources.oracle import description_of
+
+    data = _get_json(
+        client,
+        f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
+        f'?expand=all&onlyData=true&finder=ById;Id="{job_id}",siteNumber={site}',
+    )
+    items = (data or {}).get("items") if isinstance(data, dict) else None
+    record = items[0] if items else {}
+    return Extraction(
+        description=description_of(record),
+        method="ats_api",
+        posted_at=record.get("ExternalPostedStartDate"),
+        details={"location": record.get("PrimaryLocation") or ""},
+    )
+
+
+def _taleo(client: httpx.Client, tenant: str, section: str, job: str) -> Extraction:
+    """
+    The description out of a Taleo posting page's `initialHistory` field:
+    `!|!`-separated, URL-encoded values, of which the rich-text ones — the
+    description and qualifications, each written twice — begin `!*!` and
+    escape their colons.
+    """
+    from html import unescape
+    from urllib.parse import unquote
+
+    resp = client.get(
+        f"https://{tenant}.taleo.net/careersection/{section}/jobdetail.ftl?job={job}&lang=en",
+        headers={"Accept-Encoding": "identity"},
+    )
+    resp.raise_for_status()
+    match = _TALEO_HISTORY.search(resp.text)
+    if not match:
+        return Extraction()
+    blocks = []
+    for part in unescape(match.group(1)).split("!|!"):
+        text = unquote(part)
+        if text.startswith("!*!"):
+            text = text[3:].replace("\\:", ":")
+            if text.strip() and text not in blocks:
+                blocks.append(text)
+    description = clean("\n\n".join(blocks))
+    return Extraction(description=description, method="ats_api") if description else Extraction()
+
+
+def _ukg(client: httpx.Client, host: str, tenant: str, board: str,
+         opportunity: str) -> Extraction:
+    resp = client.get(f"https://{host}/{tenant}/JobBoard/{board}/OpportunityDetail",
+                      params={"opportunityId": opportunity})
+    resp.raise_for_status()
+    match = _UKG_DATA.search(resp.text)
+    if not match:
+        return Extraction()
+    data = json.loads(match.group(1))
+    address = ((data.get("Locations") or [{}])[0] or {}).get("Address") or {}
+    location = ", ".join(p for p in (
+        address.get("City"), (address.get("State") or {}).get("Code"),
+        (address.get("Country") or {}).get("Name")) if p)
+    details = {"location": location} if location else {}
+    if data.get("FullTime") is not None:
+        details["employment_type"] = "full_time" if data["FullTime"] else "part_time"
+    for period, low, high in (("YEAR", "CompensationAnnualMinimum", "CompensationAnnualMaximum"),
+                              ("HOUR", "CompensationHourlyMinimum", "CompensationHourlyMaximum")):
+        if data.get(low) or data.get(high):
+            details.update(salary_min=data.get(low), salary_max=data.get(high),
+                           salary_currency="USD", salary_period=period)
+            break
+    return Extraction(
+        description=clean(data.get("Description") or ""),
+        method="ats_api",
+        posted_at=data.get("PostedDate"),
+        details=details,
+    )
+
+
+def dayforce_posting(html: str) -> dict | None:
+    """The posting a Dayforce page carries in its Next.js data, or None."""
+    match = _NEXT_DATA.search(html or "")
+    if not match:
+        return None
+    try:
+        queries = (((json.loads(match.group(1)).get("props") or {}).get("pageProps") or {})
+                   .get("dehydratedState") or {}).get("queries") or []
+    except (ValueError, AttributeError):
+        return None
+    data = next((((q.get("state") or {}).get("data")) for q in queries
+                 if isinstance(q, dict) and (q.get("queryKey") or [None])[0] == "jobs"), None)
+    return data if isinstance(data, dict) else None
+
+
+def _dayforce(client: httpx.Client, language: str, namespace: str, board: str,
+              posting: str) -> Extraction:
+    resp = client.get(f"https://jobs.dayforcehcm.com/{language}/{namespace}/{board}/jobs/{posting}")
+    resp.raise_for_status()
+    data = dayforce_posting(resp.text)
+    if not data:
+        return Extraction()
+    content = data.get("jobPostingContent") or {}
+    description = clean("\n\n".join(content.get(k) or "" for k in (
+        "jobDescriptionHeader", "jobDescription", "jobDescriptionFooter")))
+    place = ((data.get("postingLocations") or [{}])[0] or {})
+    location = ", ".join(p for p in (place.get("cityName"), place.get("stateCode"),
+                                     place.get("isoCountryCode")) if p)
+    details = {"location": location} if location else {}
+    for attribute in data.get("jobPostingAttributes") or []:
+        if (attribute or {}).get("name") == "EmploymentIndicator" and attribute.get("value"):
+            details["employment_type"] = attribute["value"]
+    return Extraction(
+        description=description,
+        method="ats_api",
+        posted_at=data.get("postingStartTimestampUTC"),
+        details=details,
+    )
+
+
+def _apple(client: httpx.Client, position_id: str, slug: str | None) -> Extraction:
+    from app.services.sources.apple import full_description, loader_data
+
+    resp = client.get(f"https://jobs.apple.com/en-us/details/{position_id}/{slug or ''}".rstrip("/"))
+    resp.raise_for_status()
+    data = (loader_data(resp.text).get("jobDetails") or {}).get("jobsData") or {}
+    if not data:
+        return Extraction()
+    return Extraction(
+        description=full_description(data),
+        method="ats_api",
+        posted_at=data.get("postDateInGMT"),
+    )
+
+
+def _avature(client: httpx.Client, url: str) -> Extraction:
+    from app.services.sources.avature import parse_detail
+
+    resp = client.get(url, follow_redirects=True)
+    # A closed posting lands on the portal's Error page, an internal one on Login.
+    if "/JobDetail/" not in resp.url.path:
+        return Extraction()
+    resp.raise_for_status()
+    page = parse_detail(resp.text)
+    if not page or not page["description"]:
+        return Extraction()
+    details = {"location": page["location"]} if page["location"] else {}
+    if page["employment_type"]:
+        details["employment_type"] = page["employment_type"]
+    return Extraction(
+        description=clean(page["description"]),
+        method="ats_api",
+        posted_at=page["posted_at"],
+        details=details,
+    )
+
+
 def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     """The posting's JSON, when the URL says which ATS is hosting it."""
     for pattern, call in (
@@ -249,6 +441,24 @@ def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     match = _WORKDAY_URL.search(url)
     if match:
         return _workday(client, *match.groups())
+    match = _ORACLE_URL.search(url)
+    if match:
+        return _oracle(client, *match.groups())
+    match = _APPLE_URL.search(url)
+    if match:
+        return _apple(client, *match.groups())
+    match = _TALEO_URL.search(url)
+    if match:
+        return _taleo(client, *match.groups())
+    match = _UKG_URL.search(url)
+    if match:
+        return _ukg(client, *match.groups())
+    match = _DAYFORCE_URL.search(url)
+    if match:
+        return _dayforce(client, *match.groups())
+    match = _AVATURE_URL.search(url)
+    if match:
+        return _avature(client, match.group(0))
     return Extraction()
 
 
@@ -257,7 +467,8 @@ def looks_like_ats(url: str) -> bool:
     return any(
         pattern.search(url or "")
         for pattern in (_GREENHOUSE_EMBED, _GREENHOUSE_URL, _LEVER_URL, _ASHBY_URL,
-                        _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL)
+                        _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL,
+                        _APPLE_URL, _TALEO_URL, _UKG_URL, _DAYFORCE_URL, _AVATURE_URL)
     )
 
 
@@ -265,8 +476,15 @@ def looks_like_ats(url: str) -> bool:
 # 2. JSON-LD
 # ---------------------------------------------------------------------------
 
+# The `+` may arrive as a character reference. Built In writes
+# `type="application/ld&#x2B;json"` on every posting page — legal HTML, since a
+# browser decodes attribute values before anything reads them, but a pattern
+# matching the literal `+` never saw the block. So every Built In posting fell
+# past the cheapest, most precise reader to the ones after it, for a page that
+# states its description, date, pay and employment type outright.
 _LD_BLOCK = re.compile(
-    r'<script[^>]+type=["\']?application/ld\+json["\']?[^>]*>(.*?)</script>',
+    r'<script[^>]+type=["\']?application/ld(?:\+|&#x0*2b;|&#0*43;|&plus;)json'
+    r'["\']?[^>]*>(.*?)</script>',
     re.I | re.S,
 )
 
@@ -529,7 +747,7 @@ def llm_extraction(html: str, job_id=None) -> Extraction:
                 messages,
                 api_key=settings.NVIDIA_NIM_API_KEY,
                 base_url=settings.NVIDIA_NIM_BASE_URL,
-                model=settings.NVIDIA_NIM_MODEL,
+                model=live().NVIDIA_NIM_MODEL,
                 temperature=0.0,
                 max_tokens=4096,
                 role="extract",
@@ -681,7 +899,7 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
         func.length(Job.description) < THIN_DESCRIPTION_CHARS,
     )
     retry_after = datetime.now(timezone.utc) - timedelta(
-        days=max(0, int(getattr(settings, "ENRICH_RETRY_DAYS", 7)))
+        days=max(0, int(getattr(live(), "ENRICH_RETRY_DAYS", 7)))
     )
     rows = (
         db.query(Job)
@@ -1120,9 +1338,9 @@ def unproductive_hosts(db) -> set[str]:
 
     from app.models.enrichment_run import EnrichmentRun
 
-    window = max(1, int(getattr(settings, "ENRICH_HOST_MEMORY_DAYS", 14)))
-    min_attempts = max(1, int(getattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)))
-    floor = float(getattr(settings, "ENRICH_HOST_MIN_SUCCESS_RATE", 0.02))
+    window = max(1, int(getattr(live(), "ENRICH_HOST_MEMORY_DAYS", 14)))
+    min_attempts = max(1, int(getattr(live(), "ENRICH_HOST_MIN_ATTEMPTS", 50)))
+    floor = float(getattr(live(), "ENRICH_HOST_MIN_SUCCESS_RATE", 0.02))
     since = datetime.now(timezone.utc) - timedelta(days=window)
 
     totals: dict[str, list[int]] = {}
@@ -1202,10 +1420,10 @@ def enrich_jobs(
         return stats
 
     landing_html = landing_html or {}
-    workers = workers or getattr(settings, "ENRICH_WORKERS", 8)
+    workers = workers or getattr(live(), "ENRICH_WORKERS", 8)
     limiter = _HostLimiter(
-        max_concurrent=getattr(settings, "ENRICH_PER_HOST", 4),
-        min_interval=getattr(settings, "ENRICH_HOST_DELAY_MS", 400) / 1000.0,
+        max_concurrent=getattr(live(), "ENRICH_PER_HOST", 4),
+        min_interval=getattr(live(), "ENRICH_HOST_DELAY_MS", 400) / 1000.0,
     )
 
     # Split before doing anything: a host that always answers a server with a
@@ -1272,10 +1490,13 @@ def enrich_jobs(
                 except Exception as exc:
                     return job, None, exc
 
+            # Each fetch runs in a copy of this thread's context, so the pass's
+            # settings reach it rather than each read going back to the profile.
+            parent = contextvars.copy_context()
             with ThreadPoolExecutor(
                 max_workers=max(1, min(workers, len(for_server)))
             ) as pool:
-                results = list(pool.map(_work, for_server))
+                results = list(pool.map(lambda job: parent.copy().run(_work, job), for_server))
 
     attempted_at = datetime.now(timezone.utc)
 
@@ -1423,7 +1644,7 @@ def _paused_host_allowance(db, hosts: set[str]) -> dict[str, int]:
 
     from app.models.browser_task import BrowserTask
 
-    cap = max(0, int(getattr(settings, "ENRICH_PAUSED_HOST_DAILY", 40)))
+    cap = max(0, int(getattr(live(), "ENRICH_PAUSED_HOST_DAILY", 40)))
     if not hosts or not cap:
         return {host: 0 for host in hosts}
 
@@ -1561,7 +1782,7 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         else:
             candidates.append(job)
 
-    room = max(0, int(getattr(settings, "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
+    room = max(0, int(getattr(live(), "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
                - len(outstanding))
     if room <= 0:
         logger.info(
@@ -1580,8 +1801,8 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         kind = _browser_task_kind(url)
         payload = {"url": url, "purpose": "enrich", "job_id": str(job.id)}
         if kind == "browse_page":
-            payload["settle_seconds"] = int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6))
-            payload["gap_seconds"] = int(getattr(settings, "BROWSE_GAP_SECONDS", 20))
+            payload["settle_seconds"] = int(getattr(live(), "BROWSE_SETTLE_SECONDS", 6))
+            payload["gap_seconds"] = int(getattr(live(), "BROWSE_GAP_SECONDS", 20))
         try:
             browser_tasks.enqueue(
                 db, kind, payload,
@@ -1620,7 +1841,7 @@ def run(
     from app.services.enrichment_history import record_run
 
     started_at = datetime.now(timezone.utc)
-    limit = limit or getattr(settings, "ENRICH_MAX_PER_RUN", 200)
+    limit = limit or getattr(live(), "ENRICH_MAX_PER_RUN", 200)
 
     profile = db.query(Profile).first()
     profile_data = (profile.data if profile else None) or {}

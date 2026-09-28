@@ -22,6 +22,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    saw_postings,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,8 @@ def fetch(company_slugs: list[str]) -> list[dict]:
         items = data.get("result") if isinstance(data, dict) else data
         if not isinstance(items, list):
             return []
+        saw_postings(_text(item.get("id")) or _text(item.get("jobOpeningId"))
+                     for item in items if isinstance(item, dict))
 
         jobs = []
         for item in items:

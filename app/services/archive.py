@@ -32,7 +32,7 @@ it.
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.config import settings
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -44,20 +44,20 @@ PROTECTED_REASONS = frozenset({"manual", "blocked_title", "excluded_company"})
 
 def _days() -> int:
     try:
-        return max(1, int(getattr(settings, "ARCHIVE_AFTER_DAYS", 60)))
+        return max(1, int(getattr(live(), "ARCHIVE_AFTER_DAYS", 60)))
     except (TypeError, ValueError):
         return 60
 
 
 def _batch() -> int:
     try:
-        return max(1, int(getattr(settings, "ARCHIVE_MAX_PER_RUN", 5000)))
+        return max(1, int(getattr(live(), "ARCHIVE_MAX_PER_RUN", 5000)))
     except (TypeError, ValueError):
         return 5000
 
 
 def enabled() -> bool:
-    return bool(getattr(settings, "ARCHIVE_ENABLED", True))
+    return bool(getattr(live(), "ARCHIVE_ENABLED", True))
 
 
 def _eligible(db, days: int | None):
