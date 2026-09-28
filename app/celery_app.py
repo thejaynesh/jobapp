@@ -13,7 +13,7 @@ celery_app = Celery(
         "app.tasks.interview", "app.tasks.providers", "app.tasks.liveness",
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
         "app.tasks.match_eval", "app.tasks.backup", "app.tasks.archive",
-        "app.tasks.browse",
+        "app.tasks.browse", "app.tasks.discovery",
     ],
 )
 
@@ -90,6 +90,7 @@ celery_app.conf.update(
         "app.tasks.archive.*": {"queue": "batch"},
         "app.tasks.backfill.*": {"queue": "batch"},
         "app.tasks.backup.*": {"queue": "batch"},
+        "app.tasks.discovery.*": {"queue": "batch"},
         "app.tasks.descriptions.*": {"queue": "batch"},
         "app.tasks.liveness.*": {"queue": "batch"},
         "app.tasks.links.*": {"queue": "batch"},
@@ -192,6 +193,13 @@ celery_app.conf.beat_schedule = {
     # A nightly copy of the database, on this machine and nowhere else.
     # Everything else in this file assumes the data survives, and it is the one
     # thing nothing else in the system can recover from.
+    # Company boards from Common Crawl's URL index — the discovery that does not
+    # start from a posting we already hold. Hourly, and the task decides
+    # whether a walk is due, so its interval is a setting.
+    "discover-boards": {
+        "task": "app.tasks.discovery.discover_boards",
+        "schedule": celery_schedule(3600),
+    },
     "take-backup": {
         "task": "app.tasks.backup.take_backup",
         # Hourly, and the task decides whether one is due — so the interval

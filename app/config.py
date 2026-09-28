@@ -467,6 +467,12 @@ class Settings(BaseSettings):
     # the community lists alone name a few thousand boards, which at 150 a
     # cycle took weeks to reach. Editable on the settings page.
     ATS_BOARD_VALIDATE_PER_CYCLE: int = 400
+    # Company boards from Common Crawl's URL index (`services.commoncrawl`):
+    # index pages read per walk (~15,000 URLs each), and how often a walk runs.
+    # A walk resumes where the last stopped and restarts on each new crawl.
+    COMMONCRAWL_ENABLED: bool = True
+    COMMONCRAWL_PAGES_PER_RUN: int = 20
+    COMMONCRAWL_INTERVAL_HOURS: int = 24
 
     # Aggregators (Adzuna, Jooble, Careerjet) link to their own redirect page
     # rather than the employer. Following those once per new posting yields the

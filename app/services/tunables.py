@@ -224,6 +224,30 @@ TUNABLES: list[Tunable] = [
              "cycles only.",
     ),
     Tunable(
+        key="commoncrawl_enabled", env="COMMONCRAWL_ENABLED", kind="bool",
+        group="Company boards", label="Find boards in Common Crawl's index",
+        help="Walks Common Crawl's public URL index for Greenhouse, Ashby, "
+             "Workday, Oracle and other ATS hosts, and registers every board it "
+             "lists — companies no posting of ours has ever linked to. Each is "
+             "probed before it is polled.",
+    ),
+    Tunable(
+        key="commoncrawl_pages_per_run", env="COMMONCRAWL_PAGES_PER_RUN", kind="int",
+        minimum=1, maximum=500, group="Company boards",
+        label="Common Crawl: index pages per walk",
+        help="About 15,000 URLs a page, one request each, with a pause between. "
+             "A full walk of every ATS host is a few hundred pages; each walk "
+             "resumes where the last one stopped.",
+    ),
+    Tunable(
+        key="commoncrawl_interval_hours", env="COMMONCRAWL_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=720, group="Company boards",
+        label="Common Crawl: walk every (hours)",
+        help="Checked hourly. The index changes monthly, so once a walk has "
+             "finished the crawl, later ones cost one request until a new crawl "
+             "is published.",
+    ),
+    Tunable(
         key="workday_max_tenants", env="WORKDAY_MAX_TENANTS", kind="int",
         minimum=0, maximum=2000, group="Company boards",
         label="Workday companies per cycle",
