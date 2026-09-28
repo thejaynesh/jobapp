@@ -40,11 +40,15 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
         # Embed widget: boards.greenhouse.io/embed/job_board?for=<slug>
         re.compile(r"greenhouse\.io/embed/job_board[^\"'\s]*[?&]for=([A-Za-z0-9_-]{2,})", re.I),
         re.compile(r"greenhouse\.io/(?:v1/)?boards/([A-Za-z0-9_-]{2,})", re.I),
-        re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
+        # EU-hosted boards (job-boards.eu.greenhouse.io) are served by the same
+        # API as every other, so they need nothing more than to be recognised.
+        re.compile(r"(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io/([A-Za-z0-9_-]{2,})", re.I),
     ],
     "lever": [
-        re.compile(r"jobs\.lever\.co/([A-Za-z0-9_-]{2,})", re.I),
-        re.compile(r"api\.lever\.co/v0/postings/([A-Za-z0-9_-]{2,})", re.I),
+        # jobs.eu.lever.co boards live only on api.eu.lever.co; the adapter
+        # falls back to it when the US API has never heard of a slug.
+        re.compile(r"jobs\.(?:eu\.)?lever\.co/([A-Za-z0-9_-]{2,})", re.I),
+        re.compile(r"api\.(?:eu\.)?lever\.co/v0/postings/([A-Za-z0-9_-]{2,})", re.I),
     ],
     "ashby": [
         re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.\-]{2,})", re.I),
@@ -96,10 +100,25 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
 
 # Workday boards need a tenant:host:site triple, extracted from URLs like
 # https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/...
+# or, for the tenants Workday serves from its shared host,
+# https://wd5.myworkdaysite.com/en-US/recruiting/microchiphr/External/job/...
+# — the same tenant answers on microchiphr.wd5.myworkdayjobs.com, so both
+# shapes give the spec the adapter already reads.
 _WORKDAY_RE = re.compile(
-    r"https?://([a-z0-9-]{2,})\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]{2,})",
+    r"https?://([a-z0-9-]{2,})\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]+)",
     re.I,
 )
+_WORKDAY_SITE_RE = re.compile(
+    r"https?://(wd\d+)\.myworkdaysite\.com/(?:[a-z]{2}-[A-Z]{2}/)?recruiting/"
+    r"([a-z0-9-]{2,})/([A-Za-z0-9_-]+)",
+    re.I,
+)
+# Paths on a Workday host that are not career sites. The site is judged
+# against these and nothing else: "careers", "search" and "External" are
+# ordinary site names (theocc:wd5:careers, expedia:wd108:search), and the
+# general slug blocklist, written for vendor slugs, was throwing them away.
+# Nor is there a length rule: Citi's main site, 2,000 postings, is "2".
+_WORKDAY_NOT_SITES = frozenset({"wday", "login", "robots", "userhome", "recruiting"})
 
 # ATSes whose board is a careers *host* — often the employer's own domain —
 # rather than a slug on the vendor's. Each pattern reads one posting link and
@@ -130,6 +149,9 @@ _HOST_BOARD_PATTERNS: list[tuple[str, re.Pattern, "callable"]] = [
      lambda m: m.group(1).lower()),
     ("jibe", re.compile(
         r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)/jobs/\d+/?\?(?:[^\s\"'<>]*&)?icims=1", re.I),
+     lambda m: m.group(1).lower()),
+    # …and iCIMS's own host for them, which needs no marker: dish.jibeapply.com
+    ("jibe", re.compile(r"https?://([a-z0-9-]+\.jibeapply\.com)/jobs/\d+", re.I),
      lambda m: m.group(1).lower()),
     # Eightfold: {company}.eightfold.ai, or a custom host's /careers/job/<long id>
     ("eightfold", re.compile(r"https?://([a-z0-9-]+\.eightfold\.ai)/careers", re.I),
@@ -190,9 +212,11 @@ def _extract_slugs(text: str) -> dict[str, set[str]]:
                 slug = match.group(1).lower().rstrip(".")
                 if slug and slug not in _SLUG_BLOCKLIST:
                     found.setdefault(ats, set()).add(slug)
-    for match in _WORKDAY_RE.finditer(text):
-        tenant, host, site = match.group(1).lower(), match.group(2).lower(), match.group(3)
-        if site.lower() not in _SLUG_BLOCKLIST:
+    workday = [(m.group(1), m.group(2), m.group(3)) for m in _WORKDAY_RE.finditer(text)]
+    workday += [(m.group(2), m.group(1), m.group(3)) for m in _WORKDAY_SITE_RE.finditer(text)]
+    for tenant, host, site in workday:
+        tenant, host = tenant.lower(), host.lower()
+        if tenant not in _SLUG_BLOCKLIST and site.lower() not in _WORKDAY_NOT_SITES:
             found.setdefault("workday", set()).add(f"{tenant}:{host}:{site}")
     for ats, pattern, spec_of in _HOST_BOARD_PATTERNS:
         for match in pattern.finditer(text):

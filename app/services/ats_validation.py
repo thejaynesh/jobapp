@@ -31,7 +31,9 @@ def _probe_greenhouse(slug: str) -> bool:
 
 
 def _probe_lever(slug: str) -> bool:
-    r = httpx.get(f"https://api.lever.co/v0/postings/{slug}?limit=1&mode=json", timeout=_TIMEOUT)
+    from app.services.sources.lever import get_postings
+
+    r = get_postings(slug, "limit=1&mode=json", timeout=_TIMEOUT)
     return r.status_code == 200 and isinstance(r.json(), list)
 
 

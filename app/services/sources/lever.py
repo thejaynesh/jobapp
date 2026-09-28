@@ -11,6 +11,22 @@ from app.services.sources.base import (
 
 logger = logging.getLogger(__name__)
 
+# Lever keeps EU-hosted boards (jobs.eu.lever.co/<slug>) on a separate API
+# that the US one knows nothing about — it answers 404 for them. Cirrus Logic,
+# an Austin company, is one. Asking the EU API only after that 404 costs a
+# second request for a dead US slug and nothing for a live one.
+_APIS = ("https://api.lever.co", "https://api.eu.lever.co")
+
+
+def get_postings(slug: str, params: str = "mode=json", timeout: float = 15) -> httpx.Response:
+    """The board's postings response, from whichever region holds it."""
+    resp = None
+    for api in _APIS:
+        resp = httpx.get(f"{api}/v0/postings/{slug}?{params}", timeout=timeout)
+        if resp.status_code != 404:
+            return resp
+    return resp
+
 
 def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
     # The fetcher's freshness window, as set on the settings page.
@@ -18,8 +34,7 @@ def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
     cutoff_ms = cutoff.timestamp() * 1000 if cutoff is not None else 0
 
     def _fetch_one(slug: str) -> list[dict]:
-        url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
-        resp = httpx.get(url, timeout=15)
+        resp = get_postings(slug)
         resp.raise_for_status()
         items = resp.json()
 

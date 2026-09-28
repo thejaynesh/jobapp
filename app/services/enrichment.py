@@ -91,13 +91,14 @@ class Extraction:
 # ---------------------------------------------------------------------------
 
 _GREENHOUSE_URL = re.compile(
-    r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_app\?for=)?"
+    r"(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io/(?:embed/job_app\?for=)?"
     r"([A-Za-z0-9_.-]+)/jobs/(\d+)", re.I,
 )
 _GREENHOUSE_EMBED = re.compile(
     r"greenhouse\.io/embed/job_app\?for=([A-Za-z0-9_.-]+)&(?:amp;)?token=(\d+)", re.I,
 )
-_LEVER_URL = re.compile(r"jobs\.lever\.co/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})", re.I)
+# The region prefix is captured: an EU board's postings are only on its API.
+_LEVER_URL = re.compile(r"jobs\.((?:eu\.)?)lever\.co/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})", re.I)
 _ASHBY_URL = re.compile(r"jobs\.ashbyhq\.com/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})", re.I)
 _SMARTRECRUITERS_URL = re.compile(
     r"jobs\.smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", re.I
@@ -139,8 +140,8 @@ def _greenhouse(client: httpx.Client, slug: str, job_id: str) -> Extraction:
     )
 
 
-def _lever(client: httpx.Client, slug: str, posting_id: str) -> Extraction:
-    data = _get_json(client, f"https://api.lever.co/v0/postings/{slug}/{posting_id}")
+def _lever(client: httpx.Client, region: str, slug: str, posting_id: str) -> Extraction:
+    data = _get_json(client, f"https://api.{region.lower()}lever.co/v0/postings/{slug}/{posting_id}")
     if not isinstance(data, dict):
         return Extraction()
     # descriptionPlain is only the opening section; the lists that carry the

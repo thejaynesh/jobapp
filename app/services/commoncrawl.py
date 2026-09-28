@@ -51,10 +51,12 @@ _PAUSE_SECONDS = 1.0   # between index requests: the servers are shared
 TARGETS: list[tuple[str, str]] = [
     ("greenhouse-new", "url=job-boards.greenhouse.io/*"),
     ("greenhouse", "url=boards.greenhouse.io/*"),
+    ("greenhouse-eu", "url=job-boards.eu.greenhouse.io/*"),
     ("ashby", "url=jobs.ashbyhq.com/*"),
     ("smartrecruiters", "url=jobs.smartrecruiters.com/*"),
     ("workable", "url=apply.workable.com/*"),
     ("workday", "url=myworkdayjobs.com&matchType=domain"),
+    ("workday-shared", "url=myworkdaysite.com&matchType=domain"),
     ("oracle", "url=oraclecloud.com&matchType=domain&filter=~url:.*CandidateExperience.*"),
     ("eightfold", "url=eightfold.ai&matchType=domain"),
     ("bamboohr", "url=bamboohr.com&matchType=domain"),
@@ -62,6 +64,9 @@ TARGETS: list[tuple[str, str]] = [
     ("teamtailor", "url=teamtailor.com&matchType=domain"),
     ("icims", "url=icims.com&matchType=domain"),
     ("personio", "url=jobs.personio.de&matchType=domain"),
+    ("jibe", "url=jibeapply.com&matchType=domain"),
+    ("rippling", "url=ats.rippling.com/*"),
+    ("pinpoint", "url=pinpointhq.com&matchType=domain"),
 ]
 
 
