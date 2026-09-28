@@ -112,6 +112,12 @@ _WORKDAY_URL = re.compile(
 )
 # Oracle Recruiting Cloud. The posting page is an empty single-page app, so
 # without this the only route to the text was the model reading a shell.
+# Taleo's detail page carries the posting URL-encoded in a hidden field.
+_TALEO_URL = re.compile(
+    r"https?://([a-z0-9-]+)\.taleo\.net/careersection/([A-Za-z0-9_]+)/jobdetail\.ftl"
+    r"\?(?:[^#\s\"'<>]*&)?job=([A-Za-z0-9]+)", re.I,
+)
+_TALEO_HISTORY = re.compile(r'(?:name|id)="initialHistory"[^>]*value="([^"]*)"')
 # Apple's detail page embeds the posting as its own hydration data; no API.
 _APPLE_URL = re.compile(
     r"https?://jobs\.apple\.com/[a-z]{2}-[a-z]{2}/details/(\d+)(?:/([A-Za-z0-9-]+))?", re.I,
@@ -261,6 +267,35 @@ def _oracle(client: httpx.Client, host: str, site: str, job_id: str) -> Extracti
     )
 
 
+def _taleo(client: httpx.Client, tenant: str, section: str, job: str) -> Extraction:
+    """
+    The description out of a Taleo posting page's `initialHistory` field:
+    `!|!`-separated, URL-encoded values, of which the rich-text ones — the
+    description and qualifications, each written twice — begin `!*!` and
+    escape their colons.
+    """
+    from html import unescape
+    from urllib.parse import unquote
+
+    resp = client.get(
+        f"https://{tenant}.taleo.net/careersection/{section}/jobdetail.ftl?job={job}&lang=en",
+        headers={"Accept-Encoding": "identity"},
+    )
+    resp.raise_for_status()
+    match = _TALEO_HISTORY.search(resp.text)
+    if not match:
+        return Extraction()
+    blocks = []
+    for part in unescape(match.group(1)).split("!|!"):
+        text = unquote(part)
+        if text.startswith("!*!"):
+            text = text[3:].replace("\\:", ":")
+            if text.strip() and text not in blocks:
+                blocks.append(text)
+    description = clean("\n\n".join(blocks))
+    return Extraction(description=description, method="ats_api") if description else Extraction()
+
+
 def _apple(client: httpx.Client, position_id: str, slug: str | None) -> Extraction:
     from app.services.sources.apple import full_description, loader_data
 
@@ -299,6 +334,9 @@ def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     match = _APPLE_URL.search(url)
     if match:
         return _apple(client, *match.groups())
+    match = _TALEO_URL.search(url)
+    if match:
+        return _taleo(client, *match.groups())
     return Extraction()
 
 
@@ -308,7 +346,7 @@ def looks_like_ats(url: str) -> bool:
         pattern.search(url or "")
         for pattern in (_GREENHOUSE_EMBED, _GREENHOUSE_URL, _LEVER_URL, _ASHBY_URL,
                         _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL,
-                        _APPLE_URL)
+                        _APPLE_URL, _TALEO_URL)
     )
 
 

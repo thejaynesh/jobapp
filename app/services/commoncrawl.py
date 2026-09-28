@@ -67,6 +67,7 @@ TARGETS: list[tuple[str, str]] = [
     ("jibe", "url=jibeapply.com&matchType=domain"),
     ("rippling", "url=ats.rippling.com/*"),
     ("pinpoint", "url=pinpointhq.com&matchType=domain"),
+    ("taleo", "url=taleo.net&matchType=domain&filter=~url:.*careersection.*"),
 ]
 
 

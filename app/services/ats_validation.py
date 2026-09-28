@@ -129,6 +129,19 @@ def _probe_jobvite(slug: str) -> bool:
     return _probe_listing(f"https://jobs.jobvite.com/{slug}/search", "jobvite", slug)
 
 
+def _probe_taleo(spec: str) -> bool:
+    from app.services.sources.taleo import parse_spec, portal
+
+    parsed = parse_spec(spec)
+    if not parsed:
+        return False
+    # A section without a portal number has no search to call.
+    try:
+        return portal(*parsed) is not None
+    except httpx.HTTPStatusError:
+        return False
+
+
 def _probe_oracle(spec: str) -> bool:
     from app.services.sources.oracle import list_page, parse_spec
 
@@ -252,6 +265,7 @@ PROBES = {
     "jibe": _probe_jibe,
     "rippling": _probe_rippling,
     "pinpoint": _probe_pinpoint,
+    "taleo": _probe_taleo,
 }
 
 

@@ -415,6 +415,7 @@ class Settings(BaseSettings):
     # Large employers' careers platforms, by careers host. Found automatically
     # from posting links and community lists; these are for boards you want
     # polled regardless.
+    TALEO_BOARDS: str = ""           # tenant/section, e.g. textron/textron
     ORACLE_BOARDS: str = ""          # host:site, e.g. egug.fa.us2.oraclecloud.com:CX_1
     SUCCESSFACTORS_BOARDS: str = ""  # careers host, e.g. careers.qorvo.com
     PHENOM_BOARDS: str = ""          # host/country/lang, e.g. careers.mastercard.com/us/en

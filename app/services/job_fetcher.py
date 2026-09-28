@@ -107,6 +107,7 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "rippling", "pinpoint",
         # JazzHR: its sitemaps name every open posting, so no registry needed.
         "jazzhr",
+        "taleo",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
@@ -116,7 +117,7 @@ ALL_GROUPS = tuple(SOURCE_GROUPS)
 
 # Board adapters that take the cycle's role queries.
 _SEARCHED_BOARDS = frozenset({
-    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling",
+    "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "taleo",
 })
 
 
@@ -482,6 +483,7 @@ def _run_adapters(
         ("jibe", "app.services.sources.jibe"),
         ("rippling", "app.services.sources.rippling"),
         ("pinpoint", "app.services.sources.pinpoint"),
+        ("taleo", "app.services.sources.taleo"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):

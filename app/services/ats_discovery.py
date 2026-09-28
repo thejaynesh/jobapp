@@ -153,6 +153,11 @@ _HOST_BOARD_PATTERNS: list[tuple[str, re.Pattern, "callable"]] = [
     # …and iCIMS's own host for them, which needs no marker: dish.jibeapply.com
     ("jibe", re.compile(r"https?://([a-z0-9-]+\.jibeapply\.com)/jobs/\d+", re.I),
      lambda m: m.group(1).lower()),
+    # Taleo: {tenant}.taleo.net/careersection/{section}/jobdetail.ftl?job=…
+    ("taleo", re.compile(
+        r"https?://([a-z0-9-]+)\.taleo\.net/careersection/([A-Za-z0-9_]+)/"
+        r"(?:jobdetail|jobsearch|moresearch|joblist)\.ftl", re.I),
+     lambda m: f"{m.group(1).lower()}/{m.group(2)}"),
     # Eightfold: {company}.eightfold.ai, or a custom host's /careers/job/<long id>
     ("eightfold", re.compile(r"https?://([a-z0-9-]+\.eightfold\.ai)/careers", re.I),
      lambda m: m.group(1).lower()),
@@ -426,6 +431,7 @@ ATS_CONFIG_FIELDS = {
     "jibe": "JIBE_BOARDS",
     "rippling": "RIPPLING_COMPANY_SLUGS",
     "pinpoint": "PINPOINT_COMPANY_SLUGS",
+    "taleo": "TALEO_BOARDS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -449,6 +455,8 @@ TOTAL_SLUG_CAPS = {
     "eightfold": 60,
     # A five-second crawl delay per site, so fewer sites a cycle.
     "jibe": 40,
+    # One page for the portal number, then a search per role at 25 a page.
+    "taleo": 60,
 }
 
 # Caps that are a setting of their own rather than a constant here. Workday was
