@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import IntegrityError
 
 from app.models.job import Job, JobStatus
+from app.services import posting_identity
 from app.services.deduplication import (
     compute_dedupe_hash,
     enrich_from,
@@ -40,6 +41,7 @@ from app.services.deduplication import (
     find_existing_job,
     merge_description,
     merge_or_skip,
+    note_addresses,
 )
 from app.services.descriptions import clean as clean_description
 from app.services.sources.base import parse_experience_level
@@ -1226,7 +1228,9 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                source_job_id, dedupe_hash) -> str:
         """One posting, stored or merged. Returns the outcome to count."""
         source = data.get("source") or HARVEST_SOURCE
-        existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
+        apply_url = data.get("apply_url") or None
+        existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
+                                     apply_url=apply_url)
         if existing is not None:
             improved = enrich_from(existing, data)
             # The harvested copy usually carries a fuller description than the
@@ -1236,6 +1240,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
                 and existing.source_job_id == source_job_id
                 and existing.source == source
             ):
+                note_addresses(existing, url, apply_url)
                 if merge_description(existing, description):
                     improved.append("description")
             else:
@@ -1248,13 +1253,13 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         # Already seen, judged and retired. Same reasoning as the fetcher's
         # check: an archived posting is one we have an answer about, and
         # re-inserting it buys a scoring call to reach that same answer again.
-        if was_archived(db, source, url, source_job_id, dedupe_hash):
+        if was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url):
             return "skipped"
 
         job = Job(
             source=source,
             source_job_id=source_job_id,
-            source_urls=[url],
+            source_urls=posting_identity.urls(url, apply_url),
             title=title,
             company=company,
             location=location,

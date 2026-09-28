@@ -30,7 +30,7 @@ has tests from the captured response shapes.
 | 5. LinkedIn apply link | Not possible any more; see §6. | – |
 | 6. Eightfold, Phenom, SuccessFactors | All three, plus iCIMS careers-home (Jibe) sites. | as 3, and "Read iCIMS careers-home sites…" |
 | 7. Greenhouse list-first | Not done. It needs a measurement of where board time goes first, which needs production. | – |
-| 8. Work-authorization data | Each job card shows the employer's certified H-1B applications over the last four fiscal quarters (from DOL's LCA disclosure files, read as a stream; 57,824 employers), and marks an employer with none on file when the screening answers say sponsorship is needed. USCIS's Employer Data Hub refuses server requests, so it is not used. | "Show employers' H-1B filing history" |
+| 8. Work-authorization data | Each job card shows the employer's certified H-1B applications over the last four fiscal quarters (from DOL's LCA disclosure files, read as a stream; 57,824 employers), and marks an employer with none on file when the screening answers say sponsorship is needed. USCIS's Employer Data Hub refuses server requests, so it is not used. | "Show each employer's H-1B filing history on its jobs" |
 | 9. Commercial feed as a yardstick | Not done. It needs an account. | – |
 | 10. Long tail | Rippling, Pinpoint, Taleo, Paylocity and JazzHR (every open posting, from its own sitemaps), plus Amazon's, TikTok's and Apple's own searches. UKG and Dayforce postings are read by enrichment only: UKG's robots.txt disallows its search endpoint and Dayforce's search refuses plain requests, so neither gets a board poller. Avature is read from the sitemap each portal names in robots.txt (50 public portals, 22,844 postings; IBM, Delta and ManTech sometimes answer with a bot challenge and are then left alone). | "Read Rippling and Pinpoint boards", "Read Amazon's careers search…", "Read TikTok's…", "Read Apple's…", "Read JazzHR…", "Read Taleo career sections", "Read Paylocity boards, and UKG and Dayforce postings", "Read Avature portals from their sitemaps" |
 
@@ -51,6 +51,25 @@ a search portal, and a long tail of employer domains. 257 of those domains
 wrap Greenhouse behind `?gh_jid=`, and the careers-site sniffer now finds the
 board for 212 of them ("Find the Greenhouse board behind employers' own
 careers sites"), 191 of them boards we had no other way to learn.
+
+### Duplicates across sources, measured
+
+The same postings read from SimplifyJobs and from each board's own API, paired
+by the ATS posting id both carry (active rows of the 45 days to 2026-09-28).
+Before, a pair was joined only when both wrote the URL identically or the
+company, title and city hashed alike, and SimplifyJobs rewrites titles and
+links `…/apply` and `…/application`:
+
+| ATS | Pairs | Stored twice before | After canonical addresses |
+|---|---|---|---|
+| Greenhouse | 189 | 22 | 0 |
+| Lever | 97 | 90 | 0 |
+| Ashby | 110 | 99 | 0 |
+| TikTok | 33 | 0 | 0 |
+
+Each ATS posting URL now also yields the posting's canonical address
+(`services.posting_identity`), stored in `source_urls`, so the URL layer
+joins them ("Store one posting once, however each source wrote its URL").
 
 ## Round three: other job projects, and the extensions (2026-09-28)
 

@@ -177,6 +177,22 @@ def _slug_harvest_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _enrichment_on_fetch_off_by_default(monkeypatch):
+    """
+    A fetch cycle enriches the thin postings it just stored, over the network.
+
+    `ENRICH_ON_FETCH` defaults to on, so any test that runs
+    `fetch_and_save_jobs` with an empty description — every list-row source,
+    SimplifyJobs' among them — asked the real ATS for the posting. One did,
+    and stored WeRide's actual job description, because the fixture used a
+    real Lever URL; with a made-up one the same test would have passed or
+    failed on whether a 404 came back. Enrichment has its own tests, which
+    mock its seam.
+    """
+    monkeypatch.setattr(settings, "ENRICH_ON_FETCH", False)
+
+
+@pytest.fixture(autouse=True)
 def _h1b_history_off_by_default(monkeypatch):
     """
     Job cards look up the employer's H-1B filings, through a per-process cache

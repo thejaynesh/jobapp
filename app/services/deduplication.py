@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from sqlalchemy.orm import Session
 
 from app.models.job import Job
+from app.services import posting_identity
 
 # How alike two normalized titles must be to count as the same posting when
 # the dedupe hash missed (cross-posts routinely add "- Remote", reorder words,
@@ -128,24 +129,44 @@ def compute_dedupe_hash(company: str, title: str, location: str,
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
+def _ids_by_address(db: Session, model, addresses: list[str]) -> list:
+    """
+    The ids of rows whose `source_urls` hold any of these addresses.
+
+    Ids first, without a LIMIT, then the row. `.first()` adds `LIMIT 1`, and
+    the planner has no statistics for an array of unique URLs: it guesses 600
+    matches in 120,000 rows, decides a sequential scan will find one of them
+    sooner than the index can start, and reads the whole table — 62 ms for a
+    posting not yet stored, against 0.07 ms through the GIN index the same
+    query uses without the LIMIT (measured 2026-09-28).
+    """
+    if not addresses:
+        return []
+    return [row[0] for row in db.query(model.id).filter(model.source_urls.overlap(addresses))]
+
+
 def find_existing_job(
     db: Session,
     source: str,
     url: str,
     source_job_id: str | None,
     dedupe_hash: str,
+    apply_url: str | None = None,
 ) -> Job | None:
-    # Layer 1: URL already in source_urls array.
+    # Layer 1: URL already in source_urls array — as written, or as the ATS
+    # posting's canonical address (`posting_identity`), which is what joins
+    # SimplifyJobs' `…/apply` link to the board's own posting URL.
     #
-    # `.contains([url])` rather than `.any(url)`, and the difference is not
+    # An array operator rather than `.any(url)`, and the difference is not
     # style. `.any()` emits `url = ANY(source_urls)`, which no index can
     # answer — GIN indexes arrays for the containment operators only. Measured
     # against 120,000 rows with the GIN index in place: `@>` 0.065 ms,
     # `= ANY` 48.3 ms and a sequential scan of the whole table. This runs once
-    # per fetched posting.
-    job = db.query(Job).filter(Job.source_urls.contains([url])).first()
-    if job:
-        return job
+    # per fetched posting. `&&` (`.overlap`) is one of the operators the GIN
+    # index answers, so asking for any of a posting's addresses is one lookup.
+    ids = _ids_by_address(db, Job, posting_identity.urls(url, apply_url))
+    if ids:
+        return db.get(Job, ids[0])
 
     # Layer 2: source + source_job_id match
     if source_job_id:
@@ -167,6 +188,7 @@ def was_archived(
     url: str,
     source_job_id: str | None,
     dedupe_hash: str,
+    apply_url: str | None = None,
 ) -> bool:
     """
     Whether this posting was already seen, judged, and retired.
@@ -186,8 +208,7 @@ def was_archived(
 
     # `.contains`, not `.any` — see `find_existing_job`. Migration 0028 added a
     # GIN index here for exactly this lookup and `.any()` could never use it.
-    query = db.query(ArchivedJob.id).filter(ArchivedJob.source_urls.contains([url]))
-    if query.first():
+    if _ids_by_address(db, ArchivedJob, posting_identity.urls(url, apply_url)):
         return True
 
     if source_job_id:
@@ -470,6 +491,21 @@ def merge_description(job: Job, new_description: str) -> bool:
     return True
 
 
+def note_addresses(existing: Job, url: str, apply_url: str | None = None) -> bool:
+    """
+    Record a sighting's addresses on the row it matched: its URL and the
+    posting's canonical address (`posting_identity`). True if any were new.
+
+    Also what brings a row stored before canonical addresses existed up to
+    date, the next time any source lists it.
+    """
+    missing = [u for u in posting_identity.urls(url, apply_url)
+               if u not in (existing.source_urls or [])]
+    if missing:
+        existing.source_urls = list(existing.source_urls or []) + missing
+    return bool(missing)
+
+
 def merge_or_skip(
     db: Session,
     existing: Job,
@@ -491,8 +527,7 @@ def merge_or_skip(
     # Recorded even when nothing else is: a second listing of the same job is a
     # real second listing, and this array is how the overlay finds the row from
     # whichever URL the user is looking at.
-    if new_url not in existing.source_urls:
-        existing.source_urls = existing.source_urls + [new_url]
+    if note_addresses(existing, new_url, (data or {}).get("apply_url")):
         improved.append("source_urls")
 
     if data:

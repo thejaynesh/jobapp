@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
+from app.services import posting_identity
 from app.services.deduplication import (
     compute_dedupe_hash, enrich_from, find_existing_job, merge_description,
-    merge_or_skip, was_archived,
+    merge_or_skip, note_addresses, was_archived,
 )
 from app.services.descriptions import clean as clean_description
 
@@ -1598,7 +1599,8 @@ def fetch_and_save_jobs(
                     continue
 
                 dedupe_hash = compute_dedupe_hash(company, title, location, url)
-                existing = find_existing_job(db, source, url, source_job_id, dedupe_hash)
+                existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
+                                             apply_url=apply_url)
 
                 if existing is not None:
                     # What this sighting knows, in the shape the shared merge
@@ -1627,7 +1629,10 @@ def fetch_and_save_jobs(
                     _note_board(existing, job_data)
                     if same_row:
                         # The same posting again, not a cross-post: its URL is
-                        # already ours, so only the contents can be news.
+                        # already ours, so only the contents can be news —
+                        # and its canonical address, on a row stored before
+                        # there were any.
+                        note_addresses(existing, url, apply_url)
                         if merge_description(existing, description):
                             improved.append("description")
                     else:
@@ -1649,7 +1654,7 @@ def fetch_and_save_jobs(
                 # a scoring call, reaches the same verdict, and is archived
                 # again sixty days later. There is nothing to merge into — the
                 # description is what archiving discarded — so it is a skip.
-                if was_archived(db, source, url, source_job_id, dedupe_hash):
+                if was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url):
                     counts["skipped"] += 1
                     _tally(source, "skipped")
                     continue
@@ -1657,7 +1662,10 @@ def fetch_and_save_jobs(
                 new_job = Job(
                     source=source,
                     source_job_id=source_job_id,
-                    source_urls=[url],
+                    # The URL as written, and the posting's canonical address
+                    # (`posting_identity`) that the next source's link to it
+                    # will share.
+                    source_urls=posting_identity.urls(url, apply_url),
                     title=title,
                     company=company,
                     location=location,
