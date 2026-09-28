@@ -32,7 +32,7 @@ has tests from the captured response shapes.
 | 7. Greenhouse list-first | Not done. It needs a measurement of where board time goes first, which needs production. | – |
 | 8. Work-authorization data | Not done. It only matters if sponsorship matters to you. | – |
 | 9. Commercial feed as a yardstick | Not done. It needs an account. | – |
-| 10. Long tail | Rippling, Pinpoint, Taleo and JazzHR (every open posting, from its own sitemaps), plus Amazon's, TikTok's and Apple's own searches. Avature, Paylocity, UKG and Dayforce remain; see the recall table below. | "Read Rippling and Pinpoint boards", "Read Amazon's careers search…", "Read TikTok's…", "Read Apple's…", "Read JazzHR…", "Read Taleo career sections" |
+| 10. Long tail | Rippling, Pinpoint, Taleo, Paylocity and JazzHR (every open posting, from its own sitemaps), plus Amazon's, TikTok's and Apple's own searches. UKG and Dayforce postings are read by enrichment only: UKG's robots.txt disallows its search endpoint and Dayforce's search refuses plain requests, so neither gets a board poller. Avature remains (its feeds are off or hold test postings). | "Read Rippling and Pinpoint boards", "Read Amazon's careers search…", "Read TikTok's…", "Read Apple's…", "Read JazzHR…", "Read Taleo career sections", "Read Paylocity boards, and UKG and Dayforce postings" |
 
 ### Recall against SimplifyJobs, measured
 
