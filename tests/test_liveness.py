@@ -231,3 +231,94 @@ class TestWhetherTheBudgetCanKeepUp:
         _make_job(db, "cov-filtered", status=JobStatus.filtered_out)
 
         assert liveness.coverage(db)["worth_checking"] == 0
+
+
+def _scored(db, suffix, score=None, deep=None, checked_days_ago=None):
+    job = _make_job(db, suffix, checked_at=(
+        _NOW - timedelta(days=checked_days_ago) if checked_days_ago is not None else None))
+    job.llm_score, job.llm_score_deep = score, deep
+    db.flush()
+    return job
+
+
+class TestWhatIsCheckedFirst:
+    """
+    Past the per-sweep ceiling, the order decides which verdicts go stale. It
+    was the oldest check alone, so a 95 waited behind every 71 that happened to
+    be checked earlier.
+    """
+
+    def test_the_likeliest_application_is_checked_first(self, db):
+        from app.models.application import Application, ApplicationStatus
+
+        low = _scored(db, "o-low", score=71, checked_days_ago=35)
+        high = _scored(db, "o-high", score=95, checked_days_ago=30)
+        deep = _scored(db, "o-deep", score=60, deep=97, checked_days_ago=30)
+        applied = _scored(db, "o-applied", score=99, checked_days_ago=30)
+        db.add(Application(job_id=applied.id, status=ApplicationStatus.applied))
+        never = _scored(db, "o-never", score=40)
+        db.flush()
+
+        order = liveness.candidates(db, limit=10, recheck_days=3)
+
+        # Never checked; then by score (the second opinion where there is one);
+        # already applied to last, whatever its score.
+        assert order == [never, deep, high, low, applied]
+
+    def test_an_application_not_yet_sent_is_not_held_back(self, db):
+        from app.models.application import Application, ApplicationStatus
+
+        drafted = _scored(db, "o-draft", score=90, checked_days_ago=30)
+        db.add(Application(job_id=drafted.id, status=ApplicationStatus.not_applied))
+        other = _scored(db, "o-other", score=80, checked_days_ago=30)
+        db.flush()
+
+        assert liveness.candidates(db, limit=10, recheck_days=3) == [drafted, other]
+
+
+class TestASweepCutShort:
+    def test_it_keeps_every_batch_it_finished(self, db, monkeypatch):
+        jobs = [_make_job(db, f"batch-{n}") for n in range(liveness._BATCH + 5)]
+        db.commit()
+        calls = {"n": 0}
+
+        def check(url, client):
+            calls["n"] += 1
+            if calls["n"] > liveness._BATCH:
+                raise TimeoutError("the task's time limit")
+            return liveness.LivenessResult("open", "")
+
+        monkeypatch.setattr(liveness, "check_url", check)
+        with pytest.raises(TimeoutError):
+            liveness.sweep(db, limit=100, workers=1)
+        db.rollback()
+
+        checked = [j for j in jobs if db.get(Job, j.id).liveness_checked_at is not None]
+        assert len(checked) == liveness._BATCH
+
+
+class TestAnUnkeepableBudget:
+    def test_is_logged_rather_than_raised(self, db, monkeypatch, caplog):
+        # The warning read `counts["worth_checking"]`, which lives under
+        # `counts["coverage"]`: the sweep committed its work and then raised
+        # KeyError, so the task logged a failure for a sweep that had worked.
+        for n in range(3):
+            _make_job(db, f"unkeep-{n}")
+        monkeypatch.setattr(liveness, "check_url",
+                            lambda url, client: liveness.LivenessResult("open", ""))
+        monkeypatch.setattr(settings, "LIVENESS_MAX_PER_CYCLE", 1)
+        monkeypatch.setattr(settings, "LIVENESS_INTERVAL_HOURS", 24)
+        monkeypatch.setattr(settings, "LIVENESS_RECHECK_DAYS", 1)
+
+        result = liveness.sweep(db, limit=10, workers=1)
+
+        assert result["checked"] == 3
+        assert result["coverage"]["sustainable"] is False
+        assert "go stale" in caplog.text
+
+
+class TestTheDefaults:
+    def test_the_default_budget_keeps_twelve_thousand_fresh(self, db):
+        out = liveness.coverage(db)
+        assert out["sustains"] == settings.LIVENESS_MAX_PER_CYCLE * (
+            24 // settings.LIVENESS_INTERVAL_HOURS) * settings.LIVENESS_RECHECK_DAYS

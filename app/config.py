@@ -845,9 +845,15 @@ class Settings(BaseSettings):
     # silently wasting an application. Conservative by design: only a 404, an
     # explicit "no longer accepting applications", or a known ATS bouncing to
     # its board index counts — ambiguity never closes a job.
+    #
+    # Only verdicts that are due are checked, and in order of what they are
+    # worth (`liveness.candidates`), so the per-sweep number is a ceiling, not
+    # a quota. It was 200 every 12 hours — 1,200 jobs kept fresh on a 3-day
+    # recheck — which a matched backlog outgrows; 1,000 every 6 hours keeps
+    # 12,000. Editable on the settings page.
     LIVENESS_ENABLED: bool = True
-    LIVENESS_INTERVAL_HOURS: int = 12
-    LIVENESS_MAX_PER_CYCLE: int = 200   # postings checked per sweep
+    LIVENESS_INTERVAL_HOURS: int = 6
+    LIVENESS_MAX_PER_CYCLE: int = 1000  # postings checked per sweep, at most
     LIVENESS_WORKERS: int = 8
     LIVENESS_RECHECK_DAYS: int = 3      # how long a verdict stands before re-checking
 
