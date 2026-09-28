@@ -265,8 +265,15 @@ def looks_like_ats(url: str) -> bool:
 # 2. JSON-LD
 # ---------------------------------------------------------------------------
 
+# The `+` may arrive as a character reference. Built In writes
+# `type="application/ld&#x2B;json"` on every posting page — legal HTML, since a
+# browser decodes attribute values before anything reads them, but a pattern
+# matching the literal `+` never saw the block. So every Built In posting fell
+# past the cheapest, most precise reader to the ones after it, for a page that
+# states its description, date, pay and employment type outright.
 _LD_BLOCK = re.compile(
-    r'<script[^>]+type=["\']?application/ld\+json["\']?[^>]*>(.*?)</script>',
+    r'<script[^>]+type=["\']?application/ld(?:\+|&#x0*2b;|&#0*43;|&plus;)json'
+    r'["\']?[^>]*>(.*?)</script>',
     re.I | re.S,
 )
 
