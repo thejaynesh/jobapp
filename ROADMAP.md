@@ -693,6 +693,10 @@ no denominator â€” yield without reach, fields written without fields checked â€
 so the work it puts first is the work that makes the rest of the work
 falsifiable.
 
+`docs/JOB_SEARCH_RESEARCH.md` is the outside view: how other aggregators and
+open-source projects find every US posting, measured against what this system
+does, with a ranked list of the coverage changes worth making.
+
 ## Done so far (Aug 2026)
 
 - Code-review pass: 13 bug fixes (session-poisoning batch losses, profile
