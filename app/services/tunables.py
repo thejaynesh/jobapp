@@ -403,6 +403,16 @@ TUNABLES: list[Tunable] = [
              "server. Lower if an ATS starts answering 429.",
     ),
     Tunable(
+        key="fetch_source_concurrency", env="FETCH_SOURCE_CONCURRENCY", kind="int",
+        minimum=1, maximum=16, group="Company boards",
+        label="Sources read at once",
+        help="How many sources a fetch cycle reads side by side: Greenhouse, "
+             "Workday, JazzHR and the rest each read their own sites, so none "
+             "waits on another and a cycle takes about as long as its slowest "
+             "source rather than all of them added up. Each still keeps its own "
+             "per-site limits. 1 reads them one after another, as before.",
+    ),
+    Tunable(
         key="ats_board_validate_per_cycle", env="ATS_BOARD_VALIDATE_PER_CYCLE",
         kind="int", minimum=0, maximum=5000, group="Company boards",
         label="New boards checked per cycle",

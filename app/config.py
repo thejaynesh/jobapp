@@ -465,6 +465,10 @@ class Settings(BaseSettings):
     # each ATS is a different host, so this is about politeness per host, not
     # CPU. Was 8, with 30 Workday tenants a cycle; see WORKDAY_MAX_TENANTS.
     ATS_BOARD_FETCH_WORKERS: int = 16
+    # How many sources a fetch cycle reads at once (`job_fetcher._run_in_lanes`).
+    # Each reads its own hosts, so they do not compete; 1 reads them one after
+    # another as before. Editable on the settings page.
+    FETCH_SOURCE_CONCURRENCY: int = 6
     # Workday tenants polled per boards cycle. Each costs up to ~40 requests.
     WORKDAY_MAX_TENANTS: int = 150
     ATS_BOARD_MAX_EMPTY_CYCLES: int = 8  # retire a discovered board after this many silent cycles

@@ -280,11 +280,116 @@ def _run_all_adapters(
     """
     from app.services.sources.base import cycle_settings
 
+    try:
+        workers = max(1, int(getattr(cfg, "FETCH_SOURCE_CONCURRENCY", 1) or 1))
+    except (TypeError, ValueError):
+        workers = 1
     with cycle_settings(cfg):
-        return _run_adapters(
-            roles, locations, cfg, ats_slugs, loc_prefs, only=only,
+        if workers == 1:
+            return _run_adapters(
+                roles, locations, cfg, ats_slugs, loc_prefs, only=only,
+                resting=resting, manual=manual, not_due=not_due,
+            )
+        return _run_in_lanes(
+            workers, roles, locations, cfg, ats_slugs, loc_prefs, only=only,
             resting=resting, manual=manual, not_due=not_due,
         )
+
+
+# The browser tier's sources share one Chromium launch, so they share a lane.
+_SHARED_LANES = (frozenset({"wellfound", "handshake"}),)
+# Started first, since a cycle can end no sooner than its longest source: the
+# board families with hundreds of sites each, then the searches that page.
+_SLOW_FIRST = (
+    "workday", "greenhouse", "jazzhr", "oracle", "avature", "successfactors",
+    "eightfold", "phenom", "icims", "smartrecruiters", "bamboohr", "lever",
+    "ashby", "linkedin", "simplify", "apple", "amazon", "tiktok", "builtin",
+)
+
+
+def _run_in_lanes(
+    workers: int, roles: list[str], locations: list[str], cfg,
+    ats_slugs: dict | None = None, loc_prefs: dict | None = None,
+    only: set[str] | None = None, resting: dict | None = None,
+    manual: bool | None = None, not_due: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """
+    `_run_adapters`, one source per lane, `workers` lanes at a time.
+
+    The sources were read one after another, so a board cycle took the sum of
+    every family's time — four hours on average — although each reads its own
+    hosts and none waits on another. Each lane is a whole `_run_adapters`
+    restricted to its sources, so every source runs exactly the code it ran
+    before; only the waiting is shared.
+
+    The cycle's context — its settings overlay, the stored descriptions, the
+    board sightings being collected — is copied into each lane's thread, which
+    would otherwise see none of it. The jobs are put back in the order the
+    sequential run produced them, so which source first stores a posting does
+    not come down to which lane finished first.
+    """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services.ats_discovery import build_ats_slugs
+
+    if ats_slugs is None:
+        ats_slugs = build_ats_slugs(cfg)
+    if manual is None:
+        manual = only is not None
+    # Every source there is, in the order the sequential run reaches them:
+    # asked of `_run_adapters` itself with nothing selected, which calls
+    # nothing and so stays in step with it by construction.
+    _, catalogue = _run_adapters(roles, locations, cfg, ats_slugs, loc_prefs, only=set(),
+                                 manual=manual, reset_caches=False, log_summary=False)
+    order = list(catalogue)
+    wanted = [s for s in order if only is None or s in only]
+
+    lanes: list[set[str]] = []
+    for shared in _SHARED_LANES:
+        together = {s for s in wanted if s in shared}
+        if together:
+            lanes.append(together)
+    lanes += [{s} for s in wanted if not any(s in shared for shared in _SHARED_LANES)]
+    lanes.sort(key=lambda lane: min(
+        (_SLOW_FIRST.index(s) if s in _SLOW_FIRST else len(_SLOW_FIRST)) for s in lane))
+
+    _reset_source_caches()
+
+    def lane_run(lane: set[str]):
+        return _run_adapters(roles, locations, cfg, ats_slugs, loc_prefs, only=lane,
+                             resting=resting, manual=manual, not_due=not_due,
+                             reset_caches=False, log_summary=False)
+
+    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(lanes))),
+                            thread_name_prefix="source") as pool:
+        futures = [(lane, pool.submit(contextvars.copy_context().run, lane_run, lane))
+                   for lane in lanes]
+        results = []
+        for lane, future in futures:
+            try:
+                results.append((lane, *future.result()))
+            except Exception as exc:
+                # `_run_adapters` records its sources' failures itself; this is
+                # the lane dying outright, which must not take the others with it.
+                logger.error("fetch: sources %s failed: %s", sorted(lane), exc)
+                results.append((lane, [], {s: {"count": 0, "errors": [str(exc)],
+                                               "enabled": True} for s in lane}))
+
+    rank = {source: i for i, source in enumerate(order)}
+    results.sort(key=lambda result: min(rank.get(s, len(rank)) for s in result[0]))
+    all_jobs: list[dict] = []
+    stats: dict = {}
+    for lane, jobs, lane_stats in results:
+        all_jobs.extend(jobs)
+        for source, entry in lane_stats.items():
+            # Each lane reports every other source as not run; the lane that
+            # ran a source is the one that knows about it.
+            if source in lane or source not in stats:
+                stats[source] = entry
+    stats = {s: stats[s] for s in sorted(stats, key=lambda s: rank.get(s, len(rank)))}
+    _log_fetch_summary(stats)
+    return all_jobs, stats
 
 
 def _run_adapters(
@@ -292,6 +397,7 @@ def _run_adapters(
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
     only: set[str] | None = None, resting: dict | None = None,
     manual: bool | None = None, not_due: dict | None = None,
+    reset_caches: bool = True, log_summary: bool = True,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
@@ -318,8 +424,10 @@ def _run_adapters(
     # Arbeitnow feed are identical for every location, so re-downloading them
     # per location is pure waste). That caching must not outlive the cycle:
     # otherwise a manual re-trigger after an adapter change returns the old
-    # results and looks like the change did nothing.
-    _reset_source_caches()
+    # results and looks like the change did nothing. (Run in lanes, the caller
+    # resets them once, rather than each lane clearing another's mid-use.)
+    if reset_caches:
+        _reset_source_caches()
 
     resting = resting or {}
     # Sources that ran recently enough to sit this cycle out: {source: why}.
@@ -905,7 +1013,12 @@ def _run_adapters(
         if source in started and last is not None:
             entry["seconds"] = round(max(0.0, last - started[source]), 1)
 
-    # Log summary
+    if log_summary:
+        _log_fetch_summary(stats)
+    return all_jobs, stats
+
+
+def _log_fetch_summary(stats: dict) -> None:
     logger.info("=== fetch summary ===")
     for source, s in stats.items():
         status = "disabled" if not s["enabled"] else (
@@ -918,8 +1031,6 @@ def _run_adapters(
         logger.info("  %-12s %s%s", source, status, took)
         for err in s["errors"]:
             logger.warning("    └─ %s", err)
-
-    return all_jobs, stats
 
 
 def _resting_sources(db: Session) -> dict:
