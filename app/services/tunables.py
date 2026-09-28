@@ -187,6 +187,37 @@ TUNABLES: list[Tunable] = [
              "role and location you search — so 2 doubles the spend.",
     ),
     Tunable(
+        key="google_jobs_enabled", env="GOOGLE_JOBS_ENABLED", kind="bool",
+        group="Sources", label="Google Jobs",
+        help="Google's job results through SerpApi — postings from boards and "
+             "careers sites nothing else here reads. Needs SERPAPI_API_KEY in "
+             "the environment; without one this does nothing. Off skips it.",
+    ),
+    Tunable(
+        key="google_jobs_max_searches", env="GOOGLE_JOBS_MAX_SEARCHES", kind="int",
+        minimum=1, maximum=200, group="Sources",
+        label="Google Jobs: searches per run",
+        help="Every page of every role/location search is one search of your "
+             "SerpApi quota (250 a month on the free plan). First pages for all "
+             "searches go before any second page. Times runs a month, this is "
+             "your spend — 8 once a day is about 240.",
+    ),
+    Tunable(
+        key="google_jobs_pages", env="GOOGLE_JOBS_PAGES", kind="int",
+        minimum=1, maximum=5, group="Sources",
+        label="Google Jobs: pages per search",
+        help="10 results a page. Deeper pages only run once every search has had "
+             "its first, and all count against the searches-per-run cap above.",
+    ),
+    Tunable(
+        key="google_jobs_interval_hours", env="GOOGLE_JOBS_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=168, group="Sources",
+        label="Google Jobs: at most every (hours)",
+        help="The API sources run every few hours; Google Jobs sits out the runs "
+             "inside this gap so the quota lasts the month. A source picked by "
+             "hand on the Runs page ignores it. 1 runs with every API run.",
+    ),
+    Tunable(
         key="browse_parallel_sites", env="BROWSE_PARALLEL_SITES", kind="int",
         minimum=1, maximum=4, group="Browser agent",
         label="Sites at once",

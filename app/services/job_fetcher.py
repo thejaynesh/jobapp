@@ -81,6 +81,9 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "hiringcafe", "ycombinator", "linkedin", "indeed", "remotive",
         "arbeitnow", "remoteok", "weworkremotely", "themuse", "himalayas",
         "jobicy", "hnhiring", "workingnomads", "builtin", "jobspresso",
+        # Metered, so it sits out the API runs inside its own interval — see
+        # `_sources_not_due`.
+        "google_jobs",
         # Dice answers a plain HTTP request through its search API now, so it
         # left the browser tier — see `sources.dice.fetch_api`.
         "dice",
@@ -231,7 +234,7 @@ def _run_all_adapters(
     roles: list[str], locations: list[str], cfg,
     ats_slugs: dict | None = None, loc_prefs: dict | None = None,
     only: set[str] | None = None, resting: dict | None = None,
-    manual: bool | None = None,
+    manual: bool | None = None, not_due: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Call all enabled adapters and return (all_jobs, source_stats).
@@ -262,6 +265,8 @@ def _run_all_adapters(
     _reset_source_caches()
 
     resting = resting or {}
+    # Sources that ran recently enough to sit this cycle out: {source: why}.
+    not_due = not_due or {}
     started: dict[str, float] = {}
     if manual is None:
         manual = only is not None
@@ -301,6 +306,11 @@ def _run_all_adapters(
         # so resting never applied to any scheduled run at all.
         if _rests(source):
             _disable(source, _resting_reason(source))
+            return True
+        # A metered source inside its own interval. Also not on a manual run,
+        # for the same reason as resting: asking for it by name is the check.
+        if not manual and source in not_due:
+            _disable(source, not_due[source])
             return True
         # Every source asks this immediately before it starts, which makes it
         # the one place to start a clock without touching thirty branches.
@@ -350,6 +360,24 @@ def _run_all_adapters(
         )
     else:
         _disable("jsearch")
+
+    # --- Google Jobs: Google's job results, through SerpApi (metered) ---
+    if (getattr(cfg, "SERPAPI_API_KEY", "") and getattr(cfg, "GOOGLE_JOBS_ENABLED", True)
+            and not _skip("google_jobs")):
+        from app.services.sources.google_jobs import fetch_all as google_jobs_fetch
+        stats.setdefault("google_jobs", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = google_jobs_fetch(
+                api_key=cfg.SERPAPI_API_KEY, queries=roles, locations=locations,
+                max_searches=getattr(cfg, "GOOGLE_JOBS_MAX_SEARCHES", 8),
+                pages=getattr(cfg, "GOOGLE_JOBS_PAGES", 1),
+            )
+            _record(stats, "google_jobs", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "google_jobs", [], str(exc))
+    else:
+        _disable("google_jobs")
 
     greenhouse_slugs = ats_slugs.get("greenhouse") or []
     if greenhouse_slugs and not _skip("greenhouse"):
@@ -767,6 +795,51 @@ def _resting_sources(db: Session) -> dict:
         return {}
 
 
+# Metered sources and the setting holding each one's minimum gap between runs.
+# The API group runs every couple of hours, which is right for a free feed and
+# ruinous for a search that spends a monthly quota: at the default cadence,
+# eight Google Jobs searches a run would spend a free SerpApi month in three
+# days.
+_MIN_INTERVAL_HOURS = {"google_jobs": "GOOGLE_JOBS_INTERVAL_HOURS"}
+
+
+def _sources_not_due(db: Session, cfg) -> dict[str, str]:
+    """
+    Metered sources that ran too recently to run again: {source: reason}.
+
+    Never fails the cycle. Not knowing when a source last ran costs one early
+    run of it, which is cheaper than losing the fetch to a history query.
+    """
+    from datetime import timedelta
+
+    from app.services.fetch_history import last_attempted
+
+    waiting: dict[str, str] = {}
+    now = datetime.now(timezone.utc)
+    for source, setting in _MIN_INTERVAL_HOURS.items():
+        try:
+            hours = float(getattr(cfg, setting, 0) or 0)
+            if hours <= 0:
+                continue
+            last = last_attempted(db, source)
+        except Exception as exc:
+            logger.warning("job_fetcher: could not read when %s last ran: %s", source, exc)
+            continue
+        if last is None:
+            continue
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        due = last + timedelta(hours=hours)
+        if due > now:
+            wait = max(1, round((due - now).total_seconds() / 3600))
+            waiting[source] = (
+                f"ran {max(0, round((now - last).total_seconds() / 3600))}h ago; "
+                f"runs at most every {hours:g}h to spare its quota, next in "
+                f"about {wait}h (a manual run ignores this)"
+            )
+    return waiting
+
+
 def _known_urls(db: Session) -> set[str]:
     """Every URL already attached to a stored job, listing or apply."""
     known: set[str] = set()
@@ -1146,6 +1219,7 @@ def fetch_and_save_jobs(
             raw_jobs, source_stats = _run_all_adapters(
                 queries, locations, cfg, ats_slugs, loc_prefs, only,
                 resting=_resting_sources(db), manual=manual,
+                not_due=_sources_not_due(db, cfg),
             )
         merge_into_stats(source_stats, capture.messages, capture.errors)
     except Exception as exc:

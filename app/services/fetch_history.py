@@ -154,6 +154,23 @@ def prune(db: Session, retention: int = DEFAULT_RETENTION) -> int:
     return deleted
 
 
+def last_attempted(db: Session, source: str) -> datetime | None:
+    """
+    When this source was last actually called, or None if history has no call.
+
+    A run that skipped it — out of its group, rested, switched off, or not yet
+    due — does not count: those rows are `disabled`, and counting them would
+    reset the very clock that decided to skip it.
+    """
+    return (
+        db.query(func.max(FetchRun.started_at))
+        .join(FetchSourceRun, FetchSourceRun.run_id == FetchRun.id)
+        .filter(FetchSourceRun.source == source,
+                FetchSourceRun.status.notin_(("disabled", "skipped")))
+        .scalar()
+    )
+
+
 def recent_runs(db: Session, limit: int = 20) -> list[FetchRun]:
     """Most recent cycles, newest first."""
     return (

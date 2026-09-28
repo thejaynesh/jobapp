@@ -386,6 +386,15 @@ class Settings(BaseSettings):
     # Pages per query/location search. Each page is one call against a small
     # monthly quota, so this multiplies spend directly.
     JSEARCH_NUM_PAGES: int = 1
+    # Google's job results, through SerpApi (serpapi.com). The key is the
+    # secret; the rest are preferences, editable on the settings page. Each
+    # page is one search against a monthly quota (250 on the free plan), so
+    # the defaults — 8 searches, at most once a day — fit inside it.
+    SERPAPI_API_KEY: str = ""
+    GOOGLE_JOBS_ENABLED: bool = True
+    GOOGLE_JOBS_MAX_SEARCHES: int = 8
+    GOOGLE_JOBS_PAGES: int = 1
+    GOOGLE_JOBS_INTERVAL_HOURS: int = 24
     LINKEDIN_SESSION_COOKIE: str = ""
     HANDSHAKE_SESSION_COOKIE: str = ""
     GREENHOUSE_COMPANY_SLUGS: str = ""

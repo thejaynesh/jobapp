@@ -75,6 +75,7 @@ def _integrations_status() -> dict:
             {"label": "LinkedIn", "ok": _has(cfg.LINKEDIN_SESSION_COOKIE)},
             {"label": "Adzuna", "ok": _has(cfg.ADZUNA_APP_ID) and _has(cfg.ADZUNA_APP_KEY)},
             {"label": "JSearch", "ok": _has(cfg.JSEARCH_API_KEY)},
+            {"label": "Google Jobs (SerpApi)", "ok": _has(cfg.SERPAPI_API_KEY)},
             {"label": "Jooble", "ok": _has(cfg.JOOBLE_API_KEY)},
             {"label": "FindWork", "ok": _has(cfg.FINDWORK_API_KEY)},
             {"label": "CareerJet", "ok": _has(cfg.CAREERJET_AFFID)},

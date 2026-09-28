@@ -41,7 +41,7 @@ def _nim_models(db: Session) -> list[str]:
 
 # Every source the fetcher knows about, for the manual-trigger picker.
 TRIGGERABLE_SOURCES = [
-    "adzuna", "jsearch", "linkedin", "greenhouse", "lever", "ashby",
+    "adzuna", "jsearch", "google_jobs", "linkedin", "greenhouse", "lever", "ashby",
     "smartrecruiters", "workable", "recruitee", "workday", "icims",
     "bamboohr", "teamtailor", "jobvite", "personio", "jooble",
     "careerjet", "findwork", "usajobs", "hiringcafe", "ycombinator",
