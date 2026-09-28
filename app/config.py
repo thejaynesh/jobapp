@@ -451,7 +451,10 @@ class Settings(BaseSettings):
     # a guess. Probing before polling is what stops `greenhouse/linkedin` and
     # `greenhouse/appcast` from spending the budget real companies compete for.
     ATS_BOARD_VALIDATION: bool = True
-    ATS_BOARD_VALIDATE_PER_CYCLE: int = 150
+    # New boards probed per boards cycle. A probe is one cheap request, and
+    # the community lists alone name a few thousand boards, which at 150 a
+    # cycle took weeks to reach. Editable on the settings page.
+    ATS_BOARD_VALIDATE_PER_CYCLE: int = 400
 
     # Aggregators (Adzuna, Jooble, Careerjet) link to their own redirect page
     # rather than the employer. Following those once per new posting yields the
@@ -529,15 +532,26 @@ class Settings(BaseSettings):
     # Every URL here was checked to return 200 before being added; four
     # plausible-looking ones did not and are deliberately absent, because a
     # dead list costs a request and a warning line every single cycle forever.
+    #
+    # SimplifyJobs is read from its listings files rather than its READMEs: the
+    # README shows only visible rows, and the file keeps every row it has ever
+    # held — 1,724 distinct Workday sites across the two, measured 2026-09-28.
+    # `ReaVNaiL/New-Grad-2025` was dropped when it began answering 404, and
+    # `pittcsc`/`Ouckah` because they now mirror lists already here.
+    # Editable on the settings page.
     SLUG_HARVEST_URLS: str = (
-        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md,"
-        "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md,"
+        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json,"
+        "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json,"
         "https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md,"
         "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/README.md,"
-        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md,"
-        "https://raw.githubusercontent.com/pittcsc/Summer2026-Internships/dev/README.md,"
-        "https://raw.githubusercontent.com/ReaVNaiL/New-Grad-2025/main/README.md,"
-        "https://raw.githubusercontent.com/Ouckah/Summer2025-Internships/main/README.md"
+        "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md"
+    )
+    # SimplifyJobs' postings as a job source (see `sources.simplify`). New-grad
+    # only by default; add the internships file on the settings page to see
+    # internships too.
+    SIMPLIFY_ENABLED: bool = True
+    SIMPLIFY_LISTINGS_URLS: str = (
+        "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"
     )
 
     # ---- Enrichment ------------------------------------------------------

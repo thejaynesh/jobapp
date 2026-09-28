@@ -84,6 +84,9 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         # Metered, so it sits out the API runs inside its own interval — see
         # `_sources_not_due`.
         "google_jobs",
+        # SimplifyJobs' curated early-career postings: two files, one request
+        # each.
+        "simplify",
         # Dice answers a plain HTTP request through its search API now, so it
         # left the browser tier — see `sources.dice.fetch_api`.
         "dice",
@@ -661,6 +664,24 @@ def _run_all_adapters(
     else:
         _disable("builtin")
 
+    # --- SimplifyJobs: curated US early-career postings, one file per list ---
+    simplify_urls = [
+        u.strip() for u in str(getattr(cfg, "SIMPLIFY_LISTINGS_URLS", "") or "").split(",")
+        if u.strip()
+    ]
+    if getattr(cfg, "SIMPLIFY_ENABLED", True) and simplify_urls and not _skip("simplify"):
+        from app.services.sources.simplify import fetch as simplify_fetch
+        stats.setdefault("simplify", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = simplify_fetch(simplify_urls,
+                                  max_age_days=getattr(cfg, "MAX_JOB_AGE_DAYS", None))
+            _record(stats, "simplify", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "simplify", [], str(exc))
+    else:
+        _disable("simplify")
+
     # --- Jobspresso: curated remote jobs RSS feed ---
     from app.services.sources.jobspresso import fetch as jobspresso_fetch
     _run_combos(stats, all_jobs, "jobspresso",
@@ -1134,15 +1155,35 @@ def fetch_and_save_jobs(
         profile.data.get("discovered_ats") if settings.ATS_AUTO_DISCOVERY else None
     )
 
-    # Harvest company ATS slugs from community job lists (e.g. the SimplifyJobs
-    # new-grad README) and fold them into the discovered set.
-    if settings.ATS_LIST_HARVEST and settings.SLUG_HARVEST_URLS:
+    # Company boards named by community job lists (SimplifyJobs' listings
+    # files, the new-grad READMEs). Every one goes to the board registry, which
+    # probes a board before polling it — so the lists are read whole. They used
+    # to be merged into the profile's discovered set, capped at 100 boards per
+    # ATS and fifteen for Workday, which a single list filled on its first read
+    # and nothing could ever add to again.
+    #
+    # Only on a cycle that polls boards: nothing else reads the registry, and
+    # the lists run to tens of megabytes, which every two-hourly API run was
+    # downloading to no purpose.
+    from app.services.tunables import value as tunable_value
+    harvested: dict = {}
+    harvested_names: dict = {}
+    polls_boards = only is None or bool(set(only) & SOURCE_GROUPS["boards"])
+    harvest_urls = [
+        u.strip() for u in str(tunable_value(profile.data, "slug_harvest_urls") or "").split(",")
+        if u.strip()
+    ]
+    if settings.ATS_LIST_HARVEST and harvest_urls and polls_boards:
         try:
-            from app.services.ats_discovery import harvest_slugs_from_lists
-            harvest_urls = [u.strip() for u in settings.SLUG_HARVEST_URLS.split(",") if u.strip()]
-            discovered_ats = harvest_slugs_from_lists(harvest_urls, discovered_ats)
+            from app.services.ats_discovery import _merge_found, harvest_boards_from_lists
+            harvested, harvested_names = harvest_boards_from_lists(harvest_urls)
+            if not settings.ATS_BOARD_REGISTRY:
+                # No registry to validate them: the capped legacy merge.
+                merged = {ats: list(s or []) for ats, s in (discovered_ats or {}).items()}
+                _merge_found(merged, harvested)
+                discovered_ats = merged
         except Exception as exc:
-            logger.error("job_fetcher: slug harvest failed: %s", exc)
+            logger.error("job_fetcher: board harvest failed: %s", exc)
 
     # Validate/auto-fix the configured ATS slugs (cached per slug on the profile),
     # then assemble the final slug map: configured + verified seeds + discovered.
@@ -1172,6 +1213,11 @@ def fetch_and_save_jobs(
             with db.begin_nested():
                 if discovered_ats:
                     boards.backfill_from_slugs(db, discovered_ats, origin="discovered")
+                if harvested:
+                    # Replayed every cycle, so it must not revive what the
+                    # registry retired — see `record_boards`.
+                    boards.record_boards(db, harvested, origin="list", revive=False,
+                                         names=harvested_names)
                 if settings.ATS_SEED_COMPANIES:
                     from app.services.ats_seeds import SEED_ATS_SLUGS
                     boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed")
@@ -1189,7 +1235,7 @@ def fetch_and_save_jobs(
                     with db.begin_nested():
                         boards.validate_pending(
                             db,
-                            limit=settings.ATS_BOARD_VALIDATE_PER_CYCLE,
+                            limit=tunable_value(profile.data, "ats_board_validate_per_cycle"),
                             workers=settings.ATS_BOARD_FETCH_WORKERS,
                         )
                     db.commit()

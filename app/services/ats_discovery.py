@@ -229,6 +229,54 @@ def harvest_slugs_from_lists(urls: list[str], existing: dict | None = None) -> d
     return merged
 
 
+def harvest_boards_from_lists(
+    urls: list[str],
+) -> tuple[dict[str, set[str]], dict[tuple[str, str], str]]:
+    """
+    Every ATS board named by a set of community lists, uncapped, with names.
+
+    Returns `(found, names)`: `{ats: {slug}}`, and the company each board was
+    listed under where the list says, keyed by `(ats, slug)`.
+
+    Uncapped because the caller is the board registry, which validates each
+    board before polling it and ranks them by yield afterwards. The capped
+    `harvest_slugs_from_lists` fed the profile blob that predates the
+    registry, where a cap was the only thing keeping the list short — and
+    with it, one list's worth of Workday tenants was fifteen, forever.
+
+    A `.json` URL is read as a SimplifyJobs listings file, row by row, which
+    is where the company name comes from; anything else is read as text.
+    """
+    found: dict[str, set[str]] = {}
+    names: dict[tuple[str, str], str] = {}
+    for url in urls:
+        try:
+            if url.lower().split("?", 1)[0].endswith(".json"):
+                from app.services.sources.simplify import rows
+
+                before = sum(len(v) for v in found.values())
+                for row in rows(url):
+                    company = str(row.get("company_name") or "").strip()
+                    for ats, slugs in _extract_slugs(str(row.get("url") or "")).items():
+                        found.setdefault(ats, set()).update(slugs)
+                        if company:
+                            for slug in slugs:
+                                names.setdefault((ats, slug), company)
+                added = sum(len(v) for v in found.values()) - before
+            else:
+                resp = httpx.get(url, timeout=30, follow_redirects=True)
+                resp.raise_for_status()
+                before = sum(len(v) for v in found.values())
+                for ats, slugs in _extract_slugs(resp.text).items():
+                    found.setdefault(ats, set()).update(slugs)
+                added = sum(len(v) for v in found.values()) - before
+        except Exception as exc:
+            logger.warning("board harvest failed for %s: %s", url, exc)
+            continue
+        logger.info("board harvest: %d boards from %s", added, url)
+    return found, names
+
+
 def merged_slugs(configured_csv: str, discovered: dict | None, ats: str) -> list[str]:
     """Configured (env) slugs first, then discovered ones, deduplicated."""
     result: list[str] = []

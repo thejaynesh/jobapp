@@ -785,11 +785,14 @@ class TestSlugHarvestWiring:
         from app.config import settings
         monkeypatch.setattr(settings, "ATS_LIST_HARVEST", True)
 
-    def test_harvested_slugs_feed_the_adapters(self, db):
+    def test_harvested_boards_feed_the_adapters(self, db):
+        from app.models.company_board import CompanyBoard
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
-        with patch("app.services.ats_discovery.harvest_slugs_from_lists",
-                   return_value={"greenhouse": ["harvestedco"]}) as mock_harvest:
+        harvest = ({"greenhouse": {"harvestedco"}},
+                   {("greenhouse", "harvestedco"): "Harvested Co"})
+        with patch("app.services.ats_discovery.harvest_boards_from_lists",
+                   return_value=harvest) as mock_harvest:
             with patch("app.services.query_expansion.expand_search_queries",
                        return_value=(["Software Engineer"], None)):
                 with patch("app.services.job_fetcher._run_all_adapters",
@@ -798,14 +801,38 @@ class TestSlugHarvestWiring:
         assert mock_harvest.call_count == 1
         slug_map = mock_run.call_args[0][3]
         assert "harvestedco" in slug_map["greenhouse"]
-        # harvested slugs also get persisted with the discovered set
+        # Into the registry, named, rather than the capped profile blob — a
+        # list names thousands of boards and the blob held a hundred.
+        board = db.query(CompanyBoard).filter_by(ats="greenhouse", slug="harvestedco").one()
+        assert board.origin == "list" and board.company == "Harvested Co"
         profile = db.query(Profile).first()
-        assert "harvestedco" in profile.data["discovered_ats"]["greenhouse"]
+        assert "harvestedco" not in (profile.data.get("discovered_ats") or {}).get("greenhouse", [])
+
+    def test_an_api_only_run_does_not_download_the_lists(self, db):
+        from app.services.job_fetcher import fetch_and_save_jobs
+        _make_profile_with_targets(db)
+        with patch("app.services.ats_discovery.harvest_boards_from_lists") as mock_harvest:
+            with _patch_adapters([_std_job()]):
+                fetch_and_save_jobs(db, group="api")
+        mock_harvest.assert_not_called()
+
+    def test_the_lists_come_from_the_settings_page(self, db):
+        from app.services import tunables
+        from app.services.job_fetcher import fetch_and_save_jobs
+        profile = _make_profile_with_targets(db)
+        profile.data = {**profile.data,
+                        tunables.STORE_KEY: {"slug_harvest_urls": "https://lists.test/a.md"}}
+        db.flush()
+        with patch("app.services.ats_discovery.harvest_boards_from_lists",
+                   return_value=({}, {})) as mock_harvest:
+            with _patch_adapters([_std_job()]):
+                fetch_and_save_jobs(db)
+        assert mock_harvest.call_args[0][0] == ["https://lists.test/a.md"]
 
     def test_harvest_failure_does_not_block_fetch(self, db):
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
-        with patch("app.services.ats_discovery.harvest_slugs_from_lists",
+        with patch("app.services.ats_discovery.harvest_boards_from_lists",
                    side_effect=RuntimeError("github down")):
             with _patch_adapters([_std_job()]):
                 result = fetch_and_save_jobs(db)

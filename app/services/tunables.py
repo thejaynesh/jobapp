@@ -187,6 +187,38 @@ TUNABLES: list[Tunable] = [
              "role and location you search — so 2 doubles the spend.",
     ),
     Tunable(
+        key="simplify_enabled", env="SIMPLIFY_ENABLED", kind="bool",
+        group="Sources", label="SimplifyJobs lists",
+        help="Curated US new-grad postings from SimplifyJobs' GitHub list — "
+             "dated, with the employer's own apply link. About two hundred new "
+             "ones a week. Off skips it.",
+    ),
+    Tunable(
+        key="simplify_listings_urls", env="SIMPLIFY_LISTINGS_URLS", kind="text",
+        group="Sources", label="SimplifyJobs: listing files",
+        help="Comma-separated listings.json URLs. New-grad by default; add "
+             "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/"
+             "dev/.github/scripts/listings.json for internships.",
+    ),
+    Tunable(
+        key="slug_harvest_urls", env="SLUG_HARVEST_URLS", kind="text",
+        group="Company boards", label="Community lists to mine for boards",
+        help="Comma-separated URLs of job lists whose links name company "
+             "boards (Greenhouse, Workday, Oracle…). A .json URL is read as a "
+             "SimplifyJobs listings file, including rows it no longer shows. "
+             "Every board found is probed before it is polled. Read on board "
+             "cycles only.",
+    ),
+    Tunable(
+        key="ats_board_validate_per_cycle", env="ATS_BOARD_VALIDATE_PER_CYCLE",
+        kind="int", minimum=0, maximum=5000, group="Company boards",
+        label="New boards checked per cycle",
+        help="Newly found boards are probed once before they are polled. Each "
+             "probe is one small request. Higher gets thousands of list-found "
+             "boards polling within days rather than weeks; 0 stops probing, "
+             "and unprobed boards are never polled.",
+    ),
+    Tunable(
         key="google_jobs_enabled", env="GOOGLE_JOBS_ENABLED", kind="bool",
         group="Sources", label="Google Jobs",
         help="Google's job results through SerpApi — postings from boards and "

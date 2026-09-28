@@ -71,10 +71,15 @@ def record_boards(
     company: str | None = None,
     source_host: str | None = None,
     revive: bool = True,
+    names: dict[tuple[str, str], str] | None = None,
 ) -> int:
     """
     Upsert `{ats: [slug, ...]}` into the registry. Returns the number of boards
     seen for the first time.
+
+    `company` names every board in the batch; `names` names them one by one,
+    keyed by `(ats, slug)`, for a batch drawn from many employers at once (a
+    community list). A per-board name wins over the batch's.
 
     A board freshly linked from a posting is evidence the company is still
     hiring, so re-seeing one refreshes `last_seen_at` and revives it if it had
@@ -126,7 +131,7 @@ def record_boards(
             board = CompanyBoard(
                 ats=ats,
                 slug=slug,
-                company=company,
+                company=(names or {}).get((ats, slug)) or company,
                 origin=origin,
                 source_host=source_host,
                 first_seen_at=now,
@@ -141,8 +146,9 @@ def record_boards(
             continue
 
         board.last_seen_at = now
-        if company and not board.company:
-            board.company = company
+        named = (names or {}).get((ats, slug)) or company
+        if named and not board.company:
+            board.company = named
         if source_host and not board.source_host:
             board.source_host = source_host
         # Re-seeing a board revives it, but only one that was retired for going
