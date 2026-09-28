@@ -426,7 +426,11 @@ def _autofill_fields(db: Session) -> dict:
     name = (personal.get("name") or "").strip()
     first, _, last = name.partition(" ")
 
-    education = (data.get("education") or [])
+    # The first degree still in resumes: one switched out on the profile page
+    # is not typed into an employer's form either.
+    from app.services.profile_service import for_documents
+
+    education = for_documents(data).get("education") or []
     latest = education[0] if education else {}
 
     from app.services import remembered_answers, screening

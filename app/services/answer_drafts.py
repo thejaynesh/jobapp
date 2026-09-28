@@ -47,8 +47,11 @@ MAX_WORDS = 600
 
 
 def _profile(db) -> dict:
+    """The profile as employer-facing writing reads it (switched-off entries gone)."""
+    from app.services.profile_service import for_documents
+
     profile = db.query(Profile).first()
-    return (profile.data if profile else None) or {}
+    return for_documents(profile.data) if profile and profile.data else {}
 
 
 def _posting(db, url: str, posting: dict | None) -> tuple[dict, object]:

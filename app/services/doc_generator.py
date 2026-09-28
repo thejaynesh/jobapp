@@ -1041,8 +1041,12 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # means it can vary per call) so the generated docs record their author.
     start_llm_log()
 
+    from app.services.profile_service import for_documents
+
     profile = db.query(Profile).first()
-    profile_data = profile.data if profile else {}
+    # Entries switched out of resumes on the profile page are gone from here
+    # on: every call below, the resume, the letter and the review read this.
+    profile_data = for_documents(profile.data if profile else {})
     job = application.job
 
     # Each phase is labelled for the LLM log. A generation is six calls with six

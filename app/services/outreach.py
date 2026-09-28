@@ -223,6 +223,10 @@ def _evidence_lines(profile_data: dict, limit: int = 3) -> str:
     Same grounding rule as the cover letter: if it isn't in here, the model may
     not claim it.
     """
+    from app.services.profile_service import for_documents
+
+    # A message to a recruiter cites only what the resume would.
+    profile_data = for_documents(profile_data)
     lines: list[str] = []
     for exp in (profile_data.get("experience") or [])[:2]:
         role = exp.get("role") or exp.get("title") or ""

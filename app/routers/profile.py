@@ -1,7 +1,7 @@
 import copy
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
@@ -363,6 +363,35 @@ def delete_education_item(request: Request, item_id: str, db: Session = Depends(
     profile = remove_list_item(db, "education", item_id)
     db.commit()
     return templates.TemplateResponse("profile/partials/education.html", {"request": request, "profile": profile.data})
+
+
+# In resumes or not
+_SECTION_PARTIALS = {
+    "experience": "profile/partials/experience.html",
+    "projects": "profile/partials/projects.html",
+    "education": "profile/partials/education.html",
+}
+
+
+@router.post("/{section}/{item_id}/in-resume", response_class=HTMLResponse)
+def switch_in_resume(
+    request: Request, section: str, item_id: str,
+    included: str = Form(""), db: Session = Depends(get_db),
+):
+    """
+    Leave an entry out of resumes, letters and drafted answers, or put it
+    back. The entry itself is untouched, so switching it back restores it.
+    An unticked checkbox sends nothing, so absent means left out.
+    """
+    from app.services.profile_service import set_in_documents
+
+    if section not in _SECTION_PARTIALS:
+        raise HTTPException(status_code=404, detail="No such section")
+    profile = set_in_documents(db, section, item_id, included == "1")
+    db.commit()
+    return templates.TemplateResponse(
+        _SECTION_PARTIALS[section], {"request": request, "profile": profile.data},
+    )
 
 
 # Templates

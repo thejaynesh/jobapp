@@ -1,0 +1,15 @@
+{# The "In resumes" switch on one profile entry. `section` and `item` come from
+   the including template. Unticked, the entry stays in the profile but is left
+   out of resumes, letters and drafted answers until it is ticked again. #}
+{% set included = item.in_resume is not sameas false %}
+<form hx-post="/profile/{{ section }}/{{ item.id }}/in-resume"
+      hx-target="#{{ section }}-list" hx-swap="outerHTML" hx-trigger="change"
+      class="shrink-0">
+  <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none
+                {% if included %}text-gray-500{% else %}text-amber-700{% endif %}"
+         title="Untick to leave this out of resumes, cover letters and drafted answers for now. Nothing is deleted.">
+    <input type="checkbox" name="included" value="1" {% if included %}checked{% endif %}
+           class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+    In resumes
+  </label>
+</form>
