@@ -574,6 +574,10 @@ class Settings(BaseSettings):
     # countries (the US when none). 100 postings a page.
     AMAZON_ENABLED: bool = True
     AMAZON_MAX_PAGES: int = 2
+    # TikTok's own careers search (`sources.tiktok`), per role, in the profile's
+    # countries. Editable on the settings page.
+    TIKTOK_ENABLED: bool = True
+    TIKTOK_MAX_PAGES: int = 5
     # SimplifyJobs' postings as a job source (see `sources.simplify`). New-grad
     # only by default; add the internships file on the settings page to see
     # internships too.

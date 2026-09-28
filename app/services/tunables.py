@@ -215,6 +215,23 @@ TUNABLES: list[Tunable] = [
              "hundreds of matching roles, so 2 reaches the last week or two.",
     ),
     Tunable(
+        key="tiktok_enabled", env="TIKTOK_ENABLED", kind="bool",
+        group="Sources", label="TikTok Careers",
+        help="TikTok's own careers search, read by the server with full "
+             "descriptions — one of the largest employers on the new-grad "
+             "lists. Searched per role in your countries (the US when none); "
+             "a country with no TikTok office costs one request. Off skips it.",
+    ),
+    Tunable(
+        key="tiktok_max_pages", env="TIKTOK_MAX_PAGES", kind="int",
+        minimum=1, maximum=20, group="Sources",
+        label="TikTok Careers: pages per search",
+        help="100 postings a page for every role. TikTok has no newest-first "
+             "order, so a search cut short misses postings at random rather "
+             "than the oldest ones. About 1,800 US roles in all, 441 for "
+             "\"software engineer\": 5 reads every role search to its end.",
+    ),
+    Tunable(
         key="slug_harvest_urls", env="SLUG_HARVEST_URLS", kind="text",
         group="Company boards", label="Community lists to mine for boards",
         help="Comma-separated URLs of job lists whose links name company "

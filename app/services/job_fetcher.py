@@ -89,6 +89,8 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "simplify",
         # Amazon's own careers search (search.json), full descriptions inline.
         "amazon",
+        # TikTok's own careers search, likewise.
+        "tiktok",
         # Dice answers a plain HTTP request through its search API now, so it
         # left the browser tier — see `sources.dice.fetch_api`.
         "dice",
@@ -720,6 +722,27 @@ def _run_adapters(
         )
     else:
         _disable("amazon")
+
+    # --- TikTok: its own careers search, per role, in the profile's countries ---
+    if getattr(cfg, "TIKTOK_ENABLED", True) and not _skip("tiktok"):
+        from app.services.sources import tiktok
+        try:
+            # One request for the cities TikTok hires in; every search is then
+            # restricted to those in the profile's countries.
+            cities = tiktok.city_codes(adzuna_country_codes)
+        except Exception as exc:
+            stats.setdefault("tiktok", {"count": 0, "errors": [], "enabled": True})
+            _record(stats, "tiktok", [], f"city list: {exc}")
+            cities = []
+        _run_combos(
+            stats, all_jobs, "tiktok",
+            lambda role: tiktok.fetch(query=role, cities=cities,
+                                      max_pages=getattr(cfg, "TIKTOK_MAX_PAGES", None)),
+            [(r,) for r in roles] if cities else [],
+            _skip,
+        )
+    else:
+        _disable("tiktok")
 
     # --- SimplifyJobs: curated US early-career postings, one file per list ---
     simplify_urls = [
