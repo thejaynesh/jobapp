@@ -112,6 +112,10 @@ _WORKDAY_URL = re.compile(
 )
 # Oracle Recruiting Cloud. The posting page is an empty single-page app, so
 # without this the only route to the text was the model reading a shell.
+# Apple's detail page embeds the posting as its own hydration data; no API.
+_APPLE_URL = re.compile(
+    r"https?://jobs\.apple\.com/[a-z]{2}-[a-z]{2}/details/(\d+)(?:/([A-Za-z0-9-]+))?", re.I,
+)
 _ORACLE_URL = re.compile(
     r"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.oraclecloud\.com)/hcmUI/CandidateExperience/"
     r"[A-Za-z_-]+/sites/([A-Za-z0-9_]+)/job/([A-Za-z0-9]+)", re.I,
@@ -257,6 +261,21 @@ def _oracle(client: httpx.Client, host: str, site: str, job_id: str) -> Extracti
     )
 
 
+def _apple(client: httpx.Client, position_id: str, slug: str | None) -> Extraction:
+    from app.services.sources.apple import full_description, loader_data
+
+    resp = client.get(f"https://jobs.apple.com/en-us/details/{position_id}/{slug or ''}".rstrip("/"))
+    resp.raise_for_status()
+    data = (loader_data(resp.text).get("jobDetails") or {}).get("jobsData") or {}
+    if not data:
+        return Extraction()
+    return Extraction(
+        description=full_description(data),
+        method="ats_api",
+        posted_at=data.get("postDateInGMT"),
+    )
+
+
 def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     """The posting's JSON, when the URL says which ATS is hosting it."""
     for pattern, call in (
@@ -277,6 +296,9 @@ def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     match = _ORACLE_URL.search(url)
     if match:
         return _oracle(client, *match.groups())
+    match = _APPLE_URL.search(url)
+    if match:
+        return _apple(client, *match.groups())
     return Extraction()
 
 
@@ -285,7 +307,8 @@ def looks_like_ats(url: str) -> bool:
     return any(
         pattern.search(url or "")
         for pattern in (_GREENHOUSE_EMBED, _GREENHOUSE_URL, _LEVER_URL, _ASHBY_URL,
-                        _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL)
+                        _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL,
+                        _APPLE_URL)
     )
 
 

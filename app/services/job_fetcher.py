@@ -91,6 +91,8 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "amazon",
         # TikTok's own careers search, likewise.
         "tiktok",
+        # Apple's careers search: server-rendered pages, details for matches.
+        "apple",
         # Dice answers a plain HTTP request through its search API now, so it
         # left the browser tier — see `sources.dice.fetch_api`.
         "dice",
@@ -743,6 +745,21 @@ def _run_adapters(
         )
     else:
         _disable("tiktok")
+
+    # --- Apple: its own careers search, per role and country ---
+    if getattr(cfg, "APPLE_ENABLED", True) and not _skip("apple"):
+        from app.services.sources import apple
+        _run_combos(
+            stats, all_jobs, "apple",
+            lambda role, location: apple.fetch(
+                query=role, location=location,
+                max_pages=getattr(cfg, "APPLE_MAX_PAGES", None),
+                max_details=getattr(cfg, "APPLE_MAX_DETAILS", None)),
+            [(r, c) for r in roles for c in apple.countries_for(adzuna_country_codes)],
+            _skip,
+        )
+    else:
+        _disable("apple")
 
     # --- SimplifyJobs: curated US early-career postings, one file per list ---
     simplify_urls = [

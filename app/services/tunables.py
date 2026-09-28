@@ -232,6 +232,33 @@ TUNABLES: list[Tunable] = [
              "\"software engineer\": 5 reads every role search to its end.",
     ),
     Tunable(
+        key="apple_enabled", env="APPLE_ENABLED", kind="bool",
+        group="Sources", label="Apple Jobs",
+        help="Apple's own careers search, read by the server. Searched per "
+             "role in your countries (the US when none; Apple is searched in "
+             "the US, Canada, UK, Germany, Ireland, Singapore and Poland). "
+             "Off skips it.",
+    ),
+    Tunable(
+        key="apple_max_pages", env="APPLE_MAX_PAGES", kind="int",
+        minimum=1, maximum=20, group="Sources",
+        label="Apple Jobs: pages per search",
+        help="20 postings a page, newest first. Apple lists thousands of US "
+             "roles, so 3 reaches back a few days for each role; raise it if "
+             "fetches run less than daily.",
+    ),
+    Tunable(
+        key="apple_max_details", env="APPLE_MAX_DETAILS", kind="int",
+        minimum=0, maximum=100, group="Sources",
+        label="Apple Jobs: full descriptions per search",
+        help="Apple's search shows only a summary, mostly its standard "
+             "introduction. This many postings per search — the titles "
+             "matching your roles first — get one more request for the full "
+             "description and qualifications; one already read is not read "
+             "again. The rest are filled in by the enrichment pass. 0 leaves "
+             "them all to it.",
+    ),
+    Tunable(
         key="slug_harvest_urls", env="SLUG_HARVEST_URLS", kind="text",
         group="Company boards", label="Community lists to mine for boards",
         help="Comma-separated URLs of job lists whose links name company "

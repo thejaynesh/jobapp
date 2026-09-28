@@ -578,6 +578,12 @@ class Settings(BaseSettings):
     # countries. Editable on the settings page.
     TIKTOK_ENABLED: bool = True
     TIKTOK_MAX_PAGES: int = 5
+    # Apple's own careers search (`sources.apple`), per role, in the profile's
+    # countries; the matching titles get their full description. Editable on
+    # the settings page.
+    APPLE_ENABLED: bool = True
+    APPLE_MAX_PAGES: int = 3
+    APPLE_MAX_DETAILS: int = 20
     # SimplifyJobs' postings as a job source (see `sources.simplify`). New-grad
     # only by default; add the internships file on the settings page to see
     # internships too.
