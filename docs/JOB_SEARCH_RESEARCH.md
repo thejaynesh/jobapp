@@ -52,6 +52,13 @@ wrap Greenhouse behind `?gh_jid=`, and the careers-site sniffer now finds the
 board for 212 of them ("Find the Greenhouse board behind employers' own
 careers sites"), 191 of them boards we had no other way to learn.
 
+This is now measured daily, and more strictly, on the runs page's Coverage
+panel (`services.source_yield`): the share of SimplifyJobs' open postings
+matching the profile's roles that another of our sources actually listed,
+not merely whose host we recognise, with the trend and the systems behind
+the misses. The same panel shows what each source listed that no other did
+("Measure each source by what only it finds, and our reach daily").
+
 ### Duplicates across sources, measured
 
 The same postings read from SimplifyJobs and from each board's own API, paired

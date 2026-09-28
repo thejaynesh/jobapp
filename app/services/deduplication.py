@@ -506,6 +506,17 @@ def note_addresses(existing: Job, url: str, apply_url: str | None = None) -> boo
     return bool(missing)
 
 
+def note_source(existing: Job, source: str | None) -> None:
+    """Record that `source` listed this job too (`jobs.seen_by`)."""
+    if not source:
+        return
+    seen = list(existing.seen_by or [existing.source])
+    if source not in seen:
+        existing.seen_by = seen + [source]
+    elif existing.seen_by is None:
+        existing.seen_by = seen
+
+
 def merge_or_skip(
     db: Session,
     existing: Job,

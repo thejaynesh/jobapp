@@ -297,6 +297,16 @@ TUNABLES: list[Tunable] = [
              "About 740 companies match typical engineering roles at once.",
     ),
     Tunable(
+        key="recall_window_days", env="RECALL_WINDOW_DAYS", kind="int",
+        minimum=3, maximum=120, group="Company boards",
+        label="Coverage check: days looked back over",
+        help="Each day the runs page measures how many of the open postings "
+             "SimplifyJobs listed in this many days another of our sources "
+             "found too, and what each source found that no other did. "
+             "Shorter follows a reader that just broke more closely; longer "
+             "evens out quiet weeks.",
+    ),
+    Tunable(
         key="avature_max_details", env="AVATURE_MAX_DETAILS", kind="int",
         minimum=0, maximum=500, group="Company boards",
         label="Avature: posting pages per portal per cycle",

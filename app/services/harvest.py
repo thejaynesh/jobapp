@@ -42,6 +42,7 @@ from app.services.deduplication import (
     merge_description,
     merge_or_skip,
     note_addresses,
+    note_source,
 )
 from app.services.descriptions import clean as clean_description
 from app.services.sources.base import parse_experience_level
@@ -1232,6 +1233,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
                                      apply_url=apply_url)
         if existing is not None:
+            note_source(existing, source)
             improved = enrich_from(existing, data)
             # The harvested copy usually carries a fuller description than the
             # guest API managed, which is the main reason this path exists.
@@ -1260,6 +1262,7 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
             source=source,
             source_job_id=source_job_id,
             source_urls=posting_identity.urls(url, apply_url),
+            seen_by=[source],
             title=title,
             company=company,
             location=location,

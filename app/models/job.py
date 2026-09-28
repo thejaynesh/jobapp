@@ -89,6 +89,9 @@ class Job(Base):
     # adapter that lists a company's whole board inserted it. A later read of
     # that board that no longer lists it closes it (`job_fetcher._close_vanished`).
     board: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Every source that has listed it, first one first. NULL on rows stored
+    # before this was kept, which is read as `[source]` (`services.source_yield`).
+    seen_by: Mapped[list | None] = mapped_column(ARRAY(String), nullable=True)
     liveness_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

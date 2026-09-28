@@ -110,6 +110,7 @@ def get_runs(request: Request, limit: int = DEFAULT_RUNS_SHOWN,
             "run_group_filter": run_group,
             "run_groups": run_groups,
             "limit": limit,
+            "coverage": _coverage(db),
             **_agent_context(db),
             **_enrichment_context(db),
             **{k: v for k, v in _compare_context(request, db).items()
@@ -729,6 +730,35 @@ def queue_browsing(request: Request, plan: str = Form("postings"),
         "runs/_system.html",
         {"request": request, "system": _system_context(db),
          "browse_flash": flash},
+    )
+
+
+def _coverage(db: Session) -> dict | None:
+    from app.models.profile import Profile
+    from app.services.source_yield import STATE_KEY
+
+    try:
+        profile = db.query(Profile).first()
+    except Exception as exc:
+        _recover(db)
+        logger.warning("runs: coverage unavailable: %s", exc)
+        return None
+    return ((profile.data if profile else None) or {}).get(STATE_KEY)
+
+
+@router.post("/coverage", response_class=HTMLResponse)
+def measure_coverage_now(request: Request, db: Session = Depends(get_db)):
+    """The daily coverage check, now: a database read, a second or two."""
+    from app.tasks.recall import measure_and_store
+
+    try:
+        coverage = measure_and_store(db)
+    except Exception as exc:
+        _recover(db)
+        logger.error("runs: coverage check failed: %s", exc)
+        coverage = _coverage(db)
+    return templates.TemplateResponse(
+        "runs/partials/coverage.html", {"request": request, "coverage": coverage}
     )
 
 

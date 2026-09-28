@@ -83,6 +83,8 @@
 
 {% include "runs/partials/agent.html" %}
 
+{% include "runs/partials/coverage.html" %}
+
 {% if not runs and not run_status_filter and not run_group_filter %}
 <div class="text-sm text-gray-400">
   No runs recorded yet. History starts with the next fetch cycle.

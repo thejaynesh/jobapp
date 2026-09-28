@@ -803,6 +803,9 @@ class Settings(BaseSettings):
     # job (`services.sponsorship_history`). Editable on the settings page.
     H1B_HISTORY_ENABLED: bool = True
     H1B_HISTORY_QUARTERS: int = 4
+    # The days of postings the daily coverage check looks back over
+    # (`services.source_yield`). Editable on the settings page.
+    RECALL_WINDOW_DAYS: int = 30
     # How far back the jobs list looks, in days since the job was *fetched*.
     #
     # Distinct from MAX_JOB_AGE_DAYS above, which is a fetch-time gate on

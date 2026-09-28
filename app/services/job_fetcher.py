@@ -11,7 +11,7 @@ from app.models.profile import Profile
 from app.services import posting_identity
 from app.services.deduplication import (
     compute_dedupe_hash, enrich_from, find_existing_job, merge_description,
-    merge_or_skip, note_addresses, was_archived,
+    merge_or_skip, note_addresses, note_source, was_archived,
 )
 from app.services.descriptions import clean as clean_description
 
@@ -1627,6 +1627,7 @@ def fetch_and_save_jobs(
                         and existing.source == source
                     )
                     _note_board(existing, job_data)
+                    note_source(existing, source)
                     if same_row:
                         # The same posting again, not a cross-post: its URL is
                         # already ours, so only the contents can be news —
@@ -1666,6 +1667,7 @@ def fetch_and_save_jobs(
                     # (`posting_identity`) that the next source's link to it
                     # will share.
                     source_urls=posting_identity.urls(url, apply_url),
+                    seen_by=[source],
                     title=title,
                     company=company,
                     location=location,
