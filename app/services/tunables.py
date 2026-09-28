@@ -277,6 +277,23 @@ TUNABLES: list[Tunable] = [
              "About 740 companies match typical engineering roles at once.",
     ),
     Tunable(
+        key="ats_sniff_career_sites", env="ATS_SNIFF_CAREER_SITES", kind="bool",
+        group="Company boards", label="Look behind employer careers sites",
+        help="Many postings live on an employer's own site that wraps "
+             "Greenhouse, Lever or Ashby (stripe.com/jobs?gh_jid=…). Reads the "
+             "posting and the careers page for the board behind it, and asks "
+             "Greenhouse to confirm a guessed board holds the posting. Each "
+             "site is looked at once; a miss is retried after 30 days.",
+    ),
+    Tunable(
+        key="ats_sniff_max_hosts_per_cycle", env="ATS_SNIFF_MAX_HOSTS_PER_CYCLE",
+        kind="int", minimum=0, maximum=1000, group="Company boards",
+        label="Careers sites looked behind per cycle",
+        help="New employer sites examined per fetch cycle, each a few "
+             "requests. The lists alone name about 260 that wrap Greenhouse; "
+             "40 works through them in a day of board cycles. 0 pauses it.",
+    ),
+    Tunable(
         key="slug_harvest_urls", env="SLUG_HARVEST_URLS", kind="text",
         group="Company boards", label="Community lists to mine for boards",
         help="Comma-separated URLs of job lists whose links name company "

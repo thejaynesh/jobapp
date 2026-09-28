@@ -11,6 +11,16 @@ portal into a board we can poll directly every cycle.
 When the markup gives nothing away, the registrable domain is a good slug guess
 (`acme.com` → `acme`), so the likeliest ATSes get probed for it directly.
 
+A posting link carrying `gh_jid` says more than that: the page is a wrapper
+around Greenhouse, and the number is the posting's Greenhouse ID. The posting
+page itself usually embeds the board (`…/embed/job_board/js?for=urbancompass`
+on compass.com), so it is mined first. Failing that, a guessed board is asked
+for that very posting, which confirms it outright rather than merely finding
+some board of that name: `careers.withwaymo.com` is `waymo`, IXL is
+`ixllearning`, and Tower Research is `towerresearchcapital`. SimplifyJobs'
+lists link to 258 employer domains this way (1,807 postings); mining and
+confirmed guesses together name the board for most of them.
+
 Results — including misses — are cached by host so a company is sniffed once,
 not once per cycle.
 """
@@ -57,6 +67,13 @@ _SKIP_HOSTS = frozenset({
     "wellfound.com", "angel.co", "builtin.com", "dice.com", "monster.com",
 })
 
+_GH_JID = re.compile(r"[?&]gh_jid=(\d+)")
+_NAME_NOISE = frozenset({
+    "inc", "llc", "ltd", "corp", "corporation", "company", "co", "technologies",
+    "technology", "labs", "group", "holdings", "international", "global", "the",
+})
+_MAX_GUESSES = 6
+
 # Public-suffix-ish second levels, so "acme.co.uk" yields "acme" not "co".
 _COMPOUND_TLDS = frozenset({"co", "com", "net", "org", "gov", "edu", "ac"})
 
@@ -95,16 +112,53 @@ def domain_slug(host: str) -> str | None:
     return candidate
 
 
+def greenhouse_job_id(url: str) -> str | None:
+    """The Greenhouse posting ID a wrapper page carries as `gh_jid`."""
+    match = _GH_JID.search(url or "")
+    return match.group(1) if match else None
+
+
+def greenhouse_guesses(host: str, company: str | None = None) -> list[str]:
+    """Likely Greenhouse board names for a company, likeliest first."""
+    out: list[str] = []
+    slug = domain_slug(host)
+    if slug:
+        out += [slug,
+                re.sub(r"^(weare|with|join|work|team|get|go|try)", "", slug),
+                re.sub(r"(careers|jobs|hq|app)$", "", slug)]
+    words = re.findall(r"[a-z0-9]+", (company or "").lower())
+    if words:
+        out += ["".join(words), "".join(w for w in words if w not in _NAME_NOISE),
+                words[0], "-".join(words)]
+    return [g for g in dict.fromkeys(out) if len(g) >= 2][:_MAX_GUESSES]
+
+
+def _confirmed_greenhouse(client, host: str, company: str | None, job_id: str) -> str | None:
+    """The guessed board that holds this very posting, if any."""
+    for guess in greenhouse_guesses(host, company):
+        try:
+            resp = client.get(f"https://boards-api.greenhouse.io/v1/boards/{guess}/jobs/{job_id}")
+        except Exception as exc:
+            logger.debug("greenhouse confirm %s/%s failed: %s", guess, job_id, exc)
+            continue
+        if resp.status_code == 200:
+            return guess
+    return None
+
+
 def _origin(host: str) -> str:
     return f"https://{host}"
 
 
-def sniff_host(host: str, seed_html: str = "") -> dict[str, list[str]]:
+def sniff_host(host: str, seed_html: str = "", posting_url: str | None = None,
+               company: str | None = None) -> dict[str, list[str]]:
     """
     Look for ATS boards belonging to `host`.
 
     `seed_html` is the already-fetched landing page, when we have one — mining it
-    first often avoids any extra request at all.
+    first often avoids any extra request at all. `posting_url` is a posting on
+    this host, the page most likely to embed its board; `company` is who posted
+    it, which helps guess a board name.
     """
     from app.services.ats_discovery import extract_slugs
 
@@ -120,18 +174,30 @@ def sniff_host(host: str, seed_html: str = "") -> dict[str, list[str]]:
 
     from app.services.url_safety import EVENT_HOOKS
 
+    if posting_url and company_host(posting_url) != host:
+        posting_url = None
+    pages = ([posting_url] if posting_url else []) + [_origin(host) + p for p in _CAREER_PATHS]
+
     with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True,
                       event_hooks=EVENT_HOOKS) as client:
-        for path in _CAREER_PATHS:
+        for page in pages:
             try:
-                resp = client.get(_origin(host) + path)
+                resp = client.get(page)
             except Exception as exc:
-                logger.debug("sniff %s%s failed: %s", host, path, exc)
+                logger.debug("sniff %s failed: %s", page, exc)
                 continue
             if resp.status_code != 200:
                 continue
             if _absorb(resp.text):
                 return {ats: sorted(slugs) for ats, slugs in found.items()}
+
+        job_id = greenhouse_job_id(posting_url or "")
+        if job_id:
+            board = _confirmed_greenhouse(client, host, company, job_id)
+            if board:
+                logger.info("ats_sniffer: %s → greenhouse/%s (holds posting %s)",
+                            host, board, job_id)
+                return {"greenhouse": [board]}
 
     # Nothing embedded — try the domain name as a slug on the common boards.
     guess = domain_slug(host)
@@ -166,13 +232,16 @@ def sniff_hosts(
     cache: dict | None = None,
     max_hosts: int = 40,
     workers: int = DEFAULT_WORKERS,
+    hints: dict[str, dict] | None = None,
 ) -> tuple[dict[str, list[str]], dict, dict]:
     """
     Sniff each host in `hosts_html` (host → landing HTML, possibly empty).
+    `hints` maps a host to a posting on it and its company (`{"url", "company"}`).
 
     Returns (found_slugs_per_ats, updated_cache, per_host_found). The cache is
     keyed by host so repeat cycles cost nothing.
     """
+    hints = hints or {}
     cache = {k: dict(v) for k, v in (cache or {}).items() if isinstance(v, dict)}
 
     pending = [h for h in hosts_html if not (h in cache and _is_fresh(cache[h]))]
@@ -184,7 +253,7 @@ def sniff_hosts(
     if pending:
         with ThreadPoolExecutor(max_workers=max(1, min(workers, len(pending)))) as pool:
             results = list(pool.map(
-                lambda h: (h, _safe_sniff(h, hosts_html.get(h, ""))), pending
+                lambda h: (h, _safe_sniff(h, hosts_html.get(h, ""), hints.get(h))), pending
             ))
         now = datetime.now(timezone.utc).isoformat()
         for host, result in results:
@@ -210,8 +279,12 @@ def sniff_hosts(
     return merged, cache, per_host
 
 
-def _safe_sniff(host: str, html: str) -> dict[str, list[str]]:
+def _safe_sniff(host: str, html: str, hint: dict | None = None) -> dict[str, list[str]]:
+    hint = hint or {}
     try:
+        if hint:
+            return sniff_host(host, html, posting_url=hint.get("url"),
+                              company=hint.get("company"))
         return sniff_host(host, html)
     except Exception as exc:
         logger.warning("ats_sniffer: %s failed: %s", host, exc)

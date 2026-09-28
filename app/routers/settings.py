@@ -51,9 +51,14 @@ def _settings_context(profile) -> dict:
     }
 
 
-def _integrations_status() -> dict:
-    """Which external services are configured, grouped by purpose."""
-    from app.config import settings as cfg
+def _integrations_status(cfg=None) -> dict:
+    """
+    Which external services are configured, grouped by purpose. `cfg` is the
+    effective settings — the environment with the settings page's overrides —
+    so a source switched off here reads as off.
+    """
+    if cfg is None:
+        from app.config import settings as cfg
 
     def _has(val) -> bool:
         if isinstance(val, str):
@@ -105,9 +110,10 @@ def _integrations_status() -> dict:
     }
 
 
-def _feature_flags() -> list[tuple]:
-    """Boolean feature flags from config, grouped by category."""
-    from app.config import settings as cfg
+def _feature_flags(cfg=None) -> list[tuple]:
+    """Boolean feature flags from config, grouped by category (`cfg` as above)."""
+    if cfg is None:
+        from app.config import settings as cfg
 
     return [
         ("Pipeline", [
@@ -314,8 +320,11 @@ async def add_models(request: Request, provider: str, db: Session = Depends(get_
 
 
 def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
-    integrations = _integrations_status()
-    flags = _feature_flags()
+    from app.services.tunables import effective_settings
+
+    cfg = effective_settings(profile.data)
+    integrations = _integrations_status(cfg)
+    flags = _feature_flags(cfg)
     settings_ctx = _settings_context(profile)
 
     enabled_count = sum(

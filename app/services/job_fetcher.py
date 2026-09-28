@@ -1120,6 +1120,7 @@ def _update_board_registry(
     source_stats: dict,
     resolve_stats,
     updated_data: dict,
+    career_links: dict | None = None,
 ) -> dict:
     """
     Fold this cycle's findings back into the board registry:
@@ -1136,8 +1137,10 @@ def _update_board_registry(
 
     # Career sites that aren't a recognised ATS: sniff them for an embedded
     # board. The landing HTML from link resolution often answers for free.
-    if settings.ATS_SNIFF_CAREER_SITES:
-        stats["sniffed"] = _sniff_career_sites(db, raw_jobs, resolve_stats, updated_data)
+    from app.services.tunables import value as tunable_value
+    if tunable_value(updated_data, "ats_sniff_career_sites"):
+        stats["sniffed"] = _sniff_career_sites(db, raw_jobs, resolve_stats, updated_data,
+                                               career_links)
 
     # Per-board yield, so next cycle's budget favours boards that produce.
     for ats, attempted in (ats_slugs or {}).items():
@@ -1163,8 +1166,12 @@ def _update_board_registry(
 
 
 def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
-                        updated_data: dict) -> int:
-    """Mine company careers sites for the ATS board behind them."""
+                        updated_data: dict, career_links: dict | None = None) -> int:
+    """
+    Mine company careers sites for the ATS board behind them: the sites this
+    cycle's postings link to, then those the community lists name
+    (`career_links`, host → a posting there and its company).
+    """
     from app.services import company_boards as boards
     from app.services.ats_discovery import ALL_ATS
     from app.services.ats_sniffer import company_host, sniff_hosts
@@ -1177,6 +1184,7 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
     # straight at the employer's own site to begin with.
     hosts: dict[str, str] = {}   # host → landing HTML, "" meaning "go fetch it"
     host_company: dict[str, str] = {}
+    hints: dict[str, dict] = {}  # host → a posting there, for the sniffer to read
     for job in raw_jobs:
         if job.get("source") in ALL_ATS:
             continue  # already a board we poll directly
@@ -1191,14 +1199,26 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
             hosts[host] = html or hosts.get(host, "")
         if job.get("company"):
             host_company.setdefault(host, job["company"])
+        if host not in hints or ("gh_jid=" in candidate and "gh_jid=" not in hints[host]["url"]):
+            hints[host] = {"url": candidate, "company": job.get("company") or ""}
+
+    for host, link in (career_links or {}).items():
+        if is_aggregator(link.get("url") or ""):
+            continue
+        hosts.setdefault(host, "")
+        hints.setdefault(host, link)
+        if link.get("company"):
+            host_company.setdefault(host, link["company"])
 
     if not hosts:
         return 0
 
+    from app.services.tunables import value as tunable_value
     merged, cache, per_host = sniff_hosts(
         hosts,
         updated_data.get("ats_sniff_cache"),
-        max_hosts=settings.ATS_SNIFF_MAX_HOSTS_PER_CYCLE,
+        max_hosts=int(tunable_value(updated_data, "ats_sniff_max_hosts_per_cycle") or 0),
+        hints=hints,
     )
     updated_data["ats_sniff_cache"] = cache
 
@@ -1281,6 +1301,9 @@ def fetch_and_save_jobs(
     from app.services.tunables import value as tunable_value
     harvested: dict = {}
     harvested_names: dict = {}
+    # Employer-site links the lists name that no pattern recognised, for the
+    # career-site sniffer to look behind (see `ats_sniffer`).
+    harvested_links: dict = {}
     polls_boards = only is None or bool(set(only) & SOURCE_GROUPS["boards"])
     harvest_urls = [
         u.strip() for u in str(tunable_value(profile.data, "slug_harvest_urls") or "").split(",")
@@ -1289,7 +1312,8 @@ def fetch_and_save_jobs(
     if settings.ATS_LIST_HARVEST and harvest_urls and polls_boards:
         try:
             from app.services.ats_discovery import _merge_found, harvest_boards_from_lists
-            harvested, harvested_names = harvest_boards_from_lists(harvest_urls)
+            harvested, harvested_names = harvest_boards_from_lists(
+                harvest_urls, career_links=harvested_links)
             if not settings.ATS_BOARD_REGISTRY:
                 # No registry to validate them: the capped legacy merge.
                 merged = {ats: list(s or []) for ats, s in (discovered_ats or {}).items()}
@@ -1436,7 +1460,7 @@ def fetch_and_save_jobs(
             with db.begin_nested():
                 board_stats = _update_board_registry(
                     db, raw_jobs, ats_slugs, source_stats,
-                    resolve_stats, updated_data,
+                    resolve_stats, updated_data, career_links=harvested_links,
                 )
             db.commit()
             from app.services.company_boards import summary

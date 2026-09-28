@@ -319,8 +319,22 @@ def harvest_slugs_from_lists(urls: list[str], existing: dict | None = None) -> d
     return merged
 
 
+def _note_career_link(career_links: dict, link: str, company: str) -> None:
+    from app.services.ats_sniffer import company_host
+
+    host = company_host(link)
+    if not host or not _employer_host(host):
+        return
+    prior = career_links.get(host)
+    # A later row is a newer posting, likelier still open for the sniffer to
+    # confirm; a Greenhouse ID beats none at all.
+    if prior is None or "gh_jid=" in link or "gh_jid=" not in prior["url"]:
+        career_links[host] = {"url": link, "company": company}
+
+
 def harvest_boards_from_lists(
     urls: list[str],
+    career_links: dict[str, dict] | None = None,
 ) -> tuple[dict[str, set[str]], dict[tuple[str, str], str]]:
     """
     Every ATS board named by a set of community lists, uncapped, with names.
@@ -336,6 +350,11 @@ def harvest_boards_from_lists(
 
     A `.json` URL is read as a SimplifyJobs listings file, row by row, which
     is where the company name comes from; anything else is read as text.
+
+    `career_links`, when given, collects the rows no pattern recognised that
+    sit on an employer's own site: `{host: {"url", "company"}}`, one posting
+    per host, one carrying a Greenhouse `gh_jid` when there is one. Those are
+    for `ats_sniffer`, which can often find the board behind them.
     """
     found: dict[str, set[str]] = {}
     names: dict[tuple[str, str], str] = {}
@@ -347,11 +366,15 @@ def harvest_boards_from_lists(
                 before = sum(len(v) for v in found.values())
                 for row in rows(url):
                     company = str(row.get("company_name") or "").strip()
-                    for ats, slugs in _extract_slugs(str(row.get("url") or "")).items():
+                    link = str(row.get("url") or "")
+                    extracted = _extract_slugs(link)
+                    for ats, slugs in extracted.items():
                         found.setdefault(ats, set()).update(slugs)
                         if company:
                             for slug in slugs:
                                 names.setdefault((ats, slug), company)
+                    if career_links is not None and not extracted:
+                        _note_career_link(career_links, link, company)
                 added = sum(len(v) for v in found.values()) - before
             else:
                 resp = httpx.get(url, timeout=30, follow_redirects=True)
