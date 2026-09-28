@@ -87,6 +87,27 @@ def collect_board_sightings():
         _SIGHTINGS.reset(token)
 
 
+# Postings already stored with their text, per source, for adapters that can
+# list a board without the text and fetch it only for what is new
+# (`sources.greenhouse`). Loaded by the fetcher once per cycle; read by the
+# adapter in the calling thread, since it does not reach the board workers.
+_DESCRIBED: ContextVar = ContextVar("described_postings", default=None)
+
+
+@contextmanager
+def known_descriptions(by_source: dict[str, set[str]] | None):
+    token = _DESCRIBED.set(by_source or {})
+    try:
+        yield
+    finally:
+        _DESCRIBED.reset(token)
+
+
+def described(source: str) -> frozenset[str]:
+    """The `source_job_id`s of `source` already stored with a description."""
+    return frozenset((_DESCRIBED.get() or {}).get(source) or ())
+
+
 def saw_postings(ids) -> None:
     """
     Every posting the board being fetched lists, as the `source_job_id` the

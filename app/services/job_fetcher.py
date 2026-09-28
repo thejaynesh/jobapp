@@ -1418,8 +1418,13 @@ def fetch_and_save_jobs(
         # every adapter picks them up through the `cfg.X` reads it already does.
         from app.services.tunables import effective_settings
         cfg = effective_settings(profile.data)
-        from app.services.sources.base import collect_board_sightings
-        with SourceLogCapture() as capture, collect_board_sightings() as sightings:
+        from app.services.sources.base import collect_board_sightings, known_descriptions
+        described = {}
+        if getattr(cfg, "GREENHOUSE_DESCRIPTIONS_ON_DEMAND", True) and \
+                (only is None or "greenhouse" in only):
+            described["greenhouse"] = _described_ids(db, "greenhouse")
+        with SourceLogCapture() as capture, collect_board_sightings() as sightings, \
+                known_descriptions(described):
             raw_jobs, source_stats = _run_all_adapters(
                 queries, locations, cfg, ats_slugs, loc_prefs, only,
                 resting=_resting_sources(db), manual=manual,
@@ -1789,6 +1794,34 @@ def fetch_and_save_jobs(
         db.rollback()
 
     return counts
+
+
+# A stored description shorter than this is read again rather than trusted.
+_DESCRIBED_MIN_CHARS = 200
+
+
+def _described_ids(db: Session, source: str) -> set[str]:
+    """
+    The postings of `source` there is no need to download the text of again:
+    stored with a real description, or archived (judged and retired; its text
+    was thrown away on purpose, and the save skips it anyway).
+    """
+    from sqlalchemy import func
+
+    from app.models.archived_job import ArchivedJob
+
+    stored = (
+        db.query(Job.source_job_id)
+        .filter(Job.source == source, Job.source_job_id.isnot(None),
+                func.length(Job.description) >= _DESCRIBED_MIN_CHARS)
+        .all()
+    )
+    archived = (
+        db.query(ArchivedJob.source_job_id)
+        .filter(ArchivedJob.source == source, ArchivedJob.source_job_id.isnot(None))
+        .all()
+    )
+    return {row[0] for row in stored} | {row[0] for row in archived}
 
 
 def _board_key(job_data: dict) -> str | None:

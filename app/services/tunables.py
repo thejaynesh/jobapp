@@ -370,6 +370,16 @@ TUNABLES: list[Tunable] = [
              "and unprobed boards are never polled.",
     ),
     Tunable(
+        key="greenhouse_descriptions_on_demand", env="GREENHOUSE_DESCRIPTIONS_ON_DEMAND",
+        kind="bool", group="Company boards", label="Greenhouse descriptions on demand",
+        help="Read each Greenhouse board without its posting text, and fetch "
+             "the text only for postings not already stored with it. Every "
+             "posting still arrives whole; this stops downloading the same "
+             "text every cycle, which is twelve times the bytes of the list "
+             "(99 MB against 8 MB across 35 boards). Off reads every board "
+             "with its text, every time.",
+    ),
+    Tunable(
         key="yc_discovery_enabled", env="YC_DISCOVERY_ENABLED", kind="bool",
         group="Company boards", label="Look behind the sites of hiring YC companies",
         help="Y Combinator's directory lists about 1,500 companies as hiring, "

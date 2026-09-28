@@ -477,6 +477,9 @@ class Settings(BaseSettings):
     # hourly discovery tick (`services.yc_discovery`). Settings page.
     YC_DISCOVERY_ENABLED: bool = True
     YC_DISCOVERY_PER_HOUR: int = 40
+    # Greenhouse boards listed without their text, which is then fetched only
+    # for postings not already stored with it (`sources.greenhouse`). Settings.
+    GREENHOUSE_DESCRIPTIONS_ON_DEMAND: bool = True
     # Company boards from Common Crawl's URL index (`services.commoncrawl`):
     # index pages read per walk (~15,000 URLs each), and how often a walk runs.
     # A walk resumes where the last stopped and restarts on each new crawl.
