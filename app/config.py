@@ -584,6 +584,10 @@ class Settings(BaseSettings):
     APPLE_ENABLED: bool = True
     APPLE_MAX_PAGES: int = 3
     APPLE_MAX_DETAILS: int = 20
+    # JazzHR (`sources.jazzhr`): companies with new postings matching the roles,
+    # found in JazzHR's own sitemaps. Editable on the settings page.
+    JAZZHR_ENABLED: bool = True
+    JAZZHR_MAX_COMPANIES: int = 150
     # SimplifyJobs' postings as a job source (see `sources.simplify`). New-grad
     # only by default; add the internships file on the settings page to see
     # internships too.

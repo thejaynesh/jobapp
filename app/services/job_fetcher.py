@@ -105,6 +105,8 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         # Large employers' careers platforms, read by careers host.
         "oracle", "successfactors", "phenom", "eightfold", "jibe",
         "rippling", "pinpoint",
+        # JazzHR: its sitemaps name every open posting, so no registry needed.
+        "jazzhr",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
@@ -497,6 +499,20 @@ def _run_adapters(
                 _record(stats, ats_name, [], str(exc))
         else:
             _disable(ats_name)
+
+    # --- JazzHR: companies with new postings matching the roles, from its sitemaps ---
+    if getattr(cfg, "JAZZHR_ENABLED", True) and roles and not _skip("jazzhr"):
+        from app.services.sources.jazzhr import fetch as jazzhr_fetch
+        stats.setdefault("jazzhr", {"count": 0, "errors": [], "enabled": True})
+        try:
+            jobs = jazzhr_fetch(queries=roles,
+                                max_companies=getattr(cfg, "JAZZHR_MAX_COMPANIES", None))
+            _record(stats, "jazzhr", jobs)
+            all_jobs.extend(jobs)
+        except Exception as exc:
+            _record(stats, "jazzhr", [], str(exc))
+    else:
+        _disable("jazzhr")
 
     # --- Workday-hosted career sites (tenant:host:site triples) ---
     workday_tenants = ats_slugs.get("workday") or []

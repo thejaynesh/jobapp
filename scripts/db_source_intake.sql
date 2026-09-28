@@ -41,7 +41,7 @@ WITH catalog(source, expected_group) AS (
     ('workday','boards'), ('icims','boards'), ('bamboohr','boards'), ('teamtailor','boards'),
     ('jobvite','boards'), ('personio','boards'), ('oracle','boards'),
     ('successfactors','boards'), ('phenom','boards'), ('eightfold','boards'),
-    ('jibe','boards'), ('rippling','boards'), ('pinpoint','boards'), ('wellfound','browser'),
+    ('jibe','boards'), ('rippling','boards'), ('pinpoint','boards'), ('jazzhr','boards'), ('wellfound','browser'),
     ('dice','browser'), ('handshake','browser')
 ), recent AS (
   SELECT s.*, f.started_at, f."group" AS run_group

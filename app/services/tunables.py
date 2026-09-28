@@ -259,6 +259,24 @@ TUNABLES: list[Tunable] = [
              "them all to it.",
     ),
     Tunable(
+        key="jazzhr_enabled", env="JAZZHR_ENABLED", kind="bool",
+        group="Company boards", label="JazzHR",
+        help="Small and mid-sized US employers on *.applytojob.com. JazzHR "
+             "publishes an index of every open posting (about 90,000), so no "
+             "company list is needed: the companies with a new posting whose "
+             "title matches your roles are read, one request each. Read on "
+             "board cycles. Off skips it.",
+    ),
+    Tunable(
+        key="jazzhr_max_companies", env="JAZZHR_MAX_COMPANIES", kind="int",
+        minimum=0, maximum=2000, group="Company boards",
+        label="JazzHR: companies per cycle",
+        help="Companies read per board cycle, those with the most new matching "
+             "postings first. A posting already read is not read again for a "
+             "week, so after the first few cycles only new ones are pursued. "
+             "About 740 companies match typical engineering roles at once.",
+    ),
+    Tunable(
         key="slug_harvest_urls", env="SLUG_HARVEST_URLS", kind="text",
         group="Company boards", label="Community lists to mine for boards",
         help="Comma-separated URLs of job lists whose links name company "

@@ -94,6 +94,7 @@ def _integrations_status() -> dict:
             {"label": "Amazon Jobs", "ok": getattr(cfg, "AMAZON_ENABLED", True), "builtin": True},
             {"label": "TikTok Careers", "ok": getattr(cfg, "TIKTOK_ENABLED", True), "builtin": True},
             {"label": "Apple Jobs", "ok": getattr(cfg, "APPLE_ENABLED", True), "builtin": True},
+            {"label": "JazzHR", "ok": getattr(cfg, "JAZZHR_ENABLED", True), "builtin": True},
         ],
         "outreach": [
             {"label": "Hunter.io", "ok": _has(cfg.HUNTER_IO_API_KEY)},
