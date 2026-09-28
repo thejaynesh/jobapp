@@ -2,6 +2,10 @@ from celery import Celery
 from celery.schedules import schedule as celery_schedule
 
 from app.config import settings
+from app.services import http_pool
+
+# Every worker's requests reuse connections (`services.http_pool`).
+http_pool.install()
 
 celery_app = Celery(
     "jobapp",

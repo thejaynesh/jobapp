@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 from app.services.activity_log import install_handler as _install_activity_handler
 _install_activity_handler()
 
+# Requests the web process makes (the overlay's enrichment, board probes) reuse
+# connections like the workers' do (`services.http_pool`).
+from app.services import http_pool as _http_pool
+_http_pool.install()
+
 _templates = build_templates()
 
 _HTTP_TITLES = {
