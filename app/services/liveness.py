@@ -60,6 +60,10 @@ CLOSED_MARKERS = (
     "applications for this role are closed",
     "sorry, this job was removed",
     "job has expired",
+    # Paylocity's page for a closed posting, which it redirects to.
+    "that job does not exist or is not currently active",
+    # UKG renders a closed opportunity's page as before, and says so in its data.
+    '"opportunityisclosed":true',
 )
 
 # ATS hosts that answer a closed job by redirecting to the board index rather

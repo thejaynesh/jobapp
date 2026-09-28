@@ -129,6 +129,15 @@ def _probe_jobvite(slug: str) -> bool:
     return _probe_listing(f"https://jobs.jobvite.com/{slug}/search", "jobvite", slug)
 
 
+def _probe_paylocity(slug: str) -> bool:
+    from app.services.sources.paylocity import board
+
+    try:
+        return board(slug) is not None
+    except httpx.HTTPStatusError:
+        return False
+
+
 def _probe_taleo(spec: str) -> bool:
     from app.services.sources.taleo import parse_spec, portal
 
@@ -266,6 +275,7 @@ PROBES = {
     "rippling": _probe_rippling,
     "pinpoint": _probe_pinpoint,
     "taleo": _probe_taleo,
+    "paylocity": _probe_paylocity,
 }
 
 
@@ -314,8 +324,15 @@ def _oracle_name(spec: str) -> str | None:
     return (site_name(*parsed) or None) if parsed else None
 
 
+def _paylocity_name(slug: str) -> str | None:
+    from app.services.sources.paylocity import board
+
+    data = board(slug) or {}
+    return (data.get("ModuleTitle") or "").strip() or None
+
+
 # Boards whose company name comes from somewhere other than a JSON field.
-_NAME_FUNCS = {"oracle": _oracle_name}
+_NAME_FUNCS = {"oracle": _oracle_name, "paylocity": _paylocity_name}
 
 
 def board_company_name(ats: str, slug: str) -> str | None:

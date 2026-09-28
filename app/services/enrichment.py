@@ -112,6 +112,21 @@ _WORKDAY_URL = re.compile(
 )
 # Oracle Recruiting Cloud. The posting page is an empty single-page app, so
 # without this the only route to the text was the model reading a shell.
+# UKG Pro Recruiting. Its search endpoint is disallowed in robots.txt; the
+# posting page is not, and embeds the whole opportunity as a constructor
+# argument.
+_UKG_URL = re.compile(
+    r"https?://(recruiting2?\.ultipro\.com)/([A-Za-z0-9]+)/JobBoard/([0-9a-f-]{36})/"
+    r"OpportunityDetail\?(?:[^#\s\"'<>]*&)?opportunityId=([0-9a-f-]{36})", re.I,
+)
+_UKG_DATA = re.compile(r"CandidateOpportunityDetail\((\{.*?\})\);", re.S)
+# Dayforce. Its search refuses a plain request; the posting page is rendered on
+# the server with the posting in its Next.js data.
+_DAYFORCE_URL = re.compile(
+    r"https?://jobs\.dayforcehcm\.com/([A-Za-z]{2}-[A-Za-z]{2})/([A-Za-z0-9_-]+)/"
+    r"([A-Za-z0-9_-]+)/jobs/(\d+)", re.I,
+)
+_NEXT_DATA = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
 # Taleo's detail page carries the posting URL-encoded in a hidden field.
 _TALEO_URL = re.compile(
     r"https?://([a-z0-9-]+)\.taleo\.net/careersection/([A-Za-z0-9_]+)/jobdetail\.ftl"
@@ -296,6 +311,67 @@ def _taleo(client: httpx.Client, tenant: str, section: str, job: str) -> Extract
     return Extraction(description=description, method="ats_api") if description else Extraction()
 
 
+def _ukg(client: httpx.Client, host: str, tenant: str, board: str,
+         opportunity: str) -> Extraction:
+    resp = client.get(f"https://{host}/{tenant}/JobBoard/{board}/OpportunityDetail",
+                      params={"opportunityId": opportunity})
+    resp.raise_for_status()
+    match = _UKG_DATA.search(resp.text)
+    if not match:
+        return Extraction()
+    data = json.loads(match.group(1))
+    address = ((data.get("Locations") or [{}])[0] or {}).get("Address") or {}
+    location = ", ".join(p for p in (
+        address.get("City"), (address.get("State") or {}).get("Code"),
+        (address.get("Country") or {}).get("Name")) if p)
+    details = {"location": location} if location else {}
+    if data.get("FullTime") is not None:
+        details["employment_type"] = "full_time" if data["FullTime"] else "part_time"
+    for period, low, high in (("YEAR", "CompensationAnnualMinimum", "CompensationAnnualMaximum"),
+                              ("HOUR", "CompensationHourlyMinimum", "CompensationHourlyMaximum")):
+        if data.get(low) or data.get(high):
+            details.update(salary_min=data.get(low), salary_max=data.get(high),
+                           salary_currency="USD", salary_period=period)
+            break
+    return Extraction(
+        description=clean(data.get("Description") or ""),
+        method="ats_api",
+        posted_at=data.get("PostedDate"),
+        details=details,
+    )
+
+
+def _dayforce(client: httpx.Client, language: str, namespace: str, board: str,
+              posting: str) -> Extraction:
+    resp = client.get(f"https://jobs.dayforcehcm.com/{language}/{namespace}/{board}/jobs/{posting}")
+    resp.raise_for_status()
+    match = _NEXT_DATA.search(resp.text)
+    if not match:
+        return Extraction()
+    queries = (((json.loads(match.group(1)).get("props") or {}).get("pageProps") or {})
+               .get("dehydratedState") or {}).get("queries") or []
+    data = next((((q.get("state") or {}).get("data")) for q in queries
+                 if (q.get("queryKey") or [None])[0] == "jobs"), None)
+    if not isinstance(data, dict):
+        return Extraction()
+    content = data.get("jobPostingContent") or {}
+    description = clean("\n\n".join(content.get(k) or "" for k in (
+        "jobDescriptionHeader", "jobDescription", "jobDescriptionFooter")))
+    place = ((data.get("postingLocations") or [{}])[0] or {})
+    location = ", ".join(p for p in (place.get("cityName"), place.get("stateCode"),
+                                     place.get("isoCountryCode")) if p)
+    details = {"location": location} if location else {}
+    for attribute in data.get("jobPostingAttributes") or []:
+        if (attribute or {}).get("name") == "EmploymentIndicator" and attribute.get("value"):
+            details["employment_type"] = attribute["value"]
+    return Extraction(
+        description=description,
+        method="ats_api",
+        posted_at=data.get("postingStartTimestampUTC"),
+        details=details,
+    )
+
+
 def _apple(client: httpx.Client, position_id: str, slug: str | None) -> Extraction:
     from app.services.sources.apple import full_description, loader_data
 
@@ -337,6 +413,12 @@ def _ats_extraction(client: httpx.Client, url: str) -> Extraction:
     match = _TALEO_URL.search(url)
     if match:
         return _taleo(client, *match.groups())
+    match = _UKG_URL.search(url)
+    if match:
+        return _ukg(client, *match.groups())
+    match = _DAYFORCE_URL.search(url)
+    if match:
+        return _dayforce(client, *match.groups())
     return Extraction()
 
 
@@ -346,7 +428,7 @@ def looks_like_ats(url: str) -> bool:
         pattern.search(url or "")
         for pattern in (_GREENHOUSE_EMBED, _GREENHOUSE_URL, _LEVER_URL, _ASHBY_URL,
                         _SMARTRECRUITERS_URL, _WORKABLE_URL, _WORKDAY_URL, _ORACLE_URL,
-                        _APPLE_URL, _TALEO_URL)
+                        _APPLE_URL, _TALEO_URL, _UKG_URL, _DAYFORCE_URL)
     )
 
 

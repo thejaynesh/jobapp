@@ -107,7 +107,7 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         "rippling", "pinpoint",
         # JazzHR: its sitemaps name every open posting, so no registry needed.
         "jazzhr",
-        "taleo",
+        "taleo", "paylocity",
     }),
     # Playwright. The expensive tier, and the one worth running least often.
     "browser": frozenset({"wellfound", "handshake"}),
@@ -484,6 +484,7 @@ def _run_adapters(
         ("rippling", "app.services.sources.rippling"),
         ("pinpoint", "app.services.sources.pinpoint"),
         ("taleo", "app.services.sources.taleo"),
+        ("paylocity", "app.services.sources.paylocity"),
     ):
         slugs = ats_slugs.get(ats_name) or []
         if slugs and not _skip(ats_name):

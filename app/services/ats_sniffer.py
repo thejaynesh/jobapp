@@ -92,6 +92,13 @@ def company_host(url: str) -> str | None:
     if re.search(r"(greenhouse|lever|ashbyhq|smartrecruiters|workable|recruitee|myworkdayjobs)\.",
                  host):
         return None
+    # Nor any host an ATS vendor shares between its customers
+    # (recruiting.paylocity.com, jobs.dayforcehcm.com): a sniff is cached by
+    # host, so the first customer's board would stand for all of them.
+    from app.services.company_domain import ATS_HOSTS
+
+    if any(host == h or host.endswith("." + h) for h in ATS_HOSTS):
+        return None
     return host
 
 

@@ -92,6 +92,12 @@ ATS_PATTERNS: dict[str, list[re.Pattern]] = {
     "pinpoint": [
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.pinpointhq\.com", re.I),
     ],
+    # A board link names the company id; a posting link (/Jobs/Details/<n>)
+    # does not, so it is no use here.
+    "paylocity": [
+        re.compile(r"recruiting\.paylocity\.com/recruiting/jobs/all/"
+                   r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I),
+    ],
     "personio": [
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio\.(?:de|com)", re.I),
         re.compile(r"https?://([A-Za-z0-9-]{2,})\.jobs\.personio-int\.com", re.I),
@@ -432,6 +438,7 @@ ATS_CONFIG_FIELDS = {
     "rippling": "RIPPLING_COMPANY_SLUGS",
     "pinpoint": "PINPOINT_COMPANY_SLUGS",
     "taleo": "TALEO_BOARDS",
+    "paylocity": "PAYLOCITY_COMPANY_IDS",
 }
 
 # Bound per-cycle fetch time: cheap one-request-per-company boards can carry
@@ -457,6 +464,8 @@ TOTAL_SLUG_CAPS = {
     "jibe": 40,
     # One page for the portal number, then a search per role at 25 a page.
     "taleo": 60,
+    # One page each, but thousands of small employers; yield decides which.
+    "paylocity": 200,
 }
 
 # Caps that are a setting of their own rather than a constant here. Workday was
