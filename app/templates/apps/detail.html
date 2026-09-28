@@ -100,6 +100,11 @@
                 title="AI model(s) that generated this document">{{ current_resume.generated_by }}</span>
           {% endif %}
         </div>
+        {% if resume_review %}
+          {% include "apps/partials/resume_review.html" %}
+        {% else %}
+          <p class="text-xs text-gray-400">Written before documents could be edited here — regenerate once to review and edit it.</p>
+        {% endif %}
         {% if resumes | length > 1 %}
         <details class="mt-2">
           <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">
@@ -171,6 +176,19 @@
                 title="AI model(s) that generated this document">{{ current_cl.generated_by }}</span>
           {% endif %}
         </div>
+        {% if letter_body is not none %}
+        <details class="mt-3 border border-gray-200 rounded">
+          <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this letter</summary>
+          <form hx-post="/apps/{{ app.id }}/docs/{{ current_cl.id }}/edit-letter"
+                hx-target="#letter-edit-status" hx-swap="innerHTML" class="px-3 pb-3 space-y-2">
+            <textarea name="body" rows="12" class="w-full border border-gray-300 rounded px-2 py-1 text-sm">{{ letter_body }}</textarea>
+            <div class="flex items-center gap-3">
+              <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Save as a new version</button>
+              <span id="letter-edit-status" class="text-xs"></span>
+            </div>
+          </form>
+        </details>
+        {% endif %}
         {% if cover_letters | length > 1 %}
         <details class="mt-2">
           <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">

@@ -1,9 +1,11 @@
+import html
 import os
 import uuid
 import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
@@ -96,6 +98,7 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
         reverse=True,
     )
     from app.routers.outreach import panel_context
+    from app.services import document_edit
 
     return templates.TemplateResponse(
         "apps/detail.html",
@@ -103,6 +106,11 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
             "request": request,
             "resumes": resumes,
             "cover_letters": cover_letters,
+            # What the current resume says, with the job's changes marked, for
+            # the keyword check and the review-and-edit panel.
+            "resume_review": document_edit.review(resumes[0].content) if resumes else None,
+            "letter_body": (((cover_letters[0].content or {}).get("context") or {})
+                            .get("cover_letter_body") if cover_letters else None),
             # The page embeds the outreach panel partial, so it needs the same
             # context that /outreach/apps/{id}/panel builds.
             **panel_context(db, app_obj),
@@ -248,6 +256,54 @@ def save_notes(
     app_obj.notes = notes
     db.commit()
     return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
+
+
+def _document(db: Session, app_id: uuid.UUID, doc_id: uuid.UUID):
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    doc = db.query(ApplicationDocument).filter(
+        ApplicationDocument.id == doc_id,
+        ApplicationDocument.application_id == app_id,
+    ).first()
+    if app_obj is None or doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return app_obj, doc
+
+
+def _edited(app_obj, save) -> HTMLResponse:
+    """Run an edit; reload the page on success, say what went wrong otherwise."""
+    from app.services.doc_generator import DocGenerationError
+    from app.services.document_edit import NotEditable
+
+    try:
+        save()
+    except NotEditable as exc:
+        return HTMLResponse(f'<span class="text-amber-700">{html.escape(str(exc))}</span>')
+    except DocGenerationError as exc:
+        return HTMLResponse('<span class="text-red-600">The PDF would not compile: '
+                            f"{html.escape(str(exc)[:300])}</span>")
+    return HTMLResponse("", headers={"HX-Redirect": f"/apps/{app_obj.id}"})
+
+
+@router.post("/{app_id}/docs/{doc_id}/edit-resume", response_class=HTMLResponse)
+async def edit_resume(app_id: uuid.UUID, doc_id: uuid.UUID, request: Request,
+                      db: Session = Depends(get_db)):
+    """Save the review panel's summary, bullets and skills as the next resume version."""
+    from app.services import document_edit
+
+    app_obj, doc = _document(db, app_id, doc_id)
+    form = dict(await request.form())
+    return await run_in_threadpool(
+        _edited, app_obj, lambda: document_edit.save_resume(db, app_obj, doc, form))
+
+
+@router.post("/{app_id}/docs/{doc_id}/edit-letter", response_class=HTMLResponse)
+def edit_letter(app_id: uuid.UUID, doc_id: uuid.UUID, body: str = Form(""),
+                db: Session = Depends(get_db)):
+    """Save an edited letter body as the next cover letter version."""
+    from app.services import document_edit
+
+    app_obj, doc = _document(db, app_id, doc_id)
+    return _edited(app_obj, lambda: document_edit.save_letter(db, app_obj, doc, body))
 
 
 @router.post("/{app_id}/regenerate", response_class=HTMLResponse)
