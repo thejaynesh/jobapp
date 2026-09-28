@@ -201,6 +201,20 @@ TUNABLES: list[Tunable] = [
              "dev/.github/scripts/listings.json for internships.",
     ),
     Tunable(
+        key="amazon_enabled", env="AMAZON_ENABLED", kind="bool",
+        group="Sources", label="Amazon Jobs",
+        help="Amazon's own careers search, read by the server with full "
+             "descriptions — independent of the browser crawl. Searched per "
+             "role in your countries (the US when none). Off skips it.",
+    ),
+    Tunable(
+        key="amazon_max_pages", env="AMAZON_MAX_PAGES", kind="int",
+        minimum=1, maximum=10, group="Sources",
+        label="Amazon Jobs: pages per search",
+        help="100 postings a page, newest first, for every role. Amazon posts "
+             "hundreds of matching roles, so 2 reaches the last week or two.",
+    ),
+    Tunable(
         key="slug_harvest_urls", env="SLUG_HARVEST_URLS", kind="text",
         group="Company boards", label="Community lists to mine for boards",
         help="Comma-separated URLs of job lists whose links name company "

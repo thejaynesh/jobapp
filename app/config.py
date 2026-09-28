@@ -558,6 +558,10 @@ class Settings(BaseSettings):
         "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/README.md,"
         "https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md"
     )
+    # Amazon's own careers search (`sources.amazon`), per role, in the profile's
+    # countries (the US when none). 100 postings a page.
+    AMAZON_ENABLED: bool = True
+    AMAZON_MAX_PAGES: int = 2
     # SimplifyJobs' postings as a job source (see `sources.simplify`). New-grad
     # only by default; add the internships file on the settings page to see
     # internships too.

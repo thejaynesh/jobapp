@@ -87,6 +87,8 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
         # SimplifyJobs' curated early-career postings: two files, one request
         # each.
         "simplify",
+        # Amazon's own careers search (search.json), full descriptions inline.
+        "amazon",
         # Dice answers a plain HTTP request through its search API now, so it
         # left the browser tier — see `sources.dice.fetch_api`.
         "dice",
@@ -697,6 +699,21 @@ def _run_adapters(
                     [(r,) for r in roles], _skip)
     else:
         _disable("builtin")
+
+    # --- Amazon: its own careers search, per role and country ---
+    if getattr(cfg, "AMAZON_ENABLED", True) and not _skip("amazon"):
+        from app.services.sources.amazon import countries_for
+        from app.services.sources.amazon import fetch as amazon_fetch
+        _run_combos(
+            stats, all_jobs, "amazon",
+            lambda role, country: amazon_fetch(
+                query=role, country=country,
+                max_pages=getattr(cfg, "AMAZON_MAX_PAGES", None)),
+            [(r, c) for r in roles for c in countries_for(adzuna_country_codes)],
+            _skip,
+        )
+    else:
+        _disable("amazon")
 
     # --- SimplifyJobs: curated US early-career postings, one file per list ---
     simplify_urls = [
