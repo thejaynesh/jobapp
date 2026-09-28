@@ -225,7 +225,7 @@ TUNABLES: list[Tunable] = [
     ),
     Tunable(
         key="workday_site_discovery", env="WORKDAY_SITE_DISCOVERY", kind="bool",
-        group="Company boards", label="Find each Workday company's other sites",
+        group="Company boards", label="Find every Workday site a company runs",
         help="A Workday company often keeps new-grad and internship roles on "
              "their own site (Salesforce's Futureforce_NewGradRoles) that no "
              "posting ever links to. Reads each company's robots.txt once a "
@@ -233,7 +233,7 @@ TUNABLES: list[Tunable] = [
     ),
     Tunable(
         key="commoncrawl_enabled", env="COMMONCRAWL_ENABLED", kind="bool",
-        group="Company boards", label="Find boards in Common Crawl's index",
+        group="Company boards", label="Find boards in the Common Crawl index",
         help="Walks Common Crawl's public URL index for Greenhouse, Ashby, "
              "Workday, Oracle and other ATS hosts, and registers every board it "
              "lists — companies no posting of ours has ever linked to. Each is "
