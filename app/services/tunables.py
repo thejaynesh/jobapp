@@ -80,6 +80,15 @@ TUNABLES: list[Tunable] = [
              "the count that matters there is unreadable replies.",
     ),
     Tunable(
+        key="match_concurrency", env="MATCH_CONCURRENCY", kind="int",
+        minimum=1, maximum=16, group="Models",
+        label="Jobs scored at once",
+        help="How many jobs have their model calls in flight together. Calls "
+             "still start no faster than the provider allows (NIM: 40 a "
+             "minute), so what changes is that one slow reply no longer holds "
+             "up the jobs behind it. 1 scores one job at a time, as before.",
+    ),
+    Tunable(
         key="max_job_age_days", env="MAX_JOB_AGE_DAYS", kind="int",
         minimum=0, maximum=365, group="Filtering",
         label="Maximum job age (days)",

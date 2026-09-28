@@ -740,6 +740,10 @@ class Settings(BaseSettings):
     # re-queue themselves keep the queue moving and make progress durable:
     # a restart loses at most one batch.
     MATCH_MAX_JOBS_PER_TASK: int = 25
+    # Jobs whose model calls are in flight at once within a batch
+    # (`matcher._match_concurrently`); starts are still paced to the RPM limit.
+    # Editable on the settings page.
+    MATCH_CONCURRENCY: int = 4
     # An application whose generation has been running longer than this had its
     # worker killed — Celery lost the task, and nothing was ever going to
     # retry it. The sweeper re-queues those.

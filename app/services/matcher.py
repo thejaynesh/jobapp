@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from difflib import SequenceMatcher
 from typing import NamedTuple
@@ -16,6 +17,19 @@ from app.models.job import Job, JobStatus
 from app.models.profile import Profile
 
 logger = logging.getLogger(__name__)
+
+
+# The cycle's call budgets are one dict that a matching pass may have several
+# jobs' model calls writing to at once (`_match_concurrently`). A bare
+# `budget[k] = budget.get(k, 0) + 1` from two threads can lose a count, and a
+# lost count is a paid call the cap never saw.
+_BUDGET_LOCK = threading.Lock()
+
+
+def _spend(budget: dict, field: str) -> None:
+    """One call counted against `budget[field]`, safely across threads."""
+    with _BUDGET_LOCK:
+        budget[field] = budget.get(field, 0) + 1
 
 MIN_KEYWORD_SKILLS = 2  # overridden by settings.MIN_KEYWORD_SKILLS if present
 
@@ -906,7 +920,7 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None,
             # out billed nothing, and charging failures to the budget could
             # burn the whole cap on one broken provider without a single score.
             if billable and budget is not None:
-                budget["paid_calls"] = budget.get("paid_calls", 0) + 1
+                _spend(budget, "paid_calls")
             logger.info(
                 "llm_score_job: scored job %s via fallback provider %s (%s)",
                 getattr(job, "id", "?"), provider.name, provider.model,
@@ -1122,7 +1136,7 @@ def _deep_score(job, profile_data: dict, score: float,
         # billed one, and a provider erroring on every job would otherwise
         # retry through the whole batch.
         if budget is not None:
-            budget["deep_calls"] = budget.get("deep_calls", 0) + 1
+            _spend(budget, "deep_calls")
 
     if result is None:
         logger.warning(
@@ -1164,6 +1178,22 @@ def _match_job(
     db, job, profile_data: dict, api_key: str, base_url: str, model: str,
     budget: dict | None = None,
 ) -> str:
+    """
+    Screen, evaluate, file. Split in three so a matching pass can have
+    several jobs' evaluations in flight at once (`match_all_new_jobs`): the
+    first and last steps touch the database and run in order on the caller's
+    thread; the middle one is the model calls, and touches nothing but the
+    object it is handed.
+    """
+    early = _screen(job, profile_data)
+    if early is not None:
+        return early
+    return _file(db, job, profile_data,
+                 _evaluate(job, profile_data, api_key, base_url, model, budget))
+
+
+def _screen(job, profile_data: dict) -> str | None:
+    """The checks that need no model. "filtered_out", or None to evaluate."""
     # One pass over the description feeds both halves of the eligibility read.
     # The advisory half is recorded whatever happens next — including on jobs
     # that go on to be filtered for an unrelated reason — because the note is a
@@ -1201,6 +1231,31 @@ def _match_job(
         return "filtered_out"
 
     job.keyword_score = round(outcome.score, 4)
+    return None
+
+
+class _Evaluation:
+    """What the model calls found, for `_file` to write."""
+
+    def __init__(self, subject):
+        # The object evaluated: the job itself, or a snapshot of it.
+        self.subject = subject
+        self.extracted = False
+        self.foreign: str | None = None
+        self.rate_limited = False
+        self.llm_result: dict | None = None
+        self.deep_result: dict | None = None
+
+
+def _evaluate(job, profile_data: dict, api_key: str, base_url: str, model: str,
+              budget: dict | None = None) -> _Evaluation:
+    """
+    The model calls, and nothing else: detail extraction, the language gate it
+    enables, the score and the second opinion. `job` may be a snapshot
+    (`_snapshot`); nothing here reads or writes the database, so it can run on
+    another thread.
+    """
+    evaluation = _Evaluation(job)
 
     # Read the posting's stated facts before scoring it, so the prompt below
     # gets "asks for 3 years, pays $140-170k" as data instead of leaving the
@@ -1210,16 +1265,48 @@ def _match_job(
 
     if job_details.needs_extraction(job):
         try:
-            job_details.extract_and_apply(job)
+            evaluation.extracted = bool(job_details.extract_and_apply(job))
         except Exception as exc:
             # Details are an improvement to scoring, not a precondition for it.
-            logger.warning("match_job: detail extraction failed for %s: %s", job.id, exc)
+            logger.warning("match_job: detail extraction failed for %s: %s",
+                           getattr(job, "id", "?"), exc)
 
         # Extraction is where a posting's language is first learned, so the gate
         # above could not have seen it. Checking again here is what turns a
         # German listing into one wasted call instead of three — this one, the
         # scoring call, and the second opinion behind it.
-        foreign = _blocked_by_language(job, profile_data)
+        evaluation.foreign = _blocked_by_language(job, profile_data)
+        if evaluation.foreign:
+            return evaluation
+
+    try:
+        evaluation.llm_result = llm_score_job(job, profile_data, api_key, base_url, model,
+                                              budget=budget)
+    except (RateLimitError, LLMUnavailableError):
+        evaluation.rate_limited = True
+        return evaluation
+
+    # The second opinion is asked of anyone but whoever gave the first, which
+    # it reads off `matched_by`.
+    job.matched_by = evaluation.llm_result.get("scored_by")
+    evaluation.deep_result = _deep_score(job, profile_data, _penalized(evaluation.llm_result),
+                                         budget)
+    return evaluation
+
+
+def _file(db, job, profile_data: dict, evaluation: _Evaluation) -> str:
+    """Write an evaluation onto the job and decide its fate."""
+    from app.services import job_details
+
+    # Read on a snapshot: what it wrote there, onto the job. (`apply` already
+    # left hand-set fields alone, so copying them back changes nothing.)
+    if evaluation.subject is not job:
+        for field in job_details.WRITTEN_FIELDS:
+            if hasattr(evaluation.subject, field):
+                setattr(job, field, getattr(evaluation.subject, field))
+
+    if evaluation.foreign:
+        foreign = evaluation.foreign
         if foreign:
             job.status = JobStatus.filtered_out
             # Zeroed for the reason the early filter path states a few lines
@@ -1241,12 +1328,11 @@ def _match_job(
             )
             return "filtered_out"
 
-    try:
-        llm_result = llm_score_job(job, profile_data, api_key, base_url, model, budget=budget)
-    except (RateLimitError, LLMUnavailableError):
+    if evaluation.rate_limited:
         # Leave status as `new` so the next cycle retries this job
         return "rate_limited"
 
+    llm_result = evaluation.llm_result
     score = _penalized(llm_result)
 
     from app.services.tunables import value as tunable
@@ -1260,10 +1346,11 @@ def _match_job(
     job.llm_score_deep = None
     job.deep_matched_by = None
 
-    # A close call gets a second opinion. Everything outside the band is not a
-    # close call — a 20 is a 20 and a 95 is a 95 whoever reads them — so the
-    # stronger model is spent only where its answer can change the outcome.
-    deep_result = _deep_score(job, profile_data, score, budget)
+    # A close call got a second opinion (`_deep_score`, in `_evaluate`).
+    # Everything outside the band is not a close call — a 20 is a 20 and a 95
+    # is a 95 whoever reads them — so the stronger model is spent only where
+    # its answer can change the outcome.
+    deep_result = evaluation.deep_result
     if deep_result is not None:
         score = _penalized(deep_result)
         job.llm_score_deep = score
@@ -1320,6 +1407,116 @@ def _match_job(
 def count_unmatched(db) -> int:
     """How many jobs are still waiting to be scored."""
     return db.query(Job).filter(Job.status == JobStatus.new).count()
+
+
+class _Pacer:
+    """
+    Starts no two evaluations closer together than `interval`, across threads.
+
+    The sequential pass slept this long after each scored job to stay under
+    NIM's requests-per-minute limit. With several evaluations in flight the
+    limit is on how often they *start*, which is what this spaces — so calls
+    begin at the same rate as before, but a slow reply no longer holds up the
+    ones behind it.
+    """
+
+    def __init__(self, interval: float):
+        self.interval = max(0.0, float(interval or 0.0))
+        self._next = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        if not self.interval:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.interval
+        if start > now:
+            time.sleep(start - now)
+
+
+def _snapshot(job):
+    """
+    The job's columns as a plain object, for `_evaluate` on another thread.
+
+    An ORM row is tied to the session that loaded it: reading an attribute the
+    last commit expired runs a query, and a session is not to be used from two
+    threads. The snapshot is only data.
+    """
+    from types import SimpleNamespace
+
+    from sqlalchemy import inspect as sa_inspect
+
+    return SimpleNamespace(**{attr.key: getattr(job, attr.key)
+                              for attr in sa_inspect(type(job)).column_attrs})
+
+
+def _match_concurrently(db, jobs, profile_data: dict, api_key: str, base_url: str,
+                        model: str, budget: dict, pace_interval: float, workers: int,
+                        on_matched=None) -> dict:
+    """
+    `match_job` for a batch, with up to `workers` jobs' model calls in flight.
+
+    Screening and filing — everything that reads or writes the database — stay
+    on this thread and in the batch's order, so documents are queued in the
+    order jobs are filed, as before. Only `_evaluate` moves, on a snapshot.
+
+    The call budgets (paid failover, second opinions) are shared across the
+    threads and counted under a lock (`_spend`), so none is lost. Each is
+    checked before its call and counted after it, so a cycle can overshoot a
+    cap by at most the jobs in flight when it runs out.
+    """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services import score_history
+
+    counts = {"processed": 0, "matched": 0, "filtered_out": 0, "rate_limited": 0, "errors": 0}
+    pacer = _Pacer(pace_interval)
+
+    def evaluate(snapshot):
+        pacer.wait()
+        return _evaluate(snapshot, profile_data, api_key, base_url, model, budget)
+
+    def finish(job, outcome: str) -> None:
+        if outcome != "rate_limited":
+            score_history.record(db, job, profile_data=profile_data, outcome=outcome)
+        db.commit()
+        counts["processed"] += 1
+        key = outcome if outcome in ("matched", "rate_limited") else "filtered_out"
+        counts[key] += 1
+        if outcome == "matched" and on_matched is not None:
+            try:
+                on_matched(job)
+            except Exception as exc:
+                logger.error("match_all_new_jobs: on_matched failed for %s: %s", job.id, exc)
+
+    pending = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="match") as pool:
+        for job in jobs:
+            try:
+                early = _screen(job, profile_data)
+                if early is not None:
+                    finish(job, early)
+                    continue
+                snapshot = _snapshot(job)
+                pending.append((job, pool.submit(contextvars.copy_context().run,
+                                                 evaluate, snapshot)))
+            except Exception as exc:
+                logger.error("match_all_new_jobs error on job %s: %s",
+                             getattr(job, "id", "?"), exc)
+                db.rollback()
+                counts["errors"] += 1
+        for job, future in pending:
+            try:
+                finish(job, _file(db, job, profile_data, future.result()))
+            except Exception as exc:
+                logger.error("match_all_new_jobs error on job %s: %s",
+                             getattr(job, "id", "?"), exc)
+                db.rollback()
+                counts["errors"] += 1
+    return counts
 
 
 def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
@@ -1381,6 +1578,24 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
     shared = budget is None
     if shared:
         budget = match_budget.load()
+
+    try:
+        workers = max(1, int(tunable(profile_data, "match_concurrency")))
+    except (TypeError, ValueError):
+        workers = 1
+    if workers > 1 and len(new_jobs) > 1:
+        counts = _match_concurrently(db, new_jobs, profile_data, api_key, base_url, model,
+                                     budget, pace_interval, workers, on_matched)
+        if shared:
+            match_budget.save(budget)
+        remaining = count_unmatched(db)
+        logger.info(
+            "match_all_new_jobs done (%d at once) — processed=%d matched=%d "
+            "filtered_out=%d rate_limited=%d errors=%d paid_llm_calls=%d remaining=%d",
+            workers, counts["processed"], counts["matched"], counts["filtered_out"],
+            counts["rate_limited"], counts["errors"], budget["paid_calls"], remaining,
+        )
+        return {**counts, "paid_llm_calls": budget["paid_calls"], "remaining": remaining}
 
     for job in new_jobs:
         try:

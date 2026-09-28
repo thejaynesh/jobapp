@@ -411,6 +411,16 @@ def apply(job, details: dict) -> None:
     job.details_extracted_at = datetime.now(timezone.utc)
 
 
+# Every column `apply` can write, for copying an extraction made on a snapshot
+# of a job onto the job itself (`matcher._file`).
+WRITTEN_FIELDS = (
+    "salary_min", "salary_max", "salary_currency", "salary_period",
+    "salary_annual_min", "salary_annual_max", "employment_type", "required_years",
+    "required_skills", "nice_to_have_skills", "education_required", "benefits_note",
+    "language", "details_extracted_at",
+)
+
+
 def extract_and_apply(job) -> bool:
     """One call, written to the job. True when details were read."""
     details = extract(job.description, job_id=getattr(job, "id", None))

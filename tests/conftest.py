@@ -177,6 +177,20 @@ def _slug_harvest_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _matching_one_job_at_a_time_by_default(monkeypatch):
+    """
+    A matching pass scores several jobs at once in production
+    (`MATCH_CONCURRENCY`), through `matcher._match_concurrently`, which calls
+    the screen/evaluate/file steps rather than `match_job`. The tests of the
+    pass itself — its counters, its pacing sleep, its chaining — fake
+    `match_job` and assert on the one-at-a-time loop, so that is the loop they
+    get. `tests/test_match_concurrency.py` sets its own value and tests the
+    other.
+    """
+    monkeypatch.setattr(settings, "MATCH_CONCURRENCY", 1)
+
+
+@pytest.fixture(autouse=True)
 def _enrichment_on_fetch_off_by_default(monkeypatch):
     """
     A fetch cycle enriches the thin postings it just stored, over the network.
