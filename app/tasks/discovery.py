@@ -26,21 +26,32 @@ logger = logging.getLogger(__name__)
 )
 def discover_boards(force: bool = False) -> dict:
     from app.models.profile import Profile
-    from app.services import commoncrawl
+    from app.services import commoncrawl, company_boards
     from app.services.tunables import value
 
     db = SessionLocal()
     try:
         profile = db.query(Profile).first()
         data = profile.data if profile else {}
+        report: dict = {"ok": True}
+        # Every career site of the Workday tenants already registered. Cheap
+        # after the first pass — only tenants not read this month are asked —
+        # so it runs on every tick rather than waiting for the walk below.
+        if value(data, "workday_site_discovery"):
+            try:
+                report["workday_sites"] = company_boards.expand_workday_sites(db)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning("discovery: Workday site expansion failed: %s", exc)
         if not force and not value(data, "commoncrawl_enabled"):
-            return {"ok": True, "skipped": True, "detail": "switched off"}
-        return commoncrawl.run(
+            return {**report, "skipped": True, "detail": "switched off"}
+        return {**report, **commoncrawl.run(
             db,
             pages_per_run=value(data, "commoncrawl_pages_per_run"),
             interval_hours=value(data, "commoncrawl_interval_hours"),
             force=force,
-        )
+        )}
     finally:
         db.close()
 

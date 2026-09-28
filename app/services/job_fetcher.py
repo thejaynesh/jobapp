@@ -1275,8 +1275,9 @@ def fetch_and_save_jobs(
                     boards.record_boards(db, harvested, origin="list", revive=False,
                                          names=harvested_names)
                 if settings.ATS_SEED_COMPANIES:
-                    from app.services.ats_seeds import SEED_ATS_SLUGS
-                    boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed")
+                    from app.services.ats_seeds import SEED_ATS_SLUGS, SEED_BOARD_NAMES
+                    boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed",
+                                               names=SEED_BOARD_NAMES)
                 if validated_configured:
                     boards.backfill_from_slugs(db, validated_configured, origin="configured")
             db.commit()

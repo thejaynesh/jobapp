@@ -224,6 +224,14 @@ TUNABLES: list[Tunable] = [
              "cycles only.",
     ),
     Tunable(
+        key="workday_site_discovery", env="WORKDAY_SITE_DISCOVERY", kind="bool",
+        group="Company boards", label="Find each Workday company's other sites",
+        help="A Workday company often keeps new-grad and internship roles on "
+             "their own site (Salesforce's Futureforce_NewGradRoles) that no "
+             "posting ever links to. Reads each company's robots.txt once a "
+             "month and registers every site it lists.",
+    ),
+    Tunable(
         key="commoncrawl_enabled", env="COMMONCRAWL_ENABLED", kind="bool",
         group="Company boards", label="Find boards in Common Crawl's index",
         help="Walks Common Crawl's public URL index for Greenhouse, Ashby, "

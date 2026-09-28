@@ -379,10 +379,11 @@ def record_fetch_results(
 
 
 def backfill_from_slugs(
-    db: Session, slugs_by_ats: dict[str, list[str]], origin: str
+    db: Session, slugs_by_ats: dict[str, list[str]], origin: str,
+    names: dict[tuple[str, str], str] | None = None,
 ) -> int:
     """Import a stored slug mapping (config, seeds, the legacy profile blob)."""
-    return record_boards(db, slugs_by_ats, origin=origin, revive=False)
+    return record_boards(db, slugs_by_ats, origin=origin, revive=False, names=names)
 
 
 def summary(db: Session) -> dict:
@@ -465,3 +466,92 @@ def reactivate(db: Session, board_id) -> CompanyBoard | None:
     board.consecutive_empty = 0
     logger.info("company_boards: reactivated %s/%s", board.ats, board.slug)
     return board
+
+
+WORKDAY_SITES_KEY = "workday_sites_scanned"
+# A tenant adds a career site rarely; once a month is plenty to notice.
+_WORKDAY_RESCAN_DAYS = 30
+
+
+def expand_workday_sites(db: Session, limit: int = 300, workers: int = 8) -> dict:
+    """
+    Register every career site of the Workday tenants the registry knows.
+
+    Discovery finds a tenant through one posting link, which names one site —
+    usually the main one. New-grad and internship roles often live on sites of
+    their own (`Futureforce_NewGradRoles`, `…-Early-Careers`), and nothing ever
+    linked us to those. The tenant's robots.txt lists every site
+    (`sources.workday.sites_for`), so each tenant is read once, then again a
+    month later; the sites found go through validation like any other board.
+
+    Which tenants were read, and when, lives on the profile under
+    `WORKDAY_SITES_KEY` — one short entry per tenant.
+    """
+    import copy
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+
+    from app.models.profile import Profile
+    from app.services.sources.workday import parse_tenant_spec, sites_for
+
+    profile = db.query(Profile).first()
+    if profile is None:
+        return {"scanned": 0, "new_boards": 0}
+    scanned = dict((profile.data or {}).get(WORKDAY_SITES_KEY) or {})
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_WORKDAY_RESCAN_DAYS)
+
+    def stale(key: str) -> bool:
+        try:
+            return datetime.fromisoformat(scanned[key]) < cutoff
+        except (KeyError, ValueError, TypeError):
+            return True
+
+    tenants: dict[str, str | None] = {}   # "tenant:host" → a company name
+    for slug, company in (
+        db.query(CompanyBoard.slug, CompanyBoard.company)
+        .filter(CompanyBoard.ats == "workday", CompanyBoard.active.is_(True))
+        .order_by(CompanyBoard.total_job_count.desc(), CompanyBoard.slug.asc())
+        .all()
+    ):
+        parsed = parse_tenant_spec(slug)
+        if not parsed:
+            continue
+        key = f"{parsed[0]}:{parsed[1]}"
+        if stale(key) and key not in tenants:
+            tenants[key] = company
+        if len(tenants) >= max(0, limit):
+            break
+    if not tenants:
+        return {"scanned": 0, "new_boards": 0}
+
+    def read(key: str):
+        tenant, host = key.split(":", 1)
+        try:
+            return key, sites_for(tenant, host)
+        except Exception as exc:
+            logger.info("company_boards: no robots.txt sites for %s: %s", key, exc)
+            return key, None
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tenants)))) as pool:
+        results = list(pool.map(read, tenants))
+
+    found: dict[str, set[str]] = {"workday": set()}
+    names: dict[tuple[str, str], str] = {}
+    now = datetime.now(timezone.utc).isoformat()
+    for key, sites in results:
+        scanned[key] = now
+        for site in sites or []:
+            spec = f"{key}:{site}"
+            found["workday"].add(spec)
+            if tenants.get(key):
+                names[("workday", spec)] = tenants[key]
+    new = record_boards(db, found, origin="workday-sites", revive=False, names=names)
+
+    db.refresh(profile)
+    data = copy.deepcopy(profile.data or {})
+    data[WORKDAY_SITES_KEY] = scanned
+    profile.data = data
+    db.flush()
+    logger.info("company_boards: read %d Workday tenants' sites, %d new sites",
+                len(results), new)
+    return {"scanned": len(results), "new_boards": new}

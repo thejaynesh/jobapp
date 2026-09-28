@@ -470,6 +470,9 @@ class Settings(BaseSettings):
     # Company boards from Common Crawl's URL index (`services.commoncrawl`):
     # index pages read per walk (~15,000 URLs each), and how often a walk runs.
     # A walk resumes where the last stopped and restarts on each new crawl.
+    # Read each registered Workday tenant's robots.txt (monthly) for the rest
+    # of its career sites — new-grad and internship sites are often separate.
+    WORKDAY_SITE_DISCOVERY: bool = True
     COMMONCRAWL_ENABLED: bool = True
     COMMONCRAWL_PAGES_PER_RUN: int = 20
     COMMONCRAWL_INTERVAL_HOURS: int = 24

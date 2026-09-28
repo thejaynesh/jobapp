@@ -35,3 +35,16 @@ SEED_ATS_SLUGS: dict[str, list[str]] = {
         "workday:wd5:Workday",
     ],
 }
+
+
+# Large US employers' boards (see `ats_seeds_large`), merged in after the
+# hand-verified list above, and their company names for the registry rows.
+from app.services.ats_seeds_large import LARGE_EMPLOYER_BOARDS  # noqa: E402
+
+SEED_BOARD_NAMES: dict[tuple[str, str], str] = {}
+for _ats, _boards in LARGE_EMPLOYER_BOARDS.items():
+    _known = SEED_ATS_SLUGS.setdefault(_ats, [])
+    for _board, _company in _boards:
+        if _board not in _known:
+            _known.append(_board)
+        SEED_BOARD_NAMES[(_ats, _board)] = _company

@@ -30,6 +30,26 @@ _STRIP_TAGS = re.compile(r"<[^>]+>")
 _RELATIVE_POSTED = re.compile(r"posted\s+(today|yesterday|(\d+)\+?\s+days?\s+ago)", re.I)
 
 
+_SITEMAP_SITE = re.compile(r"^\s*Sitemap:\s*https?://[^/]+/([A-Za-z0-9_-]+)/siteMap\.xml",
+                           re.I | re.M)
+
+
+def sites_for(tenant: str, host: str) -> list[str]:
+    """
+    Every external career site a Workday tenant publishes, from its robots.txt.
+
+    A tenant is often more than one site, and the one discovery found first is
+    rarely the one a new graduate wants: Salesforce keeps
+    `Futureforce_NewGradRoles` and `Futureforce_Internships` apart from
+    `External_Career_Site`, Rockwell has `…-Early-Careers`. Each site's sitemap
+    is listed in the tenant's robots.txt, which is where they are read from.
+    """
+    resp = httpx.get(f"https://{tenant}.{host}.myworkdayjobs.com/robots.txt",
+                     timeout=15, follow_redirects=True)
+    resp.raise_for_status()
+    return list(dict.fromkeys(_SITEMAP_SITE.findall(resp.text or "")))
+
+
 def parse_tenant_spec(spec: str) -> tuple[str, str, str] | None:
     parts = [p.strip() for p in spec.split(":")]
     if len(parts) == 3 and all(parts):
