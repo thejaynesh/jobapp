@@ -10,8 +10,8 @@ from app.models.job import Job, JobStatus
 from app.models.profile import Profile
 from app.services import posting_identity
 from app.services.deduplication import (
-    compute_dedupe_hash, enrich_from, find_existing_job, merge_description,
-    merge_or_skip, note_addresses, note_source, was_archived,
+    KnownPostings, compute_dedupe_hash, enrich_from, find_existing_job, ids_by_each_address,
+    merge_description, merge_or_skip, note_addresses, note_source, was_archived,
 )
 from app.services.descriptions import clean as clean_description
 
@@ -1104,15 +1104,66 @@ def _sources_not_due(db: Session, cfg) -> dict[str, str]:
     return waiting
 
 
-def _known_urls(db: Session) -> set[str]:
-    """Every URL already attached to a stored job, listing or apply."""
+_LOOKUP_CHUNK = 500
+
+
+def _known_postings(db: Session, chunk: list[dict]):
+    """
+    The stored and archived rows this chunk of postings matches, looked up in
+    one pass, and the matched rows themselves loaded in one query. Loaded
+    whole: deferring the descriptions made every merge that compares text
+    fetch its row's description on its own, and the chunk ran slower than the
+    per-posting lookups it replaced (11 s against 8.3 s for 3,000). None when
+    the lookup fails; the loop then asks per posting, as it always did.
+    """
+    postings = []
+    for j in chunk:
+        try:
+            postings.append(
+                {"url": j.get("url", ""), "apply_url": j.get("apply_url"),
+                 "source": j.get("source", ""), "source_job_id": j.get("source_job_id"),
+                 "dedupe_hash": compute_dedupe_hash(j.get("company", ""), j.get("title", ""),
+                                                    j.get("location", ""), j.get("url", ""))})
+        except Exception:
+            # A posting that cannot even be hashed fails again in the loop,
+            # inside its own savepoint, where it is counted and named.
+            continue
+    try:
+        # Its own savepoint: a failed read must not roll back the inserts of
+        # the chunks before it that have not been committed yet.
+        with db.begin_nested():
+            known = KnownPostings(db, postings)
+            ids = set(known.by_address.values()) | set(known.by_pair.values()) \
+                | set(known.by_hash.values())
+            # Held on `known` for the chunk: the session keeps only weak
+            # references, and an unreferenced row would be read again by `db.get`.
+            known.rows = db.query(Job).filter(
+                Job.id.in_(list(ids))).all() if ids else []
+        return known
+    except Exception as exc:
+        logger.warning("job_fetcher: batched lookup failed, asking per posting: %s", exc)
+        return None
+
+
+def _known_urls(db: Session, urls) -> set[str]:
+    """
+    Which of these URLs are already on a stored job, as its listing, its apply
+    link or one of its sightings.
+
+    Asked about the candidates only. This used to read every URL of every
+    stored job into a set on every cycle — the whole table, arrays and all,
+    to answer a question about the handful of interstitial links a cycle
+    brings in. Each of the three lookups has an index (0038); for
+    `source_urls`, the candidates joined one by one against the GIN index is
+    the form it answers at any size (`deduplication.ids_by_each_address`).
+    """
+    wanted = [u for u in dict.fromkeys(urls) if u]
     known: set[str] = set()
-    for url, source_urls, apply_url in db.query(Job.url, Job.source_urls, Job.apply_url):
-        if url:
-            known.add(url)
-        if apply_url:
-            known.add(apply_url)
-        known.update(u for u in (source_urls or []) if u)
+    for start in range(0, len(wanted), 1000):
+        chunk = wanted[start:start + 1000]
+        known.update(u for (u,) in db.query(Job.url).filter(Job.url.in_(chunk)))
+        known.update(u for (u,) in db.query(Job.apply_url).filter(Job.apply_url.in_(chunk)))
+        known.update(ids_by_each_address(db, Job, chunk))
     return known
 
 
@@ -1125,11 +1176,9 @@ def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
     """
     from app.services.link_resolver import is_interstitial, resolve_jobs
 
-    known = _known_urls(db)
-    fresh = [
-        job for job in raw_jobs
-        if (job.get("url") or "") not in known and is_interstitial(job.get("url") or "")
-    ]
+    candidates = [job for job in raw_jobs if is_interstitial(job.get("url") or "")]
+    known = _known_urls(db, {job.get("url") or "" for job in candidates})
+    fresh = [job for job in candidates if (job.get("url") or "") not in known]
     if not fresh:
         return None
     return resolve_jobs(
@@ -1682,7 +1731,14 @@ def fetch_and_save_jobs(
         )
         entry[outcome] += 1
 
-    for job_data in raw_jobs:
+    known: KnownPostings | None = None
+    for index, job_data in enumerate(raw_jobs):
+        # Which of the next chunk's postings are already stored, or archived,
+        # asked of the database once for the chunk (`KnownPostings`) rather
+        # than once per posting per question. A chunk that cannot be looked up
+        # this way falls back to asking posting by posting.
+        if index % _LOOKUP_CHUNK == 0:
+            known = _known_postings(db, raw_jobs[index:index + _LOOKUP_CHUNK])
         # Each job gets its own savepoint: a flush that fails (a constraint
         # violation, an over-long value) used to leave the session in a failed
         # state, so every job after it errored and the final commit lost the
@@ -1710,8 +1766,13 @@ def fetch_and_save_jobs(
                     continue
 
                 dedupe_hash = compute_dedupe_hash(company, title, location, url)
-                existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
-                                             apply_url=apply_url)
+                if known is not None:
+                    existing_id = known.existing_id(source, url, source_job_id, dedupe_hash,
+                                                    apply_url=apply_url)
+                    existing = db.get(Job, existing_id) if existing_id is not None else None
+                else:
+                    existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
+                                                 apply_url=apply_url)
 
                 if existing is not None:
                     # What this sighting knows, in the shape the shared merge
@@ -1750,6 +1811,8 @@ def fetch_and_save_jobs(
                     else:
                         improved += merge_or_skip(db, existing, url, description,
                                                   layer=3, data=sighting)
+                    if known is not None:
+                        known.remember(existing)
 
                     # "Merged" means the row got better, not that it was
                     # touched. It is the number the panel reports as "enriched",
@@ -1766,7 +1829,9 @@ def fetch_and_save_jobs(
                 # a scoring call, reaches the same verdict, and is archived
                 # again sixty days later. There is nothing to merge into — the
                 # description is what archiving discarded — so it is a skip.
-                if was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url):
+                if (known.archived(source, url, source_job_id, dedupe_hash, apply_url=apply_url)
+                        if known is not None else
+                        was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url)):
                     counts["skipped"] += 1
                     _tally(source, "skipped")
                     continue
@@ -1807,6 +1872,8 @@ def fetch_and_save_jobs(
                 )
                 db.add(new_job)
                 db.flush()
+                if known is not None:
+                    known.remember(new_job)
                 counts["inserted"] += 1
                 _tally(source, "inserted")
 

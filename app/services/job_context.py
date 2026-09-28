@@ -90,8 +90,16 @@ def find_job(db, url: str) -> Job | None:
         return job
 
     # source_urls accumulates every address a posting was seen at, which is
-    # exactly this question, so it is worth the array scan as a last resort.
-    return db.query(Job).filter(Job.source_urls.overlap(variants)).first()
+    # exactly this question — and the posting's canonical address is one of
+    # them, so a link to it in any source's spelling finds the row. Through
+    # `ids_by_address`, whose query carries no LIMIT: with one, the planner
+    # chose a sequential scan (67 ms against 0.1 ms through the index, 0038).
+    from app.services import posting_identity
+    from app.services.deduplication import ids_by_address
+
+    addresses = variants + [a for a in posting_identity.urls(url) if a not in variants]
+    ids = ids_by_address(db, Job, addresses)
+    return db.get(Job, ids[0]) if ids else None
 
 
 def _score(job: Job) -> int | None:

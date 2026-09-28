@@ -129,11 +129,11 @@ def compute_dedupe_hash(company: str, title: str, location: str,
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
-def _ids_by_address(db: Session, model, addresses: list[str]) -> list:
+def ids_by_address(db: Session, model, addresses: list[str]) -> list:
     """
     The ids of rows whose `source_urls` hold any of these addresses.
 
-    Ids first, without a LIMIT, then the row. `.first()` adds `LIMIT 1`, and
+    Ids, without a LIMIT; the caller loads the row. `.first()` adds `LIMIT 1`, and
     the planner has no statistics for an array of unique URLs: it guesses 600
     matches in 120,000 rows, decides a sequential scan will find one of them
     sooner than the index can start, and reads the whole table — 62 ms for a
@@ -143,6 +143,38 @@ def _ids_by_address(db: Session, model, addresses: list[str]) -> list:
     if not addresses:
         return []
     return [row[0] for row in db.query(model.id).filter(model.source_urls.overlap(addresses))]
+
+
+def ids_by_each_address(db: Session, model, addresses) -> dict:
+    """
+    For each address a stored row's `source_urls` holds, that row's id.
+
+    For many addresses at once — a fetch chunk's thousand. One `&&` against
+    the whole list is the wrong shape for that: the planner prices each
+    element at 0.5% of the table, so past about eighty elements it expects
+    every row to match and scans them all — 1.1 s per chunk on 100,000 rows,
+    where the index answers in 13 ms. Joined against the list instead, each
+    address is its own `@>` probe of the GIN index, and the plan no longer
+    depends on how many there are: 9 ms for a thousand (measured 2026-09-28).
+    """
+    import uuid as _uuid
+
+    from sqlalchemy import text
+
+    wanted = [a for a in dict.fromkeys(addresses) if a]
+    if not wanted:
+        return {}
+    table = model.__table__.name
+    rows = db.execute(
+        text(f"SELECT a, t.id FROM unnest(CAST(:addresses AS varchar[])) AS a "
+             f"JOIN {table} AS t ON t.source_urls @> ARRAY[a]"),
+        {"addresses": wanted},
+    )
+    found: dict = {}
+    for address, row_id in rows:
+        found.setdefault(address, row_id if isinstance(row_id, _uuid.UUID)
+                         else _uuid.UUID(str(row_id)))
+    return found
 
 
 def find_existing_job(
@@ -164,7 +196,7 @@ def find_existing_job(
     # `= ANY` 48.3 ms and a sequential scan of the whole table. This runs once
     # per fetched posting. `&&` (`.overlap`) is one of the operators the GIN
     # index answers, so asking for any of a posting's addresses is one lookup.
-    ids = _ids_by_address(db, Job, posting_identity.urls(url, apply_url))
+    ids = ids_by_address(db, Job, posting_identity.urls(url, apply_url))
     if ids:
         return db.get(Job, ids[0])
 
@@ -208,7 +240,7 @@ def was_archived(
 
     # `.contains`, not `.any` — see `find_existing_job`. Migration 0028 added a
     # GIN index here for exactly this lookup and `.any()` could never use it.
-    if _ids_by_address(db, ArchivedJob, posting_identity.urls(url, apply_url)):
+    if ids_by_address(db, ArchivedJob, posting_identity.urls(url, apply_url)):
         return True
 
     if source_job_id:
@@ -222,6 +254,95 @@ def was_archived(
     return db.query(ArchivedJob.id).filter(
         ArchivedJob.dedupe_hash == dedupe_hash
     ).first() is not None
+
+
+class KnownPostings:
+    """
+    `find_existing_job` and `was_archived` for a chunk of postings at once.
+
+    The fetcher asked them per posting — up to three queries to find the row
+    and three more to rule out a tombstone — for every posting of every cycle,
+    most of them postings it had seen the cycle before. This asks each of the
+    six questions once for the whole chunk, through the same indexes, and
+    answers the postings from memory in the same layer order: address, then
+    the source's own id, then the content hash.
+
+    It learns as the chunk is saved (`remember`): a posting stored or merged
+    earlier in the chunk is found by a later sighting of it, as it was when
+    each lookup went to the database.
+    """
+
+    def __init__(self, db: Session, postings: list[dict]):
+        from sqlalchemy import tuple_
+
+        from app.models.archived_job import ArchivedJob
+
+        addresses: set[str] = set()
+        pairs: set[tuple[str, str]] = set()
+        hashes: set[str] = set()
+        for p in postings:
+            addresses.update(posting_identity.urls(p["url"], p.get("apply_url")))
+            if p.get("source_job_id"):
+                pairs.add((p["source"], str(p["source_job_id"])))
+            if p.get("dedupe_hash"):
+                hashes.add(p["dedupe_hash"])
+
+        self.by_address: dict[str, object] = {}
+        self.by_pair: dict[tuple[str, str], object] = {}
+        self.by_hash: dict[str, object] = {}
+        self.archived_addresses: set[str] = set()
+        self.archived_pairs: set[tuple[str, str]] = set()
+        self.archived_hashes: set[str] = set()
+        # The matched rows, when the caller loads them; held to keep them in
+        # the session's (weak) identity map for the chunk.
+        self.rows: list = []
+
+        pair_list, hash_list = list(pairs), list(hashes)
+        if addresses:
+            self.by_address.update(ids_by_each_address(db, Job, addresses))
+            self.archived_addresses.update(ids_by_each_address(db, ArchivedJob, addresses))
+        if pair_list:
+            for job_id, source, source_job_id in db.query(
+                    Job.id, Job.source, Job.source_job_id).filter(
+                    tuple_(Job.source, Job.source_job_id).in_(pair_list)):
+                self.by_pair.setdefault((source, source_job_id), job_id)
+            self.archived_pairs.update(
+                (source, source_job_id) for source, source_job_id in db.query(
+                    ArchivedJob.source, ArchivedJob.source_job_id).filter(
+                    tuple_(ArchivedJob.source, ArchivedJob.source_job_id).in_(pair_list)))
+        if hash_list:
+            self.by_hash.update(db.query(Job.dedupe_hash, Job.id).filter(
+                Job.dedupe_hash.in_(hash_list)))
+            self.archived_hashes.update(h for (h,) in db.query(ArchivedJob.dedupe_hash).filter(
+                ArchivedJob.dedupe_hash.in_(hash_list)))
+
+    def existing_id(self, source: str, url: str, source_job_id, dedupe_hash: str,
+                    apply_url: str | None = None):
+        """The id `find_existing_job` would have returned the row of, or None."""
+        for address in posting_identity.urls(url, apply_url):
+            if address in self.by_address:
+                return self.by_address[address]
+        if source_job_id and (source, str(source_job_id)) in self.by_pair:
+            return self.by_pair[(source, str(source_job_id))]
+        return self.by_hash.get(dedupe_hash)
+
+    def archived(self, source: str, url: str, source_job_id, dedupe_hash: str,
+                 apply_url: str | None = None) -> bool:
+        """What `was_archived` would have said."""
+        return (
+            any(a in self.archived_addresses for a in posting_identity.urls(url, apply_url))
+            or bool(source_job_id and (source, str(source_job_id)) in self.archived_pairs)
+            or dedupe_hash in self.archived_hashes
+        )
+
+    def remember(self, job: Job) -> None:
+        """A row this chunk stored or merged into, as the database now has it."""
+        for address in job.source_urls or ():
+            self.by_address.setdefault(address, job.id)
+        if job.source_job_id:
+            self.by_pair.setdefault((job.source, str(job.source_job_id)), job.id)
+        if job.dedupe_hash:
+            self.by_hash.setdefault(job.dedupe_hash, job.id)
 
 
 def find_duplicate_application_job(db: Session, job) -> Job | None:
