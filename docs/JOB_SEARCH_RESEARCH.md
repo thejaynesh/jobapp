@@ -52,6 +52,41 @@ wrap Greenhouse behind `?gh_jid=`, and the careers-site sniffer now finds the
 board for 212 of them ("Find the Greenhouse board behind employers' own
 careers sites"), 191 of them boards we had no other way to learn.
 
+## Round three: other job projects, and the extensions (2026-09-28)
+
+A survey of open-source job projects on GitHub not covered in §3, with the
+browser extensions this time. The GitHub search API is not reachable from
+this environment, so projects were found by web search and read from
+`raw.githubusercontent.com`. Licences were checked before anything was reused:
+**data** was taken only from MIT-licensed projects; from the rest, and from
+the GPL-3.0 ones, only ideas.
+
+| Project | What it is | What we took | Commit subject |
+|---|---|---|---|
+| [Feashliaa/job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator) (MIT) | 1M+ postings from 20k+ companies, daily on GitHub Actions; per-ATS company lists harvested from Common Crawl. | Its lists, read by the board harvest: **46,644 boards** we had no other way to know (11,233 Workday sites). New boards are also probed hourly now, so the backlog drains in about a week. | "Harvest other projects' board registries…" |
+| [haoawake/career-radar](https://github.com/haoawake/career-radar) (no licence) | 603 employers' ATS APIs, seniority and visa signals with evidence. | Retiring postings missing from a *complete* board read: nine full-feed adapters now close a posting the moment its board stops listing it. Its visa classifier we already have (`services.eligibility`). | "Close postings the moment their board stops listing them" |
+| [berellevy/job_app_filler](https://github.com/berellevy/job_app_filler) (BSD-3), [nikhil-ghind/autograph](https://github.com/nikhil-ghind/autograph) (GPL-3.0), [andrewmillercode/Autofill-Jobs](https://github.com/andrewmillercode/Autofill-Jobs), [ankitsharma38/Workday-Autofill-Assistant](https://github.com/ankitsharma38/Workday-Autofill-Assistant) | Autofill extensions for Workday, Greenhouse, Lever and up to 21 ATSes. | Ideas only: radio-button questions, custom listbox dropdowns, following a multi-step Workday form as it renders, and a store of answered questions. Written afresh in `extension/autofill.js`, with the answer store on the user's server, plus EEO declines. Its browser tests found two old bugs (the inverted sponsorship question, and "ethnicity" matching the location rule). | "Autofill radio questions, custom dropdowns, EEO declines and remembered answers" |
+| [seancampbell3161/job-aggregator](https://github.com/seancampbell3161/job-aggregator) (Apache-2.0) | Self-hosted alert pipeline, 15 ATS families, discovery from YC and VC portfolio lists. | The YC idea, through [yc-oss](https://github.com/yc-oss/api): 1,478 hiring YC companies' websites looked behind for their boards. It also declines to work around hiring.cafe disallowing its search endpoint — the same line this project draws. | "Look behind the websites of hiring YC companies…" |
+| [FastApply/job-aggregator](https://github.com/FastApply/job-aggregator) (no licence) | 5.1M live jobs across 88k companies from ~25 ATS adapters. | Nothing reusable without a licence. Its note that ingestion stops when the crawling laptop sleeps is the argument for our server-side scheduling. | – |
+| [andriuskleinas/job-tracker](https://github.com/andriuskleinas/job-tracker) (MIT), [Eugene-Mokrushin/job-grabber](https://github.com/Eugene-Mokrushin/job-grabber), [str58290/Job_Application_Tracker_Extension](https://github.com/str58290/Job_Application_Tracker_Extension) | Extensions that clip a posting from the page, or walk a search's result cards. | Nothing new: our harvest reads the page's own API responses rather than its markup, and the panel's "Save" reads JSON-LD first. | – |
+| [Pickle-Pixel/ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot), AIHawk, [GodsScion/Auto_job_applier_linkedIn](https://github.com/GodsScion/Auto_job_applier_linkedIn) | Agents that submit applications unattended. | Deliberately nothing. The fill here stops short of submitting, and the reasons in the extension README stand. | – |
+
+Still open from this round:
+
+- **Greenhouse descriptions on demand.** `?content=true` is 5.4 MB for
+  Stripe's board against 0.44 MB without (measured). career-radar lists
+  first and fetches descriptions later. Every board job is stored today,
+  descriptions included, so a job that would match a role added later is
+  already whole; trimming that is a trade-off to measure, not a clear win.
+- **Rate-limit cooldown per Workday cluster.** career-radar cools a whole
+  `wdN` host for a minute after a 429, because most tenants share `wd1` and
+  `wd5`. We stop an adapter on a blocking status; per-cluster cooldown would
+  let the other clusters carry on.
+- **The panel on more ATS hosts.** autograph fills 21 ATSes; the panel runs on
+  seven. Adding hosts widens the permission it asks for, so existing installs
+  would lose the panel until they grant it again. That needs a migration in
+  the options page first.
+
 ## The short version
 
 The systems that come closest to "every job" (hiring.cafe, Fantastic.jobs,
