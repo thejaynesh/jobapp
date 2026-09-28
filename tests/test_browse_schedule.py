@@ -170,9 +170,12 @@ class TestTheTask:
     def test_it_is_registered_and_scheduled(self):
         from app.celery_app import celery_app
 
+        from app.tasks import schedule
+
         assert "app.tasks.browse" in celery_app.conf.include
-        entry = celery_app.conf.beat_schedule["top-up-browsing"]
-        assert entry["task"] == "app.tasks.browse.top_up_browsing"
+        entry = schedule.BY_NAME["top-up-browsing"]
+        assert entry.task == "app.tasks.browse.top_up_browsing"
+        assert entry.tunable == "browse_topup_interval_minutes"
 
     def test_it_runs_end_to_end(self, db, monkeypatch):
         # The task opens its own session, which would be a second connection

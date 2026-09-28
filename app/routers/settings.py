@@ -58,7 +58,9 @@ def _integrations_status(cfg=None) -> dict:
     so a source switched off here reads as off.
     """
     if cfg is None:
-        from app.config import settings as cfg
+        from app.config import live
+
+        cfg = live()
 
     def _has(val) -> bool:
         if isinstance(val, str):
@@ -111,9 +113,14 @@ def _integrations_status(cfg=None) -> dict:
 
 
 def _feature_flags(cfg=None) -> list[tuple]:
-    """Boolean feature flags from config, grouped by category (`cfg` as above)."""
+    """
+    Which switches are on, grouped by category, as a summary. Each is a
+    tunable, switched in the form above; `cfg` as above.
+    """
     if cfg is None:
-        from app.config import settings as cfg
+        from app.config import live
+
+        cfg = live()
 
     return [
         ("Pipeline", [
@@ -158,9 +165,16 @@ def _feature_flags(cfg=None) -> list[tuple]:
     ]
 
 
-def _system_info() -> dict:
-    """Key system parameters the user should see at a glance."""
-    from app.config import settings as cfg
+def _system_info(cfg=None) -> dict:
+    """
+    Key system parameters the user should see at a glance — as they are in
+    effect, so a value changed above shows here too rather than the
+    environment's.
+    """
+    if cfg is None:
+        from app.config import live
+
+        cfg = live()
 
     return {
         "timezone": cfg.DISPLAY_TIMEZONE,
@@ -343,7 +357,7 @@ def _page_context(request: Request, profile, db: Session, saved: bool) -> dict:
         "slug_report": profile.data.get("ats_slug_report") or {},
         "integrations": integrations,
         "feature_flags": flags,
-        "system_info": _system_info(),
+        "system_info": _system_info(cfg),
         "summary": {
             "llm_count": sum(1 for i in integrations["llm"] if i["ok"]),
             "source_count": sum(1 for i in integrations["sources"] if i["ok"]),

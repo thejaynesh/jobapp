@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 from app.models.application import Application, ApplicationStatus
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +288,6 @@ def _scorer(profile_data: dict, model: str | None):
     `--model meta/llama-3.3-70b-instruct` asks what that specific NIM model
     would do, whatever the primary happens to be.
     """
-    from app.config import settings
     from app.llm.providers import primary_matching_provider, provider_label
     from app.services.model_compare import score_with_model
 
@@ -298,7 +298,7 @@ def _scorer(profile_data: dict, model: str | None):
                 lambda job: _score_via_provider(primary, job, profile_data)
             )
 
-    named = model or settings.NVIDIA_NIM_MODEL
+    named = model or live().NVIDIA_NIM_MODEL
     return f"nim/{named}", (lambda job: score_with_model(job, profile_data, named))
 
 

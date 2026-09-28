@@ -80,23 +80,27 @@ class TestMatchingHasItsOwnSchedule:
         # It used to run only as a tail-call from fetch_jobs, so anything one
         # pass did not finish waited hours for the next fetch — indistinguishable
         # from matching being broken.
-        from app.celery_app import celery_app
+        from app.tasks import schedule
 
-        entry = celery_app.conf.beat_schedule["match-new-jobs"]
-        assert entry["task"] == "app.tasks.match.match_jobs"
-        assert entry["schedule"].seconds == settings.MATCH_INTERVAL_MINUTES * 60
+        entry = schedule.BY_NAME["match-new-jobs"]
+        assert entry.task == "app.tasks.match.match_jobs"
+        assert schedule.interval_seconds(entry, {}) == settings.MATCH_INTERVAL_MINUTES * 60
 
     def test_the_sweep_is_scheduled_too(self):
-        from app.celery_app import celery_app
+        from app.tasks import schedule
 
-        entry = celery_app.conf.beat_schedule["sweep-stuck-generations"]
-        assert entry["task"] == "app.tasks.generate.sweep_generations"
+        entry = schedule.BY_NAME["sweep-stuck-generations"]
+        assert entry.task == "app.tasks.generate.sweep_generations"
 
     def test_the_sweep_threshold_clears_a_generations_own_time_limit(self):
         # Below it, the sweeper would re-queue runs that are merely still going.
         from app.tasks.generate import generate_docs
 
+        from app.services import tunables
+
         assert settings.GENERATION_STUCK_MINUTES * 60 > generate_docs.time_limit
+        # And the settings page cannot set it below that either.
+        assert tunables.BY_KEY["generation_stuck_minutes"].minimum * 60 > generate_docs.time_limit
 
 
 # ---------------------------------------------------------------------------

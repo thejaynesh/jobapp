@@ -12,6 +12,7 @@ import logging
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,8 @@ def discover_boards(force: bool = False) -> dict:
         # Probe boards waiting to be confirmed. The board cycle does this too,
         # but only every few hours; a list of tens of thousands would wait
         # weeks for it alone.
-        from app.config import settings
-
         per_hour = int(value(data, "ats_board_validate_hourly") or 0)
-        if per_hour > 0 and settings.ATS_BOARD_REGISTRY and settings.ATS_BOARD_VALIDATION:
+        if per_hour > 0 and live().ATS_BOARD_REGISTRY and live().ATS_BOARD_VALIDATION:
             try:
                 report["validated"] = company_boards.validate_pending(
                     db, limit=per_hour,

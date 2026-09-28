@@ -33,6 +33,7 @@ so the backlog takes days rather than making anybody's afternoon unpleasant.
 """
 
 import json
+import contextvars
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +43,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.config import settings
+from app.config import live, settings
 from sqlalchemy.orm import selectinload
 
 from app.models.job import Job, JobStatus
@@ -746,7 +747,7 @@ def llm_extraction(html: str, job_id=None) -> Extraction:
                 messages,
                 api_key=settings.NVIDIA_NIM_API_KEY,
                 base_url=settings.NVIDIA_NIM_BASE_URL,
-                model=settings.NVIDIA_NIM_MODEL,
+                model=live().NVIDIA_NIM_MODEL,
                 temperature=0.0,
                 max_tokens=4096,
                 role="extract",
@@ -898,7 +899,7 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
         func.length(Job.description) < THIN_DESCRIPTION_CHARS,
     )
     retry_after = datetime.now(timezone.utc) - timedelta(
-        days=max(0, int(getattr(settings, "ENRICH_RETRY_DAYS", 7)))
+        days=max(0, int(getattr(live(), "ENRICH_RETRY_DAYS", 7)))
     )
     rows = (
         db.query(Job)
@@ -1337,9 +1338,9 @@ def unproductive_hosts(db) -> set[str]:
 
     from app.models.enrichment_run import EnrichmentRun
 
-    window = max(1, int(getattr(settings, "ENRICH_HOST_MEMORY_DAYS", 14)))
-    min_attempts = max(1, int(getattr(settings, "ENRICH_HOST_MIN_ATTEMPTS", 50)))
-    floor = float(getattr(settings, "ENRICH_HOST_MIN_SUCCESS_RATE", 0.02))
+    window = max(1, int(getattr(live(), "ENRICH_HOST_MEMORY_DAYS", 14)))
+    min_attempts = max(1, int(getattr(live(), "ENRICH_HOST_MIN_ATTEMPTS", 50)))
+    floor = float(getattr(live(), "ENRICH_HOST_MIN_SUCCESS_RATE", 0.02))
     since = datetime.now(timezone.utc) - timedelta(days=window)
 
     totals: dict[str, list[int]] = {}
@@ -1419,10 +1420,10 @@ def enrich_jobs(
         return stats
 
     landing_html = landing_html or {}
-    workers = workers or getattr(settings, "ENRICH_WORKERS", 8)
+    workers = workers or getattr(live(), "ENRICH_WORKERS", 8)
     limiter = _HostLimiter(
-        max_concurrent=getattr(settings, "ENRICH_PER_HOST", 4),
-        min_interval=getattr(settings, "ENRICH_HOST_DELAY_MS", 400) / 1000.0,
+        max_concurrent=getattr(live(), "ENRICH_PER_HOST", 4),
+        min_interval=getattr(live(), "ENRICH_HOST_DELAY_MS", 400) / 1000.0,
     )
 
     # Split before doing anything: a host that always answers a server with a
@@ -1489,10 +1490,13 @@ def enrich_jobs(
                 except Exception as exc:
                     return job, None, exc
 
+            # Each fetch runs in a copy of this thread's context, so the pass's
+            # settings reach it rather than each read going back to the profile.
+            parent = contextvars.copy_context()
             with ThreadPoolExecutor(
                 max_workers=max(1, min(workers, len(for_server)))
             ) as pool:
-                results = list(pool.map(_work, for_server))
+                results = list(pool.map(lambda job: parent.copy().run(_work, job), for_server))
 
     attempted_at = datetime.now(timezone.utc)
 
@@ -1640,7 +1644,7 @@ def _paused_host_allowance(db, hosts: set[str]) -> dict[str, int]:
 
     from app.models.browser_task import BrowserTask
 
-    cap = max(0, int(getattr(settings, "ENRICH_PAUSED_HOST_DAILY", 40)))
+    cap = max(0, int(getattr(live(), "ENRICH_PAUSED_HOST_DAILY", 40)))
     if not hosts or not cap:
         return {host: 0 for host in hosts}
 
@@ -1778,7 +1782,7 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         else:
             candidates.append(job)
 
-    room = max(0, int(getattr(settings, "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
+    room = max(0, int(getattr(live(), "ENRICH_MAX_BROWSER_OUTSTANDING", 500))
                - len(outstanding))
     if room <= 0:
         logger.info(
@@ -1797,8 +1801,8 @@ def plan_browser_queue(db, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
         kind = _browser_task_kind(url)
         payload = {"url": url, "purpose": "enrich", "job_id": str(job.id)}
         if kind == "browse_page":
-            payload["settle_seconds"] = int(getattr(settings, "BROWSE_SETTLE_SECONDS", 6))
-            payload["gap_seconds"] = int(getattr(settings, "BROWSE_GAP_SECONDS", 20))
+            payload["settle_seconds"] = int(getattr(live(), "BROWSE_SETTLE_SECONDS", 6))
+            payload["gap_seconds"] = int(getattr(live(), "BROWSE_GAP_SECONDS", 20))
         try:
             browser_tasks.enqueue(
                 db, kind, payload,
@@ -1837,7 +1841,7 @@ def run(
     from app.services.enrichment_history import record_run
 
     started_at = datetime.now(timezone.utc)
-    limit = limit or getattr(settings, "ENRICH_MAX_PER_RUN", 200)
+    limit = limit or getattr(live(), "ENRICH_MAX_PER_RUN", 200)
 
     profile = db.query(Profile).first()
     profile_data = (profile.data if profile else None) or {}

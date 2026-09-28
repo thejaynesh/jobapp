@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import live, settings
 from app.database import get_db
 from app.models.application import Application
 from app.models.outreach import (
@@ -212,7 +212,7 @@ def discover(
     from app.services.outreach import discovery_stale
 
     app_obj = _get_application(db, app_id)
-    if not settings.OUTREACH_ENABLED:
+    if not live().OUTREACH_ENABLED:
         return _panel(request, db, app_obj,
                       {"ok": False, "message": "Outreach is disabled in configuration."})
     if app_obj.outreach_status == "discovering" and not discovery_stale(app_obj):

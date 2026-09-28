@@ -7,6 +7,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.models.application import Application
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +98,8 @@ def process_followups() -> dict:
     Drafts only. Nothing is sent without someone clicking send, so a scheduler
     that runs while nobody is looking can never mail anyone.
     """
-    from app.config import settings
 
-    if not (settings.OUTREACH_ENABLED and settings.OUTREACH_AUTO_DRAFT_FOLLOWUPS):
+    if not (live().OUTREACH_ENABLED and live().OUTREACH_AUTO_DRAFT_FOLLOWUPS):
         return {"status": "disabled"}
 
     db = SessionLocal()

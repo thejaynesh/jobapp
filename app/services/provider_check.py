@@ -24,7 +24,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from app.config import settings
+from app.config import live, settings
 from app.llm.providers import Provider, call_provider, configured_providers
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def check_providers() -> list[dict]:
         results.append(_probe(Provider(
             name="nim",
             api_key=settings.NVIDIA_NIM_API_KEY,
-            model=settings.NVIDIA_NIM_MODEL,
+            model=live().NVIDIA_NIM_MODEL,
             base_url=settings.NVIDIA_NIM_BASE_URL,
         )))
     return results

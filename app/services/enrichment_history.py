@@ -16,6 +16,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.enrichment_run import EnrichmentRun
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +125,10 @@ def _waiting(db: Session, thin) -> int:
 
     from sqlalchemy import or_
 
-    from app.config import settings
     from app.models.job import Job
 
     retry_after = datetime.now(timezone.utc) - timedelta(
-        days=max(0, int(getattr(settings, "ENRICH_RETRY_DAYS", 7)))
+        days=max(0, int(getattr(live(), "ENRICH_RETRY_DAYS", 7)))
     )
     return db.query(func.count(Job.id)).filter(
         thin,

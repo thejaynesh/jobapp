@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.utils import parseaddr
 
-from app.config import settings
+from app.config import live, settings
 from app.models.outreach import Contact, OutreachMessage
 from app.models.profile import Profile
 
@@ -87,12 +87,12 @@ def imap_password() -> str:
 
 
 def mailbox_configured() -> bool:
-    return bool(getattr(settings, "IMAP_ENABLED", False) and imap_host() and imap_username())
+    return bool(getattr(live(), "IMAP_ENABLED", False) and imap_host() and imap_username())
 
 
 def mailbox_blocked_reason() -> str:
     """Why polling is not running, or "" when it is."""
-    if not getattr(settings, "IMAP_ENABLED", False):
+    if not getattr(live(), "IMAP_ENABLED", False):
         return "Mailbox polling is off (set IMAP_ENABLED=true to turn it on)."
     if not imap_host():
         return "No IMAP server is configured (set IMAP_HOST, e.g. imap.gmail.com)."
@@ -332,7 +332,7 @@ def poll(db, limit: int | None = None) -> dict:
 
     state = _state(profile)
     folder = getattr(settings, "IMAP_FOLDER", "INBOX") or "INBOX"
-    budget = limit or int(getattr(settings, "IMAP_MAX_MESSAGES_PER_POLL", 200))
+    budget = limit or int(getattr(live(), "IMAP_MAX_MESSAGES_PER_POLL", 200))
 
     client = _connect()
     try:
@@ -359,7 +359,7 @@ def poll(db, limit: int | None = None) -> dict:
         else:
             # First run: look back a bounded window rather than the whole
             # mailbox, which on a personal Gmail is years of unrelated mail.
-            days = int(getattr(settings, "IMAP_LOOKBACK_DAYS", 14))
+            days = int(getattr(live(), "IMAP_LOOKBACK_DAYS", 14))
             since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
             criteria = f"(SINCE {since})"
 

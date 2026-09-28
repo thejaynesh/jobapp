@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from app.config import settings
+from app.config import live, settings
 
 logger = logging.getLogger(__name__)
 
@@ -82,19 +82,19 @@ def _tunable(key: str, fallback):
 
 def _keep() -> int:
     try:
-        return max(1, int(_tunable("backup_keep", getattr(settings, "BACKUP_KEEP", 14))))
+        return max(1, int(_tunable("backup_keep", getattr(live(), "BACKUP_KEEP", 14))))
     except (TypeError, ValueError):
         return 14
 
 
 def enabled() -> bool:
-    return bool(_tunable("backup_enabled", getattr(settings, "BACKUP_ENABLED", True)))
+    return bool(_tunable("backup_enabled", getattr(live(), "BACKUP_ENABLED", True)))
 
 
 def interval_hours() -> int:
     try:
         return max(1, int(_tunable("backup_interval_hours",
-                                   getattr(settings, "BACKUP_INTERVAL_HOURS", 24))))
+                                   getattr(live(), "BACKUP_INTERVAL_HOURS", 24))))
     except (TypeError, ValueError):
         return 24
 

@@ -33,7 +33,7 @@ draft is already the product, and this is an attempt to improve it.
 
 import logging
 
-from app.config import settings
+from app.config import live
 # The same ceiling the writer reads, from the one place that defines it.
 from app.services.doc_generator import _jd
 
@@ -48,7 +48,7 @@ _MAX_NOTES = 4
 
 
 def enabled() -> bool:
-    return bool(getattr(settings, "SELF_REVIEW_ENABLED", True))
+    return bool(getattr(live(), "SELF_REVIEW_ENABLED", True))
 
 
 def _clean(notes) -> list[str]:

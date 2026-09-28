@@ -1,4 +1,5 @@
 import os
+import threading
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -134,12 +135,50 @@ def db():
     session = TestSessionLocal(
         bind=connection, join_transaction_mode="create_savepoint"
     )
+    # Settings read without a profile to hand (`tunables.live()`,
+    # `tunables.current()`) open a session of their own in production, which
+    # cannot see this test's uncommitted profile. Read them from this one, so
+    # a test that stores an override sees it take effect. Without autoflush,
+    # so asking for a setting never flushes the caller's pending rows early.
+    from app.services import tunables
+
+    lock = threading.Lock()
+
+    def _profile_from_this_session() -> dict:
+        from app.models.profile import Profile
+
+        try:
+            with lock, session.no_autoflush:
+                profile = session.query(Profile).first()
+                return dict(profile.data or {}) if profile else {}
+        except Exception:
+            return {}
+
+    previous = tunables._load_profile_data
+    tunables._load_profile_data = _profile_from_this_session
     try:
         yield session
     finally:
+        tunables._load_profile_data = previous
         session.close()
         transaction.rollback()
         connection.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_profile_unless_the_test_has_one(monkeypatch):
+    """
+    A test without the `db` fixture reads the environment's values only.
+
+    `tunables.live()` and `tunables.current()` would otherwise open
+    `SessionLocal` — the development database named in `.env`, whose profile
+    is whatever was last saved there, so a test would pass or fail on the
+    state of somebody's local settings page. `db` replaces this with a read
+    of its own session.
+    """
+    from app.services import tunables
+
+    monkeypatch.setattr(tunables, "_load_profile_data", lambda: {})
 
 
 @pytest.fixture(autouse=True)

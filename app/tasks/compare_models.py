@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.celery_app import celery_app
-from app.config import settings
+from app.config import live
 from app.database import SessionLocal
 from app.services.fetch_lock import COMPARE_LOCK_KEY, acquire, release
 from app.services.model_compare import (
@@ -55,7 +55,7 @@ def run_comparison(self, models: list[str], limit: int = 10,
     try:
         mark_running(db, models, limit)
         jobs, results = compare_models(db, models, limit, pace)
-        payload = report_dict(jobs, results, settings.MIN_MATCH_SCORE)
+        payload = report_dict(jobs, results, live().MIN_MATCH_SCORE)
         payload.update({"at": started, "status": "done"})
         if not jobs:
             payload["status"] = "no jobs"
@@ -93,7 +93,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
-    threshold = args.threshold if args.threshold is not None else settings.MIN_MATCH_SCORE
+    threshold = args.threshold if args.threshold is not None else live().MIN_MATCH_SCORE
 
     db = SessionLocal()
     try:

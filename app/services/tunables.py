@@ -15,6 +15,8 @@ of jobs, not whether it happens to be configurable.
 """
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from app.config import settings
@@ -50,6 +52,9 @@ class Tunable:
     # It wins on read until the next save writes both.
     legacy_key: str | None = None
     group: str = "Matching"
+    # A provider whose model list (edited under "Model lists") supplies the
+    # choices, for a provider's default model. Implies `dynamic`.
+    catalog: str = ""
 
 
 TUNABLES: list[Tunable] = [
@@ -137,12 +142,12 @@ TUNABLES: list[Tunable] = [
     Tunable(
         key="filter_by_language", env="FILTER_BY_LANGUAGE", kind="bool",
         group="Filtering",
-        label="Skip postings not written in English",
+        label="Skip postings not in your languages",
         help="Arbeitnow and friends return German listings under English "
              "titles, so the title gate passes them and a model is then asked "
              "to score a description you could not act on. A posting whose "
-             "language could not be read is always kept — set MATCH_LANGUAGES "
-             "to accept more than English.",
+             "language could not be read is always kept. Which languages count "
+             "is Languages you read, below.",
     ),
     Tunable(
         key="junior_max_years", env="JUNIOR_MAX_YEARS", kind="float",
@@ -627,7 +632,1046 @@ TUNABLES.extend([
     ),
 ])
 
+# ---------------------------------------------------------------------------
+# Everything below was environment-only until the settings page could reach
+# it. Grouped by what it changes; each group's intervals sit with it rather
+# than under Schedule, because that is where somebody looking for them goes.
+# ---------------------------------------------------------------------------
+TUNABLES.extend([
+    # -- Matching -----------------------------------------------------------
+    Tunable(
+        key="deep_match_enabled", env="DEEP_MATCH_ENABLED", kind="bool",
+        label="Second opinion on close calls",
+        help="Jobs scored inside the band below are scored again by the "
+             "strongest configured model, because that is where accept and "
+             "reject flip. Skipped anyway when nothing stronger than the first "
+             "model is configured. Off keeps every first score.",
+    ),
+    Tunable(
+        key="deep_match_band_low", env="DEEP_MATCH_BAND_LOW", kind="int",
+        minimum=0, maximum=100,
+        label="Second opinion: from score",
+        help="The bottom of the close-call band. Lower sends more jobs for a "
+             "second opinion and spends more calls; at the top of the band "
+             "nothing is re-scored.",
+    ),
+    Tunable(
+        key="deep_match_band_high", env="DEEP_MATCH_BAND_HIGH", kind="int",
+        minimum=0, maximum=100,
+        label="Second opinion: up to score",
+        help="The top of the close-call band. A score above it is taken as it "
+             "is. Set it at or below the bottom and no job gets a second "
+             "opinion.",
+    ),
+    Tunable(
+        key="deep_match_max_per_cycle", env="DEEP_MATCH_MAX_PER_CYCLE", kind="int",
+        minimum=0, maximum=5000,
+        label="Second opinions per matching cycle",
+        help="A ceiling on second-opinion calls, shared by every batch of the "
+             "cycle. Past it, jobs keep their first score. 0 means no ceiling.",
+    ),
+    Tunable(
+        key="match_max_jobs_per_task", env="MATCH_MAX_JOBS_PER_TASK", kind="int",
+        minimum=1, maximum=500,
+        label="Jobs per matching batch",
+        help="A matching pass works in batches that queue the next one, so a "
+             "restart loses at most one batch and document generation is not "
+             "stuck behind a long pass. Higher holds a worker longer; 1 "
+             "re-queues after every job.",
+    ),
+    Tunable(
+        key="match_description_chars", env="MATCH_DESCRIPTION_CHARS", kind="int",
+        minimum=2000, maximum=100000,
+        label="Description sent for scoring (characters)",
+        help="How much of a posting the scoring prompt carries. Far longer "
+             "than a real posting by default, as a guard against a page that "
+             "cleaned badly. Too low and the model judges the job on its "
+             "marketing paragraphs rather than its requirements.",
+    ),
+    # -- Filtering ----------------------------------------------------------
+    Tunable(
+        key="match_languages", env="MATCH_LANGUAGES", kind="text", group="Filtering",
+        label="Languages you read",
+        help="Two-letter language codes, comma-separated (en, de, fr). With "
+             "the language filter on, a posting written in any other language "
+             "is set aside before it costs a model call.",
+    ),
+    # -- Models -------------------------------------------------------------
+    Tunable(
+        key="match_primary", env="MATCH_PRIMARY", kind="choice", group="Models",
+        choices=["nim", "freeinference", "gemini", "anthropic"],
+        label="Provider that scores first",
+        help="Which provider a job is scored by before any failover. Another "
+             "provider moves NIM to the end of the chain rather than removing "
+             "it; a provider with no key falls back to NIM. FreeInference here "
+             "spends the free daily credit document writing prefers.",
+    ),
+    Tunable(
+        key="nvidia_nim_rpm", env="NVIDIA_NIM_RPM", kind="int",
+        minimum=1, maximum=1000, group="Models",
+        label="NIM: requests per minute allowed",
+        help="Your NIM account limit. Matching paces its calls to it; set it "
+             "above the real limit and calls start failing with 429s, below "
+             "it and matching is slower than it needs to be.",
+    ),
+    Tunable(
+        key="nim_match_max_tokens", env="NIM_MATCH_MAX_TOKENS", kind="int",
+        minimum=256, maximum=16000, group="Models",
+        label="Scoring reply limit (tokens)",
+        help="The ceiling on a scoring reply. Reasoning models think before "
+             "they answer, so too low cuts the answer off and the score is "
+             "lost. Costs nothing unused: only tokens produced are generated.",
+    ),
+    Tunable(
+        key="max_paid_match_calls_per_cycle", env="MAX_PAID_MATCH_CALLS_PER_CYCLE",
+        kind="int", minimum=0, maximum=10000, group="Models",
+        label="Paid scoring calls per cycle",
+        help="A ceiling on scoring calls to providers that bill, for when the "
+             "free ones are down. Past it the remaining jobs stay new and are "
+             "tried next cycle. 0 means no ceiling.",
+    ),
+    Tunable(
+        key="freeinference_max_concurrency", env="FREEINFERENCE_MAX_CONCURRENCY",
+        kind="int", minimum=0, maximum=16, group="Models",
+        label="FreeInference: calls at once",
+        help="The endpoint accepts one request at a time, so calls queue for "
+             "it. 0 lets every caller through at once — only if that limit is "
+             "ever lifted.",
+    ),
+    Tunable(
+        key="freeinference_model", env="FREEINFERENCE_MODEL", kind="choice",
+        dynamic=True, catalog="freeinference", group="Models",
+        label="FreeInference: writing model",
+        help="What FreeInference writes documents with when a model role is "
+             "on auto. The list is edited under Model lists below.",
+    ),
+    Tunable(
+        key="freeinference_match_model", env="FREEINFERENCE_MATCH_MODEL", kind="choice",
+        dynamic=True, catalog="freeinference", group="Models",
+        label="FreeInference: scoring model",
+        help="What FreeInference scores jobs with — the faster sibling, since "
+             "scoring is high-volume JSON.",
+    ),
+    Tunable(
+        key="anthropic_model", env="ANTHROPIC_MODEL", kind="choice",
+        dynamic=True, catalog="anthropic", group="Models",
+        label="Anthropic: writing model",
+        help="What Anthropic writes documents with when a model role is on "
+             "auto. The strongest costs the most per application.",
+    ),
+    Tunable(
+        key="anthropic_match_model", env="ANTHROPIC_MATCH_MODEL", kind="choice",
+        dynamic=True, catalog="anthropic", group="Models",
+        label="Anthropic: scoring model",
+        help="What Anthropic scores jobs with when it is in the failover "
+             "chain. Cheap by design: scoring is by far the higher volume.",
+    ),
+    Tunable(
+        key="gemini_model", env="GEMINI_MODEL", kind="choice",
+        dynamic=True, catalog="gemini", group="Models",
+        label="Gemini: model",
+        help="What Gemini is called with, for writing and for scoring.",
+    ),
+    # -- Documents ----------------------------------------------------------
+    Tunable(
+        key="self_review_enabled", env="SELF_REVIEW_ENABLED", kind="bool",
+        group="Documents",
+        label="Read each draft back before compiling",
+        help="The model reads a draft resume or letter as the recruiter would "
+             "and fixes what it finds. One more call per document; off sends "
+             "the first draft.",
+    ),
+    Tunable(
+        key="doc_description_chars", env="DOC_DESCRIPTION_CHARS", kind="int",
+        minimum=2000, maximum=100000, group="Documents",
+        label="Description used for writing (characters)",
+        help="How much of the posting document writing reads. Too low and the "
+             "requirements it should tailor to are below the cut.",
+    ),
+    Tunable(
+        key="doc_refresh_enabled", env="DOC_REFRESH_ENABLED", kind="bool",
+        group="Documents",
+        label="Rewrite documents when the full posting arrives",
+        help="Documents written from a teaser are rewritten once the real "
+             "description is fetched — only for applications you have not "
+             "acted on. Off leaves them as first written.",
+    ),
+    Tunable(
+        key="doc_refresh_interval_hours", env="DOC_REFRESH_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Documents",
+        label="Look for documents to rewrite every (hours)",
+        help="How often the rewrite above looks for work.",
+    ),
+    Tunable(
+        key="doc_refresh_max_per_run", env="DOC_REFRESH_MAX_PER_RUN", kind="int",
+        minimum=1, maximum=500, group="Documents",
+        label="Documents rewritten per run",
+        help="Higher clears a backlog sooner, but the documents for the job "
+             "you are looking at now wait behind them.",
+    ),
+    Tunable(
+        key="generation_stuck_minutes", env="GENERATION_STUCK_MINUTES", kind="int",
+        minimum=10, maximum=240, group="Documents",
+        label="Treat a generation as stuck after (minutes)",
+        help="A generation running this long lost its worker and is queued "
+             "again; the same interval is how often that is looked for. Kept "
+             "above a generation's own time limit, so one still running is "
+             "never started twice.",
+    ),
+    Tunable(
+        key="generation_sweep_max_per_run", env="GENERATION_SWEEP_MAX_PER_RUN",
+        kind="int", minimum=1, maximum=1000, group="Documents",
+        label="Stuck or unqueued generations picked up per run",
+        help="Higher clears a pile-up at once and queues all of it together, "
+             "which is the pile-up this exists to prevent.",
+    ),
+    # -- Descriptions -------------------------------------------------------
+    Tunable(
+        key="enrich_enabled", env="ENRICH_ENABLED", kind="bool", group="Descriptions",
+        label="Fetch descriptions the source left out",
+        help="Goes back to the employer for the text an aggregator truncated "
+             "or never sent, so jobs are scored on the real posting. Off "
+             "scores them on whatever the source sent.",
+    ),
+    Tunable(
+        key="enrich_interval_minutes", env="ENRICH_INTERVAL_MINUTES", kind="int",
+        minimum=5, maximum=1440, group="Descriptions",
+        label="Look for missing descriptions every (minutes)",
+        help="How often a pass starts on its own. Passes also chain while the "
+             "backlog lasts (below), so this matters most once it is drained.",
+    ),
+    Tunable(
+        key="enrich_max_per_run", env="ENRICH_MAX_PER_RUN", kind="int",
+        minimum=1, maximum=5000, group="Descriptions",
+        label="Descriptions fetched per pass",
+        help="A pass with no ceiling holds a worker for hours while the jobs "
+             "it already rescued wait to be scored.",
+    ),
+    Tunable(
+        key="enrich_on_fetch", env="ENRICH_ON_FETCH", kind="bool", group="Descriptions",
+        label="Fetch descriptions at the end of each fetch",
+        help="So the jobs that just arrived are scored on their real text "
+             "rather than the stub the aggregator sent.",
+    ),
+    Tunable(
+        key="enrich_max_per_fetch", env="ENRICH_MAX_PER_FETCH", kind="int",
+        minimum=0, maximum=5000, group="Descriptions",
+        label="Descriptions fetched at the end of a fetch",
+        help="Smaller than a scheduled pass: the fetch is already long, and "
+             "the backlog is the scheduled pass's job.",
+    ),
+    Tunable(
+        key="enrich_workers", env="ENRICH_WORKERS", kind="int",
+        minimum=1, maximum=32, group="Descriptions",
+        label="Descriptions fetched at once",
+        help="Across all sites. Each site still gets its own limit below.",
+    ),
+    Tunable(
+        key="enrich_per_host", env="ENRICH_PER_HOST", kind="int",
+        minimum=1, maximum=16, group="Descriptions",
+        label="Requests at once to one site",
+        help="The real politeness budget. Higher is faster on a backlog that "
+             "is mostly one site, and likelier to be refused by it.",
+    ),
+    Tunable(
+        key="enrich_host_delay_ms", env="ENRICH_HOST_DELAY_MS", kind="int",
+        minimum=0, maximum=10000, group="Descriptions",
+        label="Gap between requests to one site (ms)",
+        help="The minimum pause between two requests to the same site. 0 "
+             "sends them back to back.",
+    ),
+    Tunable(
+        key="enrich_chain_passes", env="ENRICH_CHAIN_PASSES", kind="bool",
+        group="Descriptions",
+        label="Start the next pass as soon as one fills up",
+        help="Instead of idling until the next scheduled pass while a backlog "
+             "waits.",
+    ),
+    Tunable(
+        key="enrich_max_chained_passes", env="ENRICH_MAX_CHAINED_PASSES", kind="int",
+        minimum=1, maximum=500, group="Descriptions",
+        label="Passes chained back to back at most",
+        help="A ceiling on one chain, so a fault cannot make it permanent.",
+    ),
+    Tunable(
+        key="enrich_retry_days", env="ENRICH_RETRY_DAYS", kind="int",
+        minimum=1, maximum=90, group="Descriptions",
+        label="Retry a failed description after (days)",
+        help="A site refusing us this week may not next week. Too short and "
+             "the same failures sit at the head of the queue.",
+    ),
+    Tunable(
+        key="enrich_max_browser_outstanding", env="ENRICH_MAX_BROWSER_OUTSTANDING",
+        kind="int", minimum=0, maximum=5000, group="Descriptions",
+        label="Descriptions waiting for the browser at most",
+        help="The browser reads these at a person's pace, so queueing more "
+             "than it can drain only builds a backlog that expires unread. 0 "
+             "hands none to the browser.",
+    ),
+    Tunable(
+        key="enrich_paused_host_daily", env="ENRICH_PAUSED_HOST_DAILY", kind="int",
+        minimum=0, maximum=1000, group="Descriptions",
+        label="Descriptions a day from a paused site",
+        help="A paused site is not crawled, but reading the description of a "
+             "job you might apply to is a different act. About a person "
+             "reading adverts by default; 0 asks a paused site for nothing.",
+    ),
+    Tunable(
+        key="enrich_host_memory_days", env="ENRICH_HOST_MEMORY_DAYS", kind="int",
+        minimum=1, maximum=90, group="Descriptions",
+        label="Remember how a site answered for (days)",
+        help="The window over which a site that rarely gives a description is "
+             "judged not worth asking. Its evidence ages out, so a site that "
+             "improves is tried again.",
+    ),
+    Tunable(
+        key="enrich_host_min_attempts", env="ENRICH_HOST_MIN_ATTEMPTS", kind="int",
+        minimum=1, maximum=10000, group="Descriptions",
+        label="Attempts before judging a site",
+        help="How many tries in that window before a site can be set aside.",
+    ),
+    Tunable(
+        key="enrich_host_min_success_rate", env="ENRICH_HOST_MIN_SUCCESS_RATE",
+        kind="float", minimum=0.0, maximum=1.0, group="Descriptions",
+        label="Set a site aside below this success rate",
+        help="A fraction: 0.02 is two in a hundred. A rate rather than a count, "
+             "because the best site fails most often by volume. 0 never sets "
+             "one aside.",
+    ),
+    Tunable(
+        key="rescore_max_per_run", env="RESCORE_MAX_PER_RUN", kind="int",
+        minimum=0, maximum=20000, group="Descriptions",
+        label="Jobs sent back for scoring per pass",
+        help="Jobs rejected for a thin description go back to matching once "
+             "the real one arrives. No request and no model call to send them; "
+             "the ceiling is how fast matching can take them.",
+    ),
+    # -- Closed postings ----------------------------------------------------
+    Tunable(
+        key="liveness_enabled", env="LIVENESS_ENABLED", kind="bool",
+        group="Closed postings",
+        label="Check whether matched postings have closed",
+        help="Matched jobs are re-checked against the employer page, and one "
+             "that has closed wears a badge. Only a 404, a page saying the "
+             "role is closed, or a known ATS bouncing to its index counts.",
+    ),
+    Tunable(
+        key="liveness_interval_hours", env="LIVENESS_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Closed postings",
+        label="Check every (hours)",
+        help="How often a sweep runs. Each sweep checks only verdicts that "
+             "are due, so a short interval costs little when nothing is.",
+    ),
+    Tunable(
+        key="liveness_max_per_cycle", env="LIVENESS_MAX_PER_CYCLE", kind="int",
+        minimum=10, maximum=10000, group="Closed postings",
+        label="Postings checked per sweep at most",
+        help="A ceiling, not a quota: only postings whose verdict is due are "
+             "checked, highest-scored first among those not yet applied to. "
+             "Too low and the lowest-scored verdicts go stale; the log says "
+             "when.",
+    ),
+    Tunable(
+        key="liveness_workers", env="LIVENESS_WORKERS", kind="int",
+        minimum=1, maximum=32, group="Closed postings",
+        label="Postings checked at once",
+        help="Parallel checks. Most postings are on a few ATS sites, so higher "
+             "is more requests at once to the same hosts.",
+    ),
+    Tunable(
+        key="liveness_recheck_days", env="LIVENESS_RECHECK_DAYS", kind="int",
+        minimum=1, maximum=60, group="Closed postings",
+        label="A verdict stands for (days)",
+        help="How long an open verdict is trusted before the posting is "
+             "checked again. Shorter catches closures sooner and multiplies "
+             "the checks.",
+    ),
+    # -- Outreach -----------------------------------------------------------
+    Tunable(
+        key="outreach_enabled", env="OUTREACH_ENABLED", kind="bool", group="Outreach",
+        label="Find people to contact for each application",
+        help="Looks for recruiters and engineers at the company. Off stops "
+             "discovery; nothing is ever sent without a click either way.",
+    ),
+    Tunable(
+        key="outreach_max_contacts_per_app", env="OUTREACH_MAX_CONTACTS_PER_APP",
+        kind="int", minimum=1, maximum=50, group="Outreach",
+        label="Contacts kept per application",
+        help="More than a handful is noise — the point is two or three good "
+             "people.",
+    ),
+    Tunable(
+        key="outreach_use_linkedin", env="OUTREACH_USE_LINKEDIN", kind="bool",
+        group="Outreach",
+        label="Search LinkedIn for people",
+        help="An authenticated scrape from a server, which is what LinkedIn "
+             "restricts accounts for. The deep links reach the same profiles "
+             "with no account risk; understand that before switching this on.",
+    ),
+    Tunable(
+        key="outreach_linkedin_max_searches", env="OUTREACH_LINKEDIN_MAX_SEARCHES",
+        kind="int", minimum=0, maximum=10, group="Outreach",
+        label="LinkedIn people searches per run",
+        help="The account risk scales with volume, so this stays low.",
+    ),
+    Tunable(
+        key="outreach_use_github", env="OUTREACH_USE_GITHUB", kind="bool",
+        group="Outreach",
+        label="Look at the company GitHub organisation",
+        help="Public members are real engineers, often with a published "
+             "address. Needs a GitHub token in the environment.",
+    ),
+    Tunable(
+        key="outreach_use_team_pages", env="OUTREACH_USE_TEAM_PAGES", kind="bool",
+        group="Outreach",
+        label="Read the company team and about pages",
+        help="For profile links and published addresses. No key, no quota.",
+    ),
+    Tunable(
+        key="outreach_target_titles", env="OUTREACH_TARGET_TITLES", kind="text",
+        group="Outreach",
+        label="Titles to look for",
+        help="Comma-separated, most wanted first.",
+    ),
+    Tunable(
+        key="outreach_guess_emails", env="OUTREACH_GUESS_EMAILS", kind="bool",
+        group="Outreach",
+        label="Guess likely addresses",
+        help="first.last@domain and similar, when nobody publishes a real one. "
+             "Guesses are marked as guesses and never sent automatically.",
+    ),
+    Tunable(
+        key="outreach_verify_emails", env="OUTREACH_VERIFY_EMAILS", kind="bool",
+        group="Outreach",
+        label="Verify addresses with Hunter",
+        help="Spends one Hunter verifier credit per address found.",
+    ),
+    Tunable(
+        key="outreach_followup_days", env="OUTREACH_FOLLOWUP_DAYS", kind="text",
+        group="Outreach",
+        label="Follow up after (days)",
+        help="Comma-separated, one per step: 4,7,10 follows up four days after "
+             "sending, then seven, then ten. Empty sends no follow-ups.",
+    ),
+    Tunable(
+        key="outreach_auto_draft_followups", env="OUTREACH_AUTO_DRAFT_FOLLOWUPS",
+        kind="bool", group="Outreach",
+        label="Draft due follow-ups automatically",
+        help="Drafts only — nothing is sent without a click.",
+    ),
+    Tunable(
+        key="outreach_followup_interval_hours", env="OUTREACH_FOLLOWUP_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=168, group="Outreach",
+        label="Look for due follow-ups every (hours)",
+        help="How soon after it falls due a follow-up is drafted.",
+    ),
+    Tunable(
+        key="outreach_send_enabled", env="OUTREACH_SEND_ENABLED", kind="bool",
+        group="Outreach",
+        label="Allow sending email",
+        help="Also needs a mail server in the environment. Every message is "
+             "still sent only when you click send.",
+    ),
+    Tunable(
+        key="outreach_max_sends_per_day", env="OUTREACH_MAX_SENDS_PER_DAY", kind="int",
+        minimum=0, maximum=500, group="Outreach",
+        label="Emails sent per day at most",
+        help="Counted over the last 24 hours. 0 sends nothing.",
+    ),
+    Tunable(
+        key="outreach_attach_documents", env="OUTREACH_ATTACH_DOCUMENTS", kind="bool",
+        group="Outreach",
+        label="Attach the resume and cover letter",
+        help="The current versions, as PDFs.",
+    ),
+    Tunable(
+        key="imap_enabled", env="IMAP_ENABLED", kind="bool", group="Outreach",
+        label="Read the mailbox for replies and bounces",
+        help="So a follow-up is never drafted to someone who already answered. "
+             "Also needs mailbox credentials in the environment.",
+    ),
+    Tunable(
+        key="imap_lookback_days", env="IMAP_LOOKBACK_DAYS", kind="int",
+        minimum=1, maximum=365, group="Outreach",
+        label="First mailbox read looks back (days)",
+        help="Later reads resume where the last stopped, so this only bounds "
+             "the first scan.",
+    ),
+    Tunable(
+        key="imap_max_messages_per_poll", env="IMAP_MAX_MESSAGES_PER_POLL", kind="int",
+        minimum=1, maximum=5000, group="Outreach",
+        label="Messages read per mailbox check",
+        help="The rest are read on the next check.",
+    ),
+    Tunable(
+        key="imap_poll_interval_minutes", env="IMAP_POLL_INTERVAL_MINUTES", kind="int",
+        minimum=1, maximum=1440, group="Outreach",
+        label="Check the mailbox every (minutes)",
+        help="How soon a reply is noticed.",
+    ),
+    # -- Browser agent ------------------------------------------------------
+    Tunable(
+        key="browse_enabled", env="BROWSE_ENABLED", kind="bool", group="Browser agent",
+        label="Let the extension open pages on its own",
+        help="The extension opens job boards in a hidden window so they are "
+             "read without you visiting each one. Off leaves only the pages "
+             "you open yourself.",
+    ),
+    Tunable(
+        key="browse_gap_seconds", env="BROWSE_GAP_SECONDS", kind="int",
+        minimum=0, maximum=600, group="Browser agent",
+        label="Gap between pages (seconds)",
+        help="The minimum pause between one page closing and the next opening "
+             "on a site — the single most important number here. Rhythm is "
+             "what anti-automation watches, and the account is what is lost.",
+    ),
+    Tunable(
+        key="browse_settle_seconds", env="BROWSE_SETTLE_SECONDS", kind="int",
+        minimum=0, maximum=60, group="Browser agent",
+        label="Leave a page open after it loads (seconds)",
+        help="Some boards fetch the posting after the page reports loaded; "
+             "closing sooner harvests nothing.",
+    ),
+    Tunable(
+        key="browse_max_queued", env="BROWSE_MAX_QUEUED", kind="int",
+        minimum=1, maximum=1000, group="Browser agent",
+        label="Pages per run",
+        help="About an hour of browsing at the default pace.",
+    ),
+    Tunable(
+        key="browse_retry_days", env="BROWSE_RETRY_DAYS", kind="int",
+        minimum=1, maximum=365, group="Browser agent",
+        label="Reopen a posting after (days)",
+        help="A posting page does not change, so it is not opened again "
+             "sooner than this.",
+    ),
+    Tunable(
+        key="browse_search_retry_hours", env="BROWSE_SEARCH_RETRY_HOURS", kind="int",
+        minimum=1, maximum=720, group="Browser agent",
+        label="Reopen a search page after (hours)",
+        help="A search page is only ever the postings that exist now, so it "
+             "is worth reopening far sooner than a posting.",
+    ),
+    Tunable(
+        key="browse_search_reserve", env="BROWSE_SEARCH_RESERVE", kind="int",
+        minimum=0, maximum=500, group="Browser agent",
+        label="Pages per top-up kept for searching",
+        help="Reserved for crawling boards rather than fetching descriptions. "
+             "0 and searching never happens, since the description backlog is "
+             "never empty.",
+    ),
+    Tunable(
+        key="browse_search_pages", env="BROWSE_SEARCH_PAGES", kind="int",
+        minimum=1, maximum=50, group="Browser agent",
+        label="Result pages per search",
+        help="About twenty-five postings a page. Each page is a visit, so this "
+             "multiplies the length of a run.",
+    ),
+    Tunable(
+        key="browse_scroll_passes", env="BROWSE_SCROLL_PASSES", kind="int",
+        minimum=1, maximum=200, group="Browser agent",
+        label="Screens scrolled per page",
+        help="For boards with no opinion of their own; infinite-scroll boards "
+             "go deeper. The extension caps the time either way.",
+    ),
+    Tunable(
+        key="browse_scroll_pause_seconds", env="BROWSE_SCROLL_PAUSE_SECONDS", kind="int",
+        minimum=0, maximum=60, group="Browser agent",
+        label="Pause between scrolls on a site that objected (seconds)",
+        help="Only on a board that has asked us to slow down before; 0 "
+             "everywhere else.",
+    ),
+    Tunable(
+        key="browse_ratelimit_rest_minutes", env="BROWSE_RATELIMIT_REST_MINUTES",
+        kind="int", minimum=1, maximum=1440, group="Browser agent",
+        label="Rest after a site asks us to slow down (minutes)",
+        help="A rate limit means not this fast, not never, so minutes.",
+    ),
+    Tunable(
+        key="browse_challenge_backoff_hours", env="BROWSE_CHALLENGE_BACKOFF_HOURS",
+        kind="int", minimum=1, maximum=720, group="Browser agent",
+        label="Rest after a human check nobody passed (hours)",
+        help="The first rest; it doubles each time the check comes back, up "
+             "to the ceiling below.",
+    ),
+    Tunable(
+        key="browse_challenge_max_backoff_hours", env="BROWSE_CHALLENGE_MAX_BACKOFF_HOURS",
+        kind="int", minimum=1, maximum=8760, group="Browser agent",
+        label="Longest rest after repeated human checks (hours)",
+        help="Still tried occasionally at the ceiling, since a site can relent.",
+    ),
+    Tunable(
+        key="browse_topup_interval_minutes", env="BROWSE_TOPUP_INTERVAL_MINUTES",
+        kind="int", minimum=5, maximum=1440, group="Browser agent",
+        label="Check whether the browser needs work every (minutes)",
+        help="It does nothing unless the queue is nearly empty, so this sets "
+             "responsiveness rather than volume.",
+    ),
+    Tunable(
+        key="browse_topup_below", env="BROWSE_TOPUP_BELOW", kind="int",
+        minimum=0, maximum=500, group="Browser agent",
+        label="Top up when fewer pages than this are waiting",
+        help="Refilling a queue that is still working would outrun the "
+             "browser.",
+    ),
+    Tunable(
+        key="browse_agent_stale_hours", env="BROWSE_AGENT_STALE_HOURS", kind="int",
+        minimum=1, maximum=720, group="Browser agent",
+        label="Treat the extension as gone after (hours)",
+        help="No work is queued for an extension that has not checked in this "
+             "long — it would expire unread on a closed laptop.",
+    ),
+    Tunable(
+        key="browse_greenhouse_feed", env="BROWSE_GREENHOUSE_FEED", kind="text",
+        group="Browser agent",
+        label="Greenhouse job-seeker search addresses",
+        help="Set the filters on my.greenhouse.io, copy the address, and put "
+             "{q} where the keyword is. Without {q} a page is crawled as it "
+             "is. Comma-separated for several; empty crawls none.",
+    ),
+    Tunable(
+        key="browse_tsenta_feed", env="BROWSE_TSENTA_FEED", kind="text",
+        group="Browser agent",
+        label="Tsenta recommendations address",
+        help="Tsenta keeps its filters in its own state, so set them on the "
+             "site and paste the page you land on. Empty crawls none.",
+    ),
+    Tunable(
+        key="agent_task_ttl_hours", env="AGENT_TASK_TTL_HOURS", kind="int",
+        minimum=1, maximum=720, group="Browser agent",
+        label="Queued browser work expires after (hours)",
+        help="Resolving a job link matters today and not next week.",
+    ),
+    Tunable(
+        key="agent_link_resolve_max_queued", env="AGENT_LINK_RESOLVE_MAX_QUEUED",
+        kind="int", minimum=0, maximum=5000, group="Browser agent",
+        label="Links handed to the browser per cycle",
+        help="Aggregator links the server could not follow. 0 hands none over.",
+    ),
+    Tunable(
+        key="harvest_samples_enabled", env="HARVEST_SAMPLES_ENABLED", kind="bool",
+        group="Browser agent",
+        label="Keep samples of pages nothing could read",
+        help="Trimmed copies to write a reader from. They come from a logged-in "
+             "session and can carry names, so they are capped and expired.",
+    ),
+    Tunable(
+        key="harvest_samples_per_host", env="HARVEST_SAMPLES_PER_HOST", kind="int",
+        minimum=0, maximum=100, group="Browser agent",
+        label="Samples kept per site",
+        help="0 keeps none.",
+    ),
+    # -- Sources ------------------------------------------------------------
+    Tunable(
+        key="browser_tier_enabled", env="BROWSER_TIER_ENABLED", kind="bool",
+        group="Sources",
+        label="Browser tier (Playwright scrapers)",
+        help="The most expensive part of the pipeline and the least "
+             "productive per minute. Off skips it entirely.",
+    ),
+    Tunable(
+        key="hiringcafe_enabled", env="HIRINGCAFE_ENABLED", kind="bool", group="Sources",
+        label="HiringCafe",
+        help="Indexes ATS boards directly, so its postings carry full "
+             "descriptions and link to the employer.",
+    ),
+    Tunable(
+        key="yc_enabled", env="YC_ENABLED", kind="bool", group="Sources",
+        label="Y Combinator jobs",
+        help="The public role pages of Y Combinator companies.",
+    ),
+    Tunable(
+        key="yc_roles", env="YC_ROLES", kind="text", group="Sources",
+        label="Y Combinator: role pages",
+        help="Comma-separated role slugs from the YC jobs site. Empty uses the "
+             "built-in engineering list.",
+    ),
+    Tunable(
+        key="indeed_rss_enabled", env="INDEED_RSS_ENABLED", kind="bool", group="Sources",
+        label="Indeed RSS",
+        help="Indeed retired the feed and every query fails. On only if it "
+             "comes back.",
+    ),
+    Tunable(
+        key="arbeitnow_max_pages", env="ARBEITNOW_MAX_PAGES", kind="int",
+        minimum=1, maximum=20, group="Sources",
+        label="Arbeitnow: pages per run",
+        help="Each page is one request.",
+    ),
+    Tunable(
+        key="adzuna_max_pages", env="ADZUNA_MAX_PAGES", kind="int",
+        minimum=1, maximum=20, group="Sources",
+        label="Adzuna: pages per search",
+        help="Fifty results a page, each page one call against the Adzuna "
+             "quota.",
+    ),
+    Tunable(
+        key="adzuna_max_days_old", env="ADZUNA_MAX_DAYS_OLD", kind="int",
+        minimum=1, maximum=90, group="Sources",
+        label="Adzuna: posted within (days)",
+        help="A one-day window missed every posting from a day the fetch did "
+             "not run; longer overlaps and the repeats are merged.",
+    ),
+    Tunable(
+        key="usajobs_max_pages", env="USAJOBS_MAX_PAGES", kind="int",
+        minimum=1, maximum=20, group="Sources",
+        label="USAJobs: pages per search",
+        help="Each page is one request to USAJobs.",
+    ),
+    Tunable(
+        key="source_rest_after_failures", env="SOURCE_REST_AFTER_FAILURES", kind="int",
+        minimum=0, maximum=100, group="Sources",
+        label="Rest a source after this many failed runs in a row",
+        help="An expired key fails the same way forever. A resting source is "
+             "still probed now and then (below). 0 never rests one.",
+    ),
+    Tunable(
+        key="source_rest_retry_every", env="SOURCE_REST_RETRY_EVERY", kind="int",
+        minimum=1, maximum=100, group="Sources",
+        label="Probe a resting source every (runs)",
+        help="So a refreshed key resumes on its own.",
+    ),
+    # -- LinkedIn -----------------------------------------------------------
+    Tunable(
+        key="linkedin_max_detail_fetches", env="LINKEDIN_MAX_DETAIL_FETCHES", kind="int",
+        minimum=0, maximum=10000, group="LinkedIn",
+        label="LinkedIn descriptions per run",
+        help="A politeness ceiling. Only postings that pass the title check "
+             "are fetched, so each is one worth having. 0 fetches none.",
+    ),
+    Tunable(
+        key="linkedin_detail_workers", env="LINKEDIN_DETAIL_WORKERS", kind="int",
+        minimum=1, maximum=16, group="LinkedIn",
+        label="LinkedIn descriptions fetched at once",
+        help="Higher is faster and more likely to be throttled.",
+    ),
+    # -- Company boards -----------------------------------------------------
+    Tunable(
+        key="ats_auto_discovery", env="ATS_AUTO_DISCOVERY", kind="bool",
+        group="Company boards",
+        label="Learn company boards from job links",
+        help="Every link to an ATS board makes that company pollable. Off "
+             "polls only the boards already known.",
+    ),
+    Tunable(
+        key="ats_seed_companies", env="ATS_SEED_COMPANIES", kind="bool",
+        group="Company boards",
+        label="Include the built-in list of known companies",
+        help="A verified seed list of tech employers boards.",
+    ),
+    Tunable(
+        key="ats_slug_validation", env="ATS_SLUG_VALIDATION", kind="bool",
+        group="Company boards",
+        label="Check and correct the boards listed below",
+        help="Boards typed in by hand are checked against the ATS and fixed "
+             "where the name is close.",
+    ),
+    Tunable(
+        key="ats_list_harvest", env="ATS_LIST_HARVEST", kind="bool",
+        group="Company boards",
+        label="Mine community lists for boards",
+        help="The lists named under Community lists to mine for boards.",
+    ),
+    Tunable(
+        key="ats_board_registry", env="ATS_BOARD_REGISTRY", kind="bool",
+        group="Company boards",
+        label="Keep a registry of boards ranked by yield",
+        help="Discovered boards are stored and polled by how much they have "
+             "given. Off rebuilds the list each cycle from what is found then.",
+    ),
+    Tunable(
+        key="ats_board_validation", env="ATS_BOARD_VALIDATION", kind="bool",
+        group="Company boards",
+        label="Probe a new board before polling it",
+        help="A slug read out of a link is a guess; probing first stops "
+             "non-companies spending the budget real ones compete for.",
+    ),
+    Tunable(
+        key="ats_board_max_empty_cycles", env="ATS_BOARD_MAX_EMPTY_CYCLES", kind="int",
+        minimum=1, maximum=100, group="Company boards",
+        label="Retire a board after this many empty cycles",
+        help="A discovered board that returns nothing this many times is no "
+             "longer polled.",
+    ),
+    Tunable(
+        key="board_backfill_on_start", env="BOARD_BACKFILL_ON_START", kind="bool",
+        group="Company boards",
+        label="Mine stored jobs for boards once after a deploy",
+        help="Jobs stored before the registry existed were never searched for "
+             "the boards in their descriptions. The first fetch after a "
+             "deploy does it once.",
+    ),
+    Tunable(
+        key="board_backfill_max_links", env="BOARD_BACKFILL_MAX_LINKS", kind="int",
+        minimum=0, maximum=10000, group="Company boards",
+        label="Links followed by that one-off mining",
+        help="Caps the extra requests it costs.",
+    ),
+    Tunable(
+        key="board_backfill_max_hosts", env="BOARD_BACKFILL_MAX_HOSTS", kind="int",
+        minimum=0, maximum=5000, group="Company boards",
+        label="Careers sites looked behind by that mining",
+        help="Caps the extra requests it costs.",
+    ),
+    Tunable(
+        key="board_backfill_workers", env="BOARD_BACKFILL_WORKERS", kind="int",
+        minimum=1, maximum=64, group="Company boards",
+        label="Requests at once during that mining",
+        help="Sized so the worst case, every request timing out, stays a few "
+             "minutes.",
+    ),
+    # -- Apply links --------------------------------------------------------
+    Tunable(
+        key="resolve_apply_links", env="RESOLVE_APPLY_LINKS", kind="bool",
+        group="Apply links",
+        label="Follow aggregator links to the employer",
+        help="Adzuna, Jooble and Careerjet link to their own redirect page. "
+             "Following it once gives the real apply link and the company "
+             "board behind it.",
+    ),
+    Tunable(
+        key="link_resolve_max_per_cycle", env="LINK_RESOLVE_MAX_PER_CYCLE", kind="int",
+        minimum=0, maximum=50000, group="Apply links",
+        label="Links followed per cycle",
+        help="Only stops one cycle running unboundedly long; the real limit "
+             "is per site, below.",
+    ),
+    Tunable(
+        key="link_resolve_workers", env="LINK_RESOLVE_WORKERS", kind="int",
+        minimum=1, maximum=64, group="Apply links",
+        label="Links followed at once",
+        help="Across all sites.",
+    ),
+    Tunable(
+        key="link_resolve_per_host", env="LINK_RESOLVE_PER_HOST", kind="int",
+        minimum=1, maximum=32, group="Apply links",
+        label="Links followed at once on one site",
+        help="So a backlog that is mostly one aggregator paces itself.",
+    ),
+    Tunable(
+        key="link_resolve_host_delay_ms", env="LINK_RESOLVE_HOST_DELAY_MS", kind="int",
+        minimum=0, maximum=10000, group="Apply links",
+        label="Gap between links on one site (ms)",
+        help="0 sends them back to back.",
+    ),
+    # -- Schedule -----------------------------------------------------------
+    Tunable(
+        key="match_interval_minutes", env="MATCH_INTERVAL_MINUTES", kind="int",
+        minimum=1, maximum=1440, group="Schedule",
+        label="Matching: every (minutes)",
+        help="How often matching looks for new jobs on its own, besides "
+             "after each fetch. It does nothing when there is nothing new.",
+    ),
+    Tunable(
+        key="fetch_linked_interval_hours", env="FETCH_LINKED_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Schedule",
+        label="Linked boards: feed every (hours)",
+        help="Boards you linked with a credential, asked for their feed. "
+             "Cheap: one request per page of twenty.",
+    ),
+    Tunable(
+        key="fetch_linked_deep_interval_hours", env="FETCH_LINKED_DEEP_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=720, group="Schedule",
+        label="Linked boards: whole index every (hours)",
+        help="About a thousand requests each time, so far less often than the "
+             "feed.",
+    ),
+    # -- Housekeeping -------------------------------------------------------
+    Tunable(
+        key="archive_enabled", env="ARCHIVE_ENABLED", kind="bool", group="Housekeeping",
+        label="Archive settled rejections",
+        help="Old rejected jobs stop carrying their descriptions. What "
+             "deduplication needs is kept, so they are never fetched again.",
+    ),
+    Tunable(
+        key="archive_after_days", env="ARCHIVE_AFTER_DAYS", kind="int",
+        minimum=7, maximum=3650, group="Housekeeping",
+        label="Archive rejections older than (days)",
+        help="Shorter keeps the database smaller; an archived job cannot be "
+             "reopened with its description.",
+    ),
+    Tunable(
+        key="archive_max_per_run", env="ARCHIVE_MAX_PER_RUN", kind="int",
+        minimum=1, maximum=100000, group="Housekeeping",
+        label="Jobs archived per run",
+        help="One transaction; higher holds a worker and a lock longer.",
+    ),
+    Tunable(
+        key="archive_interval_hours", env="ARCHIVE_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Housekeeping",
+        label="Archive every (hours)",
+        help="How often archiving runs.",
+    ),
+    Tunable(
+        key="llm_log_enabled", env="LLM_LOG_ENABLED", kind="bool", group="Housekeeping",
+        label="Keep a log of model calls",
+        help="Every prompt and reply, together, for telling a wrong prompt "
+             "from a wrong answer on the Runs page.",
+    ),
+    Tunable(
+        key="llm_log_max_chars", env="LLM_LOG_MAX_CHARS", kind="int",
+        minimum=1000, maximum=200000, group="Housekeeping",
+        label="Model log: characters kept per prompt or reply",
+        help="Prompts carry whole descriptions; without a ceiling this table "
+             "outgrows everything else.",
+    ),
+    Tunable(
+        key="llm_log_keep_rows", env="LLM_LOG_KEEP_ROWS", kind="int",
+        minimum=100, maximum=200000, group="Housekeeping",
+        label="Model log: calls kept",
+        help="The newest this many are kept.",
+    ),
+    Tunable(
+        key="llm_log_prune_interval_hours", env="LLM_LOG_PRUNE_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=168, group="Housekeeping",
+        label="Model log: trim every (hours)",
+        help="How often it is cut back to the size above.",
+    ),
+    Tunable(
+        key="agent_event_keep_rows", env="AGENT_EVENT_KEEP_ROWS", kind="int",
+        minimum=1000, maximum=1000000, group="Housekeeping",
+        label="Extension events kept",
+        help="Small rows answering questions about weeks: is the extension "
+             "running, which sites is it failing on.",
+    ),
+    Tunable(
+        key="agent_event_prune_interval_hours", env="AGENT_EVENT_PRUNE_INTERVAL_HOURS",
+        kind="int", minimum=1, maximum=168, group="Housekeeping",
+        label="Extension history: trim every (hours)",
+        help="Trims the event log and finished browser tasks.",
+    ),
+    Tunable(
+        key="browser_task_keep_days", env="BROWSER_TASK_KEEP_DAYS", kind="int",
+        minimum=1, maximum=365, group="Housekeeping",
+        label="Finished browser tasks kept for (days)",
+        help="They carry the page they brought back, which is the large part.",
+    ),
+    Tunable(
+        key="harvest_sample_ttl_days", env="HARVEST_SAMPLE_TTL_DAYS", kind="int",
+        minimum=1, maximum=365, group="Housekeeping",
+        label="Unread page samples kept for (days)",
+        help="They can carry names from a logged-in session.",
+    ),
+    Tunable(
+        key="score_history_keep_per_job", env="SCORE_HISTORY_KEEP_PER_JOB", kind="int",
+        minimum=1, maximum=500, group="Housekeeping",
+        label="Past scores kept per job",
+        help="Per job, so a job first verdict survives however many calls "
+             "the rest of the pipeline makes.",
+    ),
+    # -- Display ------------------------------------------------------------
+    Tunable(
+        key="display_timezone", env="DISPLAY_TIMEZONE", kind="text", group="Display",
+        label="Time zone for dates on the pages",
+        help="An IANA name such as America/New_York or Europe/London. Stored "
+             "times stay UTC; a name that cannot be loaded shows UTC.",
+    ),
+])
+
+# Boards polled whatever discovery finds, per ATS. Discovery fills the
+# registry on its own from job links, community lists and careers sites; these
+# are for a company it has not reached. Read per cycle through the cycle's
+# settings (`ats_discovery.configured_ats_slugs`).
+_BOARD_LISTS = (
+    ("greenhouse_company_slugs", "GREENHOUSE_COMPANY_SLUGS", "Greenhouse",
+     "board names, as in boards.greenhouse.io/acme"),
+    ("lever_company_slugs", "LEVER_COMPANY_SLUGS", "Lever",
+     "board names, as in jobs.lever.co/acme"),
+    ("ashby_company_slugs", "ASHBY_COMPANY_SLUGS", "Ashby",
+     "board names, as in jobs.ashbyhq.com/acme"),
+    ("smartrecruiters_company_slugs", "SMARTRECRUITERS_COMPANY_SLUGS", "SmartRecruiters",
+     "company names, as in jobs.smartrecruiters.com/acme"),
+    ("workable_company_slugs", "WORKABLE_COMPANY_SLUGS", "Workable",
+     "account names, as in apply.workable.com/acme"),
+    ("recruitee_company_slugs", "RECRUITEE_COMPANY_SLUGS", "Recruitee",
+     "subdomains, as in acme.recruitee.com"),
+    ("icims_company_slugs", "ICIMS_COMPANY_SLUGS", "iCIMS",
+     "portal names, as in careers-acme.icims.com"),
+    ("bamboohr_company_slugs", "BAMBOOHR_COMPANY_SLUGS", "BambooHR",
+     "subdomains, as in acme.bamboohr.com"),
+    ("teamtailor_company_slugs", "TEAMTAILOR_COMPANY_SLUGS", "Teamtailor",
+     "subdomains, as in acme.teamtailor.com"),
+    ("jobvite_company_slugs", "JOBVITE_COMPANY_SLUGS", "Jobvite",
+     "company names, as in jobs.jobvite.com/acme"),
+    ("personio_company_slugs", "PERSONIO_COMPANY_SLUGS", "Personio",
+     "subdomains, as in acme.jobs.personio.de"),
+    ("workday_tenants", "WORKDAY_TENANTS", "Workday",
+     "tenant:cluster:site entries, as in nvidia:wd5:NVIDIAExternalCareerSite"),
+    ("taleo_boards", "TALEO_BOARDS", "Taleo",
+     "tenant/section entries, as in textron/textron"),
+    ("oracle_boards", "ORACLE_BOARDS", "Oracle Recruiting",
+     "host:site entries, as in egug.fa.us2.oraclecloud.com:CX_1"),
+    ("successfactors_boards", "SUCCESSFACTORS_BOARDS", "SuccessFactors",
+     "careers hosts, as in careers.qorvo.com"),
+    ("phenom_boards", "PHENOM_BOARDS", "Phenom",
+     "host/country/language entries, as in careers.mastercard.com/us/en"),
+    ("eightfold_boards", "EIGHTFOLD_BOARDS", "Eightfold",
+     "careers hosts, as in qualcomm.eightfold.ai"),
+    ("jibe_boards", "JIBE_BOARDS", "iCIMS careers sites",
+     "careers hosts, as in careers.amd.com"),
+    ("rippling_company_slugs", "RIPPLING_COMPANY_SLUGS", "Rippling",
+     "board names, as in ats.rippling.com/acme"),
+    ("pinpoint_company_slugs", "PINPOINT_COMPANY_SLUGS", "Pinpoint",
+     "subdomains, as in acme.pinpointhq.com"),
+    ("paylocity_company_ids", "PAYLOCITY_COMPANY_IDS", "Paylocity",
+     "company ids, the one in recruiting.paylocity.com/Recruiting/Jobs/All/<id>"),
+    ("avature_boards", "AVATURE_BOARDS", "Avature",
+     "host/portal entries, as in bloomberg.avature.net/careers"),
+)
+TUNABLES.extend(
+    Tunable(
+        key=key, env=env, kind="text", group="Boards always polled",
+        label=name,
+        help=f"Comma-separated {what}. Polled every boards cycle within that "
+             f"ATS budget, on top of what discovery finds. Empty is fine.",
+    )
+    for key, env, name, what in _BOARD_LISTS
+)
+
 BY_KEY: dict[str, Tunable] = {t.key: t for t in TUNABLES}
+
+
+# What stays in the environment, and why. Every field of `app.config.Settings`
+# is either declared above or named here — `tests/test_settings_coverage.py`
+# fails on one that is neither, so an env-only knob is noticed the day it is
+# added rather than the day somebody wonders why the page cannot change it.
+# The test from CLAUDE.md: would you change it to see a different set of jobs?
+# Then it is above. Is it what lets the application connect or authenticate at
+# all? Then it is here.
+SECRET = "a secret or credential; the page would have to store it in the profile and render it back"
+CONNECTION = "where a service is and how to reach it"
+SECURITY = "who may use the application; a web form must not be able to widen that"
+DEPLOYMENT = "a fact about the machine or the deployment, read when a process starts"
+PROTOCOL = "a timing the extension and the proxy in front of the app are built around"
+
+ENVIRONMENT: dict[str, str] = {
+    **dict.fromkeys((
+        "SECRET_KEY", "APP_PASSWORD", "AGENT_TOKEN", "NVIDIA_NIM_API_KEY",
+        "FREEINFERENCE_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        "HUNTER_IO_API_KEY", "GITHUB_TOKEN", "SMTP_USERNAME", "SMTP_PASSWORD",
+        "IMAP_USERNAME", "IMAP_PASSWORD", "ADZUNA_APP_ID", "ADZUNA_APP_KEY",
+        "JSEARCH_API_KEY", "SERPAPI_API_KEY", "LINKEDIN_SESSION_COOKIE",
+        "HANDSHAKE_SESSION_COOKIE", "JOOBLE_API_KEY", "FINDWORK_API_KEY",
+        "CAREERJET_AFFID", "USAJOBS_API_KEY", "USAJOBS_USER_AGENT", "DICE_API_KEY",
+    ), SECRET),
+    **dict.fromkeys((
+        "DATABASE_URL", "TEST_DATABASE_URL", "REDIS_URL", "NVIDIA_NIM_BASE_URL",
+        "FREEINFERENCE_BASE_URL", "GEMINI_BASE_URL", "SMTP_HOST", "SMTP_PORT",
+        "SMTP_USE_TLS", "SMTP_USE_SSL", "SMTP_TIMEOUT", "SMTP_FROM_EMAIL",
+        "SMTP_FROM_NAME", "IMAP_HOST", "IMAP_PORT", "IMAP_FOLDER", "IMAP_TIMEOUT",
+    ), CONNECTION),
+    **dict.fromkeys((
+        "AUTH_ENABLED", "SESSION_MAX_AGE_SECONDS", "SESSION_COOKIE_SECURE",
+        "CORS_ALLOW_ORIGINS",
+    ), SECURITY),
+    **dict.fromkeys((
+        "DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_TIMEOUT", "DB_POOL_RECYCLE",
+        "DEBUG", "STORAGE_PATH", "DOCS_OUTPUT_DIR", "BACKUP_DIR",
+    ), DEPLOYMENT),
+    **dict.fromkeys((
+        "AGENT_LEASE_SECONDS", "AGENT_POLL_MAX_WAIT_SECONDS", "AGENT_MAX_LEASE_BATCH",
+    ), PROTOCOL),
+}
 
 
 def choices_for(tunable: Tunable, profile_data: dict | None) -> list[str]:
@@ -644,6 +1688,8 @@ def choices_for(tunable: Tunable, profile_data: dict | None) -> list[str]:
 
     if tunable.key == "nvidia_nim_model":
         return model_catalog.models(profile_data, "nim")
+    if tunable.catalog:
+        return model_catalog.models(profile_data, tunable.catalog)
     return model_roles.choices(tunable.key.removeprefix("model_"), profile_data)
 
 GROUPS: list[str] = list(dict.fromkeys(t.group for t in TUNABLES))
@@ -726,6 +1772,30 @@ def value(profile_data: dict | None, key: str):
     return default(tunable)
 
 
+def _load_profile_data() -> dict:
+    """
+    The profile's data, read in a session of its own. `{}` when there is none
+    or it cannot be read — the environment's values then stand, which is what
+    every setting falls back to anyway.
+
+    One function, so the tests can point it at their own session: a test's
+    profile lives inside a transaction no other connection can see.
+    """
+    try:
+        from app.database import SessionLocal
+        from app.models.profile import Profile
+
+        db = SessionLocal()
+        try:
+            profile = db.query(Profile).first()
+            return dict(profile.data or {}) if profile else {}
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("tunables: could not read the profile: %s", exc)
+        return {}
+
+
 def current(key: str):
     """
     A tunable's value for code that has no profile to hand.
@@ -736,20 +1806,7 @@ def current(key: str):
     itself. Deliberately uncached: it is one single-row query, and the settings
     it serves (a site to stop visiting) have to bite the moment they are saved.
     """
-    data: dict = {}
-    try:
-        from app.database import SessionLocal
-        from app.models.profile import Profile
-
-        db = SessionLocal()
-        try:
-            profile = db.query(Profile).first()
-            data = dict(profile.data or {}) if profile else {}
-        finally:
-            db.close()
-    except Exception as exc:
-        logger.warning("tunables: could not read the profile for %s: %s", key, exc)
-    return value(data, key)
+    return value(_load_profile_data(), key)
 
 
 def values(profile_data: dict | None) -> dict:
@@ -842,3 +1899,67 @@ def effective_settings(profile_data: dict | None, base=None):
         if resolved is not None and resolved != getattr(base, tunable.env, None):
             overrides[tunable.env] = resolved
     return _Overlay(base, overrides) if overrides else base
+
+
+# A settings object someone further up has already resolved — a fetch cycle's
+# overlay (`sources.base.cycle_settings`) — so the code inside it reads the
+# one snapshot the cycle started with rather than the profile again per call.
+_BOUND: ContextVar = ContextVar("tunables_bound", default=None)
+
+
+@contextmanager
+def bound(cfg):
+    """Make `cfg` what `live()` returns, for this block."""
+    token = _BOUND.set(cfg)
+    try:
+        yield cfg
+    finally:
+        _BOUND.reset(token)
+
+
+class _ReadOnFirstUse:
+    """
+    `live()` for one request or one task: the profile is read the first time a
+    setting is asked for, and that answer serves the rest of the unit.
+
+    Without it a page rendering fifty timestamps read the profile fifty times
+    (`timefmt.zone`); with a plain read at the start, a request that asks for
+    no setting at all paid for one anyway.
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "_cfg", None)
+
+    def __getattr__(self, name):
+        cfg = object.__getattribute__(self, "_cfg")
+        if cfg is None:
+            cfg = effective_settings(_load_profile_data())
+            object.__setattr__(self, "_cfg", cfg)
+        return getattr(cfg, name)
+
+
+@contextmanager
+def read_once():
+    """
+    Within this block `live()` reads the profile once, on first use. Wrapped
+    around every web request (`main`) and every Celery task (`celery_app`), so
+    a value saved on the settings page applies from the next request or task.
+    """
+    with bound(_ReadOnFirstUse()) as cfg:
+        yield cfg
+
+
+def live():
+    """
+    `settings` with the settings page's overrides on top, for code that has
+    no profile to hand: read it as `live().THE_ENV_NAME`.
+
+    Inside `bound()` it is that block's settings. Otherwise the profile is read
+    now, uncached like `current()`, so a value saved on the page applies to the
+    next pass that asks. One query — read it once at the top of a pass and hand
+    the values down, rather than per item in a loop.
+    """
+    cfg = _BOUND.get()
+    if cfg is not None:
+        return cfg
+    return effective_settings(_load_profile_data())

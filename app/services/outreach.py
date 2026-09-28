@@ -22,7 +22,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
-from app.config import settings
+from app.config import live, settings
 from app.llm.providers import collect_llm_log, generation_chat, start_llm_log
 from app.models.outreach import (
     CLOSED_MESSAGE_STATUSES, Contact, MESSAGE_CHANNELS, MESSAGE_KINDS,
@@ -453,7 +453,7 @@ def compose_message(
                 messages=messages,
                 api_key=settings.NVIDIA_NIM_API_KEY,
                 base_url=settings.NVIDIA_NIM_BASE_URL,
-                model=settings.NVIDIA_NIM_MODEL,
+                model=live().NVIDIA_NIM_MODEL,
                 temperature=0.7,
                 max_tokens=800,
             )
@@ -604,7 +604,7 @@ def _attach_guessed_emails(candidates: list[dict], domain: str, pattern: str, hu
                 candidate["email_status"] = "unverified"
                 candidate["email_confidence"] = found.get("score") or 50
                 continue
-        if not settings.OUTREACH_GUESS_EMAILS:
+        if not live().OUTREACH_GUESS_EMAILS:
             continue
         guesses = guess_emails(first, last, domain, pattern)
         if guesses:
@@ -699,9 +699,9 @@ def discover_contacts(
     """
     job = application.job
     hunter_key = settings.HUNTER_IO_API_KEY
-    use_linkedin = settings.OUTREACH_USE_LINKEDIN if use_linkedin is None else use_linkedin
-    verify = settings.OUTREACH_VERIFY_EMAILS if verify is None else verify
-    max_contacts = max_contacts or settings.OUTREACH_MAX_CONTACTS_PER_APP
+    use_linkedin = live().OUTREACH_USE_LINKEDIN if use_linkedin is None else use_linkedin
+    verify = live().OUTREACH_VERIFY_EMAILS if verify is None else verify
+    max_contacts = max_contacts or live().OUTREACH_MAX_CONTACTS_PER_APP
 
     domain, domain_source = resolve_company_domain(
         job.company,
@@ -728,14 +728,14 @@ def discover_contacts(
         candidates.extend(hunter_contacts(domain, hunter_key, limit=10, data=data))
 
     # The company's own site: LinkedIn profile links and published addresses.
-    if settings.OUTREACH_USE_TEAM_PAGES and domain:
+    if live().OUTREACH_USE_TEAM_PAGES and domain:
         try:
             candidates.extend(team_page_contacts(domain, limit=max_contacts))
         except Exception as exc:
             logger.error("discover_contacts: team pages failed for %s: %s", domain, exc)
 
     # Public GitHub org members — named engineers, which is who referrals come from.
-    if settings.OUTREACH_USE_GITHUB and settings.GITHUB_TOKEN:
+    if live().OUTREACH_USE_GITHUB and settings.GITHUB_TOKEN:
         try:
             candidates.extend(
                 github_contacts(job.company, domain, settings.GITHUB_TOKEN, limit=max_contacts)
@@ -744,10 +744,10 @@ def discover_contacts(
             logger.error("discover_contacts: github failed for %s: %s", job.company, exc)
 
     if use_linkedin and settings.LINKEDIN_SESSION_COOKIE:
-        titles = [t.strip() for t in settings.OUTREACH_TARGET_TITLES.split(",") if t.strip()]
+        titles = [t.strip() for t in live().OUTREACH_TARGET_TITLES.split(",") if t.strip()]
         # Capped hard: every extra authenticated search from a datacenter IP is
         # another chance at an account restriction, and one good query beats five.
-        for query in titles[:max(1, settings.OUTREACH_LINKEDIN_MAX_SEARCHES)]:
+        for query in titles[:max(1, live().OUTREACH_LINKEDIN_MAX_SEARCHES)]:
             candidates.extend(
                 find_linkedin_contacts(
                     job.company, [query], settings.LINKEDIN_SESSION_COOKIE, limit=3
@@ -757,7 +757,7 @@ def discover_contacts(
     candidates = _dedupe(candidates)
     _attach_guessed_emails(candidates, domain, pattern, hunter_key)
 
-    if not candidates and domain and settings.OUTREACH_GUESS_EMAILS:
+    if not candidates and domain and live().OUTREACH_GUESS_EMAILS:
         # Nothing at all — the careers mailbox is a real, commonly monitored
         # address and is better than an empty panel.
         candidates = [{
@@ -906,7 +906,7 @@ def regenerate_message(db, message: OutreachMessage, feedback: str | None = None
 def followup_days() -> list[int]:
     """Days after sending that each successive follow-up comes due."""
     days: list[int] = []
-    for part in (settings.OUTREACH_FOLLOWUP_DAYS or "").split(","):
+    for part in (live().OUTREACH_FOLLOWUP_DAYS or "").split(","):
         part = part.strip()
         if part.isdigit() and int(part) > 0:
             days.append(int(part))
@@ -1066,7 +1066,7 @@ def run_outreach(db, application, draft: bool = True) -> list[Contact]:
     The one call a caller needs: the API endpoint, the Celery task, and the
     "Find contacts" button all land here.
     """
-    if not settings.OUTREACH_ENABLED:
+    if not live().OUTREACH_ENABLED:
         logger.info("run_outreach: disabled by configuration")
         return []
 

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func
 
-from app.config import settings
+from app.config import live, settings
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +134,11 @@ def status(db) -> dict:
         "oldest_generating_minutes": stuck_minutes,
         # Past the sweeper's threshold, so it is a stall rather than a wait.
         "generation_stalled": (
-            stuck_minutes is not None and stuck_minutes >= settings.GENERATION_STUCK_MINUTES
+            stuck_minutes is not None and stuck_minutes >= live().GENERATION_STUCK_MINUTES
         ),
         "matching_now": state(key=MATCH_LOCK_KEY).get("running", False),
-        "match_interval_minutes": settings.MATCH_INTERVAL_MINUTES,
-        "match_batch_size": settings.MATCH_MAX_JOBS_PER_TASK,
+        "match_interval_minutes": live().MATCH_INTERVAL_MINUTES,
+        "match_batch_size": live().MATCH_MAX_JOBS_PER_TASK,
         "failures": failures,
         "queue": queue_depth(),
     }

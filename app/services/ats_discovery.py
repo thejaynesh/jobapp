@@ -533,7 +533,9 @@ _CAP_SETTINGS = {"workday": ("WORKDAY_MAX_TENANTS", 150)}
 def _total_cap(ats: str, cfg=None) -> int:
     """This ATS's per-cycle board budget, from `cfg` (the cycle's settings)."""
     if cfg is None:
-        from app.config import settings as cfg
+        from app.config import live
+
+        cfg = live()
 
     default = int(getattr(cfg, "ATS_MAX_SLUGS_PER_ATS", MAX_TOTAL_SLUGS_PER_ATS))
     setting = _CAP_SETTINGS.get(ats)

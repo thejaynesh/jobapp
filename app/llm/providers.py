@@ -22,7 +22,7 @@ import contextvars
 import logging
 from dataclasses import dataclass, replace
 
-from app.config import settings
+from app.config import live, settings
 
 logger = logging.getLogger(__name__)
 
@@ -92,26 +92,27 @@ class Provider:
 
 def configured_providers() -> dict[str, Provider]:
     providers: dict[str, Provider] = {}
+    cfg = live()
     if settings.FREEINFERENCE_API_KEY:
         providers["freeinference"] = Provider(
             name="freeinference",
             api_key=settings.FREEINFERENCE_API_KEY,
-            model=settings.FREEINFERENCE_MODEL,
+            model=cfg.FREEINFERENCE_MODEL,
             base_url=settings.FREEINFERENCE_BASE_URL,
-            max_concurrency=settings.FREEINFERENCE_MAX_CONCURRENCY,
+            max_concurrency=cfg.FREEINFERENCE_MAX_CONCURRENCY,
             paid=False,
         )
     if settings.ANTHROPIC_API_KEY:
         providers["anthropic"] = Provider(
             name="anthropic",
             api_key=settings.ANTHROPIC_API_KEY,
-            model=settings.ANTHROPIC_MODEL,
+            model=cfg.ANTHROPIC_MODEL,
         )
     if settings.GEMINI_API_KEY:
         providers["gemini"] = Provider(
             name="gemini",
             api_key=settings.GEMINI_API_KEY,
-            model=settings.GEMINI_MODEL,
+            model=cfg.GEMINI_MODEL,
             base_url=settings.GEMINI_BASE_URL,
         )
     return providers
@@ -251,7 +252,7 @@ def nim_provider() -> Provider:
     return Provider(
         name="nim",
         api_key=settings.NVIDIA_NIM_API_KEY,
-        model=settings.NVIDIA_NIM_MODEL,
+        model=live().NVIDIA_NIM_MODEL,
         base_url=settings.NVIDIA_NIM_BASE_URL,
         paid=False,
     )
@@ -272,7 +273,7 @@ def primary_matching_provider() -> Provider | None:
     An unconfigured name falls back to NIM rather than failing: a typo in a
     setting should cost a log line, not every score in the queue.
     """
-    name = str(getattr(settings, "MATCH_PRIMARY", "") or "nim").strip().lower()
+    name = str(getattr(live(), "MATCH_PRIMARY", "") or "nim").strip().lower()
     if name in ("nim", "nvidia", "primary", ""):
         return None
 

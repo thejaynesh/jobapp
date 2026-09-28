@@ -10,6 +10,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.database import get_db
 from app.services.locations import REGION_OPTIONS, normalize_prefs
 from app.services.profile_service import get_or_create_profile
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,7 @@ def narrative_generate_questions(request: Request, db: Session = Depends(get_db)
         db,
         api_key=settings.NVIDIA_NIM_API_KEY,
         base_url=settings.NVIDIA_NIM_BASE_URL,
-        model=settings.NVIDIA_NIM_MODEL,
+        model=live().NVIDIA_NIM_MODEL,
     )
     db.commit()
     return templates.TemplateResponse(
@@ -424,7 +425,7 @@ def regenerate_summary(request: Request, db: Session = Depends(get_db)):
         db,
         api_key=settings.NVIDIA_NIM_API_KEY,
         base_url=settings.NVIDIA_NIM_BASE_URL,
-        model=settings.NVIDIA_NIM_MODEL,
+        model=live().NVIDIA_NIM_MODEL,
     )
     db.commit()
     return templates.TemplateResponse(

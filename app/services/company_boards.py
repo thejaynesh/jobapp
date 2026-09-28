@@ -20,6 +20,7 @@ from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.company_board import CompanyBoard
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,8 @@ AWAITING_VALIDATION = "awaiting validation"
 
 
 def _validation_enabled() -> bool:
-    from app.config import settings
 
-    return bool(getattr(settings, "ATS_BOARD_VALIDATION", True))
+    return bool(getattr(live(), "ATS_BOARD_VALIDATION", True))
 
 
 def is_blocked_slug(slug: str) -> bool:

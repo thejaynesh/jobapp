@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import live, settings
 from app.models.job import Job, JobStatus
 from app.models.profile import Profile
 from app.services import posting_identity
@@ -1045,8 +1045,8 @@ def _resting_sources(db: Session) -> dict:
 
         resting = resting_sources(
             db,
-            threshold=settings.SOURCE_REST_AFTER_FAILURES,
-            retry_every=settings.SOURCE_REST_RETRY_EVERY,
+            threshold=live().SOURCE_REST_AFTER_FAILURES,
+            retry_every=live().SOURCE_REST_RETRY_EVERY,
         )
         if resting:
             logger.info(
@@ -1183,10 +1183,10 @@ def _resolve_apply_links(db: Session, raw_jobs: list[dict]):
         return None
     return resolve_jobs(
         fresh,
-        max_links=settings.LINK_RESOLVE_MAX_PER_CYCLE,
-        workers=settings.LINK_RESOLVE_WORKERS,
-        per_host=settings.LINK_RESOLVE_PER_HOST,
-        host_delay=settings.LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
+        max_links=live().LINK_RESOLVE_MAX_PER_CYCLE,
+        workers=live().LINK_RESOLVE_WORKERS,
+        per_host=live().LINK_RESOLVE_PER_HOST,
+        host_delay=live().LINK_RESOLVE_HOST_DELAY_MS / 1000.0,
     )
 
 
@@ -1256,7 +1256,7 @@ def _maybe_backfill_boards(db: Session, profile) -> dict | None:
     """
     import copy
 
-    if not settings.BOARD_BACKFILL_ON_START:
+    if not live().BOARD_BACKFILL_ON_START:
         return None
 
     state = (profile.data or {}).get("board_backfill") or {}
@@ -1273,9 +1273,9 @@ def _maybe_backfill_boards(db: Session, profile) -> dict | None:
         with db.begin_nested():
             report = backfill_boards(
                 db,
-                max_links=settings.BOARD_BACKFILL_MAX_LINKS,
-                max_hosts=settings.BOARD_BACKFILL_MAX_HOSTS,
-                workers=settings.BOARD_BACKFILL_WORKERS,
+                max_links=live().BOARD_BACKFILL_MAX_LINKS,
+                max_hosts=live().BOARD_BACKFILL_MAX_HOSTS,
+                workers=live().BOARD_BACKFILL_WORKERS,
                 commit=False,
             )
         record = {"done": True, "at": datetime.now(timezone.utc).isoformat(),
@@ -1338,7 +1338,7 @@ def _update_board_registry(
         boards.record_fetch_results(
             db, ats, attempted, per_slug,
             had_errors=bool((source_stats.get(ats) or {}).get("errors")),
-            max_empty_cycles=settings.ATS_BOARD_MAX_EMPTY_CYCLES,
+            max_empty_cycles=live().ATS_BOARD_MAX_EMPTY_CYCLES,
         )
 
     return stats
@@ -1438,6 +1438,11 @@ def fetch_and_save_jobs(
 
     roles: list[str] = profile.data.get("target_roles") or []
 
+    # The settings page's overrides on top of the environment: what every read
+    # below sees, and what the adapters are handed (`tunables.effective_settings`).
+    from app.services.tunables import effective_settings
+    cfg = effective_settings(profile.data)
+
     # Structured location preferences drive the search locations, Adzuna
     # country endpoints, and the region prefilter during matching.
     from app.services.locations import normalize_prefs, search_locations
@@ -1455,7 +1460,7 @@ def fetch_and_save_jobs(
     try:
         queries, query_cache = expand_search_queries(
             profile.data, settings.NVIDIA_NIM_API_KEY,
-            settings.NVIDIA_NIM_BASE_URL, settings.NVIDIA_NIM_MODEL,
+            settings.NVIDIA_NIM_BASE_URL, cfg.NVIDIA_NIM_MODEL,
         )
     except Exception as exc:
         logger.error("job_fetcher: query expansion failed: %s", exc)
@@ -1464,7 +1469,7 @@ def fetch_and_save_jobs(
         queries = list(roles)
 
     discovered_ats = (
-        profile.data.get("discovered_ats") if settings.ATS_AUTO_DISCOVERY else None
+        profile.data.get("discovered_ats") if cfg.ATS_AUTO_DISCOVERY else None
     )
 
     # Company boards named by community job lists (SimplifyJobs' listings
@@ -1488,12 +1493,12 @@ def fetch_and_save_jobs(
         u.strip() for u in str(tunable_value(profile.data, "slug_harvest_urls") or "").split(",")
         if u.strip()
     ]
-    if settings.ATS_LIST_HARVEST and harvest_urls and polls_boards:
+    if cfg.ATS_LIST_HARVEST and harvest_urls and polls_boards:
         try:
             from app.services.ats_discovery import _merge_found, harvest_boards_from_lists
             harvested, harvested_names = harvest_boards_from_lists(
                 harvest_urls, career_links=harvested_links)
-            if not settings.ATS_BOARD_REGISTRY:
+            if not cfg.ATS_BOARD_REGISTRY:
                 # No registry to validate them: the capped legacy merge.
                 merged = {ats: list(s or []) for ats, s in (discovered_ats or {}).items()}
                 _merge_found(merged, harvested)
@@ -1507,12 +1512,11 @@ def fetch_and_save_jobs(
     # The settings page's overrides, for the board budget below as much as for
     # the adapters: the caps and the concurrency are preferences, not facts
     # about the deployment.
-    from app.services.tunables import effective_settings
-    cycle_cfg = effective_settings(profile.data)
+    cycle_cfg = cfg
     slug_cache = None
     slug_report: dict = {}
     validated_configured = None
-    if settings.ATS_SLUG_VALIDATION:
+    if cfg.ATS_SLUG_VALIDATION:
         try:
             from app.services.ats_validation import validate_configured_slugs
             validated_configured, slug_cache, slug_report = validate_configured_slugs(
@@ -1526,7 +1530,7 @@ def fetch_and_save_jobs(
     # the old profile blob are folded in on the way past.
     registry_boards = None
     backfill_report = None
-    if settings.ATS_BOARD_REGISTRY:
+    if cfg.ATS_BOARD_REGISTRY:
         try:
             from app.services import company_boards as boards
             # Savepoint, not the whole transaction: a registry problem must not
@@ -1539,7 +1543,7 @@ def fetch_and_save_jobs(
                     # registry retired — see `record_boards`.
                     boards.record_boards(db, harvested, origin="list", revive=False,
                                          names=harvested_names)
-                if settings.ATS_SEED_COMPANIES:
+                if cfg.ATS_SEED_COMPANIES:
                     from app.services.ats_seeds import SEED_ATS_SLUGS, SEED_BOARD_NAMES
                     boards.backfill_from_slugs(db, SEED_ATS_SLUGS, origin="seed",
                                                names=SEED_BOARD_NAMES)
@@ -1552,7 +1556,7 @@ def fetch_and_save_jobs(
             # And before that selection too: a board nobody has confirmed
             # exists is not polled, so the per-ATS budget goes to companies
             # rather than to slugs scraped off an aggregator's own page.
-            if settings.ATS_BOARD_VALIDATION:
+            if cfg.ATS_BOARD_VALIDATION:
                 try:
                     with db.begin_nested():
                         boards.validate_pending(
@@ -1579,10 +1583,9 @@ def fetch_and_save_jobs(
     # search that genuinely had no matches.
     from app.services.source_diagnostics import SourceLogCapture, merge_into_stats
     try:
-        # The overlay is `settings` with the profile's UI overrides on top, so
-        # every adapter picks them up through the `cfg.X` reads it already does.
-        from app.services.tunables import effective_settings
-        cfg = effective_settings(profile.data)
+        # The overlay (`cfg`, above) is `settings` with the profile's UI
+        # overrides on top, so every adapter picks them up through the `cfg.X`
+        # reads it already does.
         from app.services.sources.base import collect_board_sightings, known_descriptions
         described = {}
         if getattr(cfg, "GREENHOUSE_DESCRIPTIONS_ON_DEMAND", True) and \
@@ -1607,13 +1610,13 @@ def fetch_and_save_jobs(
     # Follow aggregator redirect pages through to the employer's own apply link.
     # Only postings we haven't seen before are worth the round trip.
     resolve_stats = None
-    if settings.RESOLVE_APPLY_LINKS:
+    if cfg.RESOLVE_APPLY_LINKS:
         try:
             resolve_stats = _resolve_apply_links(db, raw_jobs)
         except Exception as exc:
             logger.error("job_fetcher: apply-link resolution failed: %s", exc)
 
-    if settings.ATS_BOARD_REGISTRY:
+    if cfg.ATS_BOARD_REGISTRY:
         try:
             counts["board_names"] = _name_board_jobs(db, raw_jobs)
         except Exception as exc:
@@ -1632,7 +1635,7 @@ def fetch_and_save_jobs(
 
     # Learn company ATS boards from the fetched jobs' links; the merged slug
     # list feeds the direct board fetches on the next cycle.
-    if settings.ATS_AUTO_DISCOVERY:
+    if cfg.ATS_AUTO_DISCOVERY:
         try:
             from app.services.ats_discovery import discover_ats_slugs
             updated_data["discovered_ats"] = discover_ats_slugs(raw_jobs, discovered_ats)
@@ -1640,7 +1643,7 @@ def fetch_and_save_jobs(
             logger.error("job_fetcher: ATS discovery failed: %s", exc)
 
     board_stats: dict = {}
-    if settings.ATS_BOARD_REGISTRY:
+    if cfg.ATS_BOARD_REGISTRY:
         try:
             with db.begin_nested():
                 board_stats = _update_board_registry(
@@ -1656,7 +1659,7 @@ def fetch_and_save_jobs(
 
     # Hand what the server could not follow to the browser. Never blocks and
     # never fails the cycle: if no agent is listening the tasks simply expire.
-    if settings.RESOLVE_APPLY_LINKS:
+    if cfg.RESOLVE_APPLY_LINKS:
         try:
             from app.services.agent_work import enqueue_unresolved_links
             counts["links_queued_to_browser"] = enqueue_unresolved_links(db)
@@ -1948,12 +1951,12 @@ def fetch_and_save_jobs(
     # The landing HTML from link resolution goes in with it: those pages were
     # downloaded moments ago and thrown away after slug mining, and the job
     # description is sitting in them.
-    if settings.ENRICH_ENABLED and settings.ENRICH_ON_FETCH:
+    if cfg.ENRICH_ENABLED and cfg.ENRICH_ON_FETCH:
         try:
             from app.services.enrichment import run as enrich_run
             counts["enrichment"] = enrich_run(
                 db,
-                limit=settings.ENRICH_MAX_PER_FETCH,
+                limit=cfg.ENRICH_MAX_PER_FETCH,
                 landing_html=(resolve_stats.landing_html if resolve_stats else None),
             )
         except Exception as exc:

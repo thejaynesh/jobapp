@@ -1152,6 +1152,7 @@ class TestGroupIntervalsComeFromTheSettingsPage:
         run.assert_not_called()
 
     def test_the_dispatcher_queues_only_what_is_due(self):
+        from app.config import settings
         from app.tasks import fetch as fetch_task
 
         due = {"api": True, "boards": False, "browser": True}
@@ -1161,7 +1162,7 @@ class TestGroupIntervalsComeFromTheSettingsPage:
                 patch.object(fetch_task.fetch_api_sources, "delay") as api, \
                 patch.object(fetch_task.fetch_ats_boards, "delay") as boards, \
                 patch.object(fetch_task.fetch_browser_tier, "delay") as browser, \
-                patch.object(fetch_task.settings, "BROWSER_TIER_ENABLED", True):
+                patch.object(settings, "BROWSER_TIER_ENABLED", True):
             client.return_value.set.return_value = True
             queued = fetch_task.dispatch_due_fetches()
         assert queued == ["api", "browser"]

@@ -1,3 +1,4 @@
+import contextvars
 import logging
 import re
 import threading
@@ -5,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +155,12 @@ def fetch_boards_concurrently(
             job.setdefault("ats_slug", slug)
         return jobs
 
+    # Each board runs in a copy of this thread's context, so the cycle's
+    # settings (`cycle_settings`) reach it: a bare pool thread sees none, and
+    # every setting read there would go back to the profile.
+    parent = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(slugs)))) as pool:
-        results = list(pool.map(_guarded, slugs))
+        results = list(pool.map(lambda slug: parent.copy().run(_guarded, slug), slugs))
 
     jobs = [job for board_jobs in results for job in board_jobs]
     board_logger.info("%s: %d jobs across %d companies", label, len(jobs), len(slugs))
@@ -174,9 +180,7 @@ def age_cutoff(max_age_days=None):
     from datetime import datetime, timedelta, timezone
 
     if max_age_days is None:
-        from app.config import settings
-
-        max_age_days = getattr(settings, "MAX_JOB_AGE_DAYS", 30)
+        max_age_days = getattr(live(), "MAX_JOB_AGE_DAYS", 30)
     try:
         days = float(max_age_days)
     except (TypeError, ValueError):
@@ -330,21 +334,31 @@ _CYCLE_CFG: ContextVar = ContextVar("source_cycle_cfg", default=None)
 
 @contextmanager
 def cycle_settings(cfg):
-    """Make `cfg` what `board_workers()` and friends read, for this block."""
+    """
+    Make `cfg` what `board_workers()` and friends read, for this block — and
+    what `tunables.live()` returns, so code anywhere inside the cycle reads
+    the overlay it started with rather than the profile again.
+    """
+    from app.services import tunables
+
     token = _CYCLE_CFG.set(cfg)
     try:
-        yield cfg
+        with tunables.bound(cfg):
+            yield cfg
     finally:
         _CYCLE_CFG.reset(token)
 
 
 def cycle_cfg():
-    """The running cycle's settings overlay, or plain `settings` outside one."""
+    """
+    The running cycle's settings overlay; outside one, the settings page's
+    values as they are now (`tunables.live()`).
+    """
     cfg = _CYCLE_CFG.get()
     if cfg is not None:
         return cfg
-    from app.config import settings
-    return settings
+    from app.services import tunables
+    return tunables.live()
 
 
 def board_workers() -> int:

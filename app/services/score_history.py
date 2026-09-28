@@ -32,7 +32,7 @@ stating, because each of them is the opposite of what `llm_log` does:
 import logging
 import uuid
 
-from app.config import settings
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ DEFAULT_KEEP_PER_JOB = 20
 
 def _keep() -> int:
     try:
-        return max(1, int(getattr(settings, "SCORE_HISTORY_KEEP_PER_JOB",
+        return max(1, int(getattr(live(), "SCORE_HISTORY_KEEP_PER_JOB",
                                   DEFAULT_KEEP_PER_JOB)))
     except (TypeError, ValueError):
         return DEFAULT_KEEP_PER_JOB

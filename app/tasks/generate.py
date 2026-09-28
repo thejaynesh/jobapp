@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.celery_app import celery_app
-from app.config import settings
+from app.config import live
 from app.database import SessionLocal
 from app.models.application import Application
 
@@ -192,7 +192,7 @@ def sweep_generations() -> dict:
     from app.models.job import Job, JobStatus
 
     cutoff = datetime.now(timezone.utc) - timedelta(
-        minutes=max(1, settings.GENERATION_STUCK_MINUTES)
+        minutes=max(1, live().GENERATION_STUCK_MINUTES)
     )
     db = SessionLocal()
     requeued_stale = 0
@@ -234,7 +234,7 @@ def sweep_generations() -> dict:
                 Job.status.in_([JobStatus.matched, JobStatus.docs_generated]),
                 Application.generation_status.in_(NEEDS_GENERATION),
             )
-            .limit(max(1, settings.GENERATION_SWEEP_MAX_PER_RUN))
+            .limit(max(1, live().GENERATION_SWEEP_MAX_PER_RUN))
             .all()
         )
         # Decided before anything commits, and reduced to bare ids.

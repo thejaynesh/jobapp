@@ -24,7 +24,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from app.config import settings
+from app.config import live, settings
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +287,7 @@ def extract(description: str, job_id=None) -> dict | None:
                 messages,
                 api_key=settings.NVIDIA_NIM_API_KEY,
                 base_url=settings.NVIDIA_NIM_BASE_URL,
-                model=settings.NVIDIA_NIM_MODEL,
+                model=live().NVIDIA_NIM_MODEL,
                 temperature=0.0,
                 max_tokens=1024,
                 role="extract",

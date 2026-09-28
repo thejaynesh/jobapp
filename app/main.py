@@ -341,6 +341,29 @@ async def add_request_id(request: Request, call_next):
     return response
 
 
+class _SettingsReadOncePerRequest:
+    """
+    Each request reads the settings page's values at most once, on first use
+    (`tunables.read_once`) — a page of timestamps asks for the display zone
+    per timestamp. Outermost, so every endpoint and template runs inside it.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        from app.services import tunables
+
+        with tunables.read_once():
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(_SettingsReadOncePerRequest)
+
+
 def _rid(request: Request) -> str:
     return request.scope.get("request_id", "")
 

@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app.config import settings
+from app.config import live
 from app.models.job import Job, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -217,9 +217,9 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
     "coverage" — see `coverage` for what that answers and why it is not one of
     the counters.
     """
-    limit = limit if limit is not None else settings.LIVENESS_MAX_PER_CYCLE
-    workers = workers if workers is not None else settings.LIVENESS_WORKERS
-    recheck_days = settings.LIVENESS_RECHECK_DAYS
+    limit = limit if limit is not None else live().LIVENESS_MAX_PER_CYCLE
+    workers = workers if workers is not None else live().LIVENESS_WORKERS
+    recheck_days = live().LIVENESS_RECHECK_DAYS
 
     jobs = candidates(db, limit, recheck_days)
     counts = {"checked": 0, "closed": 0, "still_open": 0, "unknown": 0}
@@ -289,8 +289,8 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
             "verdicts will go stale. Raise LIVENESS_MAX_PER_CYCLE or shorten "
             "LIVENESS_INTERVAL_HOURS.",
             counts["worth_checking"], counts["daily_budget"],
-            settings.LIVENESS_MAX_PER_CYCLE, settings.LIVENESS_INTERVAL_HOURS,
-            settings.LIVENESS_RECHECK_DAYS,
+            live().LIVENESS_MAX_PER_CYCLE, live().LIVENESS_INTERVAL_HOURS,
+            live().LIVENESS_RECHECK_DAYS,
         )
     return counts
 
@@ -312,10 +312,10 @@ def coverage(db) -> dict:
     from sqlalchemy import func
 
     per_day = (
-        settings.LIVENESS_MAX_PER_CYCLE
-        * max(1.0, 24.0 / max(1, settings.LIVENESS_INTERVAL_HOURS))
+        live().LIVENESS_MAX_PER_CYCLE
+        * max(1.0, 24.0 / max(1, live().LIVENESS_INTERVAL_HOURS))
     )
-    sustainable_population = per_day * max(1, settings.LIVENESS_RECHECK_DAYS)
+    sustainable_population = per_day * max(1, live().LIVENESS_RECHECK_DAYS)
     worth_checking = (
         db.query(func.count(Job.id))
         .filter(

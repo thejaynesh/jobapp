@@ -34,18 +34,18 @@ recent feedback goes into the new run.
 
 import logging
 
-from app.config import settings
+from app.config import live
 
 logger = logging.getLogger(__name__)
 
 
 def _enabled() -> bool:
-    return bool(getattr(settings, "DOC_REFRESH_ENABLED", True))
+    return bool(getattr(live(), "DOC_REFRESH_ENABLED", True))
 
 
 def _limit() -> int:
     try:
-        return max(0, int(getattr(settings, "DOC_REFRESH_MAX_PER_RUN", 25)))
+        return max(0, int(getattr(live(), "DOC_REFRESH_MAX_PER_RUN", 25)))
     except (TypeError, ValueError):
         return 25
 

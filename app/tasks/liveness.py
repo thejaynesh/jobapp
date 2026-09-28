@@ -1,7 +1,6 @@
 import logging
 
 from app.celery_app import celery_app
-from app.config import settings
 from app.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,9 @@ def check_postings(limit: int | None = None) -> dict:
     same job is not re-fetched every sweep and a large backlog drains over a
     few cycles rather than hammering anyone.
     """
-    if not settings.LIVENESS_ENABLED:
+    from app.services.tunables import live
+
+    if not live().LIVENESS_ENABLED:
         return {**_EMPTY, "skipped_reason": "disabled"}
 
     from app.services.liveness import sweep

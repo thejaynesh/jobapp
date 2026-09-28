@@ -64,9 +64,9 @@ a page.
 change to see a different set of jobs?* If yes, it is a tunable. If it is what
 lets the application connect or authenticate at all, it is environment.
 
-### Two ways to read a tunable
+### Three ways to read a tunable
 
-Which one depends on whether you have the profile to hand.
+Which one depends on what you have to hand.
 
 * `tunables.value(profile_data, key)` — one setting, where you can load the
   profile. This is what `routers/jobs._age_cutoff` does.
@@ -74,6 +74,29 @@ Which one depends on whether you have the profile to hand.
   code that reads several values as `cfg.THE_ENV_NAME`. `job_fetcher` builds
   one and threads it through `_run_all_adapters` as `cfg`, so adapters have it
   without needing a session of their own.
+* `live().THE_ENV_NAME` (`from app.config import live`) — for code with no
+  profile to hand. It is the same overlay, read once per web request and once
+  per Celery task (`tunables.read_once`), so it is cheap inside either. Outside
+  them it reads the profile per call: read it once at the top of a pass, not
+  per item, and give a thread pool the caller's context
+  (`contextvars.copy_context()`) rather than letting each thread re-read.
+
+### What enforces it
+
+`tests/test_settings_coverage.py` fails when a `Settings` field is neither a
+tunable nor named in `tunables.ENVIRONMENT` with its reason, when a tunable is
+missing from `.env.example`, and when code under `app/` reads a tunable as
+`settings.X` or `getattr(settings, "X")` — which is exactly the read that
+ignores the page. `tests/test_settings_take_effect.py` stores an override for
+every tunable and checks `live()` returns it; add a behaviour test there (or
+beside the feature) for a new one.
+
+### Intervals
+
+Beat reads its schedule once, so an interval in `beat_schedule` can never be a
+setting. Put a new periodic task in `app/tasks/schedule.SCHEDULE` with the
+tunable holding its interval; the dispatcher ticks every minute and sends it
+when that interval, as currently set, has passed.
 
 ---
 

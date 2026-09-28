@@ -701,9 +701,9 @@ class Settings(BaseSettings):
     STORAGE_PATH: str = "/storage"
     DOCS_OUTPUT_DIR: str = "/storage"
     MIN_MATCH_SCORE: int = 70
-    # Kept for the combined cycle and for anything still reading it; the
-    # scheduled work is the three group intervals below.
-    FETCH_INTERVAL_HOURS: int = 5
+    # FETCH_INTERVAL_HOURS used to be here, read by nothing: the scheduled work
+    # is the three group intervals below. An older `.env` still setting it
+    # loads fine (`extra="ignore"`).
 
     # ---- Fetch groups ----------------------------------------------------
     # One 47-minute task fetched everything, so an API source that could
@@ -853,3 +853,26 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def live():
+    """
+    `settings` with the settings page's overrides on top: read a tunable as
+    `live().THE_ENV_NAME`, never as `settings.THE_ENV_NAME`, which is the
+    environment alone and silently ignores the page. See `tunables.live`.
+
+    Here rather than only there because this module imports nothing of the
+    app's, so any module can import it without a cycle.
+    """
+    import sys
+
+    module = sys.modules.get("app.services.tunables")
+    if module is not None and not hasattr(module, "live"):
+        # `tunables` is still being imported and its own declarations asked —
+        # the model-role choices it builds at import reach the providers. The
+        # environment, which is what those snapshots always used; the page
+        # rebuilds them per render.
+        return settings
+    from app.services.tunables import live as _live
+
+    return _live()

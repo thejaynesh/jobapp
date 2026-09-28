@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 from openai import OpenAI, RateLimitError
 
-from app.config import settings
+from app.config import live, settings
 from app.llm.providers import call_provider, matching_fallbacks, provider_label
 from app.services import eligibility
 from app.services.locations import describe_prefs, location_allowed, normalize_prefs
@@ -31,7 +31,7 @@ def _spend(budget: dict, field: str) -> None:
     with _BUDGET_LOCK:
         budget[field] = budget.get(field, 0) + 1
 
-MIN_KEYWORD_SKILLS = 2  # overridden by settings.MIN_KEYWORD_SKILLS if present
+MIN_KEYWORD_SKILLS = 2  # overridden by the min_keyword_skills setting
 
 
 class LLMUnavailableError(Exception):
@@ -252,7 +252,7 @@ def _blocked_by_seniority(job, profile_data: dict) -> bool:
 
 def accepted_languages() -> set[str]:
     """The ISO codes worth scoring, lowercased."""
-    raw = getattr(settings, "MATCH_LANGUAGES", "en") or "en"
+    raw = getattr(live(), "MATCH_LANGUAGES", "en") or "en"
     return {
         code.strip().lower() for code in str(raw).replace(";", ",").split(",")
         if code.strip()
@@ -531,7 +531,7 @@ def _description_for_prompt(job) -> str:
     longer than the longest real posting.
     """
     text = job.description or ""
-    limit = max(1000, int(getattr(settings, "MATCH_DESCRIPTION_CHARS", 24000)))
+    limit = max(1000, int(getattr(live(), "MATCH_DESCRIPTION_CHARS", 24000)))
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n[description truncated]"
@@ -798,7 +798,7 @@ def _match_max_tokens() -> int:
     sized for the JSON alone cuts the object in half and the parse fails —
     which reads as the model being bad at the task rather than as a budget.
     """
-    return max(256, int(getattr(settings, "NIM_MATCH_MAX_TOKENS", 1536)))
+    return max(256, int(getattr(live(), "NIM_MATCH_MAX_TOKENS", 1536)))
 
 
 def chat_completion(
@@ -860,7 +860,7 @@ def _reply_text(response) -> str:
 
 def _rpm_interval() -> float:
     """Minimum seconds to wait between LLM calls to stay under the RPM limit."""
-    rpm = getattr(settings, "NVIDIA_NIM_RPM", 40)
+    rpm = getattr(live(), "NVIDIA_NIM_RPM", 40)
     return 60.0 / max(rpm, 1)
 
 
@@ -896,7 +896,7 @@ def _score_via_fallbacks(messages: list[dict], job, budget: dict | None = None,
     per-cycle paid-call budget is exhausted. `budget` is a mutable counter dict
     shared across one matching cycle: {"paid_calls": int}.
     """
-    cap = getattr(settings, "MAX_PAID_MATCH_CALLS_PER_CYCLE", 150)
+    cap = getattr(live(), "MAX_PAID_MATCH_CALLS_PER_CYCLE", 150)
     for provider in (matching_fallbacks(first) if pinned else matching_fallbacks()):
         # The cap exists to stop a NIM outage turning into a surprise bill. A
         # provider that cannot bill — a fixed free daily allowance — has nothing
@@ -1046,8 +1046,8 @@ def _penalized(result: dict) -> float:
 
 
 def _deep_band() -> tuple[float, float]:
-    low = float(getattr(settings, "DEEP_MATCH_BAND_LOW", 55))
-    high = float(getattr(settings, "DEEP_MATCH_BAND_HIGH", 85))
+    low = float(getattr(live(), "DEEP_MATCH_BAND_LOW", 55))
+    high = float(getattr(live(), "DEEP_MATCH_BAND_HIGH", 85))
     return (low, high) if low <= high else (high, low)
 
 
@@ -1070,7 +1070,7 @@ def _deep_score(job, profile_data: dict, score: float,
     from app.llm.providers import deep_matching_chain
     from app.services import llm_log
 
-    if not getattr(settings, "DEEP_MATCH_ENABLED", True):
+    if not getattr(live(), "DEEP_MATCH_ENABLED", True):
         return None
     low, high = _deep_band()
     if not (low <= score <= high):
@@ -1100,7 +1100,7 @@ def _deep_score(job, profile_data: dict, score: float,
         # same model the same question is a call spent to hear the same answer.
         return None
 
-    cap = int(getattr(settings, "DEEP_MATCH_MAX_PER_CYCLE", 100) or 0)
+    cap = int(getattr(live(), "DEEP_MATCH_MAX_PER_CYCLE", 100) or 0)
     if cap and budget is not None and budget.get("deep_calls", 0) >= cap:
         logger.info(
             "match_job: deep-scoring budget (%d) spent this cycle; job %s keeps "

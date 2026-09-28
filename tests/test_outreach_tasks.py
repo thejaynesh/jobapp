@@ -116,9 +116,10 @@ class TestSendMessageTask:
 
 class TestBeatSchedule:
     def test_follow_ups_are_scheduled(self):
-        from app.celery_app import celery_app
+        from app.tasks import schedule
 
-        assert "draft-due-outreach-followups" in celery_app.conf.beat_schedule
+        entry = schedule.BY_NAME["draft-due-outreach-followups"]
+        assert entry.task == "app.tasks.outreach.process_followups"
 
     def test_the_outreach_module_is_registered(self):
         from app.celery_app import celery_app

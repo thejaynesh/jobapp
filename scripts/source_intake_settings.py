@@ -55,7 +55,9 @@ result = {
     },
 }
 
-# One read-only transaction. Only intake-specific effective overrides are shown.
+# One read-only transaction. Every public field is a settings-page tunable, so
+# what a fetch actually uses is the profile's value where one is saved; the
+# environment's is above for comparison.
 from app.database import SessionLocal
 from app.models.profile import Profile
 from app.services.tunables import effective_settings
@@ -69,8 +71,11 @@ with SessionLocal() as db:
     if profile is not None:
         cfg = effective_settings(profile.data or {})
         result["effective_intake_settings"] = {
-            name: getattr(cfg, name, None)
-            for name in ("LINKEDIN_MAX_PAGES", "LINKEDIN_RECENCY_HOURS", "MAX_JOB_AGE_DAYS")
+            name: getattr(cfg, name, None) for name in PUBLIC_FIELDS
+        }
+        result["effective_board_counts"] = {
+            name: len([slug for slug in (getattr(cfg, name, "") or "").split(",") if slug.strip()])
+            for name in SLUG_FIELDS
         }
         result["target_role_count"] = len((profile.data or {}).get("target_roles") or [])
 

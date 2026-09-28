@@ -17,7 +17,6 @@ def test_settings_load_from_env(monkeypatch):
     assert settings.REDIS_URL == "redis://localhost:6379/0"
     assert settings.MIN_MATCH_SCORE == 70
     assert settings.MIN_KEYWORD_SKILLS == 2
-    assert settings.FETCH_INTERVAL_HOURS == 5
 
 
 def test_settings_defaults():
