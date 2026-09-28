@@ -7,6 +7,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    saw_postings,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
         resp = get_postings(slug)
         resp.raise_for_status()
         items = resp.json()
+        saw_postings(item.get("id") for item in items if isinstance(item, dict))
 
         jobs = []
         for item in items:

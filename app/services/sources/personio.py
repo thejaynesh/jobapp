@@ -24,6 +24,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    saw_postings,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
         if root.tag.lower().endswith("html"):
             raise ValueError("feed was not XML (an HTML page came back instead)")
 
+        saw_postings(_first(node, _ID_TAGS) for node in _positions(root))
         jobs = []
         for node in _positions(root):
             title = _first(node, _TITLE_TAGS)

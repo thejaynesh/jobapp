@@ -21,6 +21,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    saw_postings,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ def _as_job(slug: str, row: dict) -> dict | None:
 
 def fetch(company_slugs: list[str]) -> list[dict]:
     def _fetch_one(slug: str) -> list[dict]:
-        return [job for job in (_as_job(slug, row) for row in postings(slug)) if job]
+        rows = postings(slug)
+        saw_postings(f"{slug}:{row.get('id')}" for row in rows if row.get("id"))
+        return [job for job in (_as_job(slug, row) for row in rows) if job]
 
     return fetch_boards_concurrently(company_slugs, _fetch_one, "Pinpoint", board_workers())

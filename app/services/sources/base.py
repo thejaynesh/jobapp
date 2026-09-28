@@ -1,5 +1,6 @@
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -65,6 +66,36 @@ def raise_if_blocked(resp, source: str) -> None:
         )
 
 
+# What each board listed this cycle, for closing the postings it no longer
+# does (`job_fetcher._close_vanished`). A board adapter that reads a company's
+# whole listing in one response calls `saw_postings` inside its per-board
+# fetch; `fetch_boards_concurrently` files the report under (source, slug) —
+# but only for a board whose fetch returned without raising, since a board
+# that failed listed nothing and says nothing about what has closed.
+_SIGHTINGS: ContextVar = ContextVar("board_sightings", default=None)
+_sighting = threading.local()
+
+
+@contextmanager
+def collect_board_sightings():
+    """Collect `{(source, slug): {source_job_id, ...}}` for the block's board reads."""
+    store: dict[tuple[str, str], set[str]] = {}
+    token = _SIGHTINGS.set(store)
+    try:
+        yield store
+    finally:
+        _SIGHTINGS.reset(token)
+
+
+def saw_postings(ids) -> None:
+    """
+    Every posting the board being fetched lists, as the `source_job_id` the
+    adapter stores — including the ones it goes on to drop for age, since a
+    posting too old to keep is still open.
+    """
+    _sighting.ids = {str(i) for i in ids if i not in (None, "")}
+
+
 def fetch_boards_concurrently(
     slugs: list[str],
     fetch_one: Callable[[str], list[dict]],
@@ -83,13 +114,20 @@ def fetch_boards_concurrently(
     # Log under the ATS's own logger so per-slug failures are attributed to that
     # source rather than to this shared helper (see services.source_diagnostics).
     board_logger = logging.getLogger(f"{__package__}.{label.lower()}")
+    sightings = _SIGHTINGS.get()
+    lock = threading.Lock()
 
     def _guarded(slug: str) -> list[dict]:
+        _sighting.ids = None
         try:
             jobs = fetch_one(slug) or []
         except Exception as exc:
             board_logger.error("%s fetch error for slug '%s': %s", label, slug, exc)
             return []
+        listed = getattr(_sighting, "ids", None)
+        if sightings is not None and listed is not None:
+            with lock:
+                sightings[(label.lower(), slug)] = listed
         for job in jobs:
             job.setdefault("ats_slug", slug)
         return jobs

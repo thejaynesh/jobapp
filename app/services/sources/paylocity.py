@@ -27,7 +27,12 @@ import re
 import httpx
 
 from app.services.descriptions import clean as clean_description
-from app.services.sources.base import board_workers, fetch_boards_concurrently, parse_experience_level
+from app.services.sources.base import (
+    board_workers,
+    fetch_boards_concurrently,
+    parse_experience_level,
+    saw_postings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +114,9 @@ def fetch(company_slugs: list[str]) -> list[dict]:
         if data is None:
             return []
         company = (data.get("ModuleTitle") or "").strip() or company_id
+        # Internal postings are not open to us, so they count as not listed.
+        saw_postings(str(job.get("JobId")) for job in data.get("Jobs") or []
+                     if isinstance(job, dict) and job.get("JobId") and not job.get("IsInternal"))
         jobs = []
         for job in data.get("Jobs") or []:
             parsed = _as_job(job, company) if isinstance(job, dict) else None

@@ -6,6 +6,7 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    saw_postings,
 )
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
 
+        saw_postings(item.get("shortcode") for item in data.get("jobs", []))
         jobs = []
         company = (data.get("name") or slug).strip()
         for item in data.get("jobs", []):

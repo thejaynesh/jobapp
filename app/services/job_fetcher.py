@@ -115,6 +115,17 @@ SOURCE_GROUPS: dict[str, frozenset[str]] = {
 
 ALL_GROUPS = tuple(SOURCE_GROUPS)
 
+# Board adapters that list a company's whole board in one response, and say
+# so (`sources.base.saw_postings`). A stored posting such a read no longer
+# lists has gone from the board, and is closed then rather than whenever the
+# liveness sweep reaches it. The searched and capped boards (Workday, Oracle,
+# SmartRecruiters' first hundred…) list a slice, and say nothing about the rest.
+FULL_FEED_BOARDS = frozenset({
+    "greenhouse", "lever", "ashby", "recruitee", "pinpoint", "paylocity",
+    "bamboohr", "personio", "workable",
+})
+VANISHED_NOTE = "no longer listed on its board"
+
 # Board adapters that take the cycle's role queries.
 _SEARCHED_BOARDS = frozenset({
     "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "taleo",
@@ -1253,7 +1264,7 @@ def fetch_and_save_jobs(
     if only is None:
         only = group_sources(group)
     counts = {"fetched": 0, "inserted": 0, "merged": 0, "skipped": 0, "stale": 0,
-              "dropped": 0, "sources": {}, "group": group or "all"}
+              "dropped": 0, "closed": 0, "sources": {}, "group": group or "all"}
 
     profile = db.query(Profile).first()
     if not profile:
@@ -1407,7 +1418,8 @@ def fetch_and_save_jobs(
         # every adapter picks them up through the `cfg.X` reads it already does.
         from app.services.tunables import effective_settings
         cfg = effective_settings(profile.data)
-        with SourceLogCapture() as capture:
+        from app.services.sources.base import collect_board_sightings
+        with SourceLogCapture() as capture, collect_board_sightings() as sightings:
             raw_jobs, source_stats = _run_all_adapters(
                 queries, locations, cfg, ats_slugs, loc_prefs, only,
                 resting=_resting_sources(db), manual=manual,
@@ -1603,6 +1615,7 @@ def fetch_and_save_jobs(
                         and existing.source_job_id == source_job_id
                         and existing.source == source
                     )
+                    _note_board(existing, job_data)
                     if same_row:
                         # The same posting again, not a cross-post: its URL is
                         # already ours, so only the contents can be news.
@@ -1659,6 +1672,7 @@ def fetch_and_save_jobs(
                     fetched_at=now,
                     posted_at=posted_at,
                     dedupe_hash=dedupe_hash,
+                    board=_board_key(job_data),
                     **_adapter_details(job_data),
                 )
                 db.add(new_job)
@@ -1698,6 +1712,14 @@ def fetch_and_save_jobs(
                 job_data.get("source") or "?", job_data.get("title") or "?",
                 job_data.get("company") or "?", job_data.get("url") or "?", exc,
             )
+
+    # Postings their board no longer lists. After the loop, so a posting that
+    # moved (a new id for the same role) has had its new row stored first.
+    try:
+        with db.begin_nested():
+            counts["closed"] = _close_vanished(db, sightings)
+    except Exception as exc:
+        logger.error("job_fetcher: closing vanished postings failed: %s", exc)
 
     # Now, with the job loop finished and the commit one line away. Re-read
     # first: this cycle has been running for minutes and the agent poll, the
@@ -1769,6 +1791,68 @@ def fetch_and_save_jobs(
     return counts
 
 
+def _board_key(job_data: dict) -> str | None:
+    """`source:slug` for a posting read from a full-feed board, else None."""
+    source, slug = job_data.get("source"), job_data.get("ats_slug")
+    if source in FULL_FEED_BOARDS and slug and job_data.get("source_job_id"):
+        return f"{source}:{slug}"
+    return None
+
+
+def _note_board(existing: Job, job_data: dict) -> None:
+    """
+    File a stored posting under its board when this is that board's own
+    sighting of it — same source, same id. A row stored from another source
+    keeps that source's id, and comparing it against the board's would close it
+    wrongly. A posting its board lists again is reopened if its board closed it.
+    """
+    key = _board_key(job_data)
+    if not key or existing.source != job_data.get("source") \
+            or existing.source_job_id != str(job_data.get("source_job_id")):
+        return
+    if existing.board is None:
+        existing.board = key
+    if existing.closed_at is not None and existing.closed_note == VANISHED_NOTE:
+        existing.closed_at = None
+        existing.closed_note = None
+
+
+def _close_vanished(db: Session, sightings: dict) -> int:
+    """
+    Close the stored postings of each board read in full this cycle that the
+    read no longer listed. Returns how many.
+
+    Only boards that listed at least one posting: an empty answer is as likely
+    a hiccup as a company that stopped hiring, and closing every posting on the
+    strength of it is not a mistake worth risking — the liveness sweep checks
+    those one by one.
+    """
+    listed = {
+        f"{source}:{slug}": ids
+        for (source, slug), ids in (sightings or {}).items()
+        if source in FULL_FEED_BOARDS and ids
+    }
+    if not listed:
+        return 0
+    now = datetime.now(timezone.utc)
+    closed = 0
+    boards = sorted(listed)
+    for start in range(0, len(boards), 500):
+        rows = (
+            db.query(Job)
+            .filter(Job.closed_at.is_(None), Job.board.in_(boards[start:start + 500]))
+            .all()
+        )
+        for job in rows:
+            if job.source_job_id and job.source_job_id not in listed[job.board]:
+                job.closed_at = now
+                job.closed_note = VANISHED_NOTE
+                closed += 1
+    if closed:
+        logger.info("job_fetcher: closed %d postings their boards no longer list", closed)
+    return closed
+
+
 def _log_run_summary(counts: dict, source_stats: dict, per_source: dict,
                      resolve_stats, board_stats: dict, started_at: datetime) -> None:
     """
@@ -1780,9 +1864,10 @@ def _log_run_summary(counts: dict, source_stats: dict, per_source: dict,
     elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
     logger.info(
         "=== fetch cycle done in %.1fs — fetched=%d new=%d merged=%d dup=%d "
-        "stale=%d dropped=%d ===",
+        "stale=%d dropped=%d closed=%d ===",
         elapsed, counts["fetched"], counts["inserted"], counts["merged"],
         counts["skipped"], counts["stale"], counts.get("dropped", 0),
+        counts.get("closed", 0),
     )
     logger.info("  %-16s %-9s %7s %6s %7s  %s",
                 "SOURCE", "STATUS", "FETCHED", "NEW", "DUP", "REASON")
