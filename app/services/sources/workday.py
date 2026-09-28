@@ -48,10 +48,14 @@ class _ClusterGate:
         self._lock = threading.Lock()
         self._until: dict[str, float] = {}
         self._trips: dict[str, int] = {}
+        # This cycle's default rest, set by `fetch` in the calling thread so the
+        # board workers, which do not see the cycle's settings, have it too.
+        self.cooldown = 0.0
 
-    def new_cycle(self) -> None:
+    def new_cycle(self, cooldown: float) -> None:
         with self._lock:
             self._trips.clear()
+            self.cooldown = cooldown
 
     def trip(self, cluster: str, seconds: float) -> None:
         with self._lock:
@@ -140,8 +144,8 @@ def _posted_at_from_text(text: str) -> str | None:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
-def _fetch_detail(tenant: str, host: str, site: str, path: str,
-                  cooldown: float = 0.0) -> dict:
+def _fetch_detail(tenant: str, host: str, site: str, path: str) -> dict:
+    cooldown = _GATE.cooldown
     if cooldown and not _GATE.open(host):
         return {}
     try:
@@ -184,7 +188,7 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
     calls (which also carry the real posted date and public URL).
     """
     cooldown = _cooldown_setting()
-    _GATE.new_cycle()
+    _GATE.new_cycle(cooldown)
 
     def _fetch_one(spec: str) -> list[dict]:
         parsed = parse_tenant_spec(spec)
@@ -253,7 +257,7 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
 
             detail: dict = {}
             if path in described:
-                detail = _fetch_detail(tenant, host, site, path, cooldown)
+                detail = _fetch_detail(tenant, host, site, path)
 
             description = _STRIP_TAGS.sub(" ", detail.get("jobDescription") or "").strip()
             location = (detail.get("location") or item.get("locationsText") or "").strip()

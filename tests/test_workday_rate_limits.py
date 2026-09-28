@@ -126,3 +126,16 @@ class TestTheSettingsPageControlsIt:
         serve(monkeypatch, {"wd5": 1}, calls)
         jobs, _ = self._run(db, {"workday_rate_limit_cooldown": 0})
         assert clock.slept == [] and calls == ["wd5"] and jobs == []
+
+
+def test_a_refused_description_rests_the_cluster_too(monkeypatch, clock):
+    serve(monkeypatch, {}, [])
+
+    def get(url, **kw):
+        return httpx.Response(429, headers={"Retry-After": "20"}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", get)
+    [job] = run(["acme:wd5:Ext"])
+    assert job["description"] == ""          # left for enrichment
+    run(["beta:wd5:Ext"])
+    assert clock.slept == [20.0]
