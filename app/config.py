@@ -417,9 +417,11 @@ class Settings(BaseSettings):
     # Y Combinator's public role pages (a fixed taxonomy, not search queries).
     YC_ENABLED: bool = True
     YC_ROLES: str = ""             # blank uses sources.ycombinator.DEFAULT_ROLES
-    # Built In publishes JobPosting structured data on city hub pages — free,
-    # no key, and descriptions come included.
+    # Built In's search pages — free, no key. Cards carry title, employer,
+    # location, age and pay; each posting page carries JobPosting structured
+    # data, which is where enrichment gets the description.
     BUILTIN_ENABLED: bool = True
+    BUILTIN_MAX_PAGES: int = 3     # 25 cards a page, per search and per role
 
     # A source that has failed every run for this many cycles is skipped rather
     # than called again — an expired key answers identically forever, and the

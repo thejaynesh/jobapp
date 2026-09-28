@@ -158,6 +158,20 @@ TUNABLES: list[Tunable] = [
              "page of about fifty listings per run.",
     ),
     Tunable(
+        key="builtin_enabled", env="BUILTIN_ENABLED", kind="bool",
+        group="Sources", label="Built In",
+        help="US tech jobs from Built In's public search, with the card's "
+             "posting age, pay band and seniority. No key. Off skips it.",
+    ),
+    Tunable(
+        key="builtin_max_pages", env="BUILTIN_MAX_PAGES", kind="int",
+        minimum=1, maximum=10, group="Sources",
+        label="Built In: pages per search",
+        help="25 postings a page, read for every role twice — its main search "
+             "and its remote one. Paging stops early at a page with nothing "
+             "new. 1 is the first page only; higher reaches older postings.",
+    ),
+    Tunable(
         key="jsearch_date_posted", env="JSEARCH_DATE_POSTED", kind="choice",
         choices=["today", "3days", "week", "month", "all"], group="Sources",
         label="JSearch: posted within",

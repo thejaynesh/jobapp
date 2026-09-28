@@ -627,7 +627,9 @@ def _run_all_adapters(
     if getattr(cfg, "BUILTIN_ENABLED", True) and not _skip("builtin"):
         from app.services.sources.builtin import fetch as builtin_fetch
         _run_combos(stats, all_jobs, "builtin",
-                    lambda role: builtin_fetch(query=role), [(r,) for r in roles], _skip)
+                    lambda role: builtin_fetch(
+                        query=role, max_pages=getattr(cfg, "BUILTIN_MAX_PAGES", None)),
+                    [(r,) for r in roles], _skip)
     else:
         _disable("builtin")
 

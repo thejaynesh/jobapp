@@ -125,6 +125,67 @@ def age_cutoff(max_age_days=None):
     return datetime.now(timezone.utc) - timedelta(days=days)
 
 
+# "2 Days Ago", "Reposted Yesterday", "18 hours ago", "30+ days ago", "a day
+# ago". Built In's cards and Google's job results both state age this way
+# rather than as a date.
+_RELATIVE_AGE = re.compile(
+    r"(?:(?P<n>\d+|an?)\+?\s+(?P<unit>minute|hour|day|week|month)s?\s+ago)"
+    r"|(?P<yesterday>yesterday)|(?P<today>today|just now|just posted)",
+    re.I,
+)
+_AGE_UNIT_DAYS = {"minute": 1 / 1440, "hour": 1 / 24, "day": 1, "week": 7, "month": 30}
+
+
+def posted_at_from_age(text: str | None, now=None) -> str | None:
+    """
+    An ISO timestamp from a relative age, or None when there is none to read.
+
+    Approximate by nature — "2 months ago" is taken as sixty days — which is
+    fine for what reads it: the age filter, which needs to know whether a
+    posting is days or months old. "30+ days ago" is read as thirty, the
+    youngest it could be, so the filter errs toward keeping it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    match = _RELATIVE_AGE.search(text or "")
+    if not match:
+        return None
+    if match.group("yesterday"):
+        days = 1.0
+    elif match.group("today"):
+        days = 0.0
+    else:
+        count = match.group("n").lower()
+        number = 1 if count in ("a", "an") else int(count)
+        days = number * _AGE_UNIT_DAYS[match.group("unit").lower()]
+    now = now or datetime.now(timezone.utc)
+    return (now - timedelta(days=days)).isoformat()
+
+
+_US_STATES = frozenset({
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+    "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+    "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+    "WV", "WI", "WY",
+})
+
+
+def in_united_states(location: str | None) -> bool:
+    """
+    Whether a location string plainly names a place in the US.
+
+    For deciding what currency an unlabelled pay band is in, so it only says
+    yes when the string does: "Austin, TX", "New York, NY 10001", "Remote,
+    United States". "Anywhere" and "2 Locations" are no, not a guess.
+    """
+    text = (location or "").strip()
+    if re.search(r"\b(?:united states|usa)\b", text, re.I):
+        return True
+    match = re.search(r",\s*([A-Z]{2})\b(?:\s+\d{5})?\s*$", text)
+    return bool(match and match.group(1) in _US_STATES)
+
+
 def board_workers() -> int:
     from app.config import settings
     return getattr(settings, "ATS_BOARD_FETCH_WORKERS", DEFAULT_BOARD_WORKERS)
