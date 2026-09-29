@@ -5,6 +5,8 @@
       {# The star sits on the title rather than down with the actions: it is
          the one control you reach for while reading the job, not after
          deciding what to do about it. #}
+      <input type="checkbox" class="job-select mr-1 align-middle rounded border-gray-300"
+             value="{{ job.id }}" aria-label="Select this job">
       <button
         hx-post="/jobs/{{ job.id }}/favourite"
         hx-target="#job-{{ job.id }}"

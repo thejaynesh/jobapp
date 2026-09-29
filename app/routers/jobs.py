@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
@@ -236,71 +236,125 @@ def _priced_count(db: Session) -> int:
         return 0
 
 
+# How many days of age cost a point of score in the "score and freshness"
+# sort, up to this many: a posting a month old has usually had its applicants.
+_FRESHNESS_DAYS = 30
+_AGE_DAYS = func.extract("epoch", func.now() - _EFFECTIVE_DATE) / 86400.0
+
 _SORT_OPTIONS = {
     # Sort and filter on the score the card actually shows. Ranking by the
     # first pass while displaying the second would put an 82 above a 91 with
     # no visible reason.
-    "score_desc": _EFFECTIVE_SCORE.desc().nullslast(),
-    "score_asc": _EFFECTIVE_SCORE.asc().nullsfirst(),
-    "posted_desc": _EFFECTIVE_DATE.desc(),
-    "posted_asc": _EFFECTIVE_DATE.asc(),
-    "company_asc": Job.company.asc(),
+    "score_desc": (_EFFECTIVE_SCORE.desc().nullslast(),),
+    "score_asc": (_EFFECTIVE_SCORE.asc().nullsfirst(),),
+    # A point off per day of age, for a month: an 84 posted today above an
+    # 88 posted three weeks ago, which is the order they are worth reading in.
+    "fresh_desc": ((_EFFECTIVE_SCORE - func.least(_AGE_DAYS, _FRESHNESS_DAYS)).desc().nullslast(),),
+    "posted_desc": (_EFFECTIVE_DATE.desc(),),
+    "posted_asc": (_EFFECTIVE_DATE.asc(),),
+    # On the annualised band, like the salary filter, with unpriced jobs last.
+    "salary_desc": (func.coalesce(Job.salary_annual_max, Job.salary_annual_min).desc().nullslast(),
+                    _EFFECTIVE_SCORE.desc().nullslast()),
+    # The skills the matcher said you lack, fewest first; an unscored job has
+    # no list rather than an empty one, so it goes last.
+    "missing_asc": (case((_EFFECTIVE_SCORE.is_(None), 999),
+                         else_=func.coalesce(func.cardinality(Job.missing_skills), 0)).asc(),
+                    _EFFECTIVE_SCORE.desc().nullslast()),
+    "company_asc": (Job.company.asc(),),
     # The useful order on the favourites view, and the default there. Sorting a
     # shortlist by score would bury the job starred this morning under one
     # starred last month that happened to score higher.
-    "favourited_desc": Job.favourited_at.desc().nullslast(),
+    "favourited_desc": (Job.favourited_at.desc().nullslast(),),
 }
 
+# Every filter the list takes. A saved view is a query string of these, so it
+# can be counted without a request.
+FILTER_PARAMS = (
+    "status", "q", "q_in", "source", "region", "location", "remote", "min_score",
+    "min_salary", "exp_level", "filter_reason", "dated", "favourite", "age", "sponsor",
+    "h1b", "open_only", "employment_type", "max_years", "applied", "company", "sort",
+)
 
-@router.get("", response_class=HTMLResponse)
-def get_jobs(
-    request: Request,
-    status: str = "",
-    q: str = "",
-    source: str = "",
-    region: str = "",
-    location: str = "",
-    remote: str = "",
-    min_score: str = "",
-    min_salary: str = "",
-    exp_level: str = "",
-    filter_reason: str = "",
-    dated: str = "",
-    favourite: str = "",
-    age: str = "",
-    sort: str = "score_desc",
-    page: int = 0,
-    db: Session = Depends(get_db),
-):
+_APPLIED_STATUSES = ("applied", "interviewing", "offered", "rejected", "withdrawn")
+
+
+def _applied_clause():
+    """Jobs with an application past "not applied"."""
+    from app.models.application import Application, ApplicationStatus
+
+    statuses = [ApplicationStatus(s) for s in _APPLIED_STATUSES
+                if s in ApplicationStatus.__members__]
+    return (select(Application.id)
+            .where(Application.job_id == Job.id, Application.status.in_(statuses))
+            .exists())
+
+
+def _h1b_companies(db: Session, query) -> list[str] | None:
+    """
+    The employers in `query` with certified H-1B filings, or None with no data.
+
+    Matched in Python by `sponsorship_history.for_company`, the same reading
+    the card's H-1B line uses: its name matching (suffixes, "Amazon" for
+    "Amazon.com Services") has no SQL equivalent, and the distinct employers
+    on the list are a few thousand at most.
+    """
+    from app.services.sponsorship_history import for_company, snapshot
+
+    if not snapshot(db):
+        return None
+    names = [c for (c,) in query.with_entities(Job.company).distinct().limit(20000) if c]
+    return [n for n in names if ((for_company(n, db) or {}).get("certified") or 0) > 0]
+
+
+def filtered(db: Session, params: dict) -> tuple:
+    """
+    The list's query for these parameters, the sort to use, and notes.
+
+    `params` is a dict of the strings in FILTER_PARAMS, as a request or a
+    saved view carries them; missing means unset.
+    """
+    get = lambda key: (params.get(key) or "").strip()  # noqa: E731
+    sort = get("sort") or "score_desc"
+    notes: dict = {}
     query = db.query(Job).filter(Job.status.in_(_FILTERABLE_STATUSES))
 
     # Old listings are noise, so the list looks back DASHBOARD_MAX_AGE_DAYS by
     # default. `?age=all` lifts it; anything the user applied to or starred is
     # exempt either way — see `_recent_or_mine`.
     cutoff = _age_cutoff(db)
-    if cutoff is not None and age != "all":
+    if cutoff is not None and get("age") != "all":
         query = query.filter(_recent_or_mine(cutoff))
 
     # Checked before anything else so the shortlist is the shortlist: a starred
     # job that the matcher filtered out must still appear here, and a status or
     # score filter carried over from the previous view would hide the very rows
     # this page exists to show.
-    if favourite == "1":
+    if get("favourite") == "1":
         query = query.filter(Job.favourite.is_(True))
         if sort == "score_desc":
             sort = "favourited_desc"
 
+    status, q = get("status"), get("q")
     if status:
         try:
             query = query.filter(Job.status == JobStatus(status))
         except ValueError:
             pass
     if q:
-        query = query.filter(
-            (Job.title.ilike(f"%{q}%")) | (Job.company.ilike(f"%{q}%"))
-        )
-    if source:
-        query = query.filter(Job.source == source)
+        pattern = f"%{q}%"
+        clause = Job.title.ilike(pattern) | Job.company.ilike(pattern)
+        # The text too, when asked: slower (no index covers it) but the only
+        # way to find the postings that mention a tool in their body.
+        if get("q_in") == "all":
+            clause = (clause | Job.description.ilike(pattern)
+                      | func.array_to_string(Job.required_skills, " ").ilike(pattern)
+                      | func.array_to_string(Job.nice_to_have_skills, " ").ilike(pattern))
+        query = query.filter(clause)
+    if get("company"):
+        query = query.filter(Job.company.ilike(f"%{get('company')}%"))
+    if get("source"):
+        query = query.filter(Job.source == get("source"))
+    region, location = get("region"), get("location")
     if region and region in REGIONS:
         query = query.filter(_region_clause(region))
     if location:
@@ -317,18 +371,28 @@ def get_jobs(
             if "remote" in location.lower():
                 loc_clause = loc_clause | (Job.is_remote == True)  # noqa: E712
             query = query.filter(loc_clause)
-    if remote == "1":
+    if get("remote") == "1":
         query = query.filter(Job.is_remote == True)  # noqa: E712
-    if exp_level:
-        query = query.filter(Job.experience_level == exp_level)
-    if min_score:
+    if get("exp_level"):
+        query = query.filter(Job.experience_level == get("exp_level"))
+    if get("employment_type"):
+        query = query.filter(Job.employment_type == get("employment_type"))
+    if get("min_score"):
         try:
-            query = query.filter(_EFFECTIVE_SCORE >= int(min_score))
+            query = query.filter(_EFFECTIVE_SCORE >= int(get("min_score")))
         except ValueError:
             pass
-    if min_salary:
+    if get("max_years"):
         try:
-            floor = float(min_salary)
+            most = float(get("max_years"))
+        except ValueError:
+            most = None
+        if most is not None:
+            # A posting that states no years is not one that asks too many.
+            query = query.filter(or_(Job.required_years.is_(None), Job.required_years <= most))
+    if get("min_salary"):
+        try:
+            floor = float(get("min_salary"))
         except ValueError:
             floor = None
         if floor is not None:
@@ -348,19 +412,62 @@ def get_jobs(
             query = query.filter(
                 func.coalesce(Job.salary_annual_max, Job.salary_annual_min) >= floor
             )
-    if filter_reason:
-        query = query.filter(Job.filter_reason == filter_reason)
+    # What the posting says about sponsoring a visa: "not_no" drops the ones
+    # that say they will not, "yes" keeps only the ones that say they will.
+    if get("sponsor") == "not_no":
+        query = query.filter(or_(Job.sponsorship_direction.is_(None),
+                                 Job.sponsorship_direction != "negative"))
+    elif get("sponsor") == "yes":
+        query = query.filter(Job.sponsorship_direction == "positive")
+    if get("h1b") == "1":
+        companies = _h1b_companies(db, query)
+        if companies is None:
+            notes["h1b_unavailable"] = True
+        else:
+            query = query.filter(Job.company.in_(companies or [""]))
+    if get("open_only") == "1":
+        query = query.filter(Job.closed_at.is_(None))
+    if get("applied") == "yes":
+        query = query.filter(_applied_clause())
+    elif get("applied") == "no":
+        query = query.filter(~_applied_clause())
+    if get("filter_reason"):
+        query = query.filter(Job.filter_reason == get("filter_reason"))
     # A job with no posting date skips the fetcher's age check entirely, so
     # some of these are long-closed listings passing as fresh. Being able to
     # see them as a group is the difference between suspecting that and knowing.
-    if dated == "1":
+    if get("dated") == "1":
         query = query.filter(Job.posted_at.isnot(None))
-    elif dated == "0":
+    elif get("dated") == "0":
         query = query.filter(Job.posted_at.is_(None))
+    return query, sort, cutoff, notes
 
-    from app.services import for_you
 
-    ranking = for_you.model_for(_profile_data(db))
+def _employment_types(db: Session) -> list[str]:
+    try:
+        rows = db.query(Job.employment_type).filter(Job.employment_type.isnot(None)).distinct().all()
+        return sorted(r[0] for r in rows if r[0])
+    except Exception:
+        return []
+
+
+@router.get("", response_class=HTMLResponse)
+def get_jobs(request: Request, page: int = 0, view: str = "", db: Session = Depends(get_db)):
+    from app.services import for_you, job_views
+
+    params = {key: request.query_params.get(key, "") for key in FILTER_PARAMS}
+    profile_data = _profile_data(db)
+    views = job_views.views(profile_data)
+
+    # The default view opens the page, unless the page was asked for with
+    # filters of its own or told to show everything (`view=none`).
+    default = job_views.default(views)
+    if default and not view and not any(params.values()) and not page:
+        return RedirectResponse(url=f"/jobs?{default['query']}&view={default['id']}",
+                                status_code=303)
+
+    query, sort, cutoff, notes = filtered(db, params)
+    ranking = for_you.model_for(profile_data)
     if sort == "for_you" and ranking is None:
         sort = "score_desc"
     total = query.count()
@@ -375,35 +482,46 @@ def get_jobs(
         # nobody's business.
         jobs = (
             query.options(selectinload(Job.scores))
-            .order_by(order)
+            .order_by(*order)
             .offset(page * _PAGE_SIZE)
             .limit(_PAGE_SIZE)
             .all()
         )
 
+    current_query = job_views.query_string(params)
     return templates.TemplateResponse(
         "jobs/index.html",
         {
             "request": request,
             "jobs": jobs,
-            "filter_reason_filter": filter_reason,
+            "filter_reason_filter": params["filter_reason"],
             "filter_reason_counts": _filter_reason_counts(db),
             "filter_reason_labels": FILTER_REASON_LABELS,
-            "status_filter": status,
-            "q": q,
-            "source_filter": source,
-            "region_filter": region,
-            "location_filter": location,
-            "remote_filter": remote,
-            "min_score_filter": min_score,
-            "min_salary_filter": min_salary,
+            "status_filter": params["status"],
+            "q": params["q"],
+            "q_in": params["q_in"],
+            "source_filter": params["source"],
+            "region_filter": params["region"],
+            "location_filter": params["location"],
+            "remote_filter": params["remote"],
+            "min_score_filter": params["min_score"],
+            "min_salary_filter": params["min_salary"],
             "priced_count": _priced_count(db),
-            "exp_level_filter": exp_level,
-            "dated_filter": dated,
+            "exp_level_filter": params["exp_level"],
+            "dated_filter": params["dated"],
             "undated_count": _undated_count(db),
-            "favourite_filter": favourite,
+            "favourite_filter": params["favourite"],
             "favourite_count": _favourite_count(db),
-            "age_filter": age,
+            "age_filter": params["age"],
+            "sponsor_filter": params["sponsor"],
+            "h1b_filter": params["h1b"],
+            "open_only_filter": params["open_only"],
+            "employment_type_filter": params["employment_type"],
+            "max_years_filter": params["max_years"],
+            "applied_filter": params["applied"],
+            "company_filter": params["company"],
+            "employment_types": _employment_types(db),
+            "notes": notes,
             # Derived from the cutoff rather than read again, so the number
             # in the banner cannot disagree with the filter that produced it.
             "age_days": (
@@ -421,6 +539,10 @@ def get_jobs(
             "exp_levels": _EXP_LEVELS,
             "region_options": REGION_OPTIONS,
             "for_you_available": ranking is not None,
+            "views": job_views.with_counts(
+                views, current_query, lambda saved: filtered(db, saved)[0].count()),
+            "current_query": current_query,
+            "active_view": view,
         },
     )
 
@@ -456,6 +578,112 @@ def _ranked_page(db: Session, query, ranking: dict, page: int) -> list:
     by_id = {job.id: job for job in
              db.query(Job).options(selectinload(Job.scores)).filter(Job.id.in_(ids)).all()}
     return [by_id[i] for i in ids if i in by_id]
+
+
+@router.post("/views")
+def save_view(name: str = Form(""), query: str = Form(""), db: Session = Depends(get_db)):
+    """Save the list as it is now under a name."""
+    from app.services import job_views
+
+    try:
+        view = job_views.save(db, name, query)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return RedirectResponse(url=f"/jobs?{view['query']}&view={view['id']}", status_code=303)
+
+
+@router.post("/views/{view_id}/default")
+def default_view(view_id: str, db: Session = Depends(get_db)):
+    """Open /jobs on this view, or stop doing so."""
+    from app.services import job_views
+
+    try:
+        job_views.set_default(db, view_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such view")
+    view = next(v for v in job_views.views(_profile_data(db)) if v["id"] == view_id)
+    return RedirectResponse(url=f"/jobs?{view['query']}&view={view_id}", status_code=303)
+
+
+@router.post("/views/{view_id}/delete")
+def delete_view(view_id: str, db: Session = Depends(get_db)):
+    from app.services import job_views
+
+    job_views.remove(db, view_id)
+    return RedirectResponse(url="/jobs?view=none", status_code=303)
+
+
+BULK_ACTIONS = ("star", "unstar", "hide", "restore", "generate")
+
+
+@router.post("/bulk", response_class=HTMLResponse)
+def bulk_action(
+    job_ids: list[str] = Form(default=[]),
+    action: str = Form(...),
+    reason: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """
+    One action on every selected job, then reload the list.
+
+    Each does what the card's own button does, job by job: a star, "Not
+    interested" (with its reason), putting a dismissed job back, queueing
+    documents. Jobs an action does not apply to (documents for a job the
+    matcher filtered out) are skipped and counted.
+    """
+    from app.services.match_report import DISMISS_REASONS
+    from app.tasks.generate import (
+        NEEDS_GENERATION, claim_for_generation, queue_generation, release_generation_claim)
+
+    if action not in BULK_ACTIONS:
+        raise HTTPException(status_code=422, detail=f"Unknown action: {action}")
+    if reason and reason not in DISMISS_REASONS:
+        raise HTTPException(status_code=422, detail=f"Unknown reason: {reason}")
+    ids = []
+    for raw in job_ids:
+        try:
+            ids.append(uuid.UUID(raw))
+        except ValueError:
+            continue
+    jobs = db.query(Job).filter(Job.id.in_(ids)).all() if ids else []
+    now = datetime.now(timezone.utc)
+    done = skipped = 0
+    for job in jobs:
+        if action in ("star", "unstar"):
+            job.favourite = action == "star"
+            job.favourited_at = now if job.favourite else None
+        elif action == "hide":
+            job.status = JobStatus.filtered_out
+            job.filter_reason = "manual"
+            job.filter_detail = "You filtered this out from the jobs list."
+            job.dismiss_reason = reason or None
+            job.dismissed_at = now
+        elif action == "restore":
+            if job.status != JobStatus.filtered_out or job.filter_reason != "manual":
+                skipped += 1
+                continue
+            job.status = JobStatus.matched
+            job.filter_reason = job.filter_detail = job.dismiss_reason = None
+            job.dismissed_at = None
+        elif action == "generate":
+            app_obj = job.applications[0] if job.applications else None
+            # Only where nothing is written or running: a bulk click is not a
+            # reason to spend six model calls rewriting documents that exist.
+            if (job.status != JobStatus.matched or app_obj is None
+                    or not claim_for_generation(db, app_obj.id, NEEDS_GENERATION)):
+                skipped += 1
+                continue
+            if not queue_generation(app_obj.id):
+                release_generation_claim(db, app_obj.id)
+                skipped += 1
+                continue
+        done += 1
+    db.commit()
+    logger.info("jobs bulk %s: %d done, %d skipped", action, done, skipped)
+    return HTMLResponse(
+        f'<span class="text-xs">{done} done{f", {skipped} skipped" if skipped else ""}</span>',
+        headers={"HX-Refresh": "true"},
+    )
 
 
 @router.get("/{job_id}/application")
