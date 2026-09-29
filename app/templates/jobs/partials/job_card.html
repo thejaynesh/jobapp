@@ -245,7 +245,7 @@
         <summary class="text-xs text-gray-500 hover:text-red-600 underline cursor-pointer list-none whitespace-nowrap">
           Not interested &#9662;
         </summary>
-        <div class="absolute right-0 z-10 mt-1 w-60 bg-white border border-gray-200 rounded-lg shadow-lg p-2">
+        <div class="absolute right-0 z-10 mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg p-2">
           <button
             hx-post="/jobs/{{ job.id }}/not-interested"
             hx-vals='{"scope": "job"}'
@@ -253,6 +253,21 @@
             class="block w-full text-left text-xs px-2 py-1.5 rounded hover:bg-gray-100">
             Hide just this job
           </button>
+          {# Why, when it is quick to say: the matching report counts these
+             against the setting that would have kept the job out, and the
+             "For you" ranking learns from them. #}
+          <p class="text-[10px] text-gray-400 px-2 pt-0.5 pb-0.5">…and say why:</p>
+          <div class="flex flex-wrap gap-1 px-2 pb-1.5">
+            {% for key, label in dismiss_reasons %}
+            <button
+              hx-post="/jobs/{{ job.id }}/not-interested"
+              hx-vals='{"scope": "job", "reason": "{{ key }}"}'
+              hx-target="#job-{{ job.id }}" hx-swap="outerHTML"
+              class="text-xs px-2 py-0.5 rounded bg-gray-50 border border-gray-200 hover:bg-red-50 hover:border-red-200">
+              {{ label }}
+            </button>
+            {% endfor %}
+          </div>
           {% if job.company %}
           <button
             hx-post="/jobs/{{ job.id }}/not-interested"

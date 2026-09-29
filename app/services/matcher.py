@@ -162,10 +162,68 @@ _SKILL_ALIASES: tuple[frozenset[str], ...] = tuple(frozenset(group) for group in
     {"machine learning", "ml engineering"},
     {"elasticsearch", "elastic search"},
     {"sql server", "mssql"},
+    {"typescript", "type script"},
+    {"python", "python3"},
+    {"c++", "cpp"},
+    {"dotnet", ".net"},
+    {"terraform", "hashicorp terraform"},
+    {"github actions", "gh actions"},
+    {"amazon s3", "aws s3", "s3"},
+    {"ec2", "aws ec2", "amazon ec2"},
+    {"lambda", "aws lambda"},
+    {"dynamodb", "dynamo db"},
+    {"bigquery", "big query"},
+    {"pyspark", "apache spark", "spark"},
+    {"kafka", "apache kafka"},
+    {"airflow", "apache airflow"},
+    {"redis", "redis cache"},
+    {"graphql", "graph ql"},
+    {"tensorflow", "tensor flow"},
+    {"pytorch", "torch"},
+    {"llm", "llms", "large language models", "large language model"},
+    {"nlp", "natural language processing"},
+    {"microservices", "micro-services", "microservice architecture"},
+    {"distributed systems", "distributed computing"},
+    {"object-oriented programming", "oop", "object oriented programming"},
+    {"unit testing", "unit tests"},
+    {"objective-c", "objc"},
+    {"power bi", "powerbi"},
 ))
-_ALIAS_INDEX: dict[str, frozenset[str]] = {
-    name: group for group in _SKILL_ALIASES for name in group
-}
+
+
+def _index(groups) -> dict[str, frozenset[str]]:
+    """Each name to its whole group, merging groups that share a name."""
+    merged: list[set[str]] = []
+    for group in groups:
+        names = {n.strip().lower() for n in group if n and n.strip()}
+        if len(names) < 2:
+            continue
+        for existing in [m for m in merged if m & names]:
+            names |= existing
+            merged.remove(existing)
+        merged.append(names)
+    return {name: frozenset(group) for group in merged for name in group}
+
+
+_ALIAS_INDEX: dict[str, frozenset[str]] = _index(_SKILL_ALIASES)
+
+
+def parse_alias_lines(text: str) -> list[list[str]]:
+    """The profile's "a = b = c" lines as groups, one per line, blanks dropped."""
+    groups = []
+    for line in (text or "").splitlines():
+        names = [n.strip() for n in re.split(r"\s*=\s*|\s*,\s*", line) if n.strip()]
+        if len(names) >= 2:
+            groups.append(names)
+    return groups
+
+
+def alias_index(profile_data: dict | None = None) -> dict[str, frozenset[str]]:
+    """The built-in names merged with the profile's own (Skills tab)."""
+    extra = [g for g in (profile_data or {}).get("skill_aliases") or [] if isinstance(g, list)]
+    if not extra:
+        return _ALIAS_INDEX
+    return _index(list(_SKILL_ALIASES) + extra)
 
 
 def _mentions(desc_lower: str, s: str) -> bool:
@@ -179,12 +237,14 @@ def _mentions(desc_lower: str, s: str) -> bool:
     return re.search(r'(?<![a-z0-9])' + re.escape(s) + r'(?![a-z0-9])', desc_lower) is not None
 
 
-def _count_skill_matches(description: str, skills_flat: list[str]) -> int:
+def _count_skill_matches(description: str, skills_flat: list[str],
+                         aliases: dict | None = None) -> int:
     desc_lower = description.lower()
+    aliases = _ALIAS_INDEX if aliases is None else aliases
     count = 0
     for skill in skills_flat:
         s = skill.lower().strip()
-        names = _ALIAS_INDEX.get(s, frozenset({s}))
+        names = aliases.get(s, frozenset({s}))
         if any(_mentions(desc_lower, name) for name in names):
             count += 1
     return count
@@ -307,6 +367,7 @@ FILTER_REASON_LABELS = {
     "restricted": "Restricted to US citizens",
     "duplicate": "Same posting already has an application",
     "manual": "You filtered it manually",
+    "low_similarity": "Reads too little like your profile to score",
     "language": "Posting isn't written in a language you read",
 }
 
@@ -331,6 +392,7 @@ _LANGUAGE_NAMES = {
 # description, so re-scoring them would cost a call and reach the same answer.
 DESCRIPTION_DEPENDENT_REASONS = frozenset({
     "no_description", "few_skills", "low_score", "restricted", "seniority",
+    "low_similarity",
 })
 
 # Verdicts the user made. A fuller description is not a reason to overrule
@@ -489,7 +551,7 @@ def evaluate_keyword_filter(job, profile_data: dict, scan=None) -> FilterOutcome
     from app.services.tunables import value as tunable
     min_skills = tunable(profile_data, "min_keyword_skills")
     description = job.description or ""
-    matched = _count_skill_matches(description, skills_flat)
+    matched = _count_skill_matches(description, skills_flat, alias_index(profile_data))
     if matched < min_skills:
         # An empty description is a fetch problem, not a bad job — worth saying
         # so, because the fix is on the source side rather than the filters.
@@ -1185,14 +1247,27 @@ def _match_job(
     thread; the middle one is the model calls, and touches nothing but the
     object it is handed.
     """
-    early = _screen(job, profile_data)
+    early = _screen(job, profile_data, _similarity_scorer(db, profile_data))
     if early is not None:
         return early
     return _file(db, job, profile_data,
                  _evaluate(job, profile_data, api_key, base_url, model, budget))
 
 
-def _screen(job, profile_data: dict) -> str | None:
+def _similarity_scorer(db, profile_data: dict):
+    """The similarity scorer for a pass, or None when it cannot be built."""
+    from app.services import similarity
+
+    try:
+        return similarity.scorer(db, profile_data)
+    except Exception as exc:
+        # A measurement, and a filter only when switched on: never a reason
+        # for a job to go unscored.
+        logger.warning("match: similarity unavailable this pass: %s", exc)
+        return None
+
+
+def _screen(job, profile_data: dict, similar=None) -> str | None:
     """The checks that need no model. "filtered_out", or None to evaluate."""
     # One pass over the description feeds both halves of the eligibility read.
     # The advisory half is recorded whatever happens next — including on jobs
@@ -1231,6 +1306,27 @@ def _screen(job, profile_data: dict) -> str | None:
         return "filtered_out"
 
     job.keyword_score = round(outcome.score, 4)
+
+    # How much the posting reads like the profile: stored for the matching
+    # report on every job, a filter only once a threshold has been set from it.
+    if similar is not None:
+        try:
+            job.similarity = similar.score(job)
+        except Exception as exc:
+            logger.warning("match: similarity failed for %s: %s", getattr(job, "id", "?"), exc)
+            job.similarity = None
+        floor = int(getattr(live(), "PRESCREEN_MIN_SIMILARITY", 0) or 0)
+        if floor and job.similarity is not None and job.similarity < floor:
+            job.status = JobStatus.filtered_out
+            job.llm_score = None
+            job.llm_score_deep = None
+            job.deep_matched_by = None
+            job.filter_reason = "low_similarity"
+            job.filter_detail = (
+                f"Its text scores {job.similarity} for similarity to your profile, under "
+                f"the pre-screen's {floor}, so it was not sent to the model."
+            )
+            return "filtered_out"
     return None
 
 
@@ -1493,10 +1589,11 @@ def _match_concurrently(db, jobs, profile_data: dict, api_key: str, base_url: st
                 logger.error("match_all_new_jobs: on_matched failed for %s: %s", job.id, exc)
 
     pending = []
+    similar = _similarity_scorer(db, profile_data)
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="match") as pool:
         for job in jobs:
             try:
-                early = _screen(job, profile_data)
+                early = _screen(job, profile_data, similar)
                 if early is not None:
                     finish(job, early)
                     continue

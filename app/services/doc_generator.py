@@ -1246,7 +1246,10 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # after the one-page trim, rather than from the context the trim cut.
     from app.services import document_content
 
-    ats = document_content.ats_check(compiled_resume, keywords, resume_ctx)
+    from app.services.matcher import alias_index
+
+    ats = document_content.ats_check(compiled_resume, keywords, resume_ctx,
+                                     alias_index(profile_data))
     logger.info(
         "generate_documents %s: ATS keyword coverage %d/%d (read from %s) — missing: %s",
         application.id, len(ats["present"]), len(keywords), ats["read_from"],

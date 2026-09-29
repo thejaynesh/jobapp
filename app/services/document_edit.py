@@ -109,13 +109,15 @@ def save_resume(db, application, previous: ApplicationDocument, form) -> Applica
     path = _output_path(application, DocType.resume,
                         _next_version(db, application.id, DocType.resume))
     compiled = compile_resume_one_page(ctx, path)
+    from app.services.matcher import alias_index
+
     keywords = (content.get("ats") or {}).get("keywords") or []
-    checks = content_checks.check_resume(ctx, _profile_for_documents(db), keywords,
-                                         application.job)
+    profile_data = _profile_for_documents(db)
+    checks = content_checks.check_resume(ctx, profile_data, keywords, application.job)
     new_content = {
         **content,
         "context": ctx,
-        "ats": document_content.ats_check(compiled, keywords, ctx),
+        "ats": document_content.ats_check(compiled, keywords, ctx, alias_index(profile_data)),
         "checks": content_checks.carried_over(checks, content.get("checks")),
         "edited_from": previous.version,
     }

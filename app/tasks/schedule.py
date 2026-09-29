@@ -97,6 +97,14 @@ SCHEDULE: tuple[Every, ...] = (
     # Postings close on the employer's side without telling anyone.
     Every("check-posting-liveness", "app.tasks.liveness.check_postings",
           "liveness_interval_hours", HOUR),
+    # How often matching agreed with what you did, and any better minimum
+    # score, as a line in the log. The report page is always current.
+    Every("report-matching", "app.tasks.match_eval.report_matching",
+          "match_report_interval_hours", HOUR),
+    # The ranking learned from applications and dismissals, retrained so new
+    # decisions count.
+    Every("retrain-for-you", "app.tasks.match_eval.retrain_for_you",
+          "for_you_retrain_hours", HOUR),
 )
 
 

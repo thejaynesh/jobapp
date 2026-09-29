@@ -66,6 +66,32 @@ TUNABLES: list[Tunable] = [
              "on the profile's skills tab — the two stay in sync.",
     ),
     Tunable(
+        key="prescreen_min_similarity", env="PRESCREEN_MIN_SIMILARITY", kind="int",
+        minimum=0, maximum=100,
+        label="Similarity pre-screen (0 = off)",
+        help="Jobs whose text reads less like your profile than this (0-100) are "
+             "filtered before the model is asked to score them, saving that call. "
+             "Off at 0. The matching report shows, on your own decisions, how many "
+             "calls each value would save and how many jobs you applied to it "
+             "would have dropped: set it from there, not by guess.",
+    ),
+    Tunable(
+        key="match_report_interval_hours", env="MATCH_REPORT_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=720, group="Schedule",
+        label="Matching report to the log every (hours)",
+        help="How often a one-line summary of the matching report (agreement with "
+             "your decisions, and any better minimum score) is written to the log. "
+             "The report page itself is always current.",
+    ),
+    Tunable(
+        key="for_you_retrain_hours", env="FOR_YOU_RETRAIN_HOURS", kind="int",
+        minimum=1, maximum=720, group="Schedule",
+        label="For you ranking: retrain every (hours)",
+        help="How often the ranking learned from your applications and dismissals "
+             "is retrained. It takes under a second; more often only matters when "
+             "you are deciding on many jobs a day.",
+    ),
+    Tunable(
         key="min_keyword_skills", env="MIN_KEYWORD_SKILLS", kind="int",
         minimum=0, maximum=20,
         label="Minimum skill matches",

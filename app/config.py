@@ -810,6 +810,13 @@ class Settings(BaseSettings):
     ARCHIVE_INTERVAL_HOURS: int = 24
 
     MIN_KEYWORD_SKILLS: int = 2
+    # Skip the scoring call for postings less similar to the profile than
+    # this (services/similarity, 0-100). 0 is off. Editable on the settings page.
+    PRESCREEN_MIN_SIMILARITY: int = 0
+    # The matching report's weekly line in the log, and the "For you"
+    # ranking's retrain. Editable on the settings page.
+    MATCH_REPORT_INTERVAL_HOURS: int = 168
+    FOR_YOU_RETRAIN_HOURS: int = 24
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     # Employers' H-1B filings from DOL's public disclosure data, shown on each
     # job (`services.sponsorship_history`). Editable on the settings page.

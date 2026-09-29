@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Matching — JobApp{% endblock %}
+{% block content %}
+{% set r = report %}
+
+<div class="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+  <h1 class="text-2xl font-bold">How well matching agrees with you</h1>
+  <p class="text-xs text-gray-400">
+    From scores already stored and what you then did: applied or starred is a yes, dismissed is a no.
+    <a href="/funnel" class="underline hover:text-blue-600">Back to the funnel</a>
+  </p>
+</div>
+
+{% if request.query_params.get("saved") %}
+<p class="mb-4 text-sm text-green-700">Minimum match score set to {{ r.threshold }}. New scores are filed against it from the next matching pass.</p>
+{% endif %}
+
+{# ---- Agreement ----------------------------------------------------------- #}
+<div class="grid sm:grid-cols-2 gap-4 mb-6">
+  {% for title, a in [("This week", r.week), ("All time", r.all)] %}
+  <div class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+    <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ title }}</p>
+    {% if a.yes + a.no %}
+    <p class="mt-1 text-3xl font-bold text-gray-800">{{ (a.share * 100) | round | int }}%</p>
+    <p class="text-sm text-gray-600">agreement on {{ a.yes + a.no }} scored decision{{ "s" if a.yes + a.no != 1 }} at your minimum score of {{ r.threshold }}</p>
+    <ul class="mt-2 text-sm text-gray-600 space-y-0.5">
+      <li><span class="font-medium text-green-700">{{ a.yes_kept }} of {{ a.yes }}</span> jobs you applied to or starred scored at or above {{ r.threshold }}</li>
+      <li><span class="font-medium text-amber-700">{{ a.no_shown }} of {{ a.no }}</span> jobs you dismissed were scored as matches anyway</li>
+      {% if a.unscored %}<li class="text-gray-400">{{ a.unscored }} decision{{ "s" if a.unscored != 1 }} on jobs with no score, not counted</li>{% endif %}
+    </ul>
+    {% else %}
+    <p class="mt-2 text-sm text-gray-500">No scored decisions {{ "this week" if title == "This week" else "yet" }}.</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{# ---- The threshold ------------------------------------------------------- #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <h2 class="text-lg font-semibold mb-1">Minimum match score</h2>
+  {% set s = r.suggestion %}
+  {% if s.kind == "wait" %}
+  <p class="text-sm text-gray-600">Too few decisions to suggest a value yet: {% if s.need_yes %}{{ s.need_yes }} more applied or starred{% endif %}{% if s.need_yes and s.need_no %} and {% endif %}{% if s.need_no %}{{ s.need_no }} more dismissed{% endif %} scored job{{ "s" if (s.need_yes + s.need_no) != 1 }}.</p>
+  {% elif s.kind == "keep" %}
+  <p class="text-sm text-gray-600">{{ r.threshold }} is the highest minimum that still keeps nine in ten of the jobs you wanted. Leave it.</p>
+  {% else %}
+  <div class="flex flex-wrap items-center gap-3 rounded border border-blue-200 bg-blue-50 px-3 py-2">
+    <p class="text-sm text-blue-900 flex-1">
+      {% if s.kind == "raise" %}
+      Raising it to <span class="font-semibold">{{ s.threshold }}</span> would still have kept {{ s.row.yes_kept }} of the jobs you wanted,
+      hidden {{ s.row.no_hidden }} you dismissed, and shown about {{ s.row.per_week }} a week instead of {{ s.current.per_week }}.
+      {% else %}
+      At {{ s.from }} you would have missed {{ ((1 - s.current.yes_share) * 100) | round | int }}% of the jobs you wanted.
+      Lowering it to <span class="font-semibold">{{ s.threshold }}</span> keeps nine in ten of them, at about {{ s.row.per_week }} jobs a week.
+      {% endif %}
+    </p>
+    <form method="post" action="/funnel/matching/threshold">
+      <input type="hidden" name="value" value="{{ s.threshold }}">
+      <button class="bg-blue-600 text-white px-3 py-1.5 rounded text-sm hover:bg-blue-700">Use {{ s.threshold }}</button>
+    </form>
+  </div>
+  {% endif %}
+  <details class="mt-3">
+    <summary class="text-xs text-gray-500 cursor-pointer">Every threshold against your decisions</summary>
+    <table class="mt-2 text-sm w-full max-w-xl">
+      <thead><tr class="text-left text-xs text-gray-500">
+        <th class="py-1">Minimum</th><th>Wanted jobs kept</th><th>Dismissed jobs hidden</th><th>Matches a week</th>
+      </tr></thead>
+      <tbody>
+      {% for row in r.table %}
+      <tr class="border-t border-gray-100 {% if row.threshold == r.threshold %}font-semibold bg-gray-50{% endif %}">
+        <td class="py-1">{{ row.threshold }}{% if row.threshold == r.threshold %} (now){% endif %}</td>
+        <td>{{ row.yes_kept }}{% if row.yes_share is not none %} <span class="text-gray-400">({{ (row.yes_share * 100) | round | int }}%)</span>{% endif %}</td>
+        <td>{{ row.no_hidden }}</td>
+        <td>{{ row.per_week }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% if r.all.missed %}
+  <details class="mt-2">
+    <summary class="text-xs text-gray-500 cursor-pointer">Jobs you wanted that scored under {{ r.threshold }} ({{ r.all.missed | length }})</summary>
+    <ul class="mt-1 text-sm text-gray-600 space-y-0.5">
+      {% for m in r.all.missed[:15] %}
+      <li><span class="font-medium">{{ m.score | int }}</span> — {{ m.title }} at {{ m.company }}</li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+
+{# ---- Why jobs were dismissed --------------------------------------------- #}
+{% if r.reasons %}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <h2 class="text-lg font-semibold mb-2">Why you dismissed jobs</h2>
+  <ul class="space-y-1.5 text-sm">
+    {% for reason in r.reasons %}
+    <li>
+      <span class="font-medium">{{ reason.count }}</span> {{ reason.label | lower }}{% if reason.hint %}
+      <span class="text-gray-500">— {{ reason.hint }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{# ---- The similarity pre-screen ------------------------------------------ #}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <h2 class="text-lg font-semibold mb-1">Similarity pre-screen</h2>
+  <p class="text-sm text-gray-600">
+    Every job that passes the keyword filter gets a free similarity to your profile (0–100) before the model scores it.
+    The pre-screen would skip the model call below a threshold; it is
+    {% if r.prescreen %}<span class="font-semibold">on at {{ r.prescreen }}</span>{% else %}<span class="font-semibold">off</span>{% endif %}
+    (<a href="/settings#prescreen_min_similarity" class="underline">settings</a>).
+  </p>
+  {% if r.similarity %}
+  <table class="mt-2 text-sm w-full max-w-xl">
+    <thead><tr class="text-left text-xs text-gray-500">
+      <th class="py-1">Threshold</th><th>Model calls saved this week</th><th>Jobs you wanted it would have dropped</th>
+    </tr></thead>
+    <tbody>
+    {% for row in r.similarity %}
+    <tr class="border-t border-gray-100 {% if row.threshold == r.prescreen %}font-semibold bg-gray-50{% endif %}">
+      <td class="py-1">{{ row.threshold }}</td>
+      <td>{{ row.calls_saved }} of {{ row.scored }}</td>
+      <td class="{% if row.yes_lost %}text-red-600{% endif %}">{{ row.yes_lost }}{% if row.yes_known %} of {{ row.yes_known }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="mt-2 text-sm text-gray-400">No similarity measured yet: it is recorded from the next matching pass on.</p>
+  {% endif %}
+</div>
+
+{# ---- For you ------------------------------------------------------------- #}
+<div id="ranking" class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <h2 class="text-lg font-semibold mb-1">"For you" ranking</h2>
+  <p class="text-sm text-gray-600">A ranking learned from what you applied to and dismissed: score, similarity, pay, remoteness, years asked, freshness, and the words of the title and company. The jobs list offers it once it orders your held-out decisions better than the match score alone.</p>
+  {% if ranking %}
+  <p class="mt-2 text-sm">
+    Trained {{ ranking.trained_at[:16] | replace("T", " ") }} UTC on {{ ranking.yes }} yes and {{ ranking.no }} no.
+    {% if ranking.auc is defined and ranking.auc is not none %}
+    It ranks a wanted job above a dismissed one <span class="font-semibold">{{ (ranking.auc * 100) | round | int }}%</span> of the time
+    {% if ranking.score_auc is not none %}(the match score alone: {{ (ranking.score_auc * 100) | round | int }}%){% endif %}.
+    {% endif %}
+    {% if ranking.usable %}<span class="text-green-700">In use: sort the jobs list by "For you".</span>
+    {% else %}<span class="text-gray-500">Not in use: {{ ranking.reason }}.</span>{% endif %}
+  </p>
+  {% else %}
+  <p class="mt-2 text-sm text-gray-500">Not trained yet. It needs {{ ranking_min[0] }} jobs you wanted and {{ ranking_min[1] }} you dismissed.</p>
+  {% endif %}
+  <form method="post" action="/funnel/matching/retrain" class="mt-2">
+    <button class="text-sm border border-gray-300 rounded px-3 py-1 hover:bg-gray-50">Retrain now</button>
+  </form>
+</div>
+
+{# ---- Recent decisions ---------------------------------------------------- #}
+{% if r.recent %}
+<div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 shadow-sm">
+  <h2 class="text-lg font-semibold mb-2">Your latest decisions</h2>
+  <table class="text-sm w-full">
+    <tbody>
+    {% for d in r.recent %}
+    <tr class="border-t border-gray-100">
+      <td class="py-1 pr-2 w-10 {% if d.verdict == 'yes' %}text-green-700{% else %}text-gray-500{% endif %}">{{ d.verdict }}</td>
+      <td class="pr-2 w-12">{{ d.score | int if d.score is not none else "—" }}</td>
+      <td class="pr-2"><a href="/jobs/{{ d.id }}/edit?next=/funnel/matching" class="hover:underline">{{ d.title }}</a> <span class="text-gray-400">at {{ d.company }}</span></td>
+      <td class="text-xs text-gray-500">{{ reason_labels.get(d.why, d.why) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

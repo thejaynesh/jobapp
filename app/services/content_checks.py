@@ -26,6 +26,8 @@ is in) and `detail` (the sentence the page shows).
 """
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from app.services.experience import total_years
 
@@ -50,11 +52,28 @@ _EVERYDAY = frozenset({
 _MAX_TERM_WORDS = 3
 
 
+# The skill names in force for one check: the built-in ones merged with the
+# profile's own (Skills tab), set by check_resume and check_letter for their
+# duration rather than passed through every helper.
+_ALIASES: ContextVar[dict | None] = ContextVar("content_check_aliases", default=None)
+
+
+@contextmanager
+def _aliases_of(profile_data: dict):
+    from app.services.matcher import alias_index
+
+    token = _ALIASES.set(alias_index(profile_data))
+    try:
+        yield
+    finally:
+        _ALIASES.reset(token)
+
+
 def _names(term: str) -> frozenset[str]:
     from app.services.matcher import _ALIAS_INDEX
 
     name = term.lower().strip()
-    return _ALIAS_INDEX.get(name, frozenset({name}))
+    return (_ALIASES.get() or _ALIAS_INDEX).get(name, frozenset({name}))
 
 
 def _pattern(name: str) -> re.Pattern:
@@ -254,6 +273,21 @@ def _prose(where: str, text: str, profile_data: dict, terms: list[str],
 
 def check_resume(ctx: dict, profile_data: dict, keywords=(), job=None) -> list[dict]:
     """Everything in a resume context the profile does not support."""
+    with _aliases_of(profile_data):
+        return _check_resume(ctx, profile_data, keywords, job)
+
+
+def check_letter(body: str, profile_data: dict, keywords=(), job=None) -> list[dict]:
+    """Figures, years and first-person skill claims in a letter the profile does not support."""
+    posting = " ".join(str(x) for x in (getattr(job, "description", None),
+                                        getattr(job, "title", None),
+                                        getattr(job, "company", None)) if x)
+    with _aliases_of(profile_data):
+        return _prose("letter", body or "", profile_data, vocabulary(profile_data, keywords, job),
+                      claims_only=True, other_sources=posting)
+
+
+def _check_resume(ctx: dict, profile_data: dict, keywords, job) -> list[dict]:
     terms = vocabulary(profile_data, keywords, job)
     found: list[dict] = []
     for section in ("experience", "projects", "education"):
@@ -272,15 +306,6 @@ def check_resume(ctx: dict, profile_data: dict, keywords=(), job=None) -> list[d
     found += _prose("summary", ctx.get("narrative_summary") or "", profile_data, terms,
                     claims_only=False)
     return found
-
-
-def check_letter(body: str, profile_data: dict, keywords=(), job=None) -> list[dict]:
-    """Figures, years and first-person skill claims in a letter the profile does not support."""
-    posting = " ".join(str(x) for x in (getattr(job, "description", None),
-                                        getattr(job, "title", None),
-                                        getattr(job, "company", None)) if x)
-    return _prose("letter", body or "", profile_data, vocabulary(profile_data, keywords, job),
-                  claims_only=True, other_sources=posting)
 
 
 def carried_over(findings: list[dict], earlier: list[dict]) -> list[dict]:

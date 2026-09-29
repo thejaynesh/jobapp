@@ -12,6 +12,9 @@
   <p class="mt-1 text-xs text-gray-500">Missing:
     {% for word in ats.missing %}<span class="inline-block px-1.5 py-0.5 mr-1 mb-1 rounded bg-amber-50 text-amber-800 border border-amber-200">{{ word }}</span>{% endfor %}
   </p>
+  {% for word, other in (ats.written_as or {}).items() %}
+  <p class="mt-0.5 text-xs text-gray-500">“{{ word }}” is on the resume as “{{ other }}”. A parser matches the posting’s spelling; use theirs.</p>
+  {% endfor %}
   {% endif %}
   {% if ats.garbled %}
   <p class="mt-1 text-xs text-red-600">This PDF's text reads back garbled ({{ ats.garbled }} characters a parser cannot read) — the server is missing the resume's outline font.</p>

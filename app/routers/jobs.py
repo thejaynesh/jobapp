@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 templates = build_templates()
 
+
+def _dismiss_reasons() -> list[tuple[str, str]]:
+    """The reasons a card offers for "Not interested"; the company has its own button."""
+    from app.services.match_report import DISMISS_REASONS
+
+    return [(key, label) for key, (label, _) in DISMISS_REASONS.items() if key != "company"]
+
+
+templates.env.globals["dismiss_reasons"] = _dismiss_reasons()
+
 # `new` belongs here: a freshly fetched job is real and worth seeing before the
 # matcher has had its say. Leaving it out made every job invisible until a
 # matching cycle ran — and a source-scoped manual fetch skips matching entirely,
@@ -348,19 +358,28 @@ def get_jobs(
     elif dated == "0":
         query = query.filter(Job.posted_at.is_(None))
 
-    order = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["score_desc"])
+    from app.services import for_you
+
+    ranking = for_you.model_for(_profile_data(db))
+    if sort == "for_you" and ranking is None:
+        sort = "score_desc"
     total = query.count()
-    # Asked for here rather than declared on the relationship. Every card
-    # renders its score history, so without this the page is fifty queries —
-    # but as a relationship-level `selectin` it was also loaded by every batch
-    # pass that touches a Job, which is thousands of rows of nobody's business.
-    jobs = (
-        query.options(selectinload(Job.scores))
-        .order_by(order)
-        .offset(page * _PAGE_SIZE)
-        .limit(_PAGE_SIZE)
-        .all()
-    )
+    if sort == "for_you":
+        jobs = _ranked_page(db, query, ranking, page)
+    else:
+        order = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["score_desc"])
+        # Asked for here rather than declared on the relationship. Every card
+        # renders its score history, so without this the page is fifty
+        # queries — but as a relationship-level `selectin` it was also loaded
+        # by every batch pass that touches a Job, which is thousands of rows of
+        # nobody's business.
+        jobs = (
+            query.options(selectinload(Job.scores))
+            .order_by(order)
+            .offset(page * _PAGE_SIZE)
+            .limit(_PAGE_SIZE)
+            .all()
+        )
 
     return templates.TemplateResponse(
         "jobs/index.html",
@@ -401,8 +420,42 @@ def get_jobs(
             "sources": _known_sources(db),
             "exp_levels": _EXP_LEVELS,
             "region_options": REGION_OPTIONS,
+            "for_you_available": ranking is not None,
         },
     )
+
+
+# What the "For you" ranking reads, loaded for every row the filters keep —
+# no descriptions, which are most of a job row's bytes.
+_RANKING_COLUMNS = (
+    Job.id, Job.title, Job.company, Job.source, Job.experience_level, Job.llm_score,
+    Job.llm_score_deep, Job.similarity, Job.keyword_score, Job.is_remote,
+    Job.salary_annual_max, Job.salary_annual_min, Job.posted_at, Job.fetched_at,
+    Job.required_years,
+)
+
+
+def _profile_data(db: Session) -> dict:
+    from app.models.profile import Profile
+
+    try:
+        profile = db.query(Profile).first()
+    except Exception:
+        return {}
+    return (profile.data if profile is not None and isinstance(profile.data, dict) else {})
+
+
+def _ranked_page(db: Session, query, ranking: dict, page: int) -> list:
+    """One page of the filtered jobs in "For you" order."""
+    from app.services import for_you
+
+    ranked = for_you.rank(ranking, query.with_entities(*_RANKING_COLUMNS).all())
+    ids = [row.id for _, row in ranked[page * _PAGE_SIZE:(page + 1) * _PAGE_SIZE]]
+    if not ids:
+        return []
+    by_id = {job.id: job for job in
+             db.query(Job).options(selectinload(Job.scores)).filter(Job.id.in_(ids)).all()}
+    return [by_id[i] for i in ids if i in by_id]
 
 
 @router.get("/{job_id}/application")
@@ -449,6 +502,7 @@ def not_interested(
     request: Request,
     scope: str = Form(...),
     word: str = Form(""),
+    reason: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """
@@ -458,10 +512,20 @@ def not_interested(
     this posting, "company" also excludes the employer from future matching,
     and "title_word" blocks a word they picked off this title. Every option
     used to be a correction the system threw away.
+
+    `reason` (a key of match_report.DISMISS_REASONS) says why, when the user
+    picked one; excluding a company or a title word is its own reason. Kept
+    with the time, for the matching report and the "For you" ranking.
     """
+    from app.services.match_report import DISMISS_REASONS
+
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if reason and reason not in DISMISS_REASONS:
+        raise HTTPException(status_code=422, detail=f"Unknown reason: {reason}")
+    job.dismiss_reason = reason or {"company": "company", "title_word": "role"}.get(scope)
+    job.dismissed_at = datetime.now(timezone.utc)
 
     if scope == "company":
         company = (job.company or "").strip()
@@ -707,11 +771,15 @@ def override_job_status(job_id: uuid.UUID, request: Request, db: Session = Depen
         job.status = JobStatus.filtered_out
         job.filter_reason = "manual"
         job.filter_detail = "You filtered this out from the jobs list."
+        job.dismissed_at = datetime.now(timezone.utc)
     elif job.status == JobStatus.filtered_out:
         job.status = JobStatus.matched
-        # Reinstated by hand — the old explanation no longer applies.
+        # Reinstated by hand — the old explanation no longer applies, and the
+        # dismissal it undoes is no longer a "no".
         job.filter_reason = None
         job.filter_detail = None
+        job.dismiss_reason = None
+        job.dismissed_at = None
     db.commit()
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",

@@ -16,6 +16,12 @@
     <label class="block text-sm font-medium text-gray-700">Clouds</label>
     <input type="text" name="clouds" value="{{ profile.skills.clouds | join(', ') }}" class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm">
   </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">Other names for your skills <span class="text-gray-400 text-xs">(one skill per line, names separated by =)</span></label>
+    <textarea name="skill_aliases" rows="3" placeholder="GCP = Google Cloud = Google Cloud Platform"
+              class="mt-1 block w-full border border-gray-300 rounded px-3 py-2 text-sm font-mono">{{ skill_alias_lines(profile) }}</textarea>
+    <p class="mt-1 text-xs text-gray-400">A posting that says any of the names counts for the skill. Common ones (Postgres, k8s, JS, Golang&hellip;) are built in.</p>
+  </div>
   <hr class="border-gray-200">
   <div>
     <label class="block text-sm font-medium text-gray-700">Target Roles <span class="text-gray-400 text-xs">(one per line)</span></label>

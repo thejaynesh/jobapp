@@ -60,6 +60,9 @@
       </select>
 
       <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        {% if for_you_available %}
+        <option value="for_you" {% if sort == "for_you" %}selected{% endif %}>For you (learned from your decisions)</option>
+        {% endif %}
         <option value="score_desc" {% if sort == "score_desc" %}selected{% endif %}>Score: high &rarr; low</option>
         <option value="score_asc" {% if sort == "score_asc" %}selected{% endif %}>Score: low &rarr; high</option>
         <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>

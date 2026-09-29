@@ -58,6 +58,41 @@ def check_match_quality(model: str | None = None, path: str | None = None) -> di
     return result
 
 
+@celery_app.task(name="app.tasks.match_eval.report_matching", bind=False,
+                 soft_time_limit=120, time_limit=150)
+def report_matching() -> dict:
+    """The matching report's summary, to the log, on the settings page's interval."""
+    from app.services import match_report
+    from app.services.profile_service import get_or_create_profile
+
+    db = SessionLocal()
+    try:
+        report = match_report.build(db, get_or_create_profile(db).data)
+        line = match_report.summary_line(report)
+        logger.info("matching report: %s See /funnel/matching.", line)
+        return {"summary": line, "suggestion": report["suggestion"]["kind"]}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.tasks.match_eval.retrain_for_you", bind=False,
+                 soft_time_limit=300, time_limit=330)
+def retrain_for_you() -> dict:
+    """Retrain the "For you" ranking from the decisions made since the last one."""
+    from app.services import for_you
+    from app.services.profile_service import get_or_create_profile
+
+    db = SessionLocal()
+    try:
+        model = for_you.fit(db, get_or_create_profile(db).data or {})
+        for_you.save(db, model)
+        logger.info("for you ranking: trained on %d yes / %d no; %s", model["yes"], model["no"],
+                    "in use" if model.get("usable") else f"not in use ({model.get('reason')})")
+        return {k: model.get(k) for k in ("yes", "no", "usable", "auc", "score_auc")}
+    finally:
+        db.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", action="store_true",

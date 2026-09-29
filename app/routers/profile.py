@@ -22,6 +22,14 @@ templates.env.globals["location_prefs"] = normalize_prefs
 # Each entry's bullets with no figure, and the question to ask for one.
 templates.env.globals["unanswered_bullets"] = bullet_facts.unanswered
 
+
+def _skill_alias_lines(profile_data) -> str:
+    return "\n".join(" = ".join(group) for group in (profile_data or {}).get("skill_aliases") or []
+                     if isinstance(group, list))
+
+
+templates.env.globals["skill_alias_lines"] = _skill_alias_lines
+
 TABS = ["personal", "experience", "projects", "skills", "education",
         "screening", "templates", "narrative", "ai prompt", "check"]
 
@@ -307,9 +315,11 @@ def save_skills(
     location_regions: list[str] = Form(default=[]),
     remote_ok: str = Form(""), custom_locations: str = Form(""),
     excluded_companies: str = Form(""), min_match_score: int = Form(70),
+    skill_aliases: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     from app.services.locations import REGIONS, search_locations
+    from app.services.matcher import parse_alias_lines
     from app.services.profile_service import save_section
     save_section(db, "skills", {
         "languages": [x.strip() for x in languages.split(",") if x.strip()],
@@ -317,6 +327,9 @@ def save_skills(
         "tools": [x.strip() for x in tools.split(",") if x.strip()],
         "clouds": [x.strip() for x in clouds.split(",") if x.strip()],
     })
+    # Absent (an older form) leaves the list alone; present and empty clears it.
+    if skill_aliases is not None:
+        save_section(db, "skill_aliases", parse_alias_lines(skill_aliases))
     save_section(db, "target_roles", [x.strip() for x in target_roles.splitlines() if x.strip()])
     prefs = {
         "regions": [r for r in location_regions if r in REGIONS],

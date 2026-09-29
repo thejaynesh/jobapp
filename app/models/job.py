@@ -3,7 +3,7 @@ import uuid
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, Float, Text, DateTime, Enum as SAEnum
+from sqlalchemy import String, Boolean, Float, SmallInteger, Text, DateTime, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -64,6 +64,15 @@ class Job(Base):
     # sentence naming the actual values that triggered it.
     filter_reason: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     filter_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Why the user dismissed it from the jobs list, when they said (a key of
+    # match_report.DISMISS_REASONS), and when. Read by the matching report and
+    # the "For you" ranking.
+    dismiss_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # TF-IDF similarity to the profile, 0-100, set when the job is screened
+    # for scoring (services/similarity). Decides nothing unless the pre-screen
+    # is switched on.
+    similarity: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     # What the posting said about visa sponsorship, quoted. Advisory only: it is
     # displayed beside the job and never filters, scores or ranks it, and never
     # reaches an LLM. `direction` is "negative" or "positive".
