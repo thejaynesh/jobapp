@@ -67,15 +67,24 @@ _UNICODE_RE = re.compile("[" + "".join(_UNICODE_MAP.keys()) + "]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7F]")
 
 
+# Accented Latin letters pdflatex sets as they are: utf8 inputenc declares
+# them for T1 (t1enc.dfu), so they compile, and a name keeps its spelling —
+# López, Müller, Dvořák. Folding them made a letter open "Dear Jose Nunez".
+# The nine here have no T1 glyph and are folded like everything else.
+_T1_LATIN = frozenset(chr(c) for c in range(0xC0, 0x180)) - frozenset("×÷ĦħĸĿŀŉŦŧſ")
+
+
 def _fold_non_ascii(match: re.Match) -> str:
-    """Fold an unmapped non-ASCII char to its closest ASCII form, or drop it.
+    """Keep a T1 letter; fold any other non-ASCII char to its closest ASCII form, or drop it.
 
     pdflatex aborts on Unicode it has no declaration for (e.g. U+272A), and
     LLM output can contain anything — so every char must leave here compilable.
-    NFKD strips accents (e.g. an accented e becomes plain e); symbols with no
+    NFKD strips accents (e.g. a barred h becomes plain h); symbols with no
     ASCII equivalent become ''. Folded output is re-escaped in case the fold
     produced a LaTeX special character.
     """
+    if match.group() in _T1_LATIN:
+        return match.group()
     folded = unicodedata.normalize("NFKD", match.group()).encode("ascii", "ignore").decode()
     return _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], folded)
 
@@ -632,12 +641,16 @@ def build_resume_context(
     }
 
 
-def build_cover_letter_context(profile_data: dict, job_company: str, job_title: str, body: str) -> dict:
+def build_cover_letter_context(profile_data: dict, job_company: str, job_title: str, body: str,
+                               recipient: dict | None = None) -> dict:
     return {
         "profile": _normalize_profile_for_template(profile_data),
         "job_company": job_company,
         "job_title": job_title,
         "cover_letter_body": body,
+        # {name, title, contact_id} from letter_recipient, or None for
+        # "Dear Hiring Manager".
+        "recipient": recipient,
     }
 
 
@@ -1268,7 +1281,10 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     db.add(resume_doc)
 
     # Cover letter
-    cl_ctx = build_cover_letter_context(profile_data, job.company, job.title, cover_body)
+    from app.services import letter_recipient
+
+    cl_ctx = build_cover_letter_context(profile_data, job.company, job.title, cover_body,
+                                        recipient=letter_recipient.for_application(application))
     cl_tex = render_latex("cover_letter.tex.j2", cl_ctx)
     cl_version = _next_version(db, application.id, DocType.cover_letter)
     cl_filename = f"{application.id}_cover_letter_v{cl_version}.pdf"

@@ -122,8 +122,17 @@ def save_resume(db, application, previous: ApplicationDocument, form) -> Applica
     return _save(db, application, previous, DocType.resume, compiled, new_content)
 
 
-def save_letter(db, application, previous: ApplicationDocument, body: str) -> ApplicationDocument:
-    """Save an edited letter body as the current cover letter."""
+_KEEP = object()
+
+
+def save_letter(db, application, previous: ApplicationDocument, body: str,
+                recipient=_KEEP) -> ApplicationDocument:
+    """
+    Save an edited letter body as the current cover letter.
+
+    `recipient` is a letter_recipient dict, None for "Dear Hiring Manager",
+    or left out to keep whoever the letter was addressed to.
+    """
     from app.services import content_checks
     from app.services.doc_generator import _next_version, compile_pdf, render_latex
 
@@ -132,6 +141,8 @@ def save_letter(db, application, previous: ApplicationDocument, body: str) -> Ap
         raise NotEditable("This version was written before edits were possible; "
                           "regenerate once to edit it.")
     ctx = {**content["context"], "cover_letter_body": (body or "").strip()}
+    if recipient is not _KEEP:
+        ctx["recipient"] = recipient
     path = _output_path(application, DocType.cover_letter,
                         _next_version(db, application.id, DocType.cover_letter))
     compiled = compile_pdf(render_latex("cover_letter.tex.j2", ctx), path)

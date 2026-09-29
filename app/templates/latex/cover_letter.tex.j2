@@ -25,13 +25,15 @@
 \vspace{1em}
 
 \begin{flushleft}
-Hiring Manager\\
-{{ job_company | latex_escape }}
+{% if recipient and recipient.name %}{{ recipient.name | latex_escape }}\\
+{% if recipient.title %}{{ recipient.title | latex_escape }}\\
+{% endif %}{% else %}Hiring Manager\\
+{% endif %}{{ job_company | latex_escape }}
 \end{flushleft}
 
 \vspace{1em}
 
-Dear Hiring Manager,
+Dear {{ (recipient.name if recipient and recipient.name else "Hiring Manager") | latex_escape }},
 
 \vspace{0.5em}
 

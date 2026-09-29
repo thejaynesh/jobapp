@@ -176,12 +176,31 @@
                 title="AI model(s) that generated this document">{{ current_cl.generated_by }}</span>
           {% endif %}
         </div>
+        {% if letter_body is not none %}
+        <p class="mt-2 text-xs text-gray-500">Addressed to
+          <span class="font-medium text-gray-700">{{ letter_recipient.name if letter_recipient else "Hiring Manager" }}</span>{% if letter_recipient and letter_recipient.title %}, {{ letter_recipient.title }}{% endif %}.
+          {% if not letter_recipient and recipient_choices %}<span class="text-blue-700">You have {{ recipient_choices | length }} contact{{ "s" if recipient_choices | length != 1 }} it could go to: choose under Review and edit.</span>{% endif %}
+        </p>
+        {% endif %}
         {% with checks = letter_checks, noun = "letter" %}{% include "apps/partials/content_checks.html" %}{% endwith %}
         {% if letter_body is not none %}
         <details class="mt-3 border border-gray-200 rounded">
           <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this letter</summary>
           <form hx-post="/apps/{{ app.id }}/docs/{{ current_cl.id }}/edit-letter"
                 hx-target="#letter-edit-status" hx-swap="innerHTML" class="px-3 pb-3 space-y-2">
+            {% set current_to = (letter_recipient or {}).get("contact_id") %}
+            <label class="block text-xs font-medium text-gray-600">To
+              <select name="recipient" class="ml-2 border border-gray-300 rounded px-2 py-1 text-sm">
+                <option value="none" {% if not letter_recipient %}selected{% endif %}>Hiring Manager (no name)</option>
+                {% if letter_recipient and not (recipient_choices | selectattr("contact_id", "equalto", current_to) | list) %}
+                <option value="keep" selected>{{ letter_recipient.name }}</option>
+                {% endif %}
+                {% for choice in recipient_choices %}
+                <option value="{{ choice.contact_id }}" {% if choice.contact_id == current_to %}selected{% endif %}>{{ choice.name }}{% if choice.title %} — {{ choice.title }}{% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            {% if not recipient_choices %}<p class="text-xs text-gray-400">A hiring manager or recruiter with a full name, found or added under Outreach, can be chosen here.</p>{% endif %}
             <textarea name="body" rows="12" class="w-full border border-gray-300 rounded px-2 py-1 text-sm">{{ letter_body }}</textarea>
             <div class="flex items-center gap-3">
               <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Save as a new version</button>

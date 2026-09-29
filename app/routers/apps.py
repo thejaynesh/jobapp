@@ -98,7 +98,7 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
         reverse=True,
     )
     from app.routers.outreach import panel_context
-    from app.services import document_edit
+    from app.services import document_edit, letter_recipient
 
     return templates.TemplateResponse(
         "apps/detail.html",
@@ -113,6 +113,13 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
                             .get("cover_letter_body") if cover_letters else None),
             "letter_checks": ((cover_letters[0].content or {}).get("checks") or []
                               if cover_letters else []),
+            # Who the current letter is addressed to, and who else it could be.
+            "letter_recipient": ((((cover_letters[0].content or {}).get("context") or {})
+                                  .get("recipient")) if cover_letters else None),
+            "recipient_choices": [
+                letter_recipient.recipient(c)
+                for c in letter_recipient.candidates(app_obj.contacts)
+            ],
             # The page embeds the outreach panel partial, so it needs the same
             # context that /outreach/apps/{id}/panel builds.
             **panel_context(db, app_obj),
@@ -300,12 +307,25 @@ async def edit_resume(app_id: uuid.UUID, doc_id: uuid.UUID, request: Request,
 
 @router.post("/{app_id}/docs/{doc_id}/edit-letter", response_class=HTMLResponse)
 def edit_letter(app_id: uuid.UUID, doc_id: uuid.UUID, body: str = Form(""),
-                db: Session = Depends(get_db)):
-    """Save an edited letter body as the next cover letter version."""
-    from app.services import document_edit
+                recipient: str = Form("keep"), db: Session = Depends(get_db)):
+    """
+    Save an edited letter body, and who it is addressed to, as the next cover
+    letter version. `recipient` is one of the application's contacts by id,
+    "none" for "Dear Hiring Manager", or "keep".
+    """
+    from app.services import document_edit, letter_recipient
 
     app_obj, doc = _document(db, app_id, doc_id)
-    return _edited(app_obj, lambda: document_edit.save_letter(db, app_obj, doc, body))
+    extra = {}
+    if recipient == "none":
+        extra["recipient"] = None
+    elif recipient != "keep":
+        chosen = next((c for c in letter_recipient.candidates(app_obj.contacts)
+                       if str(c.id) == recipient), None)
+        if chosen is None:
+            raise HTTPException(status_code=404, detail="No such contact on this application")
+        extra["recipient"] = letter_recipient.recipient(chosen)
+    return _edited(app_obj, lambda: document_edit.save_letter(db, app_obj, doc, body, **extra))
 
 
 @router.post("/{app_id}/regenerate", response_class=HTMLResponse)
