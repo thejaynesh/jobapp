@@ -78,3 +78,17 @@ def test_the_self_identification_answer_reaches_the_fill(agent, db):  # noqa: F8
         "eeo_self_identification": "Decline to self-identify"}})
     body = agent.get("/api/agent/autofill-fields", headers=auth()).json()
     assert body["eeo_self_identification"] == "Decline to self-identify"
+def test_saved_answers_are_scoped_to_an_employer_path_and_expire():
+    from datetime import datetime, timedelta, timezone
+    from app.services import remembered_answers
+    data, _ = remembered_answers.remember({}, [{"question": "Are you available to start soon?", "answer": "Yes"}], "https://jobs.example.com/acme/123")
+    assert remembered_answers.lookup(data, "https://jobs.example.com/acme/456")
+    assert not remembered_answers.lookup(data, "https://jobs.example.com/other/456")
+    assert not remembered_answers.lookup(data, "https://jobs.example.com/acme/456", now=datetime.now(timezone.utc) + timedelta(days=31))
+
+
+def test_employer_answer_takes_precedence_over_a_later_generic_answer():
+    data, _ = remembered_answers.remember({}, [{"question": "Preferred name?", "answer": "Employer name"}], "https://jobs.example.com/acme/123")
+    data, _ = remembered_answers.remember(data, [{"question": "Preferred name?", "answer": "Generic name"}])
+    assert remembered_answers.lookup(data, "https://jobs.example.com/acme/456")["preferred name"] == "Employer name"
+    assert remembered_answers.lookup(data, "https://jobs.example.com/other/456")["preferred name"] == "Generic name"

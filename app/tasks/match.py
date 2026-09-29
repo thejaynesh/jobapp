@@ -97,6 +97,10 @@ def _chain_if_more(result: dict | None) -> None:
     do no paid failover at all.
     """
     from app.services import match_budget
+    from app.services.capacity import allow_background
+    if not allow_background():
+        match_budget.clear()
+        return
 
     if not result or not result.get("remaining"):
         match_budget.clear()

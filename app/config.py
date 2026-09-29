@@ -4,6 +4,35 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    MATCH_EVIDENCE_CHARS: int = 8000
+    MATCH_EVIDENCE_MODE: str = "shadow"
+    DOCUMENT_BULLETS_PER_ENTRY: int = 4
+    INTELLIGENCE_INTERVAL_HOURS: int = 24
+    TODAY_MINUTES: int = 30
+    PLAN_APPLICATION_MINUTES: int = 15
+    PLAN_FOLLOWUP_MINUTES: int = 5
+    TODAY_EXPLORATION_PERCENT: int = 10
+    OUTCOME_MATURITY_DAYS: int = 21
+    OUTCOME_MIN_LABELS: int = 40
+    OUTCOME_MODE: str = "shadow"
+    DECISION_RETENTION_DAYS: int = 180
+    RECORD_DECISIONS_ENABLED: bool = True
+    APPLICATION_MAIL_REVIEW: bool = True
+    ANSWER_EXPIRY_DAYS: int = 30
+    ADAPTIVE_WORK_ENABLED: bool = True
+    ADAPTIVE_LATENCY_MS: int = 2000
+    ADAPTIVE_QUEUE_SECONDS: int = 180
+    ADAPTIVE_PRESSURE_PERCENT: int = 80
+    ADAPTIVE_COOLDOWN_SECONDS: int = 300
+    ADAPTIVE_SOURCE_ENABLED: bool = True
+    ADAPTIVE_SOURCE_MAX_HOURS: int = 24
+    SEMANTIC_MODE: str = "off"
+    SEMANTIC_MODEL: str = ""
+    SEMANTIC_BATCH_SIZE: int = 20
+    SEMANTIC_ACTIVE_DAYS: int = 30
+    SEMANTIC_BASE_URL: str = ""
+    SEMANTIC_API_KEY: str = ""
+
     DATABASE_URL: str
     TEST_DATABASE_URL: str = ""
     # Connection pool. Larger than SQLAlchemy's 5 + 10 default because an agent

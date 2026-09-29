@@ -128,11 +128,19 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
     )
     from app.routers.outreach import panel_context
     from app.services import document_edit, letter_recipient
+    from app.services import application_history, document_evidence
+    from app.services.profile_service import get_or_create_profile
+    timeline = application_history.timeline(db, app_obj.id)
 
     return templates.TemplateResponse(
         "apps/detail.html",
         {
             "request": request,
+            "timeline": timeline,
+            "application_channel": next((e.payload.get("channel") for e in timeline if e.kind == "application_channel"), "not recorded"),
+            "corrected_events": application_history.corrected_ids(timeline),
+            "submitted_confirmation": next((e.payload.get("confirmation") for e in timeline if e.kind == "submitted_document" and e.payload.get("document_id") == str(app_obj.sent_resume_id)), "inferred"),
+            "evidence_interview": document_evidence.interview(app_obj, get_or_create_profile(db).data or {}),
             "resumes": resumes,
             "cover_letters": cover_letters,
             # What the current resume says, with the job's changes marked, for
@@ -366,10 +374,12 @@ def _document(db: Session, app_id: uuid.UUID, doc_id: uuid.UUID):
 def _edited(app_obj, save) -> HTMLResponse:
     """Run an edit; reload the page on success, say what went wrong otherwise."""
     from app.services.doc_generator import DocGenerationError
-    from app.services.document_edit import NotEditable
+    from app.services.document_edit import NotEditable, StaleEdit
 
     try:
         save()
+    except StaleEdit as exc:
+        return HTMLResponse(f'<span class="text-amber-700">{html.escape(str(exc))}</span>', status_code=409)
     except NotEditable as exc:
         return HTMLResponse(f'<span class="text-amber-700">{html.escape(str(exc))}</span>')
     except DocGenerationError as exc:
@@ -388,6 +398,18 @@ async def edit_resume(app_id: uuid.UUID, doc_id: uuid.UUID, request: Request,
     form = dict(await request.form())
     return await run_in_threadpool(
         _edited, app_obj, lambda: document_edit.save_resume(db, app_obj, doc, form))
+
+
+@router.post("/{app_id}/docs/{doc_id}/preview-edit", response_class=HTMLResponse)
+async def preview_edit(app_id: uuid.UUID, doc_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    from app.services import document_edit, document_evidence
+    application, document = await run_in_threadpool(_document, db, app_id, doc_id)
+    form = dict(await request.form())
+    before = (document.content or {}).get("context") or {}
+    after = document_edit.edited_resume_context(document.content or {}, form) if document.doc_type == DocType.resume else {**before, "cover_letter_body": form.get("body", "")}
+    diff = document_evidence.diff(before, after)
+    return HTMLResponse('<p class="text-sm font-medium">Proposed changes from v' + str(document.version)
+        + '</p><pre class="text-xs whitespace-pre-wrap border rounded p-3 mt-2">' + html.escape(diff or "No text changes.") + '</pre>')
 
 
 @router.post("/{app_id}/docs/{doc_id}/edit-letter", response_class=HTMLResponse)

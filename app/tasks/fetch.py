@@ -56,6 +56,9 @@ def fetch_state() -> dict:
     the truth.
     """
     from app.services.fetch_lock import any_state
+    from app.services import capacity
+    if not capacity.allow_background():
+        return []
 
     return any_state(ALL_LOCK_KEYS)
 
@@ -183,6 +186,9 @@ def _scheduled(group: str) -> dict:
         _client().delete(f"jobapp:fetch:queued:{group}")
     except Exception:
         pass
+    from app.services.capacity import allow_background
+    if not allow_background():
+        return {**_EMPTY, "skipped_reason": "interactive capacity"}
     if not _due(group):
         return {**_EMPTY, "skipped_reason": "not due"}
     return _run(group, None, True)

@@ -4,7 +4,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import String, Boolean, Float, SmallInteger, Text, DateTime, Enum as SAEnum
-from sqlalchemy.dialects.postgresql import UUID, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -26,6 +26,7 @@ class JobStatus(enum.Enum):
 
 
 class Job(Base):
+    match_assessment: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     __tablename__ = "jobs"
 
     id: Mapped[uuid.UUID] = mapped_column(

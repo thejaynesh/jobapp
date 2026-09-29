@@ -21,7 +21,6 @@ settings page sets.
 """
 
 import math
-import random
 import re
 from datetime import datetime, timezone
 
@@ -130,31 +129,39 @@ def fit(db, profile_data: dict, now: datetime | None = None, seed: int = 7) -> d
     now = now or datetime.now(timezone.utc)
     my_years = total_years((profile_data or {}).get("experience") or [])
     rows = decisions(db)
-    labelled = [(features(r["job"], my_years, now), 1 if r["verdict"] == "yes" else 0,
+    labelled = [(r.get("features") or features(r["job"], my_years, r["at"] or now), 1 if r["verdict"] == "yes" else 0,
                  r["score"]) for r in rows]
     n_yes = sum(1 for _, y, _ in labelled if y)
     n_no = len(labelled) - n_yes
-    result = {"trained_at": now.isoformat(), "yes": n_yes, "no": n_no, "usable": False}
+    result = {"version": 2, "trained_at": now.isoformat(), "yes": n_yes, "no": n_no, "usable": False}
     if n_yes < MIN_YES or n_no < MIN_NO:
         return {**result, "reason": f"needs {MIN_YES} of each; has {n_yes} yes and {n_no} no"}
 
-    order = list(range(len(labelled)))
-    random.Random(seed).shuffle(order)
-    cut = max(1, int(len(order) * HOLDOUT))
-    test, train_idx = order[:cut], order[cut:]
+    # Only decision-time snapshots support a prospective quality claim.
+    # Legacy decisions remain visible in reports, but cannot prove promotion.
+    order = sorted((i for i, row in enumerate(rows) if row.get("features")),
+                   key=lambda i: (rows[i]["at"], str(rows[i]["id"])))
+    cut = max(4, int(len(order) * HOLDOUT))
+    test, train_idx = order[-cut:], order[:-cut]
+    test_families = {rows[i].get("family") for i in test}
+    train_idx = [i for i in train_idx if rows[i].get("family") not in test_families]
+    if len(train_idx) < 10 or len({labelled[i][1] for i in train_idx}) < 2:
+        return {**result, "reason": "Needs more decision-time snapshots across independent posting families.",
+                "validation": "chronological, grouped by posting family", "snapshot_count": len(order)}
     weights, bias = train([labelled[i][0] for i in train_idx], [labelled[i][1] for i in train_idx])
+    weights, bias = _prune(weights), round(bias, 5)
     test_labels = [labelled[i][1] for i in test]
     learned = auc([_predict(weights, bias, labelled[i][0]) for i in test], test_labels)
     baseline = auc([labelled[i][2] if labelled[i][2] is not None else 0 for i in test], test_labels)
 
     # The model the list uses is trained on everything; the holdout only
     # decides whether it is shown.
-    weights, bias = train([r for r, _, _ in labelled], [y for _, y, _ in labelled])
-    # A tie counts: on a held-out fifth of a few dozen decisions both often
-    # order everything right, and the learned one then reads more than the
-    # score does. Worse than the score, or no better than a coin, does not.
-    usable = learned is not None and learned > 0.5 and (baseline is None or learned >= baseline)
+    weights, bias = train([labelled[i][0] for i in order], [labelled[i][1] for i in order])
+    # A tie is insufficient evidence to replace the baseline.
+    usable = learned is not None and learned > 0.5 and baseline is not None and learned > baseline
     return {**result, "weights": _prune(weights), "bias": round(bias, 5),
+            "validation": "chronological, grouped by posting family", "holdout": len(test),
+            "snapshot_count": len(order), "label": "Application preference, not interview probability",
             "auc": learned, "score_auc": baseline, "my_years": my_years, "usable": usable,
             "reason": "" if usable else "ordered your held-out decisions worse than the match "
                                         "score alone"}
@@ -177,11 +184,11 @@ def save(db, model: dict) -> None:
 def model_for(profile_data: dict | None) -> dict | None:
     """The stored model, when it has earned a place on the jobs list."""
     model = (profile_data or {}).get(STORE_KEY)
-    return model if model and model.get("usable") and model.get("weights") else None
+    return model if model and model.get("version") == 2 and model.get("usable") and model.get("weights") else None
 
 
 def rank(model: dict, jobs, now: datetime | None = None) -> list[tuple[float, object]]:
-    """Each job with its probability of being a yes, best first."""
+    """Each job with an uncalibrated preference score, best first."""
     now = now or datetime.now(timezone.utc)
     years = model.get("my_years") or 0.0
     scored = [(_predict(model["weights"], model["bias"], features(job, years, now)), job)

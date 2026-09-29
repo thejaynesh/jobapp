@@ -490,7 +490,9 @@ def get_jobs(request: Request, page: int = 0, view: str = "", db: Session = Depe
         )
 
     current_query = job_views.query_string(params)
-    return templates.TemplateResponse(
+    from app.services.application_history import impressions
+    impressions(db, jobs, profile_data, "jobs:" + sort)
+    response = templates.TemplateResponse(
         "jobs/index.html",
         {
             "request": request,
@@ -546,6 +548,8 @@ def get_jobs(request: Request, page: int = 0, view: str = "", db: Session = Depe
             "active_view": view,
         },
     )
+    db.commit()
+    return response
 
 
 # What the "For you" ranking reads, loaded for every row the filters keep —
@@ -649,6 +653,8 @@ def bulk_action(
     jobs = db.query(Job).filter(Job.id.in_(ids)).all() if ids else []
     now = datetime.now(timezone.utc)
     done = skipped = 0
+    from app.services.application_history import record_decision
+    decision_profile = _profile_data(db)
     for job in jobs:
         if action in ("star", "unstar"):
             job.favourite = action == "star"
@@ -678,6 +684,10 @@ def bulk_action(
                 release_generation_claim(db, app_obj.id)
                 skipped += 1
                 continue
+        if action in ("star", "unstar", "hide", "restore"):
+            record_decision(db, job, decision_profile,
+                            {"star": "yes", "unstar": "reset", "hide": "no", "restore": "reset"}[action],
+                            origin="bulk", now=now)
         done += 1
     db.commit()
     logger.info("jobs bulk %s: %d done, %d skipped", action, done, skipped)
@@ -783,6 +793,8 @@ def not_interested(
         raise HTTPException(status_code=422, detail=f"Unknown scope: {scope}")
 
     job.status = JobStatus.filtered_out
+    from app.services.application_history import record_decision
+    record_decision(db, job, _profile_data(db), "no")
     db.commit()
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",
@@ -877,6 +889,8 @@ def toggle_favourite(job_id: uuid.UUID, request: Request, db: Session = Depends(
 
     job.favourite = not job.favourite
     job.favourited_at = datetime.now(timezone.utc) if job.favourite else None
+    from app.services.application_history import record_decision
+    record_decision(db, job, _profile_data(db), "yes" if job.favourite else "reset")
     db.commit()
 
     return templates.TemplateResponse(
@@ -1013,6 +1027,8 @@ def override_job_status(job_id: uuid.UUID, request: Request, db: Session = Depen
         job.filter_detail = None
         job.dismiss_reason = None
         job.dismissed_at = None
+    from app.services.application_history import record_decision
+    record_decision(db, job, _profile_data(db), "no" if job.status == JobStatus.filtered_out else "reset")
     db.commit()
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",

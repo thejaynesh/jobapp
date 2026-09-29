@@ -29,6 +29,7 @@ from app.routers.llm import router as llm_router
 from app.routers.funnel import router as funnel_router
 from app.routers.agent import router as agent_router
 from app.routers.activity import router as activity_router
+from app.routers.intelligence import router as intelligence_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -196,6 +197,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="JobApp", lifespan=lifespan)
+from app.database import engine as _database_engine
+from app.services.capacity import install_database_metrics
+install_database_metrics(_database_engine)
 
 _cors_origins = [
     origin.strip()
@@ -227,6 +231,7 @@ app.include_router(runs_router)
 app.include_router(funnel_router)
 app.include_router(llm_router)
 app.include_router(activity_router)
+app.include_router(intelligence_router)
 
 
 def _is_htmx(request: Request) -> bool:
@@ -334,10 +339,26 @@ async def require_authentication(request: Request, call_next):
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
+    import time
+    started = time.monotonic()
+    from app.services.capacity import DATABASE_TIME
+    database_observation = {"ms": 0.0}
+    token = DATABASE_TIME.set(database_observation)
     rid = request.headers.get("X-Request-ID") or _uuid.uuid4().hex[:12]
     request.scope["request_id"] = rid
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    finally:
+        DATABASE_TIME.reset(token)
     response.headers["X-Request-ID"] = rid
+    if request.method == "GET" and not request.url.path.startswith(("/static/", "/api/agent/", "/health", "/ready")):
+        from starlette.background import BackgroundTasks
+        from app.services.capacity import observe_latency
+        tasks = BackgroundTasks()
+        if response.background:
+            tasks.add_task(response.background)
+        tasks.add_task(observe_latency, (time.monotonic() - started) * 1000, response.status_code, round(database_observation["ms"], 1))
+        response.background = tasks
     return response
 
 

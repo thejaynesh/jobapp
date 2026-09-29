@@ -96,9 +96,19 @@ def decisions(db) -> list[dict]:
         rows[job.id] = {"job": job, "verdict": "no", "why": job.dismiss_reason or "",
                         "at": job.dismissed_at}
     found = []
+    from app.models.intelligence import DecisionEvent
+    snapshots = {}
+    for event in db.query(DecisionEvent).filter(
+            DecisionEvent.job_id.in_(list(rows)), DecisionEvent.kind.in_(["yes", "no", "reset"])).order_by(
+                DecisionEvent.occurred_at.desc()):
+        snapshots.setdefault(event.job_id, event)
     for row in rows.values():
         job = row["job"]
-        found.append({**row, "score": _score(job), "similarity": job.similarity,
+        snapshot = snapshots.get(job.id)
+        payload = snapshot.payload if snapshot and snapshot.kind == row["verdict"] else {}
+        found.append({**row, "score": payload.get("score", _score(job)), "similarity": job.similarity,
+                      "features": payload.get("features"), "family": payload.get("family"),
+                      "at": snapshot.occurred_at if payload else row["at"],
                       "title": job.title, "company": job.company, "id": job.id})
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     return sorted(found, key=lambda r: r["at"] or epoch, reverse=True)

@@ -433,12 +433,6 @@ def _process(db, message, counts: dict) -> None:
             counts["bounces"] += 1
         return
 
-    if _is_auto_reply(message):
-        # An out-of-office is not an answer. Counting it as one would end a
-        # sequence that should carry on after they are back.
-        counts["skipped"] += 1
-        return
-
     received_at = None
     date_header = message.get("Date")
     if date_header:
@@ -450,6 +444,13 @@ def _process(db, message, counts: dict) -> None:
             received_at = None
 
     target = _message_by_reference(db, _referenced_ids(message))
+    from app.services import application_mail
+    application_mail.propose(db, message, received_at)
+    if _is_auto_reply(message):
+        # ATS receipts can be auto-generated; they were offered for review
+        # above, but must never end an outreach sequence as a human reply.
+        counts["skipped"] += 1
+        return
     if target is None:
         target = _message_by_sender(db, sender, received_at)
     if target is None:

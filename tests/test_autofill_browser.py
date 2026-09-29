@@ -219,7 +219,7 @@ def test_the_next_step_of_a_form_is_filled_as_it_appears(page):
         '<label for="email">Email address</label><input id="email">')""")
     page.wait_for_function("document.querySelector('#email').value === 'someone@example.com'",
                            timeout=3000)
-    assert page.evaluate("window.steps.length") >= 1
+    page.wait_for_function("window.steps.length >= 1", timeout=3000)
 
 
 def test_the_question_key_matches_the_servers():
@@ -290,3 +290,47 @@ class TestLongQuestions:
         }""")
         answers = page.evaluate("() => JobAppAutofill.collectAnswers()")
         assert all(a["answer"] != "Because of Kafka." for a in answers)
+
+
+def test_a_reverted_controlled_field_is_not_reported_filled(page):
+    load(page, '<label for="email">Email</label><input id="email" type="email">')
+    page.evaluate("""() => document.getElementById('email').addEventListener('input', () => {
+        setTimeout(() => { document.getElementById('email').value = ''; }, 50);
+    })""")
+    report = fill(page)
+    assert "email" not in report["filled"]
+    assert report["fields"][0]["status"] == "needs_input"
+
+
+def test_rerendered_field_is_verified_by_its_current_value(page):
+    load(page, '<label for="email">Email</label><input id="email" type="email">')
+    page.evaluate("""() => document.getElementById('email').addEventListener('input', (event) => {
+        const replacement = event.target.cloneNode(); replacement.value = event.target.value;
+        setTimeout(() => event.target.replaceWith(replacement), 20);
+    })""")
+    report = fill(page)
+    assert report["filled"] == ["email"] and report["fields"][0]["status"] == "verified"
+
+
+@pytest.mark.parametrize("markup, expected", [
+    ('<h1>Application submitted</h1>', True),
+    ('<div role="status">Your application has been received.</div>', True),
+    ('<h1>Submit application</h1>', False),
+    ('<button>Submit</button>', False),
+    ('<p>Thank you for applying</p>', False),
+    ('<h1>When your application has been submitted</h1>', False),
+    ('<h1>Application not received</h1>', False),
+    ('<h1>Application submitted</h1><input aria-invalid="true">', False),
+])
+def test_receipts_require_visible_success_evidence(page, markup, expected):
+    load(page, markup)
+    assert bool(page.evaluate("JobAppAutofill.receipt()")) is expected
+
+
+def test_form_identity_changes_when_structure_changes_but_not_answers(page):
+    load(page, GREENHOUSE)
+    before = page.evaluate("JobAppAutofill.formIdentity()")
+    fill(page)
+    assert page.evaluate("JobAppAutofill.formIdentity()") == before
+    page.evaluate("document.getElementById('email').name = 'different-semantics'")
+    assert page.evaluate("JobAppAutofill.formIdentity()") != before

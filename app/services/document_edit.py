@@ -15,6 +15,7 @@ current, with the earlier ones still in the history.
 """
 
 import copy
+import uuid
 
 from app.models.application import ApplicationDocument, DocType
 
@@ -23,6 +24,21 @@ EDITED_BY = "you (edited)"
 
 class NotEditable(Exception):
     """The version has no stored content to edit (written before 0047)."""
+
+
+class StaleEdit(NotEditable):
+    """The base changed while the user edited or while the PDF was compiled."""
+
+
+def _assert_current(db, application, previous, *, lock=False):
+    from app.models.application import Application
+    if lock:
+        db.query(Application.id).filter(Application.id == application.id).with_for_update().one()
+    current = db.query(ApplicationDocument.id).filter(
+        ApplicationDocument.application_id == application.id,
+        ApplicationDocument.doc_type == previous.doc_type, ApplicationDocument.is_current.is_(True)).scalar()
+    if current != previous.id:
+        raise StaleEdit("A newer document is current. Reload the application and apply your changes to that version.")
 
 
 def _lines(text: str) -> list[str]:
@@ -68,7 +84,7 @@ def edited_resume_context(content: dict, form) -> dict:
 def _save(db, application, previous: ApplicationDocument, doc_type: DocType,
           path, content: dict) -> ApplicationDocument:
     from app.services.doc_generator import _next_version, _set_only_current
-
+    _assert_current(db, application, previous, lock=True)
     version = _next_version(db, application.id, doc_type)
     doc = ApplicationDocument(
         application_id=application.id, doc_type=doc_type, version=version,
@@ -85,7 +101,9 @@ def _output_path(application, doc_type: DocType, version: int):
     from app.services.doc_generator import _OUTPUT_DIR
 
     name = "resume" if doc_type == DocType.resume else "cover_letter"
-    return _OUTPUT_DIR / str(application.id) / f"{application.id}_{name}_v{version}.pdf"
+    # Two compilations starting from the same version must never overwrite
+    # one another's file, even when one is rejected by the final version check.
+    return _OUTPUT_DIR / str(application.id) / f"{application.id}_{name}_v{version}_{uuid.uuid4().hex[:12]}.pdf"
 
 
 def _profile_for_documents(db) -> dict:
@@ -105,21 +123,29 @@ def save_resume(db, application, previous: ApplicationDocument, form) -> Applica
     if content.get("kind") != "resume" or not content.get("context"):
         raise NotEditable("This version was written before edits were possible; "
                           "regenerate once to edit it.")
+    _assert_current(db, application, previous)
     ctx = edited_resume_context(content, form)
     path = _output_path(application, DocType.resume,
                         _next_version(db, application.id, DocType.resume))
-    compiled = compile_resume_one_page(ctx, path)
     from app.services.matcher import alias_index
 
     keywords = (content.get("ats") or {}).get("keywords") or []
     profile_data = _profile_for_documents(db)
     checks = content_checks.check_resume(ctx, profile_data, keywords, application.job)
+    from app.services import document_evidence
+    from types import SimpleNamespace
+    job = SimpleNamespace(**{key: getattr(application.job, key, None) for key in
+        ("description", "required_skills", "nice_to_have_skills", "required_years", "education_required", "location", "match_assessment")})
+    db.commit()
+    compiled = compile_resume_one_page(ctx, path)
     new_content = {
         **content,
         "context": ctx,
         "ats": document_content.ats_check(compiled, keywords, ctx, alias_index(profile_data)),
         "checks": content_checks.carried_over(checks, content.get("checks")),
         "edited_from": previous.version,
+        "evidence": document_evidence.manifest(job, profile_data, compiled, ctx),
+        "diff": document_evidence.diff(content.get("context") or {}, ctx),
     }
     return _save(db, application, previous, DocType.resume, compiled, new_content)
 
@@ -142,14 +168,16 @@ def save_letter(db, application, previous: ApplicationDocument, body: str,
     if content.get("kind") != "cover_letter" or not content.get("context"):
         raise NotEditable("This version was written before edits were possible; "
                           "regenerate once to edit it.")
+    _assert_current(db, application, previous)
     ctx = {**content["context"], "cover_letter_body": (body or "").strip()}
     if recipient is not _KEEP:
         ctx["recipient"] = recipient
     path = _output_path(application, DocType.cover_letter,
                         _next_version(db, application.id, DocType.cover_letter))
-    compiled = compile_pdf(render_latex("cover_letter.tex.j2", ctx), path)
     checks = content_checks.check_letter(ctx["cover_letter_body"], _profile_for_documents(db),
                                          content.get("keywords") or [], application.job)
+    db.commit()
+    compiled = compile_pdf(render_latex("cover_letter.tex.j2", ctx), path)
     return _save(db, application, previous, DocType.cover_letter, compiled, {
         **content, "context": ctx, "edited_from": previous.version,
         "checks": content_checks.carried_over(checks, content.get("checks")),

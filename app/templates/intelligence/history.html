@@ -1,0 +1,36 @@
+<section class="mt-6 bg-white border rounded-lg p-5">
+  <h2 class="text-lg font-semibold">Application evidence and history</h2>
+  <p class="text-sm mt-2"><a class="text-blue-600" href="/jobs/{{ app.job_id }}/evidence">Inspect requirement evidence</a> · <a class="text-blue-600" href="/today">Plan your next steps</a></p>
+  <form method="post" action="/apps/{{ app.id }}/channel" class="my-4 flex flex-wrap gap-2 items-center"><label for="application-channel">How you applied</label><select id="application-channel" name="channel" class="border rounded p-2">{% for channel, label in [('not recorded', 'Not recorded'), ('cold application', 'Cold application'), ('referral', 'Confirmed referral'), ('outreach', 'Outreach')] %}<option value="{{ channel }}" {% if application_channel == channel %}selected{% endif %}>{{ label }}</option>{% endfor %}</select><button class="border rounded px-3 py-2">Record channel</button><p class="w-full text-xs text-gray-500">A discovered contact is not treated as a referral. This keeps outcome cohorts separate.</p></form>
+  {% if resumes %}
+  <form method="post" action="/apps/{{ app.id }}/submitted-document" class="my-4 flex flex-wrap items-center gap-2">
+    <label for="sent-document">Resume actually submitted</label><select id="sent-document" name="document_id" class="border rounded p-2">{% for document in resumes %}<option value="{{ document.id }}" {% if app.sent_resume_id == document.id %}selected{% endif %}>Version {{ document.version }}</option>{% endfor %}</select>
+    <button class="border rounded px-3 py-2">Confirm submitted version</button>
+    <p class="w-full text-xs text-gray-500">Current linkage: {{ submitted_confirmation }}. A generated or downloaded file does not prove it was uploaded.</p>
+  </form>{% endif %}
+  <details class="my-4"><summary class="cursor-pointer font-medium">Prepare from your submitted resume</summary>
+    <p class="text-xs text-gray-500 my-2">{{ evidence_interview.note }}</p>
+    {% if evidence_interview.version %}<p class="text-sm">Linked resume v{{ evidence_interview.version }}</p>{% endif %}
+    {% for question in evidence_interview.questions %}<blockquote class="border-l-2 pl-3 my-3 text-sm">{{ question.quote }}<p class="text-gray-500 mt-1">{{ question.question }}</p></blockquote>{% endfor %}
+    {% for gap in evidence_interview.gaps or [] %}<p class="text-sm mt-2">Prepare an honest answer about {{ gap.label }} — {{ gap.status }}.</p>{% endfor %}
+    <p class="text-xs text-gray-500 mt-3">Use your story bank alongside these prompts. Record what an interview tested in its milestone note.</p>
+  </details>
+  <form method="post" action="/apps/{{ app.id }}/milestone" class="flex flex-wrap gap-2 my-4">
+    <label class="sr-only" for="milestone-kind">Milestone</label><select id="milestone-kind" name="kind" class="border rounded p-2">{% for kind in ['applied','receipt','assessment','interview_invited','interview_completed','offered','rejected','withdrawn'] %}<option value="{{ kind }}">{{ kind | replace('_',' ') | title }}</option>{% endfor %}</select>
+    <input name="note" maxlength="800" placeholder="What happened or what the interview tested" class="border rounded p-2 flex-1"><button class="bg-blue-600 text-white rounded px-3 py-2">Record milestone</button>
+  </form>
+  <ol class="space-y-3">{% for event in timeline %}<li class="border-t pt-3 text-sm {% if event.id|string in corrected_events %}text-gray-400{% endif %}">
+    <p><strong>{{ event.kind | replace('_',' ') | title }}</strong> · {{ event.occurred_at | when('%Y-%m-%d %H:%M') }} · {{ event.origin }}{% if event.id|string in corrected_events %} · corrected{% endif %}</p>
+    {% if event.payload.note %}<p class="mt-1">{{ event.payload.note }}</p>{% endif %}
+    {% if event.kind == 'application_channel' %}<p class="text-xs mt-1">{{ event.payload.channel }}</p>{% endif %}
+    {% if event.kind == 'correction' and event.id|string not in corrected_events %}<form method="post" action="/apps/{{ app.id }}/events/{{ event.id }}/correct" class="mt-2"><input type="hidden" name="note" value="Undo a previous correction"><button class="text-xs text-blue-600">Undo this correction</button></form>{% endif %}
+    {% if event.payload.inferred or event.payload.document_confirmation == 'inferred' %}<p class="text-xs text-amber-700">Inferred from recorded state; not independently confirmed.</p>{% endif %}
+    {% if event.kind in ['applied','receipt','assessment','interview_invited','interview_completed','offered','rejected','withdrawn'] and event.id|string not in corrected_events %}<details class="mt-1"><summary class="text-xs cursor-pointer text-blue-600">Correct a mistaken milestone</summary><form method="post" action="/apps/{{ app.id }}/events/{{ event.id }}/correct" class="flex gap-2 mt-2"><input name="note" required maxlength="800" placeholder="Why this event is incorrect" class="border rounded p-2 flex-1"><button class="border rounded px-3">Retract event</button></form></details>{% endif %}
+  </li>{% else %}<li class="text-gray-500 text-sm">New milestones will appear here. Earlier events have not been invented.</li>{% endfor %}</ol>
+</section>
+{% if resumes and (resumes[0].content or {}).get('evidence') %}
+{% set manifest = resumes[0].content.evidence %}
+<section class="mt-6 bg-white border rounded-lg p-5"><h2 class="font-semibold">Evidence in the rendered resume</h2><p class="text-xs text-gray-500 mt-2">Checks read the final PDF after fitting. A readable keyword alone does not establish a supported claim or predict an employer's ATS.</p>
+  <ul class="text-sm mt-3 space-y-2">{% for row in manifest.coverage.requirements %}<li>{{ row.label }} · {{ row.status }}</li>{% endfor %}</ul>
+  <details class="mt-4"><summary class="cursor-pointer text-sm">Selected achievements and their sources</summary>{% for link in manifest.links %}<article class="border-t mt-3 pt-3 text-sm"><p>{{ link.text }}</p><p class="text-xs text-gray-500">{{ 'Verbatim evidence' if link.verbatim else 'Rephrased; review against source' }} · {{ 'readable in PDF' if link.readable else 'not found verbatim in PDF' }}</p>{% for fact in link.basis %}<blockquote class="border-l-2 pl-2 mt-2 text-xs">{{ fact.heading }}: {{ fact.text }}</blockquote>{% endfor %}</article>{% endfor %}</details>
+</section>{% endif %}

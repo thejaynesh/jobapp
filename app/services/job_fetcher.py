@@ -1101,6 +1101,12 @@ def _sources_not_due(db: Session, cfg) -> dict[str, str]:
                 f"runs at most every {hours:g}h to spare its quota, next in "
                 f"about {wait}h (a manual run ignores this)"
             )
+    try:
+        from app.services.capacity import source_waits
+        for source, reason in source_waits(db, cfg, now).items():
+            waiting.setdefault(source, reason)
+    except Exception as exc:
+        logger.warning("job_fetcher: adaptive source history unavailable: %s", exc)
     return waiting
 
 

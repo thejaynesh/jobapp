@@ -408,7 +408,7 @@ async def job_context(url: str = "", db: Session = Depends(get_db)):
     return await run_in_threadpool(context, db, url)
 
 
-def _autofill_fields(db: Session) -> dict:
+def _autofill_fields(db: Session, site: str = "") -> dict:
     """
     The profile values worth typing into an application form, and nothing else.
 
@@ -457,18 +457,18 @@ def _autofill_fields(db: Session) -> dict:
         # Questions the user answered by hand on an earlier form, keyed the
         # way autofill.js keys a question. Their own answers, going back to
         # forms like the ones they came from.
-        "remembered": remembered_answers.lookup(data),
+        "remembered": remembered_answers.lookup(data, site),
     }
 
 
-def _remember_answers(db: Session, answers) -> dict:
+def _remember_answers(db: Session, answers, site="") -> dict:
     from app.models.profile import Profile
     from app.services import remembered_answers
 
     profile = db.query(Profile).first()
     if profile is None:
         return {"ok": False, "saved": 0}
-    profile.data, saved = remembered_answers.remember(profile.data or {}, answers)
+    profile.data, saved = remembered_answers.remember(profile.data or {}, answers, site)
     db.commit()
     return {"ok": True, "saved": saved}
 
@@ -477,18 +477,18 @@ def _remember_answers(db: Session, answers) -> dict:
 async def remember_answers(request: Request, db: Session = Depends(get_db)):
     """Keep the answers the user typed into questions the profile does not cover."""
     body = await _json_body(request)
-    return await run_in_threadpool(_remember_answers, db, body.get("answers"))
+    return await run_in_threadpool(_remember_answers, db, body.get("answers"), body.get("site") or "")
 
 
 @router.get("/autofill-fields")
-async def autofill_fields(db: Session = Depends(get_db)):
+async def autofill_fields(site: str = "", db: Session = Depends(get_db)):
     """
     What to put in an application form.
 
     Fetched on demand when the user presses Fill, not on page load, so profile
     values reach a page only when they have asked for them to be typed there.
     """
-    return await run_in_threadpool(_autofill_fields, db)
+    return await run_in_threadpool(_autofill_fields, db, site)
 
 
 def _draft_answer(db: Session, body: dict) -> dict:

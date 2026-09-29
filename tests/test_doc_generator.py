@@ -530,14 +530,19 @@ class TestGenerateDocuments:
         resume_ctx = mocks["render"].call_args_list[0][0][1]
         assert resume_ctx["narrative_summary"] == "Tailored summary."
 
-    def test_commits_after_generation(self):
+    def test_releases_reads_before_inference_and_commits_documents_after_generation(self):
         from app.services.doc_generator import generate_documents
         db = _mock_db_for_generate()
         app = _make_app()
-        stack, _ = self._patches()
+        stack, mocks = self._patches()
+        def summary_without_a_read_transaction(*args, **kwargs):
+            assert db.commit.call_count == 1
+            db.add.assert_not_called()
+            return "Tailored summary."
         with stack:
+            mocks["summary"].side_effect = summary_without_a_read_transaction
             generate_documents(db, app)
-        db.commit.assert_called_once()
+        assert db.commit.call_count == 2
 
 
 class TestSelfReviewInsideAGeneration:
@@ -970,6 +975,7 @@ class TestOnePageRetry:
     def _patches(self, pages_sequence):
         from contextlib import ExitStack
         stack = ExitStack()
+        stack.enter_context(patch("app.services.self_review.enabled", return_value=False))
         mocks = {
             "insights": stack.enter_context(patch(
                 "app.services.doc_generator.extract_job_insights",
@@ -1032,7 +1038,7 @@ class TestOnePageRetry:
         # First render is the full resume, second the tightened one:
         # trim level 1 caps bullets (3/experience, 2/project) but keeps all items.
         full_ctx = mocks["render"].call_args_list[0][0][1]
-        assert all(len(e["bullets"]) == 5 for e in full_ctx["experience"])
+        assert all(len(e["bullets"]) == 4 for e in full_ctx["experience"])
         tight_ctx = mocks["render"].call_args_list[1][0][1]
         assert len(tight_ctx["experience"]) == 3
         assert all(len(e["bullets"]) <= 3 for e in tight_ctx["experience"])

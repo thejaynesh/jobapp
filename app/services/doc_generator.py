@@ -1084,6 +1084,20 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # on: every call below, the resume, the letter and the review read this.
     profile_data = for_documents(profile.data if profile else {})
     job = application.job
+    # Bind the proposal to both current document versions before remote work.
+    # Concurrent editing or another generation must win over this stale base.
+    resume_version = _next_version(db, application.id, DocType.resume)
+    cl_version = _next_version(db, application.id, DocType.cover_letter)
+    from app.services import letter_recipient
+    recipient = letter_recipient.for_application(application)
+    # All fields needed below are already loaded. Preserve them while releasing
+    # the connection throughout model calls and PDF compilation.
+    expire_on_commit = db.expire_on_commit
+    db.expire_on_commit = False
+    try:
+        db.commit()
+    finally:
+        db.expire_on_commit = expire_on_commit
 
     # Each phase is labelled for the LLM log. A generation is six calls with six
     # different jobs, and "the resume came out empty" is a question about
@@ -1114,8 +1128,9 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         selection = tailor_resume_selection(
             profile_data, job.title, brief, api_key, base_url, model
         )
-    selected_experience = selection["experience"]
-    selected_projects = selection["projects"]
+    from app.services import document_evidence
+    selected_experience = document_evidence.curate(selection["experience"], job, profile_data)
+    selected_projects = document_evidence.curate(selection["projects"], job, profile_data)
     selected_skills = selection["skills"]
 
     # Rewrite bullets only for the experiences we are actually keeping.
@@ -1243,8 +1258,8 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
                 )
                 present, missing = _keyword_coverage(resume_ctx, keywords)
 
-    resume_version = _next_version(db, application.id, DocType.resume)
-    resume_filename = f"{application.id}_resume_v{resume_version}.pdf"
+    attempt = uuid.uuid4().hex[:12]
+    resume_filename = f"{application.id}_resume_v{resume_version}_{attempt}.pdf"
     resume_path = _OUTPUT_DIR / str(application.id) / resume_filename
     compiled_resume = compile_resume_one_page(resume_ctx, resume_path)
 
@@ -1273,11 +1288,6 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # keep or dismiss. The ones a check flagged are not offered.
     from app.services import bullet_bank
 
-    if profile is not None and isinstance(profile.data, dict):
-        updated = copy.deepcopy(profile.data)
-        if bullet_bank.offer_from_generation(updated, resume_ctx, resume_checks,
-                                             f"{job.title} at {job.company}"):
-            profile.data = updated
     if resume_checks or letter_checks:
         logger.info(
             "generate_documents %s: %d resume and %d letter finding(s) against the profile: %s",
@@ -1294,19 +1304,16 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_resume),
         generation_feedback=feedback,
         generated_by=generated_by,
-        content=document_content.resume(resume_ctx, ats, profile_data, checks=resume_checks),
+        content=document_content.resume(resume_ctx, ats, profile_data, checks=resume_checks,
+            evidence=document_evidence.manifest(job, profile_data, compiled_resume, resume_ctx)),
     )
-    _set_only_current(db, application.id, DocType.resume, resume_doc)
-    db.add(resume_doc)
-
     # Cover letter
     from app.services import letter_recipient
 
     cl_ctx = build_cover_letter_context(profile_data, job.company, job.title, cover_body,
-                                        recipient=letter_recipient.for_application(application))
+                                        recipient=recipient)
     cl_tex = render_latex("cover_letter.tex.j2", cl_ctx)
-    cl_version = _next_version(db, application.id, DocType.cover_letter)
-    cl_filename = f"{application.id}_cover_letter_v{cl_version}.pdf"
+    cl_filename = f"{application.id}_cover_letter_v{cl_version}_{attempt}.pdf"
     cl_path = _OUTPUT_DIR / str(application.id) / cl_filename
     compiled_cl = compile_pdf(cl_tex, cl_path)
 
@@ -1319,8 +1326,23 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         generated_by=generated_by,
         content=document_content.cover_letter(cl_ctx, checks=letter_checks, keywords=keywords),
     )
+    from app.models.application import Application
+    db.query(Application.id).filter(Application.id == application.id).with_for_update().one()
+    if (_next_version(db, application.id, DocType.resume) != resume_version
+            or _next_version(db, application.id, DocType.cover_letter) != cl_version):
+        db.rollback()
+        raise DocGenerationError("Documents changed during generation. Review the newer version before trying again.")
+    _set_only_current(db, application.id, DocType.resume, resume_doc)
     _set_only_current(db, application.id, DocType.cover_letter, cl_doc)
+    db.add(resume_doc)
     db.add(cl_doc)
+
+    if profile is not None and isinstance(profile.data, dict):
+        db.refresh(profile, with_for_update=True)
+        updated = copy.deepcopy(profile.data)
+        if bullet_bank.offer_from_generation(updated, resume_ctx, resume_checks,
+                                             f"{job.title} at {job.company}"):
+            profile.data = updated
 
     job.status = JobStatus.docs_generated
     db.commit()

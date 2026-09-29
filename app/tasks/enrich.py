@@ -177,6 +177,9 @@ def _chain_if_more(result, limit: int | None, match_after: bool, depth: int) -> 
         return
 
     cap = max(0, int(live().ENRICH_MAX_CHAINED_PASSES))
+    from app.services.capacity import allow_background
+    if not allow_background():
+        return
     if depth + 1 >= cap:
         logger.info(
             "enrich_jobs: stopping after %d chained passes; the schedule picks "

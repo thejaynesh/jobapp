@@ -67,13 +67,20 @@ def _current(application, doc_type):
 
 
 def set_status(db, application, status: ApplicationStatus, now: datetime | None = None,
-               profile_data: dict | None = None) -> None:
+               profile_data: dict | None = None, record_event: bool = True) -> None:
     """Move an application to `status`, with everything that goes with the move."""
     from app.services.tunables import value
 
     now = now or datetime.now(timezone.utc)
+    if application.id is not None:
+        # Serialize transitions, including simultaneous clicks from two tabs.
+        db.flush()
+        db.refresh(application, attribute_names=["status", "status_changed_at", "applied_at", "sent_resume_id"], with_for_update=True)
     if status == application.status and application.status_changed_at is not None:
         return
+    from app.services import application_history
+    if record_event:
+        application_history.record_status(db, application, status, profile_data or {}, now)
     application.status = status
     application.status_changed_at = now
     # Straight to "interviewing" from "not applied" still means it was sent.
@@ -186,6 +193,8 @@ def response_rates(db) -> dict:
     docs = {d.id: d for d in db.query(ApplicationDocument).filter(
         ApplicationDocument.id.in_([a.sent_resume_id for a in sent if a.sent_resume_id]))} \
         if any(a.sent_resume_id for a in sent) else {}
+    from app.services import application_history
+    history = application_history.milestones(db, [a.id for a in sent])
     groups: dict = defaultdict(lambda: defaultdict(lambda: {"sent": 0, "heard": 0, "interviews": 0}))
     for application in sent:
         resume = docs.get(application.sent_resume_id)
@@ -200,8 +209,9 @@ def response_rates(db) -> dict:
                                  ("Written by", model)):
             row = groups[question][answer]
             row["sent"] += 1
-            row["heard"] += application.status in HEARD_BACK
-            row["interviews"] += application.status in INTERVIEWED
+            milestones = history.get(application.id, set())
+            row["heard"] += application.status in HEARD_BACK or bool(milestones & {"assessment", "interview_invited", "interview_completed", "offered", "rejected"})
+            row["interviews"] += application.status in INTERVIEWED or bool(milestones & {"interview_invited", "interview_completed", "offered"})
     table = {}
     for question, answers in groups.items():
         table[question] = [{

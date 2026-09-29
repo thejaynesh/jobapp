@@ -312,6 +312,7 @@ def run(labels: list[LabelledJob], profile_data: dict,
     a document generation and a few minutes of their attention.
     """
     from app.services.tunables import value as tunable
+    from app.services.evidence import fingerprint
 
     label_for_model, score_one = _scorer(profile_data, model)
     if threshold is None:
@@ -335,6 +336,8 @@ def run(labels: list[LabelledJob], profile_data: dict,
     agreed = [r for r in scored if r.agreed]
     false_rejects = [r for r in scored if r.verdict == GOOD and r.predicted == BAD]
     false_accepts = [r for r in scored if r.verdict == BAD and r.predicted == GOOD]
+    top = sorted(scored, key=lambda r: r.score if r.score is not None else -1, reverse=True)[:10]
+    good = sum(r.verdict == GOOD for r in scored)
 
     return {
         "model": label_for_model,
@@ -347,6 +350,10 @@ def run(labels: list[LabelledJob], profile_data: dict,
         "agreement": round(100.0 * len(agreed) / len(scored), 1) if scored else 0.0,
         "false_rejects": len(false_rejects),
         "false_accepts": len(false_accepts),
+        "recall": (good - len(false_rejects)) / good if good else None,
+        "precision_at_10": sum(r.verdict == GOOD for r in top) / len(top) if top else None,
+        "top_count": len(top),
+        "fixture_hash": fingerprint([vars(label) for label in labels]),
         "disagreements": [
             {"verdict": r.verdict, "score": r.score, "title": r.title,
              "company": r.company, "note": r.note}

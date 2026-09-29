@@ -351,7 +351,8 @@
    * `{filled: [key], skipped: [key], remembered: n, declined: n}`.
    */
   async function fill(values) {
-    const report = { filled: [], skipped: [], remembered: 0, declined: 0 };
+    const report = { filled: [], skipped: [], remembered: 0, declined: 0, fields: [] };
+    const pending = [];
     const count = (answer) => {
       report.filled.push(answer[0]);
       if (answer[2] === "remembered") report.remembered += 1;
@@ -361,7 +362,11 @@
     for (const field of textFields()) {
       const question = questionText(field);
       const answer = answerFor(describe(field), question, values);
-      if (!answer) continue;
+      if (!answer) {
+        report.fields.push({ key: "unknown", question, status: "needs_input" });
+        continue;
+      }
+      let expected = String(answer[1]);
       if (field instanceof HTMLSelectElement) {
         const options = Array.from(field.options).filter(
           (option, index) => !option.disabled && !(index === 0 && !normalize(option.value)),
@@ -369,14 +374,16 @@
         const option = pick(options, (o) => o.textContent || o.value, answer[1]);
         if (!option) {
           report.skipped.push(answer[0]);
+          report.fields.push({ key: answer[0], question, status: "needs_input" });
           continue;
         }
         setValue(field, option.value);
+        expected = option.value;
       } else {
         setValue(field, answer[1]);
       }
       mark(field);
-      count(answer);
+      pending.push({ field, answer, question, expected, kind: "value" });
     }
 
     for (const radios of radioGroups()) {
@@ -391,7 +398,7 @@
       radio.click();
       mark(radio.closest("label") || radio);
       touched.add(radio);
-      count(answer);
+      pending.push({ field: radio, answer, question, expected: radio.value, kind: "radio" });
     }
 
     for (const button of listboxButtons()) {
@@ -407,10 +414,72 @@
       }
       option.click();
       mark(button);
-      count(answer);
+      pending.push({ field: button, answer, question, expected: textOf(option), kind: "listbox" });
       await wait(50);
     }
+    // Frameworks may accept an event and then restore their previous state.
+    // Count only values still observable after two render turns and a pause.
+    await wait(150);
+    for (const item of pending) {
+      let field = item.field;
+      if (!field.isConnected && field.id) field = document.getElementById(field.id);
+      const valid = field && field.isConnected && field.getAttribute("aria-invalid") !== "true" &&
+        (!field.validity || field.validity.valid);
+      const verified = valid && (item.kind === "radio" ? field.checked && field.value === item.expected :
+        item.kind === "listbox" ? normalize(textOf(field)) === normalize(item.expected) :
+        String(field.value).trim() === String(item.expected).trim());
+      report.fields.push({ key: item.answer[0], question: item.question, status: verified ? "verified" : "needs_input" });
+      if (verified) count(item.answer);
+      else report.skipped.push(item.answer[0]);
+    }
+    for (const checkbox of document.querySelectorAll('input[type="checkbox"]')) {
+      if (visible(checkbox) && !checkbox.checked && !checkbox.disabled) {
+        report.fields.push({ key: "consent", question: questionText(checkbox), status: "needs_input" });
+      }
+    }
+    report.checkpoint = await checkpoint(report);
     return report;
+  }
+
+  function formIdentity() {
+    const fields = Array.from(document.querySelectorAll("input,select,textarea,[aria-haspopup='listbox']"))
+      .filter(visible).map((field) => [field.tagName, field.type, field.id, field.name, normalizeQuestion(questionText(field))]);
+    // Structural hash only; never answer values. Changed forms get a new key.
+    const text = JSON.stringify([location.origin, location.pathname, fields]);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i += 1) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+    return (hash >>> 0).toString(16);
+  }
+
+  async function checkpoint(report) {
+    const key = formIdentity();
+    try {
+      const storage = globalThis.chrome?.storage?.local;
+      if (!storage) return { saved: false, form: key };
+      const saved = (await storage.get("jobappFillCheckpoints")).jobappFillCheckpoints || {};
+      const previous = saved[key];
+      const fresh = Object.fromEntries(Object.entries(saved).filter(([, row]) =>
+        row && Date.now() - row.at < 24 * 60 * 60 * 1000).sort((a, b) => b[1].at - a[1].at).slice(0, 19));
+      // No personal answers, page text, full URL or credentials are persisted.
+      fresh[key] = { at: Date.now(), verified: report.filled.length,
+        needsInput: report.fields.filter((field) => field.status === "needs_input").length,
+        mappings: report.fields.filter((field) => field.status === "verified").map((field) => field.key) };
+      await storage.set({ jobappFillCheckpoints: fresh });
+      return { saved: true, form: key, resumed: Boolean(previous && Date.now() - previous.at < 24 * 60 * 60 * 1000) };
+    } catch (_) { return { saved: false, form: key }; }
+  }
+
+  function receipt() {
+    if (Array.from(document.querySelectorAll('[aria-invalid="true"]')).some(visible)) return null;
+    for (const node of document.querySelectorAll('[role="status"],[role="alert"],h1,h2,.application-confirmation')) {
+      if (!visible(node)) continue;
+      const text = textOf(node).trim();
+      if (text.length > 300) continue;
+      if (/^(?:thank you for applying[!.]?|thanks for applying[!.]?|(?:your )?application (?:has been |was )?(?:successfully )?(?:submitted|received)[!.]?)(?:\s|$)/i.test(text)) {
+        return { kind: "visible_confirmation", text: text.slice(0, 300) };
+      }
+    }
+    return null;
   }
 
   /**
@@ -422,21 +491,31 @@
   function watch(values, onFill, minutes = 15) {
     let timer = null;
     let running = false;
-    const observer = new MutationObserver(() => {
+    let stopped = false;
+    let dirty = false;
+    const schedule = () => {
+      dirty = true;
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        if (running) return;
+        if (running || stopped) return;
         running = true;
+        dirty = false;
         try {
           const report = await fill(values);
           if (report.filled.length || report.skipped.length) onFill(report);
         } finally {
           running = false;
+          if (dirty && !stopped) schedule();
         }
       }, 400);
-    });
+    };
+    const observer = new MutationObserver(schedule);
     observer.observe(document.body, { childList: true, subtree: true });
+    // Catch a step that appeared while the initial fill was being verified,
+    // before the observer could be attached.
+    schedule();
     const stop = () => {
+      stopped = true;
       clearTimeout(timer);
       observer.disconnect();
     };
@@ -540,5 +619,7 @@
     longQuestions,
     normalizeQuestion,
     put,
+    receipt,
+    formIdentity,
   };
 })();

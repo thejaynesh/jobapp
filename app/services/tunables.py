@@ -58,6 +58,32 @@ class Tunable:
 
 
 TUNABLES: list[Tunable] = [
+    Tunable(key="outcome_mode", env="OUTCOME_MODE", kind="choice", choices=["off", "shadow", "assist"], group="Intelligence", label="Outcome ordering experiment", help="Shadow reports a chronological outcome comparison. Assist adds a small ordering signal to Today only after enough mature labels and a better independent holdout; it never claims calibrated interview probabilities."),
+    Tunable(key="record_decisions_enabled", env="RECORD_DECISIONS_ENABLED", kind="bool", group="Intelligence", label="Record ranking decisions and impressions", help="Store bounded observations for ranking evaluation. Deleting observations on Today also pauses collection until you enable this again. Application history remains available."),
+    Tunable(key="match_evidence_mode", env="MATCH_EVIDENCE_MODE", kind="choice", choices=["shadow", "assist"], group="Intelligence", label="Evidence-assisted matching", help="Shadow keeps the existing scoring prompt and records inspectable evidence separately. Assist supplies approved achievements to both scoring passes. Compare a frozen quality benchmark before switching."),
+    Tunable(key="document_bullets_per_entry", env="DOCUMENT_BULLETS_PER_ENTRY", kind="int", minimum=1, maximum=8, group="Documents", label="Achievement bullets per entry", help="Select this many approved achievements per employer or project before tailoring; prefer requirement coverage and avoid repetition. Final PDF fitting still enforces one page."),
+    Tunable(key="intelligence_interval_hours", env="INTELLIGENCE_INTERVAL_HOURS", kind="int", minimum=1, maximum=168, group="Schedule", label="Intelligence maintenance every (hours)", help="Prune old observations, evaluate confirmed outcomes and refresh an enabled semantic experiment in bounded batches."),
+    Tunable(key="plan_application_minutes", env="PLAN_APPLICATION_MINUTES", kind="int", minimum=3, maximum=90, group="Intelligence", label="Estimated application time (minutes)", help="Time reserved per application in Today. Adjust it to your actual pace."),
+    Tunable(key="plan_followup_minutes", env="PLAN_FOLLOWUP_MINUTES", kind="int", minimum=1, maximum=60, group="Intelligence", label="Estimated follow-up time (minutes)", help="Time reserved for an existing application's next action in Today."),
+    Tunable(key="match_evidence_chars", env="MATCH_EVIDENCE_CHARS", kind="int", minimum=1000, maximum=20000, group="Intelligence", label="Candidate evidence budget (characters)", help="Maximum achievement evidence sent to each matching pass. Higher includes more facts but costs more tokens."),
+    Tunable(key="today_minutes", env="TODAY_MINUTES", kind="int", minimum=5, maximum=240, group="Intelligence", label="Daily plan (minutes)", help="Default time available for the Today plan. The plan stops when this budget is filled."),
+    Tunable(key="today_exploration_percent", env="TODAY_EXPLORATION_PERCENT", kind="int", minimum=0, maximum=30, group="Intelligence", label="Explore overlooked opportunities (%)", help="Share of application suggestions reserved for plausible jobs outside the usual shortlist. Zero disables exploration."),
+    Tunable(key="outcome_maturity_days", env="OUTCOME_MATURITY_DAYS", kind="int", minimum=7, maximum=90, group="Intelligence", label="Outcome observation window (days)", help="Compare applications only after this follow-up window. Silence remains unknown rather than a rejection."),
+    Tunable(key="outcome_min_labels", env="OUTCOME_MIN_LABELS", kind="int", minimum=20, maximum=1000, group="Intelligence", label="Minimum outcome labels for an experiment", help="A learned outcome ranker stays in shadow mode until this many confirmed outcomes exist and its holdout improves."),
+    Tunable(key="decision_retention_days", env="DECISION_RETENTION_DAYS", kind="int", minimum=30, maximum=1095, group="Intelligence", label="Decision and impression retention (days)", help="Old ranking observations are removed on the daily maintenance pass. Application milestones are retained until you delete the application."),
+    Tunable(key="application_mail_review", env="APPLICATION_MAIL_REVIEW", kind="bool", group="Applications", label="Suggest application updates from mail", help="Read-only mailbox polling can propose milestones for review. It never changes application status without your confirmation."),
+    Tunable(key="answer_expiry_days", env="ANSWER_EXPIRY_DAYS", kind="int", minimum=1, maximum=365, group="Applications", label="Remember availability answers for (days)", help="Time-sensitive saved answers expire after this interval; employer-specific answers only apply to the saved site."),
+    Tunable(key="adaptive_work_enabled", env="ADAPTIVE_WORK_ENABLED", kind="bool", group="Capacity", label="Protect interactive work", help="Pause admission of background work when observed latency, queue age or host pressure is high. Interactive actions and recovery tasks continue."),
+    Tunable(key="adaptive_latency_ms", env="ADAPTIVE_LATENCY_MS", kind="int", minimum=250, maximum=30000, group="Capacity", label="Page latency threshold (milliseconds)", help="A slow recent page-latency sample defers background work. Higher tolerates more contention."),
+    Tunable(key="adaptive_queue_seconds", env="ADAPTIVE_QUEUE_SECONDS", kind="int", minimum=10, maximum=3600, group="Capacity", label="Interactive queue age limit (seconds)", help="Stop admitting background work when a queued user request has waited this long."),
+    Tunable(key="adaptive_pressure_percent", env="ADAPTIVE_PRESSURE_PERCENT", kind="int", minimum=10, maximum=100, group="Capacity", label="Host pressure threshold (%)", help="Sustained CPU, CPU steal, or memory pressure above this value triggers reduced work. Telemetry unavailable on a host is shown as unknown."),
+    Tunable(key="adaptive_cooldown_seconds", env="ADAPTIVE_COOLDOWN_SECONDS", kind="int", minimum=30, maximum=3600, group="Capacity", label="Recovery cooldown (seconds)", help="Keep background admission paused for this long after pressure is detected, avoiding rapid stop/start cycles."),
+    Tunable(key="adaptive_source_enabled", env="ADAPTIVE_SOURCE_ENABLED", kind="bool", group="Capacity", label="Adapt source polling to useful yield", help="Low-yield sources are polled less often after enough observations. A periodic probe preserves coverage."),
+    Tunable(key="adaptive_source_max_hours", env="ADAPTIVE_SOURCE_MAX_HOURS", kind="int", minimum=1, maximum=168, group="Capacity", label="Maximum source probe gap (hours)", help="Even a low-yield source is admitted after this long. Lower preserves freshness at greater cost."),
+    Tunable(key="semantic_mode", env="SEMANTIC_MODE", kind="choice", choices=["off", "shadow", "assist"], group="Intelligence", label="Semantic retrieval experiment", help="Off makes no embedding calls. Shadow records comparison results; assist adds cached semantic relevance to Today suggestions without hiding jobs."),
+    Tunable(key="semantic_model", env="SEMANTIC_MODEL", kind="text", group="Intelligence", label="Embedding model", help="Model served by the configured compatible embedding endpoint. Changing it invalidates cached vectors; credentials stay in the environment."),
+    Tunable(key="semantic_batch_size", env="SEMANTIC_BATCH_SIZE", kind="int", minimum=1, maximum=100, group="Intelligence", label="New embeddings per maintenance pass", help="Bounds remote work per pass; only changed active postings are embedded."),
+    Tunable(key="semantic_active_days", env="SEMANTIC_ACTIVE_DAYS", kind="int", minimum=1, maximum=90, group="Intelligence", label="Semantic active window (days)", help="Embed recent candidate postings and favourites rather than the historical corpus."),
     Tunable(
         key="min_match_score", env="MIN_MATCH_SCORE", kind="int",
         minimum=0, maximum=100, legacy_key="min_match_score",
@@ -1707,6 +1733,8 @@ DEPLOYMENT = "a fact about the machine or the deployment, read when a process st
 PROTOCOL = "a timing the extension and the proxy in front of the app are built around"
 
 ENVIRONMENT: dict[str, str] = {
+    "SEMANTIC_API_KEY": SECRET,
+    "SEMANTIC_BASE_URL": CONNECTION,
     **dict.fromkeys((
         "SECRET_KEY", "APP_PASSWORD", "AGENT_TOKEN", "NVIDIA_NIM_API_KEY",
         "FREEINFERENCE_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",

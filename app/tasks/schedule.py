@@ -53,6 +53,7 @@ class Every:
 HOUR, MINUTE = 3600, 60
 
 SCHEDULE: tuple[Every, ...] = (
+    Every("intelligence-maintenance", "app.tasks.intelligence.maintain", "intelligence_interval_hours", HOUR),
     Every("retry-browser-ingestion", "app.tasks.browse.retry_ingestion",
           "agent_ingest_retry_minutes", MINUTE),
     # Boards with a stored credential, asked over their own API — the feed,
@@ -147,11 +148,17 @@ def dispatch_scheduled() -> list[str]:
     from app.services.tunables import _load_profile_data
 
     profile_data = _load_profile_data()
+    from app.services import capacity
+    paused = not capacity.allow_background(profile_data)
     redis = _client()
     now = time.time()
     sent = []
     for entry in SCHEDULE:
         try:
+            # Recovery and user-facing operations continue while harvesting,
+            # enrichment, matching and analytical work wait for capacity.
+            if paused and entry.name not in {"sweep-stuck-generations", "retry-browser-ingestion", "poll-mailbox", "remind-due-actions", "prune-llm-log", "prune-agent-history"}:
+                continue
             if not due(entry, profile_data, now, redis):
                 continue
             celery_app.send_task(entry.task, kwargs=dict(entry.kwargs))

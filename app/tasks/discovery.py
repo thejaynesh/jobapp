@@ -29,6 +29,9 @@ def discover_boards(force: bool = False) -> dict:
     from app.models.profile import Profile
     from app.services import commoncrawl, company_boards
     from app.services.tunables import value
+    from app.services.capacity import allow_background
+    if not force and not allow_background():
+        return {"ok": True, "skipped": True, "detail": "interactive capacity"}
 
     db = SessionLocal()
     try:

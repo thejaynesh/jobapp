@@ -193,6 +193,15 @@ def _backlog_cache_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _capacity_isolated_by_default(monkeypatch):
+    """Host load and another xdist worker's samples cannot decide test results."""
+    from app.services import capacity
+    def unavailable():
+        raise ConnectionError("capacity telemetry is isolated in tests")
+    monkeypatch.setattr(capacity, "_client", unavailable)
+
+
+@pytest.fixture(autouse=True)
 def _auth_disabled_by_default(monkeypatch):
     """
     Route tests exercise their own subject, not the front door.

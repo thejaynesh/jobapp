@@ -16,12 +16,26 @@ like a credential or identity document, whoever sends it.
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 STORE_KEY = "remembered_answers"
 MAX_ANSWERS = 500
 MAX_QUESTION = 300
 MAX_ANSWER = 500
+_VOLATILE = re.compile(r"available|availability|start|notice|salary|compensation|relocat|hybrid|remote|sponsor|authoriz", re.I)
+
+
+def site_scope(url):
+    try:
+        parsed = urlsplit(str(url or ""))
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            return ""
+        # Shared ATS domains host many employers; origin alone is insufficient.
+        first = next((part for part in parsed.path.split("/") if part), "")
+        return parsed.hostname.lower() + "/" + first
+    except ValueError:
+        return ""
 
 _SENSITIVE = re.compile(
     r"(password|passcode|social security|\bssn\b|date of birth|birth ?date|\bdob\b|bank|"
@@ -40,13 +54,33 @@ def entries(profile_data: dict) -> dict:
     return stored if isinstance(stored, dict) else {}
 
 
-def lookup(profile_data: dict) -> dict:
+def lookup(profile_data: dict, site="", now=None) -> dict:
     """`{normalized question: answer}`, for the autofill."""
-    return {key: entry["answer"] for key, entry in entries(profile_data).items()
-            if isinstance(entry, dict) and entry.get("answer")}
+    from app.services.tunables import value
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=int(value(profile_data, "answer_expiry_days")))
+    found, priorities = {}, {}
+    for key, entry in entries(profile_data).items():
+        if not isinstance(entry, dict) or not entry.get("answer"):
+            continue
+        if entry.get("scope") and entry["scope"] != site_scope(site):
+            continue
+        if _VOLATILE.search(entry.get("question") or key):
+            try:
+                at = datetime.fromisoformat(entry.get("at") or "")
+                if at.tzinfo is None or at < cutoff:
+                    continue
+            except ValueError:
+                continue
+        question = normalize_question(entry.get("question") or key)
+        priority = int(bool(entry.get("scope")))
+        if priority >= priorities.get(question, -1):
+            found[question] = entry["answer"]
+            priorities[question] = priority
+    return found
 
 
-def remember(profile_data: dict, answers: list) -> tuple[dict, int]:
+def remember(profile_data: dict, answers: list, site="") -> tuple[dict, int]:
     """The profile data with these answers kept, and how many were."""
     kept = dict(entries(profile_data))
     saved = 0
@@ -61,7 +95,9 @@ def remember(profile_data: dict, answers: list) -> tuple[dict, int]:
             continue
         if _SENSITIVE.search(question) or _SENSITIVE.search(answer):
             continue
-        kept[key] = {"question": question, "answer": answer, "at": now}
+        scope = site_scope(site)
+        storage_key = key + (" @ " + scope if scope else "")
+        kept[storage_key] = {"question": question, "answer": answer, "at": now, "scope": scope}
         saved += 1
     if len(kept) > MAX_ANSWERS:
         newest = sorted(kept.items(), key=lambda kv: kv[1].get("at") or "", reverse=True)

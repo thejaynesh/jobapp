@@ -417,6 +417,11 @@
     const button = document.createElement("button");
     button.className = "action secondary";
     button.textContent = "Mark applied";
+    const confirmation = autofill()?.receipt();
+    if (confirmation) {
+      line(box, "This page shows an application confirmation. Verify it is for this role, then mark applied.");
+      button.textContent = "Confirm applied";
+    }
     button.addEventListener("click", async () => {
       button.disabled = true;
       button.textContent = "Saving…";
@@ -508,7 +513,7 @@
     button.disabled = true;
     button.textContent = "Filling…";
 
-    const reply = await ask("/api/agent/autofill-fields");
+    const reply = await ask("/api/agent/autofill-fields?site=" + encodeURIComponent(location.origin + location.pathname));
     if (reply.error) {
       button.disabled = false;
       button.textContent = "Fill this form";
@@ -533,17 +538,18 @@
     line(
       box,
       report.filled.length
-        ? `Filled ${report.filled.length} (${summarize(report)}). Outlined in blue — check them, then submit yourself.`
+        ? `Verified ${report.filled.length} filled values (${summarize(report)}). Outlined in blue — check them, then submit yourself.`
         : "Nothing matched. Either the fields are already filled, or this form names them in a way I do not recognise.",
     );
     if (report.skipped.length) {
       line(
         box,
-        `Left for you: ${report.skipped.join(", ")} — none of the options ` +
-          "clearly matched your answer, and picking the nearest one is how a " +
-          "form ends up declaring something you did not say.",
+        `Needs your review: ${report.skipped.join(", ")}. An option did not match, a value did not persist, or the form reported a validation error.`,
       );
     }
+    const unknown = (report.fields || []).filter((field) => field.status === "needs_input");
+    if (unknown.length) line(box, `${unknown.length} fields need your input: ` + unknown.slice(0, 6).map((field) => field.question || field.key).join("; "));
+    if (report.checkpoint?.resumed) line(box, "Resumed this form's checkpoint; existing answers were preserved and new fills were verified.");
 
     // Multi-step forms (Workday) draw the next step into the same page, so
     // keep filling what appears — empty fields only — for a while.
@@ -578,7 +584,7 @@
       }
       button.disabled = true;
       button.textContent = "Saving…";
-      const reply = await ask("/api/agent/remember-answers", { answers });
+      const reply = await ask("/api/agent/remember-answers", { answers, site: location.origin + location.pathname });
       button.disabled = false;
       button.textContent = "Remember my answers";
       const saved = (reply.data || {}).saved;

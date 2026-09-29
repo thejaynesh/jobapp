@@ -70,6 +70,15 @@ def _make_job(status=JobStatus.matched, title="Backend Engineer", company="Acme"
     job.missing_skills = ["Rust"]
     job.source = "adzuna"
     job.fetched_at = None
+    job.posted_at = None
+    job.required_years = None
+    job.salary_annual_min = None
+    job.salary_annual_max = None
+    job.similarity = None
+    job.description = "Build Python services"
+    job.required_skills = ["Python"]
+    job.nice_to_have_skills = []
+    job.education_level = None
     return job
 
 

@@ -299,9 +299,14 @@ class TestSimilarity:
 def remote_lover(db, n=14):
     """Applies to remote jobs whatever they score; dismisses on-site ones."""
     for i in range(n):
-        applied(db, make_job(db, score=60 + i % 10, remote=True, title=f"Platform Engineer {i}"))
-        dismissed(make_job(db, score=80 + i % 10, remote=False, title=f"Onsite Engineer {i}"),
-                  "location")
+        from app.services.application_history import record_decision
+        when = NOW - timedelta(hours=n - i)
+        remote = make_job(db, score=60 + i % 10, remote=True, title=f"Platform Engineer {i}")
+        onsite = make_job(db, score=80 + i % 10, remote=False, title=f"Onsite Engineer {i}")
+        applied(db, remote, when=when)
+        dismissed(onsite, "location", when=when + timedelta(seconds=1))
+        record_decision(db, remote, {}, "yes", now=when)
+        record_decision(db, onsite, {}, "no", now=when + timedelta(seconds=1))
     db.commit()
 
 

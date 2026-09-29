@@ -212,6 +212,7 @@
         <details class="mt-3 border border-gray-200 rounded">
           <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this letter</summary>
           <form hx-post="/apps/{{ app.id }}/docs/{{ current_cl.id }}/edit-letter"
+                hx-on::before-swap="if(event.detail.xhr.status === 409) { event.detail.shouldSwap = true; event.detail.isError = false; }"
                 hx-target="#letter-edit-status" hx-swap="innerHTML" class="px-3 pb-3 space-y-2">
             {% set current_to = (letter_recipient or {}).get("contact_id") %}
             <label class="block text-xs font-medium text-gray-600">To
@@ -230,7 +231,9 @@
             <div class="flex items-center gap-3">
               <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Save as a new version</button>
               <span id="letter-edit-status" class="text-xs"></span>
+              <button type="button" hx-post="/apps/{{ app.id }}/docs/{{ current_cl.id }}/preview-edit" hx-include="closest form" hx-target="#letter-edit-preview" class="border rounded px-3 py-1.5 text-sm">Preview changes</button>
             </div>
+            <div id="letter-edit-preview" aria-live="polite"></div>
           </form>
         </details>
         {% endif %}
@@ -486,4 +489,5 @@
   </div>
 </div>
 
+{% include "intelligence/history.html" %}
 {% endblock %}

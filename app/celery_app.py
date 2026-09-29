@@ -1,5 +1,5 @@
 from celery import Celery
-from celery.signals import task_postrun, task_prerun
+from celery.signals import before_task_publish, task_postrun, task_prerun
 from celery.schedules import schedule as celery_schedule
 
 from app.config import settings
@@ -20,6 +20,7 @@ celery_app = Celery(
         "app.tasks.match_eval", "app.tasks.backup", "app.tasks.archive",
         "app.tasks.browse", "app.tasks.discovery", "app.tasks.sponsorship",
         "app.tasks.recall", "app.tasks.schedule", "app.tasks.tracker",
+        "app.tasks.intelligence",
     ],
 )
 
@@ -106,6 +107,7 @@ celery_app.conf.update(
         "app.tasks.liveness.*": {"queue": "batch"},
         "app.tasks.links.*": {"queue": "batch"},
         "app.tasks.match_eval.*": {"queue": "batch"},
+        "app.tasks.intelligence.*": {"queue": "batch"},
         "app.tasks.providers.*": {"queue": "batch"},
         # Deliberately interactive: the user pressed something, or the laptop
         # is waiting for work to do.
@@ -182,6 +184,13 @@ celery_app.conf.beat_schedule = {
 # a value saved there applies from the next task (`tunables.read_once`). Held
 # per task id: prerun and postrun are separate calls around the task body.
 _SETTINGS_SCOPES: dict = {}
+
+
+@before_task_publish.connect
+def _stamp_queue_time(headers=None, **_):
+    import time
+    if headers is not None:
+        headers["jobapp_queued_at"] = time.time()
 
 
 @task_prerun.connect

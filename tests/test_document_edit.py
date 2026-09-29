@@ -165,7 +165,8 @@ class TestSavingAVersion:
         assert (latest.version, latest.is_current, latest.id) == (2, True, new.id)
         assert latest.generated_by == document_edit.EDITED_BY
         assert latest.generation_feedback == "Edited by hand from v1"
-        assert latest.path.endswith(f"{application.id}_resume_v2.pdf")
+        assert Path(latest.path).name.startswith(f"{application.id}_resume_v2_")
+        assert latest.path.endswith(".pdf")
         assert compiled[0][0]["experience"][0]["bullets"] == ["Ran Kafka at scale"]
         # The keyword check is re-run on the new PDF with the posting's keywords.
         assert latest.content["ats"]["present"] == ["Python", "Kafka"]
