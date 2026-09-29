@@ -1,0 +1,73 @@
+{# The current resume: what a parser reads out of it, and every part of it
+   editable, saved as the next version. `resume_review` comes from
+   services/document_edit.review; `current_resume` is the version shown. #}
+{% set ats = resume_review.ats %}
+{% if ats and ats.keywords %}
+<div class="mt-3 text-sm">
+  <p class="text-gray-700">
+    <span class="font-medium">{{ ats.present | length }} of {{ ats.keywords | length }}</span>
+    of the posting's keywords are in the text a parser reads out of this PDF.
+  </p>
+  {% if ats.missing %}
+  <p class="mt-1 text-xs text-gray-500">Missing:
+    {% for word in ats.missing %}<span class="inline-block px-1.5 py-0.5 mr-1 mb-1 rounded bg-amber-50 text-amber-800 border border-amber-200">{{ word }}</span>{% endfor %}
+  </p>
+  {% for word, other in (ats.written_as or {}).items() %}
+  <p class="mt-0.5 text-xs text-gray-500">“{{ word }}” is on the resume as “{{ other }}”. A parser matches the posting’s spelling; use theirs.</p>
+  {% endfor %}
+  {% endif %}
+  {% if ats.garbled %}
+  <p class="mt-1 text-xs text-red-600">This PDF's text reads back garbled ({{ ats.garbled }} characters a parser cannot read) — the server is missing the resume's outline font.</p>
+  {% elif ats.read_from == "template" %}
+  <p class="mt-1 text-xs text-gray-400">No text could be read back out of the PDF, so this was checked against what was sent to the template.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% with checks = resume_review.checks, noun = "resume" %}{% include "apps/partials/content_checks.html" %}{% endwith %}
+
+<details class="mt-3 border border-gray-200 rounded">
+  <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this resume</summary>
+  <form hx-post="/apps/{{ app.id }}/docs/{{ current_resume.id }}/edit-resume"
+        hx-target="#resume-edit-status" hx-swap="innerHTML"
+        class="px-3 pb-3 space-y-4">
+    <p class="text-xs text-gray-500">
+      Saving compiles the next version with your changes and makes it current; this one stays in the history.
+      Bullets marked <span class="px-1 rounded bg-purple-50 text-purple-700">rewritten</span> were written for this job, not taken word for word from your profile.
+    </p>
+    <div>
+      <label class="block text-xs font-medium text-gray-600">Summary</label>
+      <textarea name="summary" rows="3" class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm">{{ resume_review.summary }}</textarea>
+    </div>
+    {% for section in resume_review.sections if section.entries %}
+    <div>
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ section.label }}</p>
+      {% for entry in section.entries %}
+      <div class="mt-2">
+        <label class="block text-sm font-medium text-gray-700">{{ entry.heading or "Untitled" }}
+          {% if entry.rewritten %}<span class="ml-1 text-[11px] font-normal px-1 rounded bg-purple-50 text-purple-700">{{ entry.rewritten | length }} rewritten</span>{% endif %}
+        </label>
+        <textarea name="{{ entry.field }}" rows="{{ [entry.bullets | length + 1, 3] | max }}"
+                  class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm">{{ entry.bullets | join('\n') }}</textarea>
+        {% if entry.original is not none and entry.rewritten %}
+        <details class="mt-1">
+          <summary class="text-xs text-gray-500 cursor-pointer">Your profile's bullets for this</summary>
+          <ul class="mt-1 list-disc list-inside text-xs text-gray-500 space-y-0.5">
+            {% for bullet in entry.original %}<li>{{ bullet }}</li>{% endfor %}
+          </ul>
+        </details>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+    <div>
+      <label class="block text-xs font-medium text-gray-600">Skills (one category per line: <code>languages: Python, Go</code>)</label>
+      <textarea name="skills" rows="4" class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono">{{ resume_review.skills }}</textarea>
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Save as a new version</button>
+      <span id="resume-edit-status" class="text-xs"></span>
+    </div>
+  </form>
+</details>

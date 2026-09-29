@@ -1,0 +1,58 @@
+{# The story bank (services/stories): each story in STAR form, used by the
+   drafted answers and listed on applications as interview preparation. #}
+<div id="stories-list" class="max-w-3xl">
+  <p class="text-sm text-gray-600 mb-3">
+    Stories you can tell about your work: the situation, what you had to do, what you did, and what came of it.
+    Drafted answers draw on the ones that fit the question, and each application lists the ones that fit the posting under
+    <span class="font-medium">Stories to have ready</span>.
+  </p>
+  {% set entries = (profile.experience or []) + (profile.projects or []) %}
+  {% for story in profile.stories or [] %}
+  <div class="border border-gray-200 bg-white rounded p-4 mb-3">
+    <details {% if not story.title %}open{% endif %}>
+      <summary class="cursor-pointer font-medium text-gray-700">
+        {{ story.title or "New story" }}
+        {% if story.skills %}<span class="ml-2 text-xs font-normal text-gray-400">{{ story.skills | join(", ") }}</span>{% endif %}
+        {% if saved_id is defined and saved_id == story.id %}<span class="text-green-600 text-xs ml-2 success-flash">Saved.</span>{% endif %}
+      </summary>
+      <form hx-post="/profile/stories/{{ story.id }}" hx-target="#stories-list" hx-swap="outerHTML" class="mt-3 space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs text-gray-500">Title</label>
+            <input type="text" name="title" value="{{ story.title }}" placeholder="Cutting ingestion latency at Initech"
+                   class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500">From</label>
+            <select name="entry_id" class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm">
+              <option value="">Not tied to an entry</option>
+              {% for e in entries %}
+              <option value="{{ e.id }}" {% if story.entry_id == e.id %}selected{% endif %}>{{ e.role or e.name or "" }}{% if e.company %} — {{ e.company }}{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500">Skills it shows (comma-separated)</label>
+          <input type="text" name="skills" value="{{ (story.skills or []) | join(', ') }}" placeholder="Kafka, incident response, leading without authority"
+                 class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm">
+        </div>
+        {% for part, hint in [("situation", "Where you were and what was going on"),
+                              ("task", "What you had to get done, and why it was hard"),
+                              ("action", "What you did: your part, in steps"),
+                              ("result", "What came of it, with the numbers")] %}
+        <div>
+          <label class="block text-xs text-gray-500">{{ part | title }} <span class="text-gray-400">— {{ hint }}</span></label>
+          <textarea name="{{ part }}" rows="2" class="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm">{{ story[part] }}</textarea>
+        </div>
+        {% endfor %}
+        <div class="flex gap-2">
+          <button type="submit" class="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700">Save</button>
+          <button type="button" hx-post="/profile/stories/{{ story.id }}/delete" hx-target="#stories-list" hx-swap="outerHTML" hx-confirm="Delete this story?" class="text-red-500 text-sm hover:underline">Delete</button>
+        </div>
+      </form>
+    </details>
+  </div>
+  {% endfor %}
+  <button hx-post="/profile/stories/add" hx-target="#stories-list" hx-swap="outerHTML" class="mt-2 text-blue-600 text-sm hover:underline">+ Add a story</button>
+</div>

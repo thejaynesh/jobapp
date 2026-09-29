@@ -1,13 +1,14 @@
 import copy
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import get_db
+from app.services import bullet_facts
 from app.services.locations import REGION_OPTIONS, normalize_prefs
 from app.services.profile_service import get_or_create_profile
 from app.config import live
@@ -18,9 +19,19 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 templates = build_templates()
 templates.env.globals["region_options"] = REGION_OPTIONS
 templates.env.globals["location_prefs"] = normalize_prefs
+# Each entry's bullets with no figure, and the question to ask for one.
+templates.env.globals["unanswered_bullets"] = bullet_facts.unanswered
 
-TABS = ["personal", "experience", "projects", "skills", "education",
-        "screening", "templates", "narrative", "ai prompt", "check"]
+
+def _skill_alias_lines(profile_data) -> str:
+    return "\n".join(" = ".join(group) for group in (profile_data or {}).get("skill_aliases") or []
+                     if isinstance(group, list))
+
+
+templates.env.globals["skill_alias_lines"] = _skill_alias_lines
+
+TABS = ["personal", "experience", "projects", "skills", "education", "stories",
+        "screening", "templates", "narrative", "ai prompt", "check", "import"]
 
 
 @router.get("", response_class=HTMLResponse)
@@ -38,7 +49,177 @@ def get_profile(request: Request, tab: str = "personal", db: Session = Depends(g
         context["preview"] = _preview(db)
     if tab == "check":
         context["check"] = _check(profile.data)
+    if tab == "import":
+        from app.services import profile_import
+
+        draft = (profile.data or {}).get(profile_import.DRAFT_KEY)
+        context["draft"] = draft
+        context["review"] = (profile_import.review(draft["parsed"], profile.data)
+                             if draft else None)
+        context["import_error"] = request.query_params.get("error", "")
+        context["import_done"] = request.query_params.get("added", "")
     return templates.TemplateResponse("profile/index.html", context)
+
+
+_BANK_ACTIONS = ("keep", "dismiss", "use", "remove")
+
+
+def _bank_changed(request: Request, section: str, item_id: str, change) -> HTMLResponse:
+    """Apply a bullet_bank change and re-render the section, the entry's bank open."""
+    from app.services import bullet_bank
+
+    if section not in bullet_bank.SECTIONS:
+        raise HTTPException(status_code=404, detail="No such section")
+    try:
+        profile = change()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such entry")
+    return templates.TemplateResponse(
+        _SECTION_PARTIALS[section],
+        {"request": request, "profile": profile.data, "opened": item_id, "panel": "bank"},
+    )
+
+
+@router.post("/{section}/{item_id}/bank", response_class=HTMLResponse)
+def add_to_bank(request: Request, section: str, item_id: str, text: str = Form(""),
+                db: Session = Depends(get_db)):
+    """Keep a wording of your own for this entry."""
+    from app.services import bullet_bank
+
+    response = _bank_changed(request, section, item_id,
+                             lambda: bullet_bank.add_own(db, section, item_id, text))
+    db.commit()
+    return response
+
+
+@router.post("/{section}/{item_id}/bank/{bank_id}/{action}", response_class=HTMLResponse)
+def bank_action(request: Request, section: str, item_id: str, bank_id: str, action: str,
+                db: Session = Depends(get_db)):
+    """Keep, dismiss, use or remove one wording in the entry's bank."""
+    from app.services import bullet_bank
+
+    if action not in _BANK_ACTIONS:
+        raise HTTPException(status_code=404, detail="No such action")
+    response = _bank_changed(request, section, item_id,
+                             lambda: getattr(bullet_bank, action)(db, section, item_id, bank_id))
+    db.commit()
+    return response
+
+
+def _stories_list(request: Request, profile, saved_id: str | None = None) -> HTMLResponse:
+    return templates.TemplateResponse(
+        "profile/partials/stories.html",
+        {"request": request, "profile": profile.data, "saved_id": saved_id},
+    )
+
+
+def _ensure_stories(db: Session):
+    profile = get_or_create_profile(db)
+    if not isinstance((profile.data or {}).get("stories"), list):
+        data = copy.deepcopy(profile.data or {})
+        data["stories"] = []
+        profile.data = data
+        db.flush()
+    return profile
+
+
+@router.post("/stories/add", response_class=HTMLResponse)
+def add_story(request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import add_list_item
+    from app.services.stories import PARTS
+
+    _ensure_stories(db)
+    profile = add_list_item(db, "stories", {"title": "", **{p: "" for p in PARTS},
+                                            "skills": [], "entry_id": None})
+    db.commit()
+    return _stories_list(request, profile)
+
+
+@router.post("/stories/{story_id}", response_class=HTMLResponse)
+async def save_story(story_id: str, request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import update_list_item
+    from app.services.stories import from_form
+
+    _ensure_stories(db)
+    profile = update_list_item(db, "stories", story_id, from_form(await request.form()))
+    db.commit()
+    return _stories_list(request, profile, story_id)
+
+
+@router.post("/stories/{story_id}/delete", response_class=HTMLResponse)
+def delete_story(story_id: str, request: Request, db: Session = Depends(get_db)):
+    from app.services.profile_service import remove_list_item
+
+    _ensure_stories(db)
+    profile = remove_list_item(db, "stories", story_id)
+    db.commit()
+    return _stories_list(request, profile)
+
+
+@router.post("/import")
+async def import_profile(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Read an uploaded resume, LinkedIn export or JSON Resume into a draft to review."""
+    from urllib.parse import quote
+
+    from fastapi.concurrency import run_in_threadpool
+
+    from app.services import profile_import
+
+    data = await file.read()
+    if len(data) > 15 * 1024 * 1024:
+        return RedirectResponse(url="/profile?tab=import&error=" + quote("That file is over 15 MB"),
+                                status_code=303)
+    profile = get_or_create_profile(db)
+    try:
+        # A resume goes through the model; off the event loop while it does.
+        source, parsed = await run_in_threadpool(
+            profile_import.parse_upload, file.filename or "", data, profile.data)
+    except profile_import.ImportError_ as exc:
+        return RedirectResponse(url="/profile?tab=import&error=" + quote(str(exc)),
+                                status_code=303)
+    except Exception as exc:
+        logger.warning("profile import failed: %s", exc)
+        return RedirectResponse(url="/profile?tab=import&error=" + quote(
+            f"Could not read it: {str(exc)[:200]}"), status_code=303)
+    profile_import.stage(db, source, parsed)
+    return RedirectResponse(url="/profile?tab=import", status_code=303)
+
+
+@router.post("/import/apply")
+async def apply_import(request: Request, db: Session = Depends(get_db)):
+    """Merge what the review ticked."""
+    from urllib.parse import quote
+
+    from app.services import profile_import
+
+    form = await request.form()
+    try:
+        added = profile_import.apply(db, form)
+    except profile_import.ImportError_ as exc:
+        return RedirectResponse(url="/profile?tab=import&error=" + quote(str(exc)),
+                                status_code=303)
+    summary = ", ".join(f"{n} {what}" for what, n in added.items() if n) or "nothing"
+    return RedirectResponse(url="/profile?tab=import&added=" + quote(summary), status_code=303)
+
+
+@router.post("/import/discard")
+def discard_import(db: Session = Depends(get_db)):
+    from app.services import profile_import
+
+    profile_import.discard(db)
+    return RedirectResponse(url="/profile?tab=import", status_code=303)
+
+
+@router.get("/export.json")
+def export_json_resume(db: Session = Depends(get_db)):
+    """The profile as a JSON Resume file."""
+    from fastapi.responses import JSONResponse
+
+    from app.services import profile_import
+
+    profile = get_or_create_profile(db)
+    return JSONResponse(profile_import.to_json_resume(profile.data or {}),
+                        headers={"Content-Disposition": 'attachment; filename="resume.json"'})
 
 
 def _check(profile_data: dict) -> dict | None:
@@ -304,9 +485,11 @@ def save_skills(
     location_regions: list[str] = Form(default=[]),
     remote_ok: str = Form(""), custom_locations: str = Form(""),
     excluded_companies: str = Form(""), min_match_score: int = Form(70),
+    skill_aliases: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     from app.services.locations import REGIONS, search_locations
+    from app.services.matcher import parse_alias_lines
     from app.services.profile_service import save_section
     save_section(db, "skills", {
         "languages": [x.strip() for x in languages.split(",") if x.strip()],
@@ -314,6 +497,9 @@ def save_skills(
         "tools": [x.strip() for x in tools.split(",") if x.strip()],
         "clouds": [x.strip() for x in clouds.split(",") if x.strip()],
     })
+    # Absent (an older form) leaves the list alone; present and empty clears it.
+    if skill_aliases is not None:
+        save_section(db, "skill_aliases", parse_alias_lines(skill_aliases))
     save_section(db, "target_roles", [x.strip() for x in target_roles.splitlines() if x.strip()])
     prefs = {
         "regions": [r for r in location_regions if r in REGIONS],
@@ -363,6 +549,84 @@ def delete_education_item(request: Request, item_id: str, db: Session = Depends(
     profile = remove_list_item(db, "education", item_id)
     db.commit()
     return templates.TemplateResponse("profile/partials/education.html", {"request": request, "profile": profile.data})
+
+
+# In resumes or not
+_SECTION_PARTIALS = {
+    "experience": "profile/partials/experience.html",
+    "projects": "profile/partials/projects.html",
+    "education": "profile/partials/education.html",
+}
+
+
+@router.post("/{section}/{item_id}/in-resume", response_class=HTMLResponse)
+def switch_in_resume(
+    request: Request, section: str, item_id: str,
+    included: str = Form(""), db: Session = Depends(get_db),
+):
+    """
+    Leave an entry out of resumes, letters and drafted answers, or put it
+    back. The entry itself is untouched, so switching it back restores it.
+    An unticked checkbox sends nothing, so absent means left out.
+    """
+    from app.services.profile_service import set_in_documents
+
+    if section not in _SECTION_PARTIALS:
+        raise HTTPException(status_code=404, detail="No such section")
+    profile = set_in_documents(db, section, item_id, included == "1")
+    db.commit()
+    return templates.TemplateResponse(
+        _SECTION_PARTIALS[section], {"request": request, "profile": profile.data},
+    )
+
+
+def _facts_changed(request: Request, section: str, item_id: str, change) -> HTMLResponse:
+    """Apply a bullet_facts change and re-render the section's list, the entry's questions open."""
+    if section not in bullet_facts.SECTIONS:
+        raise HTTPException(status_code=404, detail="No such section")
+    try:
+        profile = change()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such entry")
+    return templates.TemplateResponse(
+        _SECTION_PARTIALS[section],
+        {"request": request, "profile": profile.data, "opened": item_id, "panel": "facts"},
+    )
+
+
+@router.post("/{section}/{item_id}/facts", response_class=HTMLResponse)
+def add_fact(
+    request: Request, section: str, item_id: str,
+    about: str = Form(""), answer: str = Form(""), db: Session = Depends(get_db),
+):
+    """The number a bullet left out, kept on the entry for generation to use."""
+    response = _facts_changed(
+        request, section, item_id, lambda: bullet_facts.add(db, section, item_id, about, answer))
+    db.commit()
+    return response
+
+
+@router.post("/{section}/{item_id}/facts/skip", response_class=HTMLResponse)
+def skip_fact(
+    request: Request, section: str, item_id: str,
+    about: str = Form(""), db: Session = Depends(get_db),
+):
+    """No number fits this bullet; stop asking."""
+    response = _facts_changed(
+        request, section, item_id, lambda: bullet_facts.skip(db, section, item_id, about))
+    db.commit()
+    return response
+
+
+@router.post("/{section}/{item_id}/facts/{fact_id}/delete", response_class=HTMLResponse)
+def delete_fact(
+    request: Request, section: str, item_id: str, fact_id: str,
+    db: Session = Depends(get_db),
+):
+    response = _facts_changed(
+        request, section, item_id, lambda: bullet_facts.remove(db, section, item_id, fact_id))
+    db.commit()
+    return response
 
 
 # Templates

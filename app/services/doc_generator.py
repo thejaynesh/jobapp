@@ -67,15 +67,24 @@ _UNICODE_RE = re.compile("[" + "".join(_UNICODE_MAP.keys()) + "]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7F]")
 
 
+# Accented Latin letters pdflatex sets as they are: utf8 inputenc declares
+# them for T1 (t1enc.dfu), so they compile, and a name keeps its spelling —
+# López, Müller, Dvořák. Folding them made a letter open "Dear Jose Nunez".
+# The nine here have no T1 glyph and are folded like everything else.
+_T1_LATIN = frozenset(chr(c) for c in range(0xC0, 0x180)) - frozenset("×÷ĦħĸĿŀŉŦŧſ")
+
+
 def _fold_non_ascii(match: re.Match) -> str:
-    """Fold an unmapped non-ASCII char to its closest ASCII form, or drop it.
+    """Keep a T1 letter; fold any other non-ASCII char to its closest ASCII form, or drop it.
 
     pdflatex aborts on Unicode it has no declaration for (e.g. U+272A), and
     LLM output can contain anything — so every char must leave here compilable.
-    NFKD strips accents (e.g. an accented e becomes plain e); symbols with no
+    NFKD strips accents (e.g. a barred h becomes plain h); symbols with no
     ASCII equivalent become ''. Folded output is re-escaped in case the fold
     produced a LaTeX special character.
     """
+    if match.group() in _T1_LATIN:
+        return match.group()
     folded = unicodedata.normalize("NFKD", match.group()).encode("ascii", "ignore").decode()
     return _LATEX_SPECIAL.sub(lambda m: _LATEX_MAP[m.group()], folded)
 
@@ -632,12 +641,16 @@ def build_resume_context(
     }
 
 
-def build_cover_letter_context(profile_data: dict, job_company: str, job_title: str, body: str) -> dict:
+def build_cover_letter_context(profile_data: dict, job_company: str, job_title: str, body: str,
+                               recipient: dict | None = None) -> dict:
     return {
         "profile": _normalize_profile_for_template(profile_data),
         "job_company": job_company,
         "job_title": job_title,
         "cover_letter_body": body,
+        # {name, title, contact_id} from letter_recipient, or None for
+        # "Dear Hiring Manager".
+        "recipient": recipient,
     }
 
 
@@ -787,13 +800,17 @@ _COVER_LETTER_BANNED = [
 def _evidence_block(experience: list[dict], projects: list[dict]) -> str:
     """Concrete accomplishments the letter is allowed to draw from."""
     lines: list[str] = []
+    from app.services.bullet_facts import answers
+
     for e in experience[:3]:
         role = e.get("role") or e.get("title") or ""
         lines.append(f"EXPERIENCE — {role} at {e.get('company', '')}:")
         lines.extend(f"  - {b}" for b in (e.get("bullets") or [])[:3])
+        lines.extend(f"  - (fact) {a}" for a in answers(e))
     for p in projects[:2]:
         lines.append(f"PROJECT — {p.get('name', '')} ({p.get('description', '')}):")
         lines.extend(f"  - {b}" for b in (p.get("bullets") or [])[:3])
+        lines.extend(f"  - (fact) {a}" for a in answers(p))
     return "\n".join(lines)
 
 
@@ -903,6 +920,14 @@ def _ground_tailored_bullets(original_entries: list[dict], tailored: list[dict])
         (e.get("company") or "", e.get("title") or ""): e.get("bullets") or []
         for e in original_entries
     }
+    # Figures the candidate supplied for an entry (bullet_facts) or approved in
+    # an alternative wording (bullet_bank) are as much theirs as the ones in
+    # its bullets.
+    fact_numbers = {
+        (e.get("company") or "", e.get("title") or ""):
+            _numbers_in(" ".join((e.get("facts") or []) + (e.get("alternates") or [])))
+        for e in original_entries
+    }
     grounded: list[dict] = []
     for entry in tailored if isinstance(tailored, list) else []:
         if not isinstance(entry, dict):
@@ -912,7 +937,7 @@ def _ground_tailored_bullets(original_entries: list[dict], tailored: list[dict])
             logger.warning("tailor_resume_bullets: dropped invented entry %s", key)
             continue
         originals = orig_map[key]
-        allowed_numbers: set[str] = set()
+        allowed_numbers: set[str] = set(fact_numbers.get(key) or ())
         for b in originals:
             allowed_numbers |= _numbers_in(b)
         bullets: list[str] = []
@@ -942,9 +967,15 @@ def tailor_resume_bullets(
     insights: dict | None = None,
     feedback: str | None = None,
 ) -> list[dict]:
+    from app.services.bullet_bank import kept
+    from app.services.bullet_facts import answers
+
     experience = profile_data.get("experience", [])
     exp_json = [
-        {"company": e.get("company"), "title": e.get("title") or e.get("role") or "", "bullets": e.get("bullets", [])}
+        {"company": e.get("company"), "title": e.get("title") or e.get("role") or "",
+         "bullets": e.get("bullets", []),
+         **({"facts": answers(e)} if answers(e) else {}),
+         **({"alternates": kept(e)} if kept(e) else {})}
         for e in experience
     ]
     keywords = (insights or {}).get("keywords") or []
@@ -964,6 +995,11 @@ def tailor_resume_bullets(
                 "- One line each: at most ~30 words. Cut filler, keep specifics.\n"
                 "- Keep the same companies, titles, and bullet count; only reword and "
                 "re-emphasize.\n"
+                "- An entry's \"facts\" are figures and details the candidate supplied "
+                "for it. Use them to quantify that entry's bullets where they fit; they "
+                "are the only numbers you may add. Never move a fact to another entry.\n"
+                "- An entry's \"alternates\" are other wordings of its work the candidate "
+                "approved. You may use one in place of a bullet, or borrow from it.\n"
                 "Return a JSON array with the SAME structure: "
                 '[{"company": str, "title": str, "bullets": [str, ...]}]. '
                 "Return ONLY the JSON array."
@@ -1041,8 +1077,12 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
     # means it can vary per call) so the generated docs record their author.
     start_llm_log()
 
+    from app.services.profile_service import for_documents
+
     profile = db.query(Profile).first()
-    profile_data = profile.data if profile else {}
+    # Entries switched out of resumes on the profile page are gone from here
+    # on: every call below, the resume, the letter and the review read this.
+    profile_data = for_documents(profile.data if profile else {})
     job = application.job
 
     # Each phase is labelled for the LLM log. A generation is six calls with six
@@ -1203,14 +1243,47 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
                 )
                 present, missing = _keyword_coverage(resume_ctx, keywords)
 
-    logger.info(
-        "generate_documents %s: ATS keyword coverage %d/%d — missing: %s",
-        application.id, len(present), len(present) + len(missing), ", ".join(missing) or "none",
-    )
     resume_version = _next_version(db, application.id, DocType.resume)
     resume_filename = f"{application.id}_resume_v{resume_version}.pdf"
     resume_path = _OUTPUT_DIR / str(application.id) / resume_filename
     compiled_resume = compile_resume_one_page(resume_ctx, resume_path)
+
+    # The coverage that counts: read back out of the PDF a parser will get,
+    # after the one-page trim, rather than from the context the trim cut.
+    from app.services import document_content
+
+    from app.services.matcher import alias_index
+
+    ats = document_content.ats_check(compiled_resume, keywords, resume_ctx,
+                                     alias_index(profile_data))
+    logger.info(
+        "generate_documents %s: ATS keyword coverage %d/%d (read from %s) — missing: %s",
+        application.id, len(ats["present"]), len(keywords), ats["read_from"],
+        ", ".join(ats["missing"]) or "none",
+    )
+
+    # What the drafts say that the profile does not — moved skills, figures,
+    # years, a changed employer or date — named on the review panel.
+    from app.services import content_checks
+
+    resume_checks = content_checks.check_resume(resume_ctx, profile_data, keywords, job)
+    letter_checks = content_checks.check_letter(cover_body, profile_data, keywords, job)
+
+    # This resume's rewritten bullets, offered to each entry's bullet bank to
+    # keep or dismiss. The ones a check flagged are not offered.
+    from app.services import bullet_bank
+
+    if profile is not None and isinstance(profile.data, dict):
+        updated = copy.deepcopy(profile.data)
+        if bullet_bank.offer_from_generation(updated, resume_ctx, resume_checks,
+                                             f"{job.title} at {job.company}"):
+            profile.data = updated
+    if resume_checks or letter_checks:
+        logger.info(
+            "generate_documents %s: %d resume and %d letter finding(s) against the profile: %s",
+            application.id, len(resume_checks), len(letter_checks),
+            "; ".join(f["detail"] for f in (resume_checks + letter_checks)[:5]),
+        )
 
     generated_by = ", ".join(collect_llm_log()) or None
 
@@ -1221,12 +1294,16 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_resume),
         generation_feedback=feedback,
         generated_by=generated_by,
+        content=document_content.resume(resume_ctx, ats, profile_data, checks=resume_checks),
     )
     _set_only_current(db, application.id, DocType.resume, resume_doc)
     db.add(resume_doc)
 
     # Cover letter
-    cl_ctx = build_cover_letter_context(profile_data, job.company, job.title, cover_body)
+    from app.services import letter_recipient
+
+    cl_ctx = build_cover_letter_context(profile_data, job.company, job.title, cover_body,
+                                        recipient=letter_recipient.for_application(application))
     cl_tex = render_latex("cover_letter.tex.j2", cl_ctx)
     cl_version = _next_version(db, application.id, DocType.cover_letter)
     cl_filename = f"{application.id}_cover_letter_v{cl_version}.pdf"
@@ -1240,6 +1317,7 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
         path=str(compiled_cl),
         generation_feedback=feedback,
         generated_by=generated_by,
+        content=document_content.cover_letter(cl_ctx, checks=letter_checks, keywords=keywords),
     )
     _set_only_current(db, application.id, DocType.cover_letter, cl_doc)
     db.add(cl_doc)

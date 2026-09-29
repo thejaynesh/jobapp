@@ -1,0 +1,110 @@
+{# Import from a resume, a LinkedIn export or a JSON Resume, reviewed before
+   anything is merged (services/profile_import). Export as a JSON Resume. #}
+<div class="max-w-3xl space-y-6">
+  {% if import_error %}<p class="text-sm text-red-600">{{ import_error }}</p>{% endif %}
+  {% if import_done %}<p class="text-sm text-green-700">Added {{ import_done }}.</p>{% endif %}
+
+  {% if not draft %}
+  <form method="post" action="/profile/import" enctype="multipart/form-data"
+        class="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+    <p class="text-sm font-medium text-gray-700">Import into your profile</p>
+    <ul class="text-xs text-gray-500 list-disc list-inside space-y-0.5">
+      <li><span class="font-medium">A resume</span> (.pdf or .docx): read by the writing model into the profile's sections, bullets and numbers as written.</li>
+      <li><span class="font-medium">LinkedIn's data export</span> (.zip): LinkedIn › Settings › Data privacy › Get a copy of your data. Read without a model.</li>
+      <li><span class="font-medium">A JSON Resume</span> (.json), from jsonresume.org or another tool.</li>
+    </ul>
+    <p class="text-xs text-gray-500">You see everything it found before anything is added, and entries you already have are never overwritten.</p>
+    <div class="flex items-center gap-3">
+      <input type="file" name="file" accept=".pdf,.docx,.zip,.json" required class="text-sm">
+      <button class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Read it</button>
+    </div>
+  </form>
+  {% else %}
+  <form method="post" action="/profile/import/apply" class="bg-white border border-gray-200 rounded-lg p-4 space-y-5">
+    <div class="flex items-baseline justify-between">
+      <p class="text-sm font-medium text-gray-700">From your {{ draft.source }}: tick what to add</p>
+      <button type="button" class="text-xs text-blue-600 underline"
+              onclick="this.form.querySelectorAll('input[name=pick]').forEach(b => b.checked = true)">Tick all</button>
+    </div>
+
+    {% if review.personal %}
+    <div>
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Contact</p>
+      {% for change in review.personal %}
+      <label class="flex items-start gap-2 text-sm mt-1">
+        <input type="checkbox" name="pick" value="personal:{{ change.field }}" {% if not change.current %}checked{% endif %} class="mt-1 rounded border-gray-300">
+        <span><span class="text-gray-500">{{ change.field }}:</span> {{ change.new }}
+          {% if change.current %}<span class="text-xs text-gray-400">(replaces {{ change.current }})</span>{% endif %}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if review.summary %}
+    <div>
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Summary</p>
+      <label class="flex items-start gap-2 text-sm mt-1">
+        <input type="checkbox" name="pick" value="summary" {% if not review.summary.current %}checked{% endif %} class="mt-1 rounded border-gray-300">
+        <span>{{ review.summary.new }}{% if review.summary.current %} <span class="text-xs text-gray-400">(replaces yours)</span>{% endif %}</span>
+      </label>
+    </div>
+    {% endif %}
+
+    {% for section, rows in review.sections.items() if rows %}
+    <div>
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">{{ section }}</p>
+      {% for row in rows %}
+      {% set e = row.entry %}
+      <div class="mt-2 border border-gray-100 rounded p-2">
+        {% if row.new %}
+        <label class="flex items-start gap-2 text-sm">
+          <input type="checkbox" name="pick" value="{{ section }}:{{ row.index }}" checked class="mt-1 rounded border-gray-300">
+          <span class="font-medium">{{ e.role or e.degree or "" }}{% if e.company or e.school %} — {{ e.company or e.school }}{% endif %}{{ e.name or "" }}
+            <span class="font-normal text-xs text-gray-400">{{ e.start_date }}{% if e.end_date %} – {{ e.end_date }}{% endif %} · new</span></span>
+        </label>
+        {% if e.bullets %}<ul class="ml-6 mt-1 list-disc text-xs text-gray-600 space-y-0.5">{% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}</ul>{% endif %}
+        {% else %}
+        <input type="hidden" name="{{ section }}:{{ row.index }}:matches" value="{{ row.matches }}">
+        <label class="flex items-start gap-2 text-sm">
+          <input type="checkbox" name="pick" value="{{ section }}:{{ row.index }}:bullets" class="mt-1 rounded border-gray-300">
+          <span>Add {{ row.bullets | length }} bullet{{ "s" if row.bullets | length != 1 }} to your
+            <span class="font-medium">{{ e.role or e.name or e.degree }}{% if e.company or e.school %} — {{ e.company or e.school }}{% endif %}</span> entry</span>
+        </label>
+        <ul class="ml-6 mt-1 list-disc text-xs text-gray-600 space-y-0.5">{% for b in row.bullets %}<li>{{ b }}</li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+
+    {% if review.skills %}
+    <div>
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Skills you have not listed</p>
+      <div class="mt-1 flex flex-wrap gap-2">
+        {% for skill in review.skills %}
+        <label class="inline-flex items-center gap-1 text-sm px-2 py-0.5 border border-gray-200 rounded">
+          <input type="checkbox" name="pick" value="skill:{{ skill.box }}:{{ skill.name }}" checked class="rounded border-gray-300">
+          {{ skill.name }} <span class="text-[10px] text-gray-400">{{ skill.box }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if not (review.personal or review.summary or review.skills or (review.sections.values() | select | list)) %}
+    <p class="text-sm text-gray-500">Nothing here that your profile does not already have.</p>
+    {% endif %}
+
+    <div class="flex items-center gap-3 pt-2 border-t border-gray-100">
+      <button class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Add what is ticked</button>
+      <button formaction="/profile/import/discard" class="text-sm text-gray-500 underline">Discard this import</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <div class="bg-white border border-gray-200 rounded-lg p-4">
+    <p class="text-sm font-medium text-gray-700">Export</p>
+    <p class="text-xs text-gray-500 mt-1">Your profile as a JSON Resume: readable by other resume tools, and a copy of it you can keep.</p>
+    <a href="/profile/export.json" class="inline-block mt-2 text-sm text-blue-600 underline">Download resume.json</a>
+  </div>
+</div>

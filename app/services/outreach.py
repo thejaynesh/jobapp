@@ -223,14 +223,21 @@ def _evidence_lines(profile_data: dict, limit: int = 3) -> str:
     Same grounding rule as the cover letter: if it isn't in here, the model may
     not claim it.
     """
+    from app.services.bullet_facts import answers
+    from app.services.profile_service import for_documents
+
+    # A message to a recruiter cites only what the resume would.
+    profile_data = for_documents(profile_data)
     lines: list[str] = []
     for exp in (profile_data.get("experience") or [])[:2]:
         role = exp.get("role") or exp.get("title") or ""
         lines.append(f"- {role} at {exp.get('company', '')}")
         lines.extend(f"    * {b}" for b in (exp.get("bullets") or [])[:limit])
+        lines.extend(f"    * (fact) {a}" for a in answers(exp))
     for proj in (profile_data.get("projects") or [])[:2]:
         lines.append(f"- Project {proj.get('name', '')}: {proj.get('description', '')}")
         lines.extend(f"    * {b}" for b in (proj.get("bullets") or [])[:2])
+        lines.extend(f"    * (fact) {a}" for a in answers(proj))
     return "\n".join(lines)
 
 

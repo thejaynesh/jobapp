@@ -199,5 +199,34 @@ def rendered(profile_data: dict) -> dict:
 
 
 def report(profile_data: dict) -> dict:
-    """Both halves, for the panel."""
-    return {"readiness": readiness(profile_data), "rendered": rendered(profile_data)}
+    """
+    Both halves, for the panel — on the profile as generation reads it, so
+    entries switched out of resumes are out of this too, and named, because a
+    resume thinner than the profile is otherwise a mystery.
+    """
+    from app.services.profile_service import DOCUMENT_SECTIONS, for_documents, in_documents
+
+    shown = for_documents(profile_data)
+    left_out = [
+        _entry_label(item)
+        for section in DOCUMENT_SECTIONS
+        for item in ((profile_data or {}).get(section) or [])
+        if not in_documents(item)
+    ]
+    result = {"readiness": readiness(shown), "rendered": rendered(shown)}
+    if left_out:
+        result["readiness"]["warnings"].insert(
+            0, f"Switched out of resumes for now: {', '.join(left_out)}.")
+    result["left_out"] = left_out
+    from app.services.bullet_facts import count_unanswered
+
+    # A bullet with no figure gets none on any resume: the generator may not
+    # invent one, so the number has to come from here.
+    unquantified = count_unanswered(profile_data or {})
+    if unquantified:
+        result["readiness"]["warnings"].append(
+            f"{unquantified} bullet{'s have' if unquantified != 1 else ' has'} no number. "
+            "The Experience and Projects tabs ask for each one; an answer is kept as a "
+            "fact resumes and letters can use.")
+    result["unquantified"] = unquantified
+    return result

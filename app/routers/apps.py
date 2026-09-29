@@ -1,9 +1,11 @@
+import html
 import os
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
@@ -65,7 +67,36 @@ def get_apps(
             "status_filter": status,
             "q": q,
             "sort": sort,
+            "rates": _rates(db),
         },
+    )
+
+
+def _rates(db: Session) -> dict | None:
+    from app.services import tracker
+
+    try:
+        return tracker.response_rates(db)
+    except Exception as exc:
+        logger.warning("apps: response rates unavailable: %s", exc)
+        return None
+
+
+def _profile_data(db: Session) -> dict:
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    return profile.data if profile is not None and isinstance(profile.data, dict) else {}
+
+
+@router.get("/board", response_class=HTMLResponse)
+def get_board(request: Request, db: Session = Depends(get_db)):
+    """Applications in a column per status, each with what is next and when."""
+    from app.services import tracker
+
+    return templates.TemplateResponse(
+        "apps/board.html",
+        {"request": request, "columns": tracker.board(db), "today": datetime.now(timezone.utc).date()},
     )
 
 
@@ -96,6 +127,7 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
         reverse=True,
     )
     from app.routers.outreach import panel_context
+    from app.services import document_edit, letter_recipient
 
     return templates.TemplateResponse(
         "apps/detail.html",
@@ -103,6 +135,24 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
             "request": request,
             "resumes": resumes,
             "cover_letters": cover_letters,
+            # What the current resume says, with the job's changes marked, for
+            # the keyword check and the review-and-edit panel.
+            "resume_review": document_edit.review(resumes[0].content) if resumes else None,
+            "letter_body": (((cover_letters[0].content or {}).get("context") or {})
+                            .get("cover_letter_body") if cover_letters else None),
+            "letter_checks": ((cover_letters[0].content or {}).get("checks") or []
+                              if cover_letters else []),
+            # Who the current letter is addressed to, and who else it could be.
+            "letter_recipient": ((((cover_letters[0].content or {}).get("context") or {})
+                                  .get("recipient")) if cover_letters else None),
+            "recipient_choices": [
+                letter_recipient.recipient(c)
+                for c in letter_recipient.candidates(app_obj.contacts)
+            ],
+            "stories_for_job": _stories_for(db, app_obj.job),
+            "next_action_overdue": (
+                isinstance(app_obj.next_action_due, date)
+                and app_obj.next_action_due < datetime.now(timezone.utc).date()),
             # The page embeds the outreach panel partial, so it needs the same
             # context that /outreach/apps/{id}/panel builds.
             **panel_context(db, app_obj),
@@ -218,11 +268,17 @@ def update_app_status(
     app_obj = db.query(Application).filter(Application.id == app_id).first()
     if not app_obj:
         raise HTTPException(status_code=404, detail="Application not found")
+    from app.services import tracker
+
     try:
-        app_obj.status = ApplicationStatus(status)
+        new_status = ApplicationStatus(status)
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid status: {status}")
+    # The time, what was sent, and the next action move with the status.
+    tracker.set_status(db, app_obj, new_status, profile_data=_profile_data(db))
     db.commit()
+    if fragment == "board":
+        return HTMLResponse("", headers={"HX-Refresh": "true"})
     # The detail page swaps only a small confirmation badge; the apps list
     # swaps the whole card.
     if fragment == "badge":
@@ -234,6 +290,37 @@ def update_app_status(
         "apps/partials/app_card.html",
         {"request": request, "app": app_obj},
     )
+
+
+@router.post("/{app_id}/next-action", response_class=HTMLResponse)
+def save_next_action(app_id: uuid.UUID, next_action: str = Form(""), due: str = Form(""),
+                     db: Session = Depends(get_db)):
+    """Your own next step and its date, in place of the default."""
+    from datetime import date as date_type
+
+    from app.services import tracker
+
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    if not app_obj:
+        raise HTTPException(status_code=404, detail="Application not found")
+    try:
+        due_date = date_type.fromisoformat(due) if due else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Due date must be YYYY-MM-DD")
+    tracker.set_next_action(app_obj, next_action, due_date)
+    db.commit()
+    return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
+
+
+@router.post("/{app_id}/sent-letter", response_class=HTMLResponse)
+def save_sent_letter(app_id: uuid.UUID, sent: str = Form(""), db: Session = Depends(get_db)):
+    """Whether a cover letter actually went with this application."""
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    if not app_obj:
+        raise HTTPException(status_code=404, detail="Application not found")
+    app_obj.sent_cover_letter = sent == "1"
+    db.commit()
+    return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
 
 
 @router.post("/{app_id}/notes", response_class=HTMLResponse)
@@ -248,6 +335,82 @@ def save_notes(
     app_obj.notes = notes
     db.commit()
     return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
+
+
+def _stories_for(db: Session, job) -> list[dict]:
+    """The story bank's best fits for this posting, for interview preparation."""
+    from app.models.profile import Profile
+    from app.services import stories
+    from app.services.profile_service import for_documents
+
+    profile = db.query(Profile).first()
+    if profile is None or job is None:
+        return []
+    text = " ".join(str(x) for x in (
+        job.title, job.description, " ".join(job.required_skills or []),
+        " ".join(job.nice_to_have_skills or [])) if x)
+    return stories.relevant(for_documents(profile.data or {}), text)
+
+
+def _document(db: Session, app_id: uuid.UUID, doc_id: uuid.UUID):
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    doc = db.query(ApplicationDocument).filter(
+        ApplicationDocument.id == doc_id,
+        ApplicationDocument.application_id == app_id,
+    ).first()
+    if app_obj is None or doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return app_obj, doc
+
+
+def _edited(app_obj, save) -> HTMLResponse:
+    """Run an edit; reload the page on success, say what went wrong otherwise."""
+    from app.services.doc_generator import DocGenerationError
+    from app.services.document_edit import NotEditable
+
+    try:
+        save()
+    except NotEditable as exc:
+        return HTMLResponse(f'<span class="text-amber-700">{html.escape(str(exc))}</span>')
+    except DocGenerationError as exc:
+        return HTMLResponse('<span class="text-red-600">The PDF would not compile: '
+                            f"{html.escape(str(exc)[:300])}</span>")
+    return HTMLResponse("", headers={"HX-Redirect": f"/apps/{app_obj.id}"})
+
+
+@router.post("/{app_id}/docs/{doc_id}/edit-resume", response_class=HTMLResponse)
+async def edit_resume(app_id: uuid.UUID, doc_id: uuid.UUID, request: Request,
+                      db: Session = Depends(get_db)):
+    """Save the review panel's summary, bullets and skills as the next resume version."""
+    from app.services import document_edit
+
+    app_obj, doc = _document(db, app_id, doc_id)
+    form = dict(await request.form())
+    return await run_in_threadpool(
+        _edited, app_obj, lambda: document_edit.save_resume(db, app_obj, doc, form))
+
+
+@router.post("/{app_id}/docs/{doc_id}/edit-letter", response_class=HTMLResponse)
+def edit_letter(app_id: uuid.UUID, doc_id: uuid.UUID, body: str = Form(""),
+                recipient: str = Form("keep"), db: Session = Depends(get_db)):
+    """
+    Save an edited letter body, and who it is addressed to, as the next cover
+    letter version. `recipient` is one of the application's contacts by id,
+    "none" for "Dear Hiring Manager", or "keep".
+    """
+    from app.services import document_edit, letter_recipient
+
+    app_obj, doc = _document(db, app_id, doc_id)
+    extra = {}
+    if recipient == "none":
+        extra["recipient"] = None
+    elif recipient != "keep":
+        chosen = next((c for c in letter_recipient.candidates(app_obj.contacts)
+                       if str(c.id) == recipient), None)
+        if chosen is None:
+            raise HTTPException(status_code=404, detail="No such contact on this application")
+        extra["recipient"] = letter_recipient.recipient(chosen)
+    return _edited(app_obj, lambda: document_edit.save_letter(db, app_obj, doc, body, **extra))
 
 
 @router.post("/{app_id}/regenerate", response_class=HTMLResponse)

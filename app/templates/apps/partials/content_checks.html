@@ -1,0 +1,14 @@
+{# Findings from services/content_checks: what this version says that the
+   profile does not. `checks` is the list; `noun` names the document. #}
+{% if checks %}
+<div class="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2">
+  <p class="text-sm font-medium text-amber-900">
+    {{ checks | length }} thing{{ "s" if checks | length != 1 }} in this {{ noun }} your profile does not say — check before sending
+  </p>
+  <ul class="mt-1 space-y-1 text-xs text-amber-900">
+    {% for finding in checks %}
+    <li>{{ finding.detail }}{% if finding.text %} <span class="text-amber-700">— “{{ finding.text | truncate(160) }}”</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}

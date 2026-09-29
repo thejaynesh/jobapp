@@ -38,8 +38,40 @@
 </p>
 {% endif %}
 
-{% set has_active_filters = status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter %}
-{% set has_advanced_filters = source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter %}
+{# Saved views: the list's own query strings, named, with how many jobs each
+   holds now. The starred one is what /jobs opens on. #}
+<div class="flex flex-wrap items-center gap-2 mb-3" id="saved-views">
+  <a href="/jobs?view=none"
+     class="text-xs px-2.5 py-1 rounded-full border {% if not current_query %}border-blue-400 bg-blue-50 text-blue-700{% else %}border-gray-200 bg-white text-gray-600 hover:border-blue-300{% endif %}">All jobs</a>
+  {% for v in views %}
+  <span class="inline-flex items-center gap-1 text-xs pl-2.5 pr-1 py-1 rounded-full border {% if v.active %}border-blue-400 bg-blue-50 text-blue-700{% else %}border-gray-200 bg-white text-gray-600{% endif %}">
+    <a href="/jobs?{{ v.query }}&view={{ v.id }}" class="hover:underline">{% if v.default %}&#9733; {% endif %}{{ v.name }}</a>
+    {% if v.count is not none %}<span class="font-semibold">{{ "{:,}".format(v.count) }}</span>{% endif %}
+    <details class="relative">
+      <summary class="list-none cursor-pointer px-1 text-gray-400 hover:text-gray-700" aria-label="View options">&#8942;</summary>
+      <div class="absolute left-0 z-10 mt-1 w-44 bg-white border border-gray-200 rounded shadow-lg p-1">
+        <form method="post" action="/jobs/views/{{ v.id }}/default">
+          <button class="block w-full text-left px-2 py-1 rounded hover:bg-gray-100">{% if v.default %}Stop opening on this{% else %}Open /jobs on this{% endif %}</button>
+        </form>
+        <form method="post" action="/jobs/views/{{ v.id }}/delete">
+          <button class="block w-full text-left px-2 py-1 rounded text-red-600 hover:bg-red-50">Delete view</button>
+        </form>
+      </div>
+    </details>
+  </span>
+  {% endfor %}
+  {% if current_query and not (views | selectattr("active") | list) %}
+  <form method="post" action="/jobs/views" class="inline-flex items-center gap-1">
+    <input type="hidden" name="query" value="{{ current_query }}">
+    <input type="text" name="name" required maxlength="60" placeholder="Name this view"
+           class="text-xs border border-gray-300 rounded px-2 py-1 w-36">
+    <button class="text-xs text-blue-600 hover:underline">Save</button>
+  </form>
+  {% endif %}
+</div>
+
+{% set has_active_filters = status_filter or q or source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter or sponsor_filter or h1b_filter or open_only_filter or employment_type_filter or max_years_filter or applied_filter or company_filter %}
+{% set has_advanced_filters = source_filter or region_filter or location_filter or remote_filter or min_score_filter or min_salary_filter or exp_level_filter or filter_reason_filter or dated_filter or sponsor_filter or h1b_filter or open_only_filter or employment_type_filter or max_years_filter or applied_filter or company_filter %}
 <form method="get" action="/jobs" class="bg-white border border-gray-200 rounded-lg shadow-sm mb-6">
   <input type="hidden" name="page" value="0">
   {# Carried through the filter form, or changing any other filter would
@@ -48,8 +80,12 @@
 
   <div class="px-4 pt-4 pb-3">
     <div class="flex flex-wrap gap-2 items-center">
-      <input type="text" name="q" value="{{ q }}" placeholder="Search title or company..."
+      <input type="text" name="q" value="{{ q }}" placeholder="Search title or company... ( / )" id="job-search"
         class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-[200px] focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <label class="flex items-center gap-1 text-xs text-gray-500 whitespace-nowrap" title="Also look in each posting's text and its listed skills (slower)">
+        <input type="checkbox" name="q_in" value="all" {% if q_in == "all" %}checked{% endif %} class="rounded border-gray-300">
+        in descriptions
+      </label>
 
       <select name="status" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
         <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
@@ -60,8 +96,14 @@
       </select>
 
       <select name="sort" class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        {% if for_you_available %}
+        <option value="for_you" {% if sort == "for_you" %}selected{% endif %}>For you (learned from your decisions)</option>
+        {% endif %}
         <option value="score_desc" {% if sort == "score_desc" %}selected{% endif %}>Score: high &rarr; low</option>
+        <option value="fresh_desc" {% if sort == "fresh_desc" %}selected{% endif %}>Score, less a point a day of age</option>
         <option value="score_asc" {% if sort == "score_asc" %}selected{% endif %}>Score: low &rarr; high</option>
+        <option value="salary_desc" {% if sort == "salary_desc" %}selected{% endif %}>Pay: high &rarr; low</option>
+        <option value="missing_asc" {% if sort == "missing_asc" %}selected{% endif %}>Fewest missing skills</option>
         <option value="posted_desc" {% if sort == "posted_desc" %}selected{% endif %}>Newest posted</option>
         <option value="posted_asc" {% if sort == "posted_asc" %}selected{% endif %}>Oldest posted</option>
         <option value="company_asc" {% if sort == "company_asc" %}selected{% endif %}>Company A &rarr; Z</option>
@@ -99,7 +141,17 @@
       {% if exp_level_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ exp_level_filter }}</span>{% endif %}
       {% if filter_reason_filter %}<span class="text-xs px-2 py-0.5 rounded bg-amber-50 text-amber-700">{{ filter_reason_labels.get(filter_reason_filter, filter_reason_filter) }}</span>{% endif %}
       {% if dated_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{% if dated_filter == "1" %}has date{% else %}no date{% endif %}</span>{% endif %}
+      {% if company_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">company: {{ company_filter }}</span>{% endif %}
+      {% if sponsor_filter == "not_no" %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">sponsorship not refused</span>{% elif sponsor_filter == "yes" %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">says it sponsors</span>{% endif %}
+      {% if h1b_filter == "1" %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">has H-1B filings</span>{% endif %}
+      {% if open_only_filter == "1" %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">still open</span>{% endif %}
+      {% if employment_type_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">{{ employment_type_filter | replace("_", "-") }}</span>{% endif %}
+      {% if max_years_filter %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">asks &le; {{ max_years_filter }} years</span>{% endif %}
+      {% if applied_filter == "yes" %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">applied</span>{% elif applied_filter == "no" %}<span class="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-700">not applied</span>{% endif %}
     </div>
+    {% endif %}
+    {% if notes.h1b_unavailable %}
+    <p class="mt-2 text-xs text-amber-700">No H-1B filings are loaded (or the feature is off on the settings page), so that filter was not applied.</p>
     {% endif %}
   </div>
 
@@ -184,6 +236,49 @@
         &#9733; Favourites{% if favourite_count %} ({{ favourite_count }}){% endif %}
       </label>
     </div>
+
+    <div class="flex flex-wrap gap-2 items-center">
+      <input type="text" name="company" value="{{ company_filter }}" placeholder="Company..."
+        class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 min-w-[9rem] focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+      <select name="sponsor" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="What the posting says about sponsoring a visa">
+        <option value="" {% if not sponsor_filter %}selected{% endif %}>Any sponsorship wording</option>
+        <option value="not_no" {% if sponsor_filter == "not_no" %}selected{% endif %}>Doesn't refuse sponsorship</option>
+        <option value="yes" {% if sponsor_filter == "yes" %}selected{% endif %}>Says it sponsors</option>
+      </select>
+
+      <select name="employment_type" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not employment_type_filter %}selected{% endif %}>Any employment type</option>
+        {% for t in employment_types %}
+        <option value="{{ t }}" {% if employment_type_filter == t %}selected{% endif %}>{{ t | replace("_", "-") | title }}</option>
+        {% endfor %}
+      </select>
+
+      <select name="max_years" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="Postings that state no years are kept">
+        <option value="" {% if not max_years_filter %}selected{% endif %}>Any years asked</option>
+        {% for n in ["0", "1", "2", "3", "5", "8"] %}
+        <option value="{{ n }}" {% if max_years_filter == n %}selected{% endif %}>Asks &le; {{ n }} years</option>
+        {% endfor %}
+      </select>
+
+      <select name="applied" class="border border-gray-300 rounded px-3 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="" {% if not applied_filter %}selected{% endif %}>Applied or not</option>
+        <option value="no" {% if applied_filter == "no" %}selected{% endif %}>Not applied yet</option>
+        <option value="yes" {% if applied_filter == "yes" %}selected{% endif %}>Applied</option>
+      </select>
+
+      <label class="flex items-center gap-1.5 text-sm text-gray-600 whitespace-nowrap" title="Employers with certified H-1B filings in the loaded quarters">
+        <input type="checkbox" name="h1b" value="1" {% if h1b_filter == "1" %}checked{% endif %} class="rounded border-gray-300">
+        Files H-1Bs
+      </label>
+
+      <label class="flex items-center gap-1.5 text-sm text-gray-600 whitespace-nowrap" title="Hide postings a check found closed">
+        <input type="checkbox" name="open_only" value="1" {% if open_only_filter == "1" %}checked{% endif %} class="rounded border-gray-300">
+        Hide closed
+      </label>
+    </div>
   </div>
 </form>
 
@@ -221,10 +316,10 @@
 </div>
 
 {% if has_prev or has_next %}
-{% set qs = "status=" ~ status_filter ~ "&q=" ~ (q | urlencode) ~ "&source=" ~ source_filter ~ "&region=" ~ region_filter ~ "&location=" ~ (location_filter | urlencode) ~ "&remote=" ~ remote_filter ~ "&min_score=" ~ min_score_filter ~ "&min_salary=" ~ min_salary_filter ~ "&exp_level=" ~ exp_level_filter ~ "&filter_reason=" ~ filter_reason_filter ~ "&dated=" ~ dated_filter ~ "&favourite=" ~ favourite_filter ~ "&sort=" ~ sort %}
+{# Every parameter carried as it is, the view and age window included. #}
 <div class="flex justify-between items-center mt-6">
   {% if has_prev %}
-  <a href="/jobs?page={{ page - 1 }}&{{ qs }}"
+  <a href="{{ request.url.include_query_params(page=page - 1) }}"
      class="px-4 py-2 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50">
     &larr; Prev
   </a>
@@ -233,7 +328,7 @@
   {% endif %}
   <span class="text-sm text-gray-500">Page {{ page + 1 }} of {{ [1, ((total - 1) // page_size + 1)] | max }}</span>
   {% if has_next %}
-  <a href="/jobs?page={{ page + 1 }}&{{ qs }}"
+  <a href="{{ request.url.include_query_params(page=page + 1) }}"
      class="px-4 py-2 border border-gray-300 rounded text-sm text-gray-700 hover:bg-gray-50">
     Next &rarr;
   </a>
@@ -242,4 +337,111 @@
   {% endif %}
 </div>
 {% endif %}
+
+{# One action on every ticked job. The ids are copied into the form as they
+   are ticked; the reply reloads the list. #}
+<div id="bulk-bar" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-20 bg-white border border-gray-300 rounded-lg shadow-lg px-4 py-2 text-sm">
+  <form id="bulk-form" hx-post="/jobs/bulk" hx-target="#bulk-status" class="flex flex-wrap items-center gap-2">
+    <span><span id="bulk-count" class="font-semibold">0</span> selected</span>
+    <span id="bulk-ids"></span>
+    <button name="action" value="star" class="px-2 py-1 rounded border border-gray-200 hover:bg-amber-50">&#9733; Star</button>
+    <button name="action" value="generate" class="px-2 py-1 rounded border border-gray-200 hover:bg-blue-50" title="Write documents for the matched ones that have none">Write documents</button>
+    <select name="reason" class="border border-gray-200 rounded px-1 py-1 text-xs" aria-label="Why hide them">
+      <option value="">no reason</option>
+      {% for key, label in dismiss_reasons %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+    </select>
+    <button name="action" value="hide" class="px-2 py-1 rounded border border-gray-200 hover:bg-red-50">Hide</button>
+    <button name="action" value="restore" class="px-2 py-1 rounded border border-gray-200 hover:bg-gray-50" title="Put back jobs you hid">Put back</button>
+    <button type="button" id="bulk-clear" class="text-xs text-gray-500 underline">Clear</button>
+    <span id="bulk-status" class="text-xs text-gray-500"></span>
+  </form>
+</div>
+
+<div id="key-help" class="hidden fixed bottom-4 right-4 z-20 bg-white border border-gray-300 rounded-lg shadow-lg p-3 text-xs text-gray-700">
+  <p class="font-semibold mb-1">Keys on this list</p>
+  <table>
+    {% for key, what in [("j / k", "next / previous job"), ("x", "select it"), ("s", "star it"),
+                          ("h", "hide it"), ("o", "open it"), ("g", "write its documents"),
+                          ("/", "search"), ("?", "this help")] %}
+    <tr><td class="pr-3 font-mono">{{ key }}</td><td>{{ what }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+<p class="mt-4 text-xs text-gray-400">Press <span class="font-mono">?</span> for keyboard shortcuts.</p>
+
+<script>
+(function () {
+  const list = document.getElementById("job-list");
+  if (!list) return;
+  const bar = document.getElementById("bulk-bar");
+  const ids = document.getElementById("bulk-ids");
+  const count = document.getElementById("bulk-count");
+  const cards = () => Array.from(list.querySelectorAll(':scope > div[id^="job-"]'));
+  const FOCUS = ["ring-2", "ring-blue-400"];
+  let current = -1;
+
+  function refreshBar() {
+    const picked = Array.from(list.querySelectorAll("input.job-select:checked")).map(c => c.value);
+    ids.replaceChildren(...picked.map(id => Object.assign(document.createElement("input"),
+      { type: "hidden", name: "job_ids", value: id })));
+    count.textContent = picked.length;
+    bar.classList.toggle("hidden", picked.length === 0);
+  }
+
+  function focusCard(i) {
+    const all = cards();
+    if (!all.length) return;
+    current = Math.max(0, Math.min(all.length - 1, i));
+    all.forEach(c => c.classList.remove(...FOCUS));
+    all[current].classList.add(...FOCUS);
+    all[current].scrollIntoView({ block: "nearest" });
+  }
+
+  function press(selector) {
+    const card = cards()[current];
+    const el = card && card.querySelector(selector);
+    if (el) el.click();
+  }
+
+  list.addEventListener("change", e => { if (e.target.matches("input.job-select")) refreshBar(); });
+  document.getElementById("bulk-clear").addEventListener("click", () => {
+    list.querySelectorAll("input.job-select:checked").forEach(c => { c.checked = false; });
+    refreshBar();
+  });
+  // A card replaced by its own action comes back unticked and unfocused.
+  document.body.addEventListener("htmx:afterSwap", () => {
+    refreshBar();
+    if (current >= 0) focusCard(current);
+  });
+
+  document.addEventListener("keydown", e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.closest("input, textarea, select, [contenteditable]")) {
+      if (e.key === "Escape") e.target.blur();
+      return;
+    }
+    const card = cards()[current];
+    switch (e.key) {
+      case "j": focusCard(current + 1); break;
+      case "k": focusCard(current - 1); break;
+      case "x": {
+        const box = card && card.querySelector("input.job-select");
+        if (box) { box.checked = !box.checked; refreshBar(); }
+        break;
+      }
+      case "s": press('button[hx-post$="/favourite"]'); break;
+      case "h": press('button[hx-post$="/not-interested"]'); break;
+      case "g": press('[hx-post$="/generate-docs"]'); break;
+      case "o": {
+        const link = card && card.querySelector('a[href$="/application"]');
+        if (link) window.location = link.href;
+        break;
+      }
+      case "/": e.preventDefault(); document.getElementById("job-search").focus(); break;
+      case "?": document.getElementById("key-help").classList.toggle("hidden"); break;
+      default: return;
+    }
+  });
+})();
+</script>
 {% endblock %}

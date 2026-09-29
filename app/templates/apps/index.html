@@ -2,7 +2,8 @@
 {% block title %}Applications — JobApp{% endblock %}
 {% block content %}
 <div class="flex flex-wrap justify-between items-baseline gap-2 mb-4">
-  <h1 class="text-2xl font-bold text-gray-800">Applications</h1>
+  <h1 class="text-2xl font-bold text-gray-800">Applications
+    <a href="/apps/board" class="ml-2 text-sm font-normal text-blue-600 underline">Board view</a></h1>
   <div class="flex items-center gap-3">
     {% if apps %}
     <div class="flex gap-2 text-xs">
@@ -25,6 +26,31 @@
     {% endif %}
   </div>
 </div>
+
+{# What went out against what came back (services/tracker.response_rates). #}
+{% if rates and rates.total %}
+<details class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-6">
+  <summary class="cursor-pointer text-sm font-medium text-gray-700">What gets replies <span class="text-xs font-normal text-gray-400">({{ rates.total }} application{{ "s" if rates.total != 1 }} sent)</span></summary>
+  <p class="mt-2 text-xs text-gray-500">Heard back is an interview, an offer or a rejection. A group under {{ rates.min_for_rate }} applications shows counts, not a rate.</p>
+  <div class="mt-3 grid gap-4 sm:grid-cols-2">
+    {% for question, rows in rates.groups.items() %}
+    <table class="text-sm w-full">
+      <thead><tr class="text-left text-xs text-gray-500"><th class="py-1">{{ question }}</th><th>Sent</th><th>Heard back</th><th>Interviews</th></tr></thead>
+      <tbody>
+      {% for row in rows %}
+      <tr class="border-t border-gray-100">
+        <td class="py-1 pr-2">{{ row.answer }}</td>
+        <td>{{ row.sent }}</td>
+        <td>{{ row.heard }}{% if row.heard_rate is not none %} <span class="text-gray-400">({{ (row.heard_rate * 100) | round | int }}%)</span>{% endif %}</td>
+        <td>{{ row.interviews }}{% if row.interview_rate is not none %} <span class="text-gray-400">({{ (row.interview_rate * 100) | round | int }}%)</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
 
 <form method="get" action="/apps" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-6">
   <div class="flex flex-wrap gap-2 items-center">

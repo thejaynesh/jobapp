@@ -426,7 +426,11 @@ def _autofill_fields(db: Session) -> dict:
     name = (personal.get("name") or "").strip()
     first, _, last = name.partition(" ")
 
-    education = (data.get("education") or [])
+    # The first degree still in resumes: one switched out on the profile page
+    # is not typed into an employer's form either.
+    from app.services.profile_service import for_documents
+
+    education = for_documents(data).get("education") or []
     latest = education[0] if education else {}
 
     from app.services import remembered_answers, screening
@@ -625,8 +629,14 @@ def _mark_applied(db: Session, url: str) -> dict:
             "detail": f"Already marked {application.status.value.replace('_', ' ')}.",
         }
 
-    application.status = ApplicationStatus.applied
-    application.applied_at = datetime.now(timezone.utc)
+    from app.models.profile import Profile
+    from app.services import tracker
+
+    profile = db.query(Profile).first()
+    # The same move as the application page's: what was sent is recorded,
+    # and a follow-up is due.
+    tracker.set_status(db, application, ApplicationStatus.applied,
+                       profile_data=profile.data if profile else None)
     db.commit()
     logger.info("agent: marked application %s applied from the overlay",
                 application.id)

@@ -48,6 +48,7 @@
       hx-target="#status-badge"
       hx-swap="outerHTML"
       hx-include="this"
+      hx-on::after-request="if (event.detail.successful) window.location.reload()"
       name="status"
       class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
       {% for s in ['not_applied', 'applied', 'interviewing', 'offered', 'rejected', 'withdrawn'] %}
@@ -79,6 +80,30 @@
   </div>
 </div>
 
+{# What happens next, defaulted on each status change and yours to edit; and,
+   once sent, whether a letter went with it (services/tracker). #}
+<div class="flex flex-wrap items-center gap-3 -mt-2 mb-6 text-sm">
+  <form hx-post="/apps/{{ app.id }}/next-action" hx-target="#next-action-status" class="flex flex-wrap items-center gap-2">
+    <label class="text-xs text-gray-500" for="next-action">Next</label>
+    <input id="next-action" type="text" name="next_action" value="{{ app.next_action or '' }}" placeholder="What happens next"
+           class="border border-gray-300 rounded px-2 py-1 text-sm w-72">
+    <input type="date" name="due" value="{{ app.next_action_due.isoformat() if app.next_action_due else '' }}"
+           class="border border-gray-300 rounded px-2 py-1 text-sm {% if next_action_overdue %}border-red-400 text-red-600{% endif %}">
+    <button class="text-xs text-blue-600 underline">Save</button>
+    <span id="next-action-status"></span>
+  </form>
+  <a href="/apps/board" class="text-xs text-gray-500 underline">Board</a>
+  {% if app.status.value != 'not_applied' %}
+  <form hx-post="/apps/{{ app.id }}/sent-letter" hx-target="#sent-letter-status" hx-trigger="change" class="flex items-center gap-1">
+    <label class="flex items-center gap-1 text-xs text-gray-600">
+      <input type="checkbox" name="sent" value="1" {% if app.sent_cover_letter %}checked{% endif %} class="rounded border-gray-300">
+      A cover letter went with it
+    </label>
+    <span id="sent-letter-status"></span>
+  </form>
+  {% endif %}
+</div>
+
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
   <!-- Left column: documents + regenerate -->
@@ -100,6 +125,11 @@
                 title="AI model(s) that generated this document">{{ current_resume.generated_by }}</span>
           {% endif %}
         </div>
+        {% if resume_review %}
+          {% include "apps/partials/resume_review.html" %}
+        {% else %}
+          <p class="text-xs text-gray-400">Written before documents could be edited here — regenerate once to review and edit it.</p>
+        {% endif %}
         {% if resumes | length > 1 %}
         <details class="mt-2">
           <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">
@@ -171,6 +201,39 @@
                 title="AI model(s) that generated this document">{{ current_cl.generated_by }}</span>
           {% endif %}
         </div>
+        {% if letter_body is not none %}
+        <p class="mt-2 text-xs text-gray-500">Addressed to
+          <span class="font-medium text-gray-700">{{ letter_recipient.name if letter_recipient else "Hiring Manager" }}</span>{% if letter_recipient and letter_recipient.title %}, {{ letter_recipient.title }}{% endif %}.
+          {% if not letter_recipient and recipient_choices %}<span class="text-blue-700">You have {{ recipient_choices | length }} contact{{ "s" if recipient_choices | length != 1 }} it could go to: choose under Review and edit.</span>{% endif %}
+        </p>
+        {% endif %}
+        {% with checks = letter_checks, noun = "letter" %}{% include "apps/partials/content_checks.html" %}{% endwith %}
+        {% if letter_body is not none %}
+        <details class="mt-3 border border-gray-200 rounded">
+          <summary class="px-3 py-2 text-sm font-medium text-gray-700 cursor-pointer">Review and edit this letter</summary>
+          <form hx-post="/apps/{{ app.id }}/docs/{{ current_cl.id }}/edit-letter"
+                hx-target="#letter-edit-status" hx-swap="innerHTML" class="px-3 pb-3 space-y-2">
+            {% set current_to = (letter_recipient or {}).get("contact_id") %}
+            <label class="block text-xs font-medium text-gray-600">To
+              <select name="recipient" class="ml-2 border border-gray-300 rounded px-2 py-1 text-sm">
+                <option value="none" {% if not letter_recipient %}selected{% endif %}>Hiring Manager (no name)</option>
+                {% if letter_recipient and not (recipient_choices | selectattr("contact_id", "equalto", current_to) | list) %}
+                <option value="keep" selected>{{ letter_recipient.name }}</option>
+                {% endif %}
+                {% for choice in recipient_choices %}
+                <option value="{{ choice.contact_id }}" {% if choice.contact_id == current_to %}selected{% endif %}>{{ choice.name }}{% if choice.title %} — {{ choice.title }}{% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            {% if not recipient_choices %}<p class="text-xs text-gray-400">A hiring manager or recruiter with a full name, found or added under Outreach, can be chosen here.</p>{% endif %}
+            <textarea name="body" rows="12" class="w-full border border-gray-300 rounded px-2 py-1 text-sm">{{ letter_body }}</textarea>
+            <div class="flex items-center gap-3">
+              <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Save as a new version</button>
+              <span id="letter-edit-status" class="text-xs"></span>
+            </div>
+          </form>
+        </details>
+        {% endif %}
         {% if cover_letters | length > 1 %}
         <details class="mt-2">
           <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">
@@ -357,6 +420,30 @@
     {% include "outreach/partials/panel.html" %}
 
     {% include "apps/partials/interview_panel.html" %}
+
+    {# Interview preparation from the story bank: the stories that share the
+       most with this posting's words and skills. #}
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-1">Stories to have ready</h2>
+      {% if stories_for_job %}
+      <p class="text-[11px] text-gray-400 mb-3">From your story bank, the ones that fit this posting best.</p>
+      <div class="space-y-3">
+        {% for story in stories_for_job %}
+        <details class="text-sm">
+          <summary class="cursor-pointer font-medium text-gray-700">{{ story.title or "Untitled story" }}
+            {% if story.skills %}<span class="text-xs font-normal text-gray-400">· {{ story.skills | join(", ") }}</span>{% endif %}</summary>
+          <dl class="mt-1 space-y-1 text-xs text-gray-600">
+            {% for part in ["situation", "task", "action", "result"] if story[part] %}
+            <div><dt class="inline font-semibold">{{ part | title }}:</dt> <dd class="inline">{{ story[part] }}</dd></div>
+            {% endfor %}
+          </dl>
+        </details>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-xs text-gray-500">None of your stories fits this posting yet. <a href="/profile?tab=stories" class="text-blue-600 underline">Write one</a> in STAR form; drafted answers use them too.</p>
+      {% endif %}
+    </div>
 
     {% if legacy_contacts %}
     <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">

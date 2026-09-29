@@ -232,7 +232,65 @@ def update_list_item(db: Session, section: str, item_id: str, data: dict) -> Pro
     updated = copy.deepcopy(profile.data)
     for i, item in enumerate(updated[section]):
         if item.get("id") == item_id:
-            updated[section][i] = {"id": item_id, **data}
+            # The edit form carries only the fields it shows, so what it does
+            # not show is kept: the "In resumes" switch (an edit must not
+            # quietly put a left-out entry back into every resume), the facts
+            # answered for its bullets, anything an import brought in.
+            updated[section][i] = {**item, **data, "id": item_id}
+            break
+    profile.data = updated
+    db.flush()
+    return profile
+
+
+# ---------------------------------------------------------------------------
+# Entries left out of what employers read
+# ---------------------------------------------------------------------------
+#
+# An experience, project or degree switched off on the profile page stays in
+# the profile — nothing is lost, and switching it back on restores it — but is
+# left out of everything written for an employer: the resume, the cover
+# letter, drafted answers, outreach messages and the education autofill types
+# into forms. Matching still sees it: it is still true, and whether a job fits
+# does not depend on what this resume shows.
+
+# The profile keys that are the candidate's own content, as opposed to what
+# the app keeps there (settings, saved views, drafts, a trained ranking). Checks
+# of what a document may claim read these and nothing else.
+CONTENT_KEYS = ("personal", "narrative", "skills", "experience", "projects", "education",
+                "stories", "target_roles")
+
+IN_DOCUMENTS = "in_resume"
+DOCUMENT_SECTIONS = ("experience", "projects", "education")
+
+
+def in_documents(item) -> bool:
+    """Whether a profile entry goes into employer-facing writing. Absent means yes."""
+    return not (isinstance(item, dict) and item.get(IN_DOCUMENTS) is False)
+
+
+def for_documents(profile_data: dict | None) -> dict:
+    """The profile as employer-facing writing should see it: switched-off entries removed."""
+    data = dict(profile_data or {})
+    for section in DOCUMENT_SECTIONS:
+        items = data.get(section)
+        if isinstance(items, list):
+            data[section] = [item for item in items if in_documents(item)]
+    return data
+
+
+def set_in_documents(db: Session, section: str, item_id: str, included: bool) -> Profile:
+    """Switch one entry into or out of employer-facing writing."""
+    if section not in DOCUMENT_SECTIONS:
+        raise ValueError(f"{section!r} has no entries to switch")
+    profile = get_or_create_profile(db)
+    updated = copy.deepcopy(profile.data)
+    for item in updated.get(section) or []:
+        if item.get("id") == item_id:
+            if included:
+                item.pop(IN_DOCUMENTS, None)
+            else:
+                item[IN_DOCUMENTS] = False
             break
     profile.data = updated
     db.flush()
