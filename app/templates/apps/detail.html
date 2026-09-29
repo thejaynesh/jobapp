@@ -48,6 +48,7 @@
       hx-target="#status-badge"
       hx-swap="outerHTML"
       hx-include="this"
+      hx-on::after-request="if (event.detail.successful) window.location.reload()"
       name="status"
       class="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
       {% for s in ['not_applied', 'applied', 'interviewing', 'offered', 'rejected', 'withdrawn'] %}
@@ -77,6 +78,30 @@
       Job link &nearr;
     </a>
   </div>
+</div>
+
+{# What happens next, defaulted on each status change and yours to edit; and,
+   once sent, whether a letter went with it (services/tracker). #}
+<div class="flex flex-wrap items-center gap-3 -mt-2 mb-6 text-sm">
+  <form hx-post="/apps/{{ app.id }}/next-action" hx-target="#next-action-status" class="flex flex-wrap items-center gap-2">
+    <label class="text-xs text-gray-500" for="next-action">Next</label>
+    <input id="next-action" type="text" name="next_action" value="{{ app.next_action or '' }}" placeholder="What happens next"
+           class="border border-gray-300 rounded px-2 py-1 text-sm w-72">
+    <input type="date" name="due" value="{{ app.next_action_due.isoformat() if app.next_action_due else '' }}"
+           class="border border-gray-300 rounded px-2 py-1 text-sm {% if next_action_overdue %}border-red-400 text-red-600{% endif %}">
+    <button class="text-xs text-blue-600 underline">Save</button>
+    <span id="next-action-status"></span>
+  </form>
+  <a href="/apps/board" class="text-xs text-gray-500 underline">Board</a>
+  {% if app.status.value != 'not_applied' %}
+  <form hx-post="/apps/{{ app.id }}/sent-letter" hx-target="#sent-letter-status" hx-trigger="change" class="flex items-center gap-1">
+    <label class="flex items-center gap-1 text-xs text-gray-600">
+      <input type="checkbox" name="sent" value="1" {% if app.sent_cover_letter %}checked{% endif %} class="rounded border-gray-300">
+      A cover letter went with it
+    </label>
+    <span id="sent-letter-status"></span>
+  </form>
+  {% endif %}
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">

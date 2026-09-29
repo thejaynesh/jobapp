@@ -84,6 +84,21 @@ TUNABLES: list[Tunable] = [
              "The report page itself is always current.",
     ),
     Tunable(
+        key="followup_after_days", env="FOLLOWUP_AFTER_DAYS", kind="int",
+        minimum=1, maximum=60, group="Applications",
+        label="Follow up after (days)",
+        help="When an application is marked applied, its next action is a follow-up "
+             "due this many days later, unless you set your own. Shorter nags sooner; "
+             "longer leaves more time for a reply before you are reminded.",
+    ),
+    Tunable(
+        key="reminder_interval_hours", env="REMINDER_INTERVAL_HOURS", kind="int",
+        minimum=1, maximum=168, group="Schedule",
+        label="Application reminders every (hours)",
+        help="How often the next actions due today or earlier are written to the log "
+             "as one reminder, which the Log badge counts.",
+    ),
+    Tunable(
         key="for_you_retrain_hours", env="FOR_YOU_RETRAIN_HOURS", kind="int",
         minimum=1, maximum=720, group="Schedule",
         label="For you ranking: retrain every (hours)",

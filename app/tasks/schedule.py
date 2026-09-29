@@ -105,6 +105,9 @@ SCHEDULE: tuple[Every, ...] = (
     # decisions count.
     Every("retrain-for-you", "app.tasks.match_eval.retrain_for_you",
           "for_you_retrain_hours", HOUR),
+    # Next actions on applications that have come due, as one line in the log.
+    Every("remind-due-actions", "app.tasks.tracker.remind_due_actions",
+          "reminder_interval_hours", HOUR),
 )
 
 

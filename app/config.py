@@ -817,6 +817,10 @@ class Settings(BaseSettings):
     # ranking's retrain. Editable on the settings page.
     MATCH_REPORT_INTERVAL_HOURS: int = 168
     FOR_YOU_RETRAIN_HOURS: int = 24
+    # An applied application's default follow-up, and how often due next
+    # actions are sent to the log. Editable on the settings page.
+    FOLLOWUP_AFTER_DAYS: int = 7
+    REMINDER_INTERVAL_HOURS: int = 24
     MAX_JOB_AGE_DAYS: int = 30  # skip fetched jobs posted longer ago than this (0 disables)
     # Employers' H-1B filings from DOL's public disclosure data, shown on each
     # job (`services.sponsorship_history`). Editable on the settings page.

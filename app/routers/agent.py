@@ -629,8 +629,14 @@ def _mark_applied(db: Session, url: str) -> dict:
             "detail": f"Already marked {application.status.value.replace('_', ' ')}.",
         }
 
-    application.status = ApplicationStatus.applied
-    application.applied_at = datetime.now(timezone.utc)
+    from app.models.profile import Profile
+    from app.services import tracker
+
+    profile = db.query(Profile).first()
+    # The same move as the application page's: what was sent is recorded,
+    # and a follow-up is due.
+    tracker.set_status(db, application, ApplicationStatus.applied,
+                       profile_data=profile.data if profile else None)
     db.commit()
     logger.info("agent: marked application %s applied from the overlay",
                 application.id)

@@ -2,7 +2,7 @@ import html
 import os
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -67,7 +67,36 @@ def get_apps(
             "status_filter": status,
             "q": q,
             "sort": sort,
+            "rates": _rates(db),
         },
+    )
+
+
+def _rates(db: Session) -> dict | None:
+    from app.services import tracker
+
+    try:
+        return tracker.response_rates(db)
+    except Exception as exc:
+        logger.warning("apps: response rates unavailable: %s", exc)
+        return None
+
+
+def _profile_data(db: Session) -> dict:
+    from app.models.profile import Profile
+
+    profile = db.query(Profile).first()
+    return profile.data if profile is not None and isinstance(profile.data, dict) else {}
+
+
+@router.get("/board", response_class=HTMLResponse)
+def get_board(request: Request, db: Session = Depends(get_db)):
+    """Applications in a column per status, each with what is next and when."""
+    from app.services import tracker
+
+    return templates.TemplateResponse(
+        "apps/board.html",
+        {"request": request, "columns": tracker.board(db), "today": datetime.now(timezone.utc).date()},
     )
 
 
@@ -121,6 +150,9 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
                 for c in letter_recipient.candidates(app_obj.contacts)
             ],
             "stories_for_job": _stories_for(db, app_obj.job),
+            "next_action_overdue": (
+                isinstance(app_obj.next_action_due, date)
+                and app_obj.next_action_due < datetime.now(timezone.utc).date()),
             # The page embeds the outreach panel partial, so it needs the same
             # context that /outreach/apps/{id}/panel builds.
             **panel_context(db, app_obj),
@@ -236,11 +268,17 @@ def update_app_status(
     app_obj = db.query(Application).filter(Application.id == app_id).first()
     if not app_obj:
         raise HTTPException(status_code=404, detail="Application not found")
+    from app.services import tracker
+
     try:
-        app_obj.status = ApplicationStatus(status)
+        new_status = ApplicationStatus(status)
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid status: {status}")
+    # The time, what was sent, and the next action move with the status.
+    tracker.set_status(db, app_obj, new_status, profile_data=_profile_data(db))
     db.commit()
+    if fragment == "board":
+        return HTMLResponse("", headers={"HX-Refresh": "true"})
     # The detail page swaps only a small confirmation badge; the apps list
     # swaps the whole card.
     if fragment == "badge":
@@ -252,6 +290,37 @@ def update_app_status(
         "apps/partials/app_card.html",
         {"request": request, "app": app_obj},
     )
+
+
+@router.post("/{app_id}/next-action", response_class=HTMLResponse)
+def save_next_action(app_id: uuid.UUID, next_action: str = Form(""), due: str = Form(""),
+                     db: Session = Depends(get_db)):
+    """Your own next step and its date, in place of the default."""
+    from datetime import date as date_type
+
+    from app.services import tracker
+
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    if not app_obj:
+        raise HTTPException(status_code=404, detail="Application not found")
+    try:
+        due_date = date_type.fromisoformat(due) if due else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Due date must be YYYY-MM-DD")
+    tracker.set_next_action(app_obj, next_action, due_date)
+    db.commit()
+    return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
+
+
+@router.post("/{app_id}/sent-letter", response_class=HTMLResponse)
+def save_sent_letter(app_id: uuid.UUID, sent: str = Form(""), db: Session = Depends(get_db)):
+    """Whether a cover letter actually went with this application."""
+    app_obj = db.query(Application).filter(Application.id == app_id).first()
+    if not app_obj:
+        raise HTTPException(status_code=404, detail="Application not found")
+    app_obj.sent_cover_letter = sent == "1"
+    db.commit()
+    return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
 
 
 @router.post("/{app_id}/notes", response_class=HTMLResponse)

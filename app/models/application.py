@@ -1,9 +1,9 @@
 import uuid
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import String, Boolean, Text, DateTime, Integer, Enum as SAEnum, ForeignKey, func, text, Index
+from sqlalchemy import String, Boolean, Text, Date, DateTime, Integer, Enum as SAEnum, ForeignKey, func, text, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,10 +71,31 @@ class Application(Base):
     outreach_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # What happens next and by when, defaulted on each status change
+    # (services/tracker) and editable; when the status last moved (0050).
+    next_action: Mapped[str | None] = mapped_column(String, nullable=True)
+    next_action_due: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The resume version current when it was marked applied, and whether a
+    # cover letter went too (0051): what "which resumes get replies" reads.
+    # Named and added after both tables exist (`use_alter`): with documents
+    # pointing at applications and this pointing back, the two tables form a
+    # cycle that create_all and drop_all could not otherwise order.
+    sent_resume_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("application_documents.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_applications_sent_resume_id"),
+        nullable=True,
+    )
+    sent_cover_letter: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     job = relationship("Job", backref="applications")
+    # Named, because `sent_resume_id` is a second path between the tables.
     documents: Mapped[list["ApplicationDocument"]] = relationship(
-        "ApplicationDocument", back_populates="application"
+        "ApplicationDocument", back_populates="application",
+        foreign_keys="ApplicationDocument.application_id",
     )
     contacts: Mapped[list["Contact"]] = relationship(
         "Contact",
@@ -136,5 +157,5 @@ class ApplicationDocument(Base):
     )
 
     application: Mapped["Application"] = relationship(
-        "Application", back_populates="documents"
+        "Application", back_populates="documents", foreign_keys=[application_id],
     )

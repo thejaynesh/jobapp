@@ -19,7 +19,7 @@ celery_app = Celery(
         "app.tasks.descriptions", "app.tasks.links", "app.tasks.enrich",
         "app.tasks.match_eval", "app.tasks.backup", "app.tasks.archive",
         "app.tasks.browse", "app.tasks.discovery", "app.tasks.sponsorship",
-        "app.tasks.recall", "app.tasks.schedule",
+        "app.tasks.recall", "app.tasks.schedule", "app.tasks.tracker",
     ],
 )
 
@@ -101,6 +101,7 @@ celery_app.conf.update(
         "app.tasks.discovery.*": {"queue": "batch"},
         "app.tasks.sponsorship.*": {"queue": "batch"},
         "app.tasks.recall.*": {"queue": "batch"},
+        "app.tasks.tracker.*": {"queue": "batch"},
         "app.tasks.descriptions.*": {"queue": "batch"},
         "app.tasks.liveness.*": {"queue": "batch"},
         "app.tasks.links.*": {"queue": "batch"},
