@@ -1,196 +1,77 @@
-# Push to main, build on the VPS, migrate, move traffic onto the new image.
-#
-# **`command_timeout` is the setting that matters here.** `appleboy/ssh-action`
-# defaults it to 10 minutes, and this deploy takes longer than that: a cold
-# `docker compose build` spends over twelve minutes in the apt layer alone,
-# installing the texlive fonts pdflatex needs. Every run from the moment the
-# migration step was added died the same way —
-#
-#     out: #6 712.0 Unpacking fonts-texgyre (20180621-6) ...
-#     2026/09/21 23:09:13 Run Command Timeout
-#
-# — three times per run, because a layer killed part-way through is not
-# cached, so each retry restarted it from scratch and hit the same wall. The
-# retries below are for a *connect* failure and cannot help with this; only a
-# bigger `command_timeout` can. Keep it comfortably above the cold-build time.
-#
-# The two failure modes are worth telling apart when this goes red:
-#
-#   `dial tcp :22: i/o timeout` after ~90s  → the connect problem, retries fix it
-#   `Run Command Timeout` after command_timeout → the script needs longer
-
 name: Deploy to VPS
 
 on:
   push:
     branches: [main]
 
-# One deploy at a time, and never cancel one that has started.
-#
-# There is a single VPS behind this, so two runs mean two `docker compose
-# build` and two `up -d` against the same daemon, interleaving a container
-# swap with somebody else's build. `cancel-in-progress: false` queues the
-# newer run instead: cancelling is worse than waiting when the thing being
-# cancelled might be half way through `alembic upgrade head`.
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-vps
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  tests:
+    uses: ./.github/workflows/test.yml
+
+  image:
+    needs: tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      reference: ${{ steps.name.outputs.image }}@${{ steps.build.outputs.digest }}
     steps:
-      - name: Deploy via SSH
-        id: deploy_first
+      - uses: actions/checkout@v4
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build tested revision
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [tests, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Deploy tested image via SSH
         uses: appleboy/ssh-action@v1.0.3
-        continue-on-error: true
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOY_IMAGE: ${{ needs.image.outputs.reference }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           timeout: 90s
-          # See the header: the action's 10-minute default killed the build.
-          command_timeout: 60m
+          command_timeout: 40m
+          envs: DEPLOY_SHA,DEPLOY_IMAGE,REGISTRY_USERNAME,REGISTRY_TOKEN
           script: |
-            set -e
+            set -eu
             cd /opt/jobapp
-            C="docker compose -f docker-compose.prod.yml"
-            git pull origin main
-            # Build, migrate with the new image, then move traffic onto it.
-            # `up -d --build` followed by a migration ran the new code against
-            # the old schema for the length of the migration; a `run` before the
-            # build would have applied the old image's migrations.
-            $C build
-            # Stop the background workers BEFORE migrating.
-            #
-            # Migrations take locks on `jobs` — a share lock for CREATE INDEX,
-            # access exclusive for ALTER TABLE — and this step used to run with
-            # the old containers still writing. On the first real deployment
-            # that put CREATE INDEX behind an 11.5-hour write transaction from
-            # the old fetch cycle, and Postgres lock queues are FIFO, so every
-            # later writer queued behind it. The table was unusable for an hour
-            # and the deploy looked like it had hung.
-            #
-            # `web` deliberately stays up: it writes only in short transactions
-            # on user action, and stopping it would be downtime. The long
-            # transactions all come from the workers.
-            $C stop worker worker-interactive beat
-            if ! $C run --rm web alembic upgrade head; then
-              echo "migration failed — restarting workers on the previous image"
-              $C start worker worker-interactive beat
-              exit 1
-            fi
-            $C up -d
-            # The Caddyfile is a read-only bind mount, so compose cannot see a
-            # change to it and `up -d` leaves the proxy alone.
-            $C restart caddy
-
-      # Port 22 on the VPS periodically stops accepting connections for a few
-      # minutes at a time — both attempts fail on `dial tcp :22: i/o timeout`,
-      # then a manual re-run moments later connects in under 30 seconds. A
-      # longer connect timeout doesn't help (a connect that never establishes
-      # just burns a bigger window); more attempts spread further apart do.
-      #
-      # That is the only thing these retries are for. They are useless against
-      # a script that runs out of time — see the header — and were masking it:
-      # three identical 10-minute timeouts read like a flaky host rather than a
-      # deploy that had outgrown its budget.
-      - name: Wait before retry
-        if: steps.deploy_first.outcome == 'failure'
-        run: sleep 120
-
-      - name: Deploy via SSH (retry)
-        id: deploy_second
-        continue-on-error: true
-        if: steps.deploy_first.outcome == 'failure'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          timeout: 90s
-          # See the header: the action's 10-minute default killed the build.
-          command_timeout: 60m
-          script: |
-            set -e
-            cd /opt/jobapp
-            C="docker compose -f docker-compose.prod.yml"
-            git pull origin main
-            # Build, migrate with the new image, then move traffic onto it.
-            # `up -d --build` followed by a migration ran the new code against
-            # the old schema for the length of the migration; a `run` before the
-            # build would have applied the old image's migrations.
-            $C build
-            # Stop the background workers BEFORE migrating.
-            #
-            # Migrations take locks on `jobs` — a share lock for CREATE INDEX,
-            # access exclusive for ALTER TABLE — and this step used to run with
-            # the old containers still writing. On the first real deployment
-            # that put CREATE INDEX behind an 11.5-hour write transaction from
-            # the old fetch cycle, and Postgres lock queues are FIFO, so every
-            # later writer queued behind it. The table was unusable for an hour
-            # and the deploy looked like it had hung.
-            #
-            # `web` deliberately stays up: it writes only in short transactions
-            # on user action, and stopping it would be downtime. The long
-            # transactions all come from the workers.
-            $C stop worker worker-interactive beat
-            if ! $C run --rm web alembic upgrade head; then
-              echo "migration failed — restarting workers on the previous image"
-              $C start worker worker-interactive beat
-              exit 1
-            fi
-            $C up -d
-            # The Caddyfile is a read-only bind mount, so compose cannot see a
-            # change to it and `up -d` leaves the proxy alone.
-            $C restart caddy
-
-      - name: Wait before final retry
-        if: steps.deploy_first.outcome == 'failure' && steps.deploy_second.outcome == 'failure'
-        run: sleep 240
-
-      # No continue-on-error: if this one fails the deploy has genuinely failed
-      # and the run should go red rather than look successful.
-      - name: Deploy via SSH (final retry)
-        if: steps.deploy_first.outcome == 'failure' && steps.deploy_second.outcome == 'failure'
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          timeout: 90s
-          # See the header: the action's 10-minute default killed the build.
-          command_timeout: 60m
-          script: |
-            set -e
-            cd /opt/jobapp
-            C="docker compose -f docker-compose.prod.yml"
-            git pull origin main
-            # Build, migrate with the new image, then move traffic onto it.
-            # `up -d --build` followed by a migration ran the new code against
-            # the old schema for the length of the migration; a `run` before the
-            # build would have applied the old image's migrations.
-            $C build
-            # Stop the background workers BEFORE migrating.
-            #
-            # Migrations take locks on `jobs` — a share lock for CREATE INDEX,
-            # access exclusive for ALTER TABLE — and this step used to run with
-            # the old containers still writing. On the first real deployment
-            # that put CREATE INDEX behind an 11.5-hour write transaction from
-            # the old fetch cycle, and Postgres lock queues are FIFO, so every
-            # later writer queued behind it. The table was unusable for an hour
-            # and the deploy looked like it had hung.
-            #
-            # `web` deliberately stays up: it writes only in short transactions
-            # on user action, and stopping it would be downtime. The long
-            # transactions all come from the workers.
-            $C stop worker worker-interactive beat
-            if ! $C run --rm web alembic upgrade head; then
-              echo "migration failed — restarting workers on the previous image"
-              $C start worker worker-interactive beat
-              exit 1
-            fi
-            $C up -d
-            # The Caddyfile is a read-only bind mount, so compose cannot see a
-            # change to it and `up -d` leaves the proxy alone.
-            $C restart caddy
+            git fetch origin "$DEPLOY_SHA"
+            git checkout --detach "$DEPLOY_SHA"
+            bash scripts/deploy-vps.sh "$DEPLOY_IMAGE"

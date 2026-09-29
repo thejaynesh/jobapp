@@ -310,6 +310,9 @@ def complete(db, task_id, result: dict | None = None, *, agent_id: str = "") -> 
     task.status = "done"
     task.result = result or {}
     task.error = None
+    task.ingestion_status = "pending"
+    task.ingestion_error = None
+    task.ingestion_retry_at = None
     task.completed_at = _now()
     task.lease_expires_at = None
     db.commit()
@@ -577,6 +580,7 @@ def prune(db, days: int | None = None) -> int:
             # Terminal only. A queued task is not old, it is late, and deleting
             # it would silently drop work nobody has done yet.
             BrowserTask.status.in_(("done", "failed", "expired")),
+            BrowserTask.ingestion_status == "done",
             BrowserTask.completed_at.isnot(None),
             BrowserTask.completed_at < cutoff,
         )
@@ -654,6 +658,18 @@ def tasks_by_site(db, status: str = "queued", limit: int = 8) -> list[dict]:
         counts[site] = counts.get(site, 0) + 1
     ranked = sorted(counts.items(), key=lambda item: -item[1])[:limit]
     return [{"site": site, "count": count} for site, count in ranked]
+
+
+def ingestion_stats(db) -> dict:
+    pending = db.query(BrowserTask).filter(
+        BrowserTask.status == "done",
+        BrowserTask.ingestion_status.in_(("pending", "retry")),
+    )
+    errors = pending.filter(BrowserTask.ingestion_error.isnot(None)).order_by(
+        BrowserTask.ingestion_retry_at.desc(), BrowserTask.id,
+    ).limit(3).all()
+    return {"pending": pending.count(),
+            "errors": [row.ingestion_error for row in errors]}
 
 
 def queue_stats(db) -> dict:

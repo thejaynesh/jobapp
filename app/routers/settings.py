@@ -2,6 +2,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
@@ -313,11 +314,15 @@ def discover_models(request: Request, provider: str, first: str = Form(""),
 
 @router.post("/models/{provider}/add", response_class=HTMLResponse)
 async def add_models(request: Request, provider: str, db: Session = Depends(get_db)):
+    form = await request.form()
+    return await run_in_threadpool(_add_models, request, provider, db, form)
+
+
+def _add_models(request, provider, db, form):
     """Append the ticked discoveries to the provider's list."""
     from app.services import model_catalog
 
     _known_provider(provider)
-    form = await request.form()
     ticked = [m for m in form.getlist("add") if model_catalog.is_model_id(m)]
     profile = get_or_create_profile(db)
     if not ticked:
@@ -400,9 +405,13 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
     from the `TUNABLES` declaration, and duplicating them here is exactly how
     the old version ended up saving three values nobody read.
     """
+    form = dict(await request.form())
+    return await run_in_threadpool(_save_settings, request, db, form)
+
+
+def _save_settings(request, db, form):
     from app.services import tunables
 
-    form = dict(await request.form())
     profile = get_or_create_profile(db)
     profile.data = tunables.apply_to_profile(
         profile.data, tunables.parse_form(form, profile.data)

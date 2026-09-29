@@ -27,6 +27,33 @@ from app.database import SessionLocal
 logger = logging.getLogger(__name__)
 
 
+@celery_app.task(name="app.tasks.browse.retry_ingestion", soft_time_limit=120, time_limit=180)
+def retry_ingestion() -> dict:
+    from datetime import datetime, timezone
+    from app.config import live
+    from app.models.browser_task import BrowserTask
+    from app.services.agent_work import ingest
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        ids = [row[0] for row in db.query(BrowserTask.id).filter(
+            BrowserTask.status == "done",
+            BrowserTask.ingestion_status.in_(("pending", "retry")),
+            (BrowserTask.ingestion_retry_at.is_(None)) | (BrowserTask.ingestion_retry_at <= now),
+        ).order_by(BrowserTask.ingestion_retry_at.asc().nullsfirst(), BrowserTask.completed_at, BrowserTask.id)
+            .limit(max(1, live().AGENT_INGEST_BATCH_SIZE)).all()]
+        db.commit()
+        recovered = 0
+        for task_id in ids:
+            task = db.get(BrowserTask, task_id)
+            if task is not None:
+                recovered += int(ingest(db, task))
+        return {"checked": len(ids), "recovered": recovered}
+    finally:
+        db.close()
+
+
 @celery_app.task(
     name="app.tasks.browse.top_up_browsing",
     bind=False,

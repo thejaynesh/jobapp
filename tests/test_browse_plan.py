@@ -553,6 +553,8 @@ class TestTheTaskAndItsResult:
         })
         task.result = {"final_url": task.payload["url"], "signed_in": True,
                        "title": "Backend Engineer | Acme"}
+        task.status, task.ingestion_status = "done", "pending"
+        db.commit()
         agent_work.ingest(db, task)
 
         event = db.query(AgentEvent).filter(AgentEvent.kind == "browse").one()
@@ -571,6 +573,8 @@ class TestTheTaskAndItsResult:
         })
         task.result = {"final_url": "https://www.linkedin.com/login",
                        "signed_in": False, "title": "Sign In | LinkedIn"}
+        task.status, task.ingestion_status = "done", "pending"
+        db.commit()
         agent_work.ingest(db, task)
 
         event = db.query(AgentEvent).filter(AgentEvent.kind == "browse").one()
@@ -584,6 +588,8 @@ class TestTheTaskAndItsResult:
 
         task = browser_tasks.enqueue(db, "browse_page", {"url": "https://x/1"})
         task.result = {"final_url": "https://x/1", "signed_in": True}
+        task.status, task.ingestion_status = "done", "pending"
+        db.commit()
         agent_work.ingest(db, task)
 
         assert db.query(Job).count() == 0

@@ -267,6 +267,8 @@ class TestSeeingThatItRan:
         })
         task.result = {"final_url": task.payload["url"], "signed_in": True,
                        "title": "Jobs", "scrolled_px": 92000}
+        task.status, task.ingestion_status = "done", "pending"
+        db.commit()
         agent_work.ingest(db, task)
 
         assert browse_plan.recent_visits(db)[0]["scrolled_px"] == 92000

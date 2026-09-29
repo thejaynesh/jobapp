@@ -1,16 +1,9 @@
-# Run the suite before anything reaches the VPS.
-#
-# `deploy.yml` was the only workflow in this repository: three thousand tests
-# and nothing between a push and production. This is the gate. It does not need
-# Redis — every service that touches it fails open by design, and the tests
-# assert that behaviour rather than a live server's — but it does need Postgres,
-# because the models use JSONB, UUID and ARRAY columns that SQLite cannot host.
+# Reused by deployment so this exact revision must pass before it is published.
 
 name: Tests
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
   pull_request:
 
 # A second push to the same branch makes the first run's answer irrelevant.
@@ -79,3 +72,16 @@ jobs:
 
       - name: Run the suite
         run: pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check extension syntax
+        run: bash scripts/check_extension.sh
+
+      - name: Check page interception in Chromium
+        run: |
+          npm install --no-save --package-lock=false playwright@1.49.1
+          npx playwright install --with-deps chromium
+          node scripts/check_interceptor.mjs

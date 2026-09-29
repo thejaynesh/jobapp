@@ -153,13 +153,16 @@ class TestSendMessage:
         deliver.assert_not_called()
         assert message.status != "sent"
 
-    def test_a_deliberate_second_press_sends_it(self, db, smtp_on):
+    def test_only_an_explicit_uncertain_retry_sends_it(self, db, smtp_on):
         _, _, message = _fixtures(db)
         message.message_id = "<earlier@jobapp>"
+        db.commit()
         with patch("app.services.outreach_sender._deliver") as deliver:
             with pytest.raises(SendError):
                 send_message(db, message)
-            send_message(db, message)
+            with pytest.raises(SendError):
+                send_message(db, message)
+            send_message(db, message, retry_uncertain=True)
         deliver.assert_called_once()
         assert message.status == "sent"
 

@@ -70,15 +70,16 @@
     {% endif %}
 
     {% if msg.status not in ('sent', 'replied') %}
-      {% if msg.channel == 'email' and not send_blocked and msg.contact.email %}
+      {% if msg.status in ('draft', 'approved') and msg.channel == 'email' and not send_blocked and msg.contact.email %}
       <form hx-post="/outreach/messages/{{ msg.id }}/send"
             hx-target="#outreach-panel" hx-swap="outerHTML"
-            hx-confirm="Send this email to {{ msg.contact.email }}?">
+            hx-confirm="{% if msg.delivery_uncertain %}Have you checked your Sent folder? Retrying may send a duplicate email to {{ msg.contact.email }}.{% else %}Send this email to {{ msg.contact.email }}?{% endif %}">
+        {% if msg.delivery_uncertain %}<input type="hidden" name="retry_uncertain" value="true">{% endif %}
         {% if msg.contact.email_status == 'guessed' %}
         <input type="hidden" name="allow_guessed" value="true">
         {% endif %}
-        <button type="submit" class="text-xs bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700">
-          Send{% if msg.contact.email_status == 'guessed' %} (unconfirmed address){% endif %}
+        <button type="submit" {% if msg.send_in_progress %}disabled{% endif %} class="text-xs bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700 disabled:opacity-50">
+          {% if msg.send_in_progress %}Sending…{% elif msg.delivery_uncertain %}Retry after checking Sent{% else %}Send{% endif %}{% if msg.contact.email_status == 'guessed' %} (unconfirmed address){% endif %}
         </button>
       </form>
       {% endif %}

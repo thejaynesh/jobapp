@@ -58,16 +58,31 @@ def queue_depth() -> dict:
     try:
         import redis
 
-        client = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3)
-        # Celery's default queue is a plain Redis list named after the queue,
-        # and tasks a worker has claimed but not yet acknowledged live in a
-        # hash called `unacked` — which only stays populated under late acks,
-        # the setting that makes those same tasks recoverable.
-        return {
-            "waiting": int(client.llen("celery")),
-            "claimed": int(client.hlen("unacked")),
-            "reachable": True,
-        }
+        from app.celery_app import celery_app
+        from kombu.transport.redis import Channel
+
+        options = celery_app.conf.broker_transport_options or {}
+        priority_steps = options.get("priority_steps", Channel.priority_steps)
+        separator = options.get("sep", Channel.sep)
+        prefix = options.get("global_keyprefix", "")
+        names = {celery_app.conf.task_default_queue}
+        names.update(route["queue"] for route in celery_app.conf.task_routes.values()
+                     if isinstance(route, dict) and route.get("queue"))
+        names.update(celery_app.amqp.queues)
+        with redis.Redis.from_url(settings.REDIS_URL, socket_connect_timeout=3,
+                                  socket_timeout=3) as client:
+            with client.pipeline(transaction=False) as pipe:
+                for name in sorted(names):
+                    for priority in priority_steps:
+                        suffix = f"{separator}{priority}" if priority else ""
+                        pipe.llen(f"{prefix}{name}{suffix}")
+                pipe.hlen(f"{prefix}{options.get('unacked_key', Channel.unacked_key)}")
+                values = pipe.execute()
+        width = len(priority_steps)
+        queues = {name: sum(values[index * width:(index + 1) * width])
+                  for index, name in enumerate(sorted(names))}
+        return {"waiting": sum(queues.values()), "queues": queues,
+                "claimed": int(values[-1]), "reachable": True}
     except Exception as exc:
         logger.warning("pipeline: queue depth unavailable: %s", exc)
         return {"waiting": None, "claimed": None, "reachable": False, "error": str(exc)}

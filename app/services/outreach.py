@@ -936,6 +936,7 @@ def mark_sent(db, message: OutreachMessage, when: datetime | None = None) -> Out
     message.status = "sent"
     message.sent_at = when
     message.send_error = None
+    message.send_state = "idle"
 
     days = followup_days()
     index = message.sequence_step - 1
@@ -956,6 +957,7 @@ def mark_replied(db, message: OutreachMessage, when: datetime | None = None) -> 
     already answered is the worst outcome the feature can produce.
     """
     message.status = "replied"
+    message.send_state = "idle"
     message.replied_at = when or _now()
     message.follow_up_due_at = None
 
@@ -972,6 +974,8 @@ def mark_replied(db, message: OutreachMessage, when: datetime | None = None) -> 
 def set_message_status(db, message: OutreachMessage, status: str) -> OutreachMessage:
     if status not in MESSAGE_STATUSES:
         raise ValueError(f"Unknown message status: {status}")
+    if message.send_in_progress:
+        raise ValueError("Wait for the active email delivery before changing its status.")
     if status == "sent":
         return mark_sent(db, message)
     if status == "replied":
@@ -979,6 +983,7 @@ def set_message_status(db, message: OutreachMessage, status: str) -> OutreachMes
     message.status = status
     if status in CLOSED_MESSAGE_STATUSES:
         message.follow_up_due_at = None
+        message.send_state = "idle"
     db.commit()
     return message
 

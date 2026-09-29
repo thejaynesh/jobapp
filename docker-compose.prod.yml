@@ -47,6 +47,9 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -100,8 +103,14 @@ services:
   # re-run `docker compose up -d`.
   web:
     build: .
-    image: jobapp-app
+    image: ${APP_IMAGE:-jobapp-app}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://localhost:8000/ready"]
+      interval: 10s
+      timeout: 6s
+      start_period: 60s
+      retries: 6
     # First call on the CPU: this is what a person is waiting on.
     cpu_shares: 2048
     volumes:
@@ -120,7 +129,7 @@ services:
 
   worker:
     # Built by `web`. See the note there.
-    image: jobapp-app
+    image: ${APP_IMAGE:-jobapp-app}
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=25 -Q batch -n batch@%h
     # Fetching, matching, enrichment and the Playwright browser tier: the bulk
     # of the load, none of it urgent. Lowest priority, and never more than
@@ -155,7 +164,7 @@ services:
   # "Generate documents" click should not wait behind a backlog.
   worker-interactive:
     # Built by `web`. See the note there.
-    image: jobapp-app
+    image: ${APP_IMAGE:-jobapp-app}
     command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q interactive -n interactive@%h
     # Somebody pressed a button for this, so it outranks the batch worker, but
     # not the page they are looking at while it runs.
@@ -174,7 +183,7 @@ services:
 
   beat:
     # Built by `web`. See the note there.
-    image: jobapp-app
+    image: ${APP_IMAGE:-jobapp-app}
     command: celery -A app.celery_app beat --loglevel=info
     env_file: .env
     restart: unless-stopped
@@ -194,7 +203,8 @@ services:
       # Bare domain, no scheme and no trailing slash, e.g. example.com
       APP_DOMAIN: ${APP_DOMAIN:?required}
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount the directory so git replacing Caddyfile is visible to reload.
+      - ./caddy:/etc/caddy:ro
       - storage_data:/storage:ro
       - caddy_data:/data
       - caddy_config:/config
@@ -203,6 +213,10 @@ services:
       - web
 
 volumes:
+  # Explicitly retain the old Redis volume on first deploy; see deploy-vps.sh.
+  redis_data:
+    external: true
+    name: ${REDIS_DATA_VOLUME:-jobapp_redis_data}
   postgres_data:
   storage_data:
   # Certificates and the ACME account key. Losing this means re-issuing on every

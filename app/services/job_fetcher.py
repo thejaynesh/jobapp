@@ -1880,24 +1880,6 @@ def fetch_and_save_jobs(
                 counts["inserted"] += 1
                 _tally(source, "inserted")
 
-            # Committed in chunks rather than once at the end.
-            #
-            # The per-row savepoints isolate a bad row, which is what they were
-            # for — but every one of them lived inside a single outer
-            # transaction committed once, minutes later. If that commit failed
-            # (a dropped connection, disk pressure) the `except` logged, rolled
-            # back, and every insert in the cycle was gone. The savepoints
-            # protect against a bad row, not against a bad commit.
-            #
-            # Outside the savepoint block, so a commit failure cannot poison a
-            # flush that has already succeeded.
-            if counts["inserted"] and counts["inserted"] % _COMMIT_EVERY == 0:
-                try:
-                    db.commit()
-                except Exception as exc:
-                    logger.error("job_fetcher: chunk commit failed: %s", exc)
-                    db.rollback()
-
         except Exception as exc:
             # A job that fell out here is a job we fetched and then lost, and
             # the four outcome counters above all sum to less than `fetched`
@@ -1912,6 +1894,17 @@ def fetch_and_save_jobs(
                 job_data.get("source") or "?", job_data.get("title") or "?",
                 job_data.get("company") or "?", job_data.get("url") or "?", exc,
             )
+        finally:
+            # Includes merges and early-continue paths. Savepoints isolate bad
+            # rows but retain write locks until this outer transaction commits.
+            if (index + 1) % _COMMIT_EVERY == 0:
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    # Do not report rolled-back rows as successfully saved, or
+                    # continue using identities for inserts that no longer exist.
+                    raise
 
     # Postings their board no longer lists. After the loop, so a posting that
     # moved (a new id for the same role) has had its new row stored first.
@@ -1942,6 +1935,7 @@ def fetch_and_save_jobs(
     except Exception as exc:
         logger.error("job_fetcher: DB commit failed: %s", exc)
         db.rollback()
+        raise
 
     # Enrich what just arrived, before matching scores it. A job matched on
     # Adzuna's 500-character stub is filtered for "too few skills" and never

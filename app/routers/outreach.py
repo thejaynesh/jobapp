@@ -489,6 +489,7 @@ def send(
     message_id: uuid.UUID,
     request: Request,
     allow_guessed: bool = Form(False),
+    retry_uncertain: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """
@@ -501,7 +502,7 @@ def send(
 
     message = _get_message(db, message_id)
     try:
-        send_message(db, message, allow_guessed=allow_guessed)
+        send_message(db, message, allow_guessed=allow_guessed, retry_uncertain=retry_uncertain)
     except SendError as exc:
         return _panel_for_contact(request, db, message.contact, {"ok": False, "message": str(exc)})
     except Exception as exc:

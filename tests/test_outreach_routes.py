@@ -376,7 +376,8 @@ class TestMessageRoutes:
         db.flush()
         assert client.post(f"/outreach/messages/{message.id}/delete").status_code == 409
 
-    def test_sending_is_refused_while_smtp_is_off(self, client, message):
+    def test_sending_is_refused_while_smtp_is_off(self, client, db, message):
+        db.commit()  # a failed send rolls back its claim, not a pre-existing draft
         response = client.post(f"/outreach/messages/{message.id}/send")
         assert response.status_code == 200
         assert "turned off" in response.text

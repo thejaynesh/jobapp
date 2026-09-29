@@ -781,6 +781,8 @@ class Settings(BaseSettings):
     # hosts is it failing on") are questions about weeks.
     AGENT_EVENT_KEEP_ROWS: int = 20000
     AGENT_EVENT_PRUNE_INTERVAL_HOURS: int = 12
+    AGENT_INGEST_RETRY_MINUTES: int = 5
+    AGENT_INGEST_BATCH_SIZE: int = 25
     # Finished browser tasks carry the page they brought back, which is the
     # large part. The countable history now lives in `agent_events`, so the task
     # row only needs to outlive anyone's interest in the detail.

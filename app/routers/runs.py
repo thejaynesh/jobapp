@@ -256,6 +256,7 @@ def _system_context(db: Session) -> dict:
 
         context["agent"] = {
             "queue": browser_tasks.queue_stats(db),
+            "ingestion": browser_tasks.ingestion_stats(db),
             "recent": browser_tasks.recent(db, 8),
             "last_agent": browser_tasks.last_agent(db),
             # Per site, so "why only one window?" has an answer on the page:

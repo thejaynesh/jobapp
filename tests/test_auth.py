@@ -19,6 +19,25 @@ TOKEN = "agent-token-under-test"
 SIGNING_KEY = "a-real-signing-key-not-the-placeholder"
 
 
+def test_login_rejects_multipart_before_parsing(secured, monkeypatch):
+    from starlette.formparsers import MultiPartParser
+    def forbidden(*args, **kwargs):
+        raise AssertionError("multipart parser must not run for login")
+    monkeypatch.setattr(MultiPartParser, "parse", forbidden)
+    assert secured.post("/login", files={"file": ("large.bin", b"data")}).status_code == 415
+
+
+def test_login_rejects_oversized_form(secured):
+    assert secured.post("/login", data={"password": "x" * 9000}).status_code == 413
+
+
+def test_login_rejects_oversized_chunked_form(secured):
+    def chunks():
+        yield b"password="
+        yield b"x" * 9000
+    assert secured.post("/login", content=chunks(), headers={"Content-Type": "application/x-www-form-urlencoded"}).status_code == 413
+
+
 @pytest.fixture
 def secured(monkeypatch, db):
     """An app with authentication on and properly configured."""

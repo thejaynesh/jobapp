@@ -220,39 +220,27 @@ def sweep_generations() -> dict:
                 app.generation_started_at = now
                 requeued_stale += 1
 
-        # Bounded, and with the documents loaded in one query rather than one
-        # per row. This read every matched application on every sweep — every
-        # twenty minutes — and then touched `app.documents` per row, so a large
-        # matched backlog made an unbounded scan plus an N+1 on a timer.
-        from sqlalchemy.orm import selectinload
+        # Filter before limiting: failed rows and applications with documents
+        # must not consume every slot and starve never-started applications.
+        from app.models.application import ApplicationDocument
 
         missed = (
             db.query(Application)
             .join(Job, Application.job_id == Job.id)
-            .options(selectinload(Application.documents))
             .filter(
                 Job.status.in_([JobStatus.matched, JobStatus.docs_generated]),
-                Application.generation_status.in_(NEEDS_GENERATION),
+                Application.generation_status == "idle",
+                ~db.query(ApplicationDocument.id).filter(
+                    ApplicationDocument.application_id == Application.id,
+                    ApplicationDocument.is_current.is_(True),
+                ).exists(),
             )
+            .order_by(Application.created_at, Application.id)
             .limit(max(1, live().GENERATION_SWEEP_MAX_PER_RUN))
             .all()
         )
-        # Decided before anything commits, and reduced to bare ids.
-        #
-        # `claim_for_generation` commits, and `expire_on_commit` is on, so
-        # reading `app.generation_status` or `app.documents` inside the claim
-        # loop would expire and reload every row — one query per application,
-        # which is the N+1 the `selectinload` above exists to remove, made
-        # worse. Two passes: read, then write.
-        #
-        # A 'failed' one has an error the user can read and a Rewrite button;
-        # re-queueing it on a timer would just burn LLM calls on the same
-        # failure. Only never-started ones are swept.
-        wanted = [
-            app.id for app in missed
-            if app.generation_status == "idle"
-            and not any(doc.is_current for doc in app.documents)
-        ]
+        # Claims commit and expire ORM objects, so retain only ids first.
+        wanted = [app.id for app in missed]
         # The stale loop's re-queues go out before any claim commits, so the
         # two writes cannot interleave in one transaction.
         if requeued_stale:

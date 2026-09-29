@@ -306,7 +306,6 @@ def _no_dns_in_the_url_guard(monkeypatch):
     from app.services import url_safety
 
     monkeypatch.setattr(url_safety, "_resolve", lambda host: ["93.184.216.34"])
-    url_safety.is_public_host.cache_clear()
 
 
 @pytest.fixture(autouse=True)

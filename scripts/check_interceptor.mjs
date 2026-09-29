@@ -77,7 +77,7 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 
 const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH || "/opt/pw-browsers/chromium",
+  executablePath: process.env.CHROMIUM_PATH || undefined,
 });
 const page = await browser.newPage();
 

@@ -21,6 +21,7 @@ import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
+from sqlalchemy import or_, text
 
 from app.config import live, settings
 from app.models.outreach import OutreachMessage
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 class SendError(Exception):
     """A send that could not proceed, phrased for the person who clicked send."""
+
+
+class DeliveryUncertain(SendError):
+    """SMTP may have accepted the message before the connection failed."""
 
 
 def sending_configured() -> bool:
@@ -120,6 +125,7 @@ def build_email(message: OutreachMessage, profile_data: dict, attachments: list[
 
 def _deliver(mail: EmailMessage) -> None:
     """Hand the message to the SMTP server, translating failures into SendError."""
+    delivery_started = False
     try:
         if settings.SMTP_USE_SSL:
             server = smtplib.SMTP_SSL(
@@ -136,6 +142,7 @@ def _deliver(mail: EmailMessage) -> None:
                 server.ehlo()
             if settings.SMTP_USERNAME:
                 server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+            delivery_started = True
             server.send_message(mail)
     except smtplib.SMTPAuthenticationError as exc:
         raise SendError(f"The mail server rejected the login: {exc}") from exc
@@ -143,13 +150,20 @@ def _deliver(mail: EmailMessage) -> None:
         raise SendError(
             "The mail server refused the recipient address — it probably doesn't exist."
         ) from exc
+    except smtplib.SMTPDataError as exc:
+        raise SendError(f"The mail server refused the message: {exc}") from exc
     except smtplib.SMTPException as exc:
+        if delivery_started:
+            raise DeliveryUncertain("The connection failed during delivery. Check your Sent folder before retrying.") from exc
         raise SendError(f"The mail server refused the message: {exc}") from exc
     except OSError as exc:
+        if delivery_started:
+            raise DeliveryUncertain("The connection failed during delivery. Check your Sent folder before retrying.") from exc
         raise SendError(f"Could not reach the mail server: {exc}") from exc
 
 
-def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> OutreachMessage:
+def send_message(db, message: OutreachMessage, allow_guessed: bool = False,
+                 retry_uncertain: bool = False) -> OutreachMessage:
     """
     Send one drafted email and record the outcome.
 
@@ -157,6 +171,43 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
     follow-up. On failure the message stays a draft with `send_error` set, so
     the user can fix the address and try again.
     """
+    # The reservation and daily-cap check share a short transaction. Its lock
+    # is released by commit before SMTP starts; no connection is held on the wire.
+    try:
+        db.flush()
+        db.execute(text("SELECT pg_advisory_xact_lock(2006934001)"))
+        db.refresh(message, with_for_update=True)
+        mail = _prepare_send(db, message, allow_guessed, retry_uncertain)
+        message.message_id = mail["Message-ID"]
+        message.send_error = None
+        message.send_state = "sending"
+        message.send_started_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    try:
+        _deliver(mail)
+    except SendError as exc:
+        message.send_state = "uncertain" if isinstance(exc, DeliveryUncertain) else "idle"
+        message.send_error = str(exc)[:500]
+        db.commit()
+        raise
+    except BaseException:
+        # A process kill leaves the durable 'sending' claim in place. Other
+        # interruptions can record ambiguity explicitly, but never unlock it.
+        message.send_state = "uncertain"
+        message.send_error = "Delivery was interrupted. Check your Sent folder before retrying."
+        db.commit()
+        raise
+
+    mark_sent(db, message)
+    logger.info("outreach_sender: sent message %s", message.id)
+    return message
+
+
+def _prepare_send(db, message, allow_guessed, retry_uncertain):
     blocked = sending_blocked_reason()
     if blocked:
         raise SendError(blocked)
@@ -167,23 +218,18 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
         )
     if message.status in ("sent", "replied"):
         raise SendError("That message has already been sent.")
-    # A Message-ID with no recorded outcome means an earlier attempt got as far
-    # as delivering and was then cut off — a worker restart between the SMTP
-    # handoff and `mark_sent`. With late acks that task comes back, and sending
-    # again would mail the same person twice. Refuse once, and say why; the
-    # refusal is recorded as the outcome, so a deliberate second press goes.
-    if message.message_id and not message.send_error:
-        message.send_error = (
-            "An earlier attempt to send this was interrupted after delivery had "
-            "started, so it may already have gone. Check your Sent folder — mark "
-            "it sent if it is there, or press send again to send it."
-        )
-        db.commit()
-        raise SendError(message.send_error)
+    if message.status not in ("draft", "approved"):
+        raise SendError("Only a draft or approved message can be sent.")
+    if message.send_in_progress:
+        raise SendError("This email is already being sent. Wait for its delivery result.")
+    if message.delivery_uncertain and not retry_uncertain:
+        raise SendError("This email may already have gone. Check your Sent folder, then mark it sent or explicitly retry delivery.")
 
     contact = message.contact
     if not contact or not contact.email:
         raise SendError("That contact has no email address.")
+    if contact.archived:
+        raise SendError("Restore this archived contact before sending.")
     if contact.email_status == "invalid":
         raise SendError("That address failed verification — fix it before sending.")
     if contact.email_status == "guessed" and not allow_guessed:
@@ -191,7 +237,14 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
             "That address is a pattern guess, not a confirmed one. Send it anyway "
             "only if you accept it may bounce."
         )
-    if sends_today(db) >= live().OUTREACH_MAX_SENDS_PER_DAY:
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    reserved = db.query(OutreachMessage).filter(
+        OutreachMessage.channel == "email", OutreachMessage.id != message.id,
+        or_(OutreachMessage.sent_at >= since,
+            (OutreachMessage.status.in_(("draft", "approved"))) &
+            (OutreachMessage.send_state.in_(("sending", "uncertain")))),
+    ).count()
+    if reserved >= live().OUTREACH_MAX_SENDS_PER_DAY:
         raise SendError(
             f"Daily send limit reached ({live().OUTREACH_MAX_SENDS_PER_DAY}). "
             "Try again tomorrow, or raise OUTREACH_MAX_SENDS_PER_DAY."
@@ -202,21 +255,4 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False) -> O
     profile = db.query(Profile).first()
     profile_data = (profile.data if profile else {}) or {}
 
-    mail = build_email(message, profile_data, _attachments(db, message.application))
-    # Recorded before delivery, not after: a send that succeeds and then fails to
-    # write the id back would leave a message on the wire whose reply we could
-    # never recognize. A stored id for a message that never left is harmless —
-    # nothing will ever quote it.
-    message.message_id = mail["Message-ID"]
-    message.send_error = None
-    db.commit()
-    try:
-        _deliver(mail)
-    except SendError as exc:
-        message.send_error = str(exc)[:500]
-        db.commit()
-        raise
-
-    mark_sent(db, message)
-    logger.info("outreach_sender: sent message %s to %s", message.id, contact.email)
-    return message
+    return build_email(message, profile_data, _attachments(db, message.application))

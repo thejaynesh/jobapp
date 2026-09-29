@@ -100,6 +100,13 @@ class BrowserTask(Base):
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Receipt and server-side processing are independent. Pending results must
+    # survive worker failures and may not be pruned until ingestion succeeds.
+    ingestion_status: Mapped[str] = mapped_column(String, nullable=False, default="done", server_default="done")
+    ingestion_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ingestion_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    ingestion_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Higher runs first. Same-priority work is FIFO, so a burst of link
     # resolutions cannot starve one urgent task queued behind it.
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

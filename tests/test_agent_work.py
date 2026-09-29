@@ -207,7 +207,10 @@ class TestIngestFailureIsContained:
 
         monkeypatch.setitem(agent_work.RESULT_HANDLERS, "ping", explode)
         task = browser_tasks.enqueue(db, "ping")
+        task.status, task.ingestion_status = "done", "pending"
+        db.commit()
         agent_work.ingest(db, task)  # must not raise
+        assert task.ingestion_status == "retry"
 
 
 class TestRedditViaBrowser:

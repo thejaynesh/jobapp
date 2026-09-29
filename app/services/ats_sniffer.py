@@ -179,14 +179,13 @@ def sniff_host(host: str, seed_html: str = "", posting_url: str | None = None,
     if seed_html and _absorb(seed_html):
         return {ats: sorted(slugs) for ats, slugs in found.items()}
 
-    from app.services.url_safety import EVENT_HOOKS
+    from app.services.url_safety import public_client
 
     if posting_url and company_host(posting_url) != host:
         posting_url = None
     pages = ([posting_url] if posting_url else []) + [_origin(host) + p for p in _CAREER_PATHS]
 
-    with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True,
-                      event_hooks=EVENT_HOOKS) as client:
+    with public_client(headers=_HEADERS, timeout=_TIMEOUT, follow_redirects=True) as client:
         for page in pages:
             try:
                 resp = client.get(page)

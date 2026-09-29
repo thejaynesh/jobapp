@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
 from sqlalchemy import case, func, or_, select
@@ -943,13 +944,17 @@ async def save_job_edit(
     means "off" rather than "leave alone" — so the form carries a marker naming
     every checkbox it rendered, and the missing ones are filled in as false.
     """
+    form = await request.form()
+    return await run_in_threadpool(_save_job_edit, job_id, request, db, form)
+
+
+def _save_job_edit(job_id, request, db, form):
     from app.services import job_edits
 
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    form = await request.form()
     values = {
         field: form[field]
         for field in job_edits.EDITABLE

@@ -265,12 +265,11 @@ def sweep(db, limit: int | None = None, workers: int | None = None) -> dict:
 
     # The network happens outside the ORM: check a batch, then write its
     # outcomes back and commit, so no transaction spans a slow site.
-    from app.services.url_safety import EVENT_HOOKS
+    from app.services.url_safety import public_client
 
-    with httpx.Client(
+    with public_client(
         headers=_HEADERS, timeout=REQUEST_TIMEOUT,
         follow_redirects=True, max_redirects=10,
-        event_hooks=EVENT_HOOKS,
     ) as client:
         with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs)))) as pool:
             for start in range(0, len(jobs), _BATCH):

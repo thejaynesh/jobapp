@@ -1578,6 +1578,18 @@ TUNABLES.extend([
         help="How often it is cut back to the size above.",
     ),
     Tunable(
+        key="agent_ingest_retry_minutes", env="AGENT_INGEST_RETRY_MINUTES", kind="int",
+        minimum=1, maximum=60, group="Housekeeping",
+        label="Retry saved browser results every (minutes)",
+        help="Recover server-side processing failures without browsing the page again. Higher values reduce retry load but delay recovery.",
+    ),
+    Tunable(
+        key="agent_ingest_batch_size", env="AGENT_INGEST_BATCH_SIZE", kind="int",
+        minimum=1, maximum=100, group="Housekeeping",
+        label="Saved browser results per retry pass",
+        help="Maximum results recovered in one pass. Lower values leave more capacity for interactive work.",
+    ),
+    Tunable(
         key="agent_event_keep_rows", env="AGENT_EVENT_KEEP_ROWS", kind="int",
         minimum=1000, maximum=1000000, group="Housekeeping",
         label="Extension events kept",

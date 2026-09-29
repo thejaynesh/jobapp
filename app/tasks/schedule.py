@@ -53,6 +53,8 @@ class Every:
 HOUR, MINUTE = 3600, 60
 
 SCHEDULE: tuple[Every, ...] = (
+    Every("retry-browser-ingestion", "app.tasks.browse.retry_ingestion",
+          "agent_ingest_retry_minutes", MINUTE),
     # Boards with a stored credential, asked over their own API — the feed,
     # then the whole index less often (a thousand requests to the feed's eleven).
     Every("sweep-linked-boards", "app.tasks.fetch.sweep_linked_boards",

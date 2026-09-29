@@ -162,12 +162,13 @@ async def lease(request: Request, db: Session = Depends(get_db)):
         wait = _max_poll_seconds()
     wait = max(0.0, min(wait, _max_poll_seconds()))
 
+    parallel_sites = await run_in_threadpool(_parallel_sites)
     # Once per request, not per attempt: the poll re-checks the queue every
     # second and this is a write.
     try:
         await run_in_threadpool(
             browser_tasks.record_agent_seen, db, agent_id, kinds, harvest_sites,
-            exclude_sites, _parallel_sites(),
+            exclude_sites, parallel_sites,
         )
     except Exception as exc:
         # Presence is a diagnostic, not the job. Failing to note it must not
@@ -176,7 +177,7 @@ async def lease(request: Request, db: Session = Depends(get_db)):
 
     if lanes == 0:
         return {"tasks": [], "lease_seconds": browser_tasks._lease_seconds(),
-                "parallel_sites": _parallel_sites()}
+                "parallel_sites": parallel_sites}
 
     deadline = time.monotonic() + wait
     while True:
@@ -191,10 +192,10 @@ async def lease(request: Request, db: Session = Depends(get_db)):
                 "agent: leased %d task(s) to %s", len(tasks), agent_id or "anonymous"
             )
             return {"tasks": tasks, "lease_seconds": browser_tasks._lease_seconds(),
-                    "parallel_sites": _parallel_sites()}
+                    "parallel_sites": parallel_sites}
         if time.monotonic() >= deadline:
             return {"tasks": [], "lease_seconds": browser_tasks._lease_seconds(),
-                    "parallel_sites": _parallel_sites()}
+                    "parallel_sites": parallel_sites}
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 

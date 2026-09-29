@@ -133,8 +133,11 @@ when that interval, as currently set, has passed.
 
 ## Deploying
 
-Push to `main`; `.github/workflows/deploy.yml` builds on the VPS, migrates, and
-swaps the containers. `docs/DEPLOYING.md` has the detail. Two things that cost
-an evening and are now documented in the workflow itself: `command_timeout` on
-`appleboy/ssh-action` defaults to 10 minutes and the build is longer than that,
-and all four app services share one image so only `web` declares `build:`.
+Push to `main`; `.github/workflows/deploy.yml` first runs the reusable test
+workflow, builds the exact revision on GitHub Actions, publishes to GHCR, and
+deploys the resulting immutable digest. `scripts/deploy-vps.sh` preserves the
+existing Redis volume, enables AOF before restarting Redis, stops workers for
+migrations, and checks `/ready` before declaring success. It restores the prior
+application image if migration or readiness fails. The script records APP_IMAGE
+and REDIS_DATA_VOLUME in the VPS `.env`; no registry credentials are retained.
+See `docs/DEPLOYING.md`. Never build the production image on the restricted VPS.

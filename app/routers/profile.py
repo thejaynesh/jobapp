@@ -2,6 +2,7 @@ import copy
 import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
@@ -137,11 +138,16 @@ def add_story(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/stories/{story_id}", response_class=HTMLResponse)
 async def save_story(story_id: str, request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    return await run_in_threadpool(_save_story, story_id, request, db, form)
+
+
+def _save_story(story_id, request, db, form):
     from app.services.profile_service import update_list_item
     from app.services.stories import from_form
 
     _ensure_stories(db)
-    profile = update_list_item(db, "stories", story_id, from_form(await request.form()))
+    profile = update_list_item(db, "stories", story_id, from_form(form))
     db.commit()
     return _stories_list(request, profile, story_id)
 
@@ -159,21 +165,23 @@ def delete_story(story_id: str, request: Request, db: Session = Depends(get_db))
 @router.post("/import")
 async def import_profile(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """Read an uploaded resume, LinkedIn export or JSON Resume into a draft to review."""
-    from urllib.parse import quote
+    data = await file.read()
+    return await run_in_threadpool(_import_profile, file.filename or "", data, db)
 
-    from fastapi.concurrency import run_in_threadpool
+
+def _import_profile(filename, data, db):
+    from urllib.parse import quote
 
     from app.services import profile_import
 
-    data = await file.read()
     if len(data) > 15 * 1024 * 1024:
         return RedirectResponse(url="/profile?tab=import&error=" + quote("That file is over 15 MB"),
                                 status_code=303)
     profile = get_or_create_profile(db)
+    profile_data = copy.deepcopy(profile.data or {})
+    db.commit()  # release the connection before parsing can call a model
     try:
-        # A resume goes through the model; off the event loop while it does.
-        source, parsed = await run_in_threadpool(
-            profile_import.parse_upload, file.filename or "", data, profile.data)
+        source, parsed = profile_import.parse_upload(filename, data, profile_data)
     except profile_import.ImportError_ as exc:
         return RedirectResponse(url="/profile?tab=import&error=" + quote(str(exc)),
                                 status_code=303)
@@ -188,11 +196,15 @@ async def import_profile(file: UploadFile = File(...), db: Session = Depends(get
 @router.post("/import/apply")
 async def apply_import(request: Request, db: Session = Depends(get_db)):
     """Merge what the review ticked."""
+    form = await request.form()
+    return await run_in_threadpool(_apply_import, db, form)
+
+
+def _apply_import(db, form):
     from urllib.parse import quote
 
     from app.services import profile_import
 
-    form = await request.form()
     try:
         added = profile_import.apply(db, form)
     except profile_import.ImportError_ as exc:
@@ -293,10 +305,14 @@ async def save_screening(request: Request, db: Session = Depends(get_db)):
     autofill projection — a second copy of it in this signature is a second
     place to forget to update.
     """
+    form = await request.form()
+    return await run_in_threadpool(_save_screening, request, db, dict(form))
+
+
+def _save_screening(request, db, form):
     from app.services import screening
     from app.services.profile_service import save_section
 
-    form = await request.form()
     profile = save_section(
         db, "screening_answers", screening.clean(dict(form))
     )
@@ -326,11 +342,15 @@ def _screening_context(profile_data: dict) -> dict:
 @router.post("/remembered/forget", response_class=HTMLResponse)
 async def forget_remembered(request: Request, db: Session = Depends(get_db)):
     """Drop one remembered answer; the next form asking it is left for the user."""
+    form = await request.form()
+    return await run_in_threadpool(_forget_remembered, request, db, str(form.get("key") or ""))
+
+
+def _forget_remembered(request, db, key):
     from app.services import remembered_answers
 
-    form = await request.form()
     profile = get_or_create_profile(db)
-    profile.data = remembered_answers.forget(profile.data or {}, str(form.get("key") or ""))
+    profile.data = remembered_answers.forget(profile.data or {}, key)
     db.commit()
     return templates.TemplateResponse(
         "profile/partials/screening.html",

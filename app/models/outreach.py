@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func,
@@ -185,6 +185,8 @@ class OutreachMessage(Base):
         DateTime(timezone=True), nullable=True
     )
     send_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    send_state: Mapped[str] = mapped_column(String, nullable=False, default="idle", server_default="idle")
+    send_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -195,6 +197,21 @@ class OutreachMessage(Base):
 
     contact = relationship("Contact", back_populates="messages")
     application = relationship("Application", back_populates="outreach_messages")
+
+    @property
+    def send_in_progress(self) -> bool:
+        if self.send_state != "sending" or self.send_started_at is None:
+            return False
+        started = self.send_started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return started > datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    @property
+    def delivery_uncertain(self) -> bool:
+        return (self.send_state in ("sending", "uncertain") and not self.send_in_progress
+                or self.status in ("draft", "approved") and bool(self.message_id)
+                and not self.send_error and self.send_state == "idle")
 
     @property
     def is_open(self) -> bool:

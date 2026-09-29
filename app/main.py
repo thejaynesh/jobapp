@@ -239,7 +239,7 @@ def _is_htmx(request: Request) -> bool:
 # caddy/Caddyfile). It is public in the sense that it is reachable without a
 # session — it exists to *report* whether there is one — and it returns a bare
 # 204 or 401 with no body.
-_PUBLIC_PATHS = frozenset({"/health", "/login", "/auth/check"})
+_PUBLIC_PATHS = frozenset({"/health", "/ready", "/login", "/auth/check"})
 _PUBLIC_PREFIXES = ("/static/",)
 
 # Served with a bearer token instead of a session — there is no browser here to
@@ -364,6 +364,47 @@ class _SettingsReadOncePerRequest:
 app.add_middleware(_SettingsReadOncePerRequest)
 
 
+class _BoundLoginForm:
+    """Bound and validate the public form before multipart parsing can run."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") != "/login" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
+        if content_type not in (b"", b"application/x-www-form-urlencoded"):
+            await JSONResponse({"detail": "Use the login form; file uploads are not accepted."}, status_code=415)(scope, receive, send)
+            return
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > 8192:
+                await JSONResponse({"detail": "Login form is too large."}, status_code=413)(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+        delivered = False
+
+        async def bounded_receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.app(scope, bounded_receive, send)
+
+
+app.add_middleware(_BoundLoginForm)
+
+
 def _rid(request: Request) -> str:
     return request.scope.get("request_id", "")
 
@@ -465,6 +506,17 @@ def health_check(db: Session = Depends(get_db)):
         "pool": pool_status(),
         "activity": activity_log.counts(),
     }
+
+
+@app.get("/ready")
+def readiness(db: Session = Depends(get_db)):
+    ready = not _migration_failure and not auth.misconfiguration()
+    try:
+        db.execute(text("SET LOCAL statement_timeout = '3s'"))
+        db.execute(text("SELECT 1"))
+    except Exception:
+        ready = False
+    return JSONResponse({"ready": bool(ready)}, status_code=200 if ready else 503)
 
 
 @app.get("/")

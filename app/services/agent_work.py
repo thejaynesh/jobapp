@@ -287,7 +287,9 @@ def _ingest_enrichment(db, task: BrowserTask, payload: dict, final_url: str,
         )
         return
 
-    found = extract_from_html(html, job_id=job.id)
+    found = getattr(task, "_prepared_extraction", None)
+    if found is None:
+        found = extract_from_html(html, job_id=job.id)
     outcome = apply_extraction(db, job, found)
 
     # An apply URL is worth taking from this trip too, since the browser
@@ -612,22 +614,75 @@ RESULT_HANDLERS = {
 }
 
 
-def ingest(db, task: BrowserTask) -> None:
-    """
-    Act on a completed task.
+def ingest(db, task: BrowserTask) -> bool:
+    """Apply one saved result atomically; failed processing remains retryable.
 
-    Never raises. The agent has already done the work and reported it honestly,
-    so a handler that fails must not turn that into a failed task — the result
-    is recorded either way, and the ingestion problem is ours to see in the log.
+    The child session joins our transaction with savepoints. Handlers may commit
+    internally, but their effects and the success marker commit together here.
+    A process killed between those writes rolls everything back to pending.
     """
-    handler = RESULT_HANDLERS.get(task.kind)
-    if not handler:
-        return
+    from sqlalchemy.orm import Session
+    from app.config import live
+
+    task_id = task.id
+    now = datetime.now(timezone.utc)
+    retry_minutes = max(1, live().AGENT_INGEST_RETRY_MINUTES)
     try:
-        handler(db, task)
+        if task.status != "done" or task.ingestion_status not in ("pending", "retry"):
+            db.rollback()
+            return False
+        prepared = None
+        payload, result = dict(task.payload or {}), dict(task.result or {})
+        if task.kind == "resolve_link" and payload.get("purpose") == "enrich" and result.get("html"):
+            from app.services.enrichment import extract_from_html
+            from app.services.liveness import closed_marker
+            html = result["html"]
+            job_id = payload.get("job_id")
+            exists = job_id and db.query(Job.id).filter(Job.id == job_id).first()
+            db.commit()
+            # Model extraction can wait on a remote provider. Do it before
+            # acquiring a task lock or opening the atomic write transaction.
+            if exists and not closed_marker(html):
+                prepared = extract_from_html(html, job_id=job_id)
+        claimed = db.query(BrowserTask).filter(
+            BrowserTask.id == task_id, BrowserTask.status == "done",
+            BrowserTask.ingestion_status.in_(("pending", "retry")),
+            (BrowserTask.ingestion_retry_at.is_(None)) | (BrowserTask.ingestion_retry_at <= now),
+        ).populate_existing().with_for_update(skip_locked=True).first()
+        if claimed is None:
+            db.rollback()
+            return False
+        with Session(bind=db.connection(), join_transaction_mode="create_savepoint") as work:
+            current = work.get(BrowserTask, task_id)
+            current._prepared_extraction = prepared
+            handler = RESULT_HANDLERS.get(current.kind)
+            if handler:
+                handler(work, current)
+            work.commit()
+        db.refresh(claimed)
+        claimed.ingestion_status = "done"
+        claimed.ingestion_error = None
+        claimed.ingestion_attempts += 1
+        claimed.ingestion_retry_at = None
+        db.commit()
+        return True
     except Exception as exc:
-        logger.error(
-            "agent_work: ingesting %s result for task %s failed: %s",
-            task.kind, task.id, exc,
-        )
         db.rollback()
+        logger.error("agent_work: ingesting task %s failed: %s", task_id, exc)
+        try:
+            # Do not overwrite a successful concurrent recovery after rollback
+            # releases the row lock. Retain the original payload for retries.
+            db.query(BrowserTask).filter(
+                BrowserTask.id == task_id,
+                BrowserTask.ingestion_status.in_(("pending", "retry")),
+            ).update({
+                "ingestion_status": "retry", "ingestion_error": str(exc)[:1000],
+                "ingestion_attempts": BrowserTask.ingestion_attempts + 1,
+                "ingestion_retry_at": now + timedelta(minutes=retry_minutes),
+            }, synchronize_session=False)
+            db.commit()
+            db.expire_all()
+        except Exception:
+            db.rollback()  # original pending row remains durable if DB is down
+            logger.exception("agent_work: could not record ingestion failure for %s", task_id)
+        return False

@@ -644,6 +644,7 @@ class TestBrowserResults:
         )
         task.status = "done"
         task.result = {"final_url": job.url, "html": html}
+        task.ingestion_status = "pending"
         db.commit()
 
         ingest(db, task)
@@ -663,6 +664,7 @@ class TestBrowserResults:
         )
         task.status = "done"
         task.result = {"final_url": "https://x/1", "html": "<html></html>"}
+        task.ingestion_status = "pending"
         db.commit()
 
         ingest(db, task)
@@ -680,6 +682,7 @@ class TestBrowserResults:
         task = browser_tasks.enqueue(db, "resolve_link", {"url": job.url})
         task.status = "done"
         task.result = {"final_url": "https://boards.greenhouse.io/acme/jobs/3"}
+        task.ingestion_status = "pending"
         db.commit()
 
         ingest(db, task)
@@ -1246,6 +1249,7 @@ class TestAPostingTheBrowserFoundGone:
             {"url": url, "purpose": "enrich", "job_id": str(job.id)})
         task.status = "done"
         task.result = {"final_url": url, "html": html}
+        task.ingestion_status = "pending"
         db.commit()
 
         ingest(db, task)
