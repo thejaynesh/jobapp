@@ -124,14 +124,37 @@ def _numbers(text: str) -> set[str]:
 
 
 def _strings(value) -> list[str]:
-    """Every string in a nested profile value."""
+    """
+    Every string the candidate stands behind in a nested profile value.
+
+    A bullet bank's offered and dismissed wordings are the model's, not the
+    candidate's, so only the kept ones count; "id" is never content.
+    """
     if isinstance(value, str):
         return [value]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return [str(value)]
     if isinstance(value, dict):
-        return [s for v in value.values() for s in _strings(v)]
+        found = []
+        for key, v in value.items():
+            if key == "id":
+                continue
+            if key == "bank":
+                found += [b.get("text", "") for b in v or []
+                          if isinstance(b, dict) and b.get("status") == "kept"]
+                continue
+            found += _strings(v)
+        return found
     if isinstance(value, (list, tuple)):
         return [s for v in value for s in _strings(v)]
     return []
+
+
+def profile_text(profile_data: dict) -> str:
+    """The profile's content, lowercased: what the candidate wrote, not what the app keeps."""
+    from app.services.profile_service import CONTENT_KEYS
+
+    return " ".join(_strings({k: (profile_data or {}).get(k) for k in CONTENT_KEYS})).lower()
 
 
 def vocabulary(profile_data: dict, keywords=(), job=None) -> list[str]:
@@ -214,7 +237,7 @@ def _identity(section: str, entry: dict, original: dict) -> list[dict]:
 
 
 def _bullets(section: str, entry: dict, original: dict, terms: list[str]) -> list[dict]:
-    source = " ".join(_strings({k: v for k, v in original.items() if k != "id"})).lower()
+    source = " ".join(_strings(original)).lower()
     source_numbers = _numbers(source)
     found = []
     for bullet in entry.get("bullets") or []:
@@ -239,15 +262,15 @@ def _bullets(section: str, entry: dict, original: dict, terms: list[str]) -> lis
 def _prose(where: str, text: str, profile_data: dict, terms: list[str],
            *, claims_only: bool, other_sources: str = "") -> list[dict]:
     """The summary or the letter, against everything the profile says."""
-    profile_text = " ".join(_strings(profile_data)).lower()
-    known_numbers = _numbers(profile_text) | _numbers(other_sources)
+    known_text = profile_text(profile_data)
+    known_numbers = _numbers(known_text) | _numbers(other_sources)
     worked = total_years(profile_data.get("experience") or [])
     found = []
     for sentence in _sentences(text):
         years = list(_YEARS_CLAIM.finditer(sentence))
         for match in years:
             if (float(match.group(1)) > worked + YEARS_TOLERANCE
-                    and match.group(0).lower() not in profile_text):
+                    and match.group(0).lower() not in known_text):
                 found.append({
                     "kind": "years", "where": where, "term": match.group(0), "text": sentence,
                     "detail": (f"The {where} says “{match.group(0)}”; the dates on "
@@ -257,7 +280,7 @@ def _prose(where: str, text: str, profile_data: dict, terms: list[str],
         # clause about the candidate claims to have used it.
         for term in terms:
             claimed_here = _claims(sentence, term) if claims_only else says(sentence, term)
-            if claimed_here and not _has(profile_text, term):
+            if claimed_here and not _has(known_text, term):
                 found.append({
                     "kind": "tech", "where": where, "term": term, "text": sentence,
                     "detail": f"The {where} claims {term}; your profile never mentions it.",

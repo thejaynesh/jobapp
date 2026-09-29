@@ -120,6 +120,7 @@ def get_app_detail(app_id: uuid.UUID, request: Request, db: Session = Depends(ge
                 letter_recipient.recipient(c)
                 for c in letter_recipient.candidates(app_obj.contacts)
             ],
+            "stories_for_job": _stories_for(db, app_obj.job),
             # The page embeds the outreach panel partial, so it needs the same
             # context that /outreach/apps/{id}/panel builds.
             **panel_context(db, app_obj),
@@ -265,6 +266,21 @@ def save_notes(
     app_obj.notes = notes
     db.commit()
     return HTMLResponse('<span class="text-xs text-green-600">Saved</span>')
+
+
+def _stories_for(db: Session, job) -> list[dict]:
+    """The story bank's best fits for this posting, for interview preparation."""
+    from app.models.profile import Profile
+    from app.services import stories
+    from app.services.profile_service import for_documents
+
+    profile = db.query(Profile).first()
+    if profile is None or job is None:
+        return []
+    text = " ".join(str(x) for x in (
+        job.title, job.description, " ".join(job.required_skills or []),
+        " ".join(job.nice_to_have_skills or [])) if x)
+    return stories.relevant(for_documents(profile.data or {}), text)
 
 
 def _document(db: Session, app_id: uuid.UUID, doc_id: uuid.UUID):

@@ -254,6 +254,12 @@ def update_list_item(db: Session, section: str, item_id: str, data: dict) -> Pro
 # into forms. Matching still sees it: it is still true, and whether a job fits
 # does not depend on what this resume shows.
 
+# The profile keys that are the candidate's own content, as opposed to what
+# the app keeps there (settings, saved views, drafts, a trained ranking). Checks
+# of what a document may claim read these and nothing else.
+CONTENT_KEYS = ("personal", "narrative", "skills", "experience", "projects", "education",
+                "stories", "target_roles")
+
 IN_DOCUMENTS = "in_resume"
 DOCUMENT_SECTIONS = ("experience", "projects", "education")
 

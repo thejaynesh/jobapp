@@ -920,10 +920,12 @@ def _ground_tailored_bullets(original_entries: list[dict], tailored: list[dict])
         (e.get("company") or "", e.get("title") or ""): e.get("bullets") or []
         for e in original_entries
     }
-    # Figures the candidate supplied for an entry (bullet_facts) are as much
-    # theirs as the ones in its bullets.
+    # Figures the candidate supplied for an entry (bullet_facts) or approved in
+    # an alternative wording (bullet_bank) are as much theirs as the ones in
+    # its bullets.
     fact_numbers = {
-        (e.get("company") or "", e.get("title") or ""): _numbers_in(" ".join(e.get("facts") or []))
+        (e.get("company") or "", e.get("title") or ""):
+            _numbers_in(" ".join((e.get("facts") or []) + (e.get("alternates") or [])))
         for e in original_entries
     }
     grounded: list[dict] = []
@@ -965,13 +967,15 @@ def tailor_resume_bullets(
     insights: dict | None = None,
     feedback: str | None = None,
 ) -> list[dict]:
+    from app.services.bullet_bank import kept
     from app.services.bullet_facts import answers
 
     experience = profile_data.get("experience", [])
     exp_json = [
         {"company": e.get("company"), "title": e.get("title") or e.get("role") or "",
          "bullets": e.get("bullets", []),
-         **({"facts": answers(e)} if answers(e) else {})}
+         **({"facts": answers(e)} if answers(e) else {}),
+         **({"alternates": kept(e)} if kept(e) else {})}
         for e in experience
     ]
     keywords = (insights or {}).get("keywords") or []
@@ -994,6 +998,8 @@ def tailor_resume_bullets(
                 "- An entry's \"facts\" are figures and details the candidate supplied "
                 "for it. Use them to quantify that entry's bullets where they fit; they "
                 "are the only numbers you may add. Never move a fact to another entry.\n"
+                "- An entry's \"alternates\" are other wordings of its work the candidate "
+                "approved. You may use one in place of a bullet, or borrow from it.\n"
                 "Return a JSON array with the SAME structure: "
                 '[{"company": str, "title": str, "bullets": [str, ...]}]. '
                 "Return ONLY the JSON array."
@@ -1262,6 +1268,16 @@ def generate_documents(db, application, feedback: str | None = None) -> None:
 
     resume_checks = content_checks.check_resume(resume_ctx, profile_data, keywords, job)
     letter_checks = content_checks.check_letter(cover_body, profile_data, keywords, job)
+
+    # This resume's rewritten bullets, offered to each entry's bullet bank to
+    # keep or dismiss. The ones a check flagged are not offered.
+    from app.services import bullet_bank
+
+    if profile is not None and isinstance(profile.data, dict):
+        updated = copy.deepcopy(profile.data)
+        if bullet_bank.offer_from_generation(updated, resume_ctx, resume_checks,
+                                             f"{job.title} at {job.company}"):
+            profile.data = updated
     if resume_checks or letter_checks:
         logger.info(
             "generate_documents %s: %d resume and %d letter finding(s) against the profile: %s",

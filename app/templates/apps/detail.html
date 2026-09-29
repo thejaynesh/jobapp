@@ -396,6 +396,30 @@
 
     {% include "apps/partials/interview_panel.html" %}
 
+    {# Interview preparation from the story bank: the stories that share the
+       most with this posting's words and skills. #}
+    <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
+      <h2 class="text-base font-semibold text-gray-800 mb-1">Stories to have ready</h2>
+      {% if stories_for_job %}
+      <p class="text-[11px] text-gray-400 mb-3">From your story bank, the ones that fit this posting best.</p>
+      <div class="space-y-3">
+        {% for story in stories_for_job %}
+        <details class="text-sm">
+          <summary class="cursor-pointer font-medium text-gray-700">{{ story.title or "Untitled story" }}
+            {% if story.skills %}<span class="text-xs font-normal text-gray-400">· {{ story.skills | join(", ") }}</span>{% endif %}</summary>
+          <dl class="mt-1 space-y-1 text-xs text-gray-600">
+            {% for part in ["situation", "task", "action", "result"] if story[part] %}
+            <div><dt class="inline font-semibold">{{ part | title }}:</dt> <dd class="inline">{{ story[part] }}</dd></div>
+            {% endfor %}
+          </dl>
+        </details>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-xs text-gray-500">None of your stories fits this posting yet. <a href="/profile?tab=stories" class="text-blue-600 underline">Write one</a> in STAR form; drafted answers use them too.</p>
+      {% endif %}
+    </div>
+
     {% if legacy_contacts %}
     <div class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm">
       <h2 class="text-base font-semibold text-gray-800 mb-1">Earlier outreach</h2>

@@ -1,0 +1,40 @@
+{# The entry's bullet bank (services/bullet_bank): wordings a generation
+   wrote for it, offered to keep or dismiss, and the ones kept, which the
+   bullet rewriter may use. `section` and `item` come from the including
+   template. #}
+{% set offered = (item.bank or []) | selectattr("status", "equalto", "offered") | list %}
+{% set kept = (item.bank or []) | selectattr("status", "equalto", "kept") | list %}
+<details class="mt-2 border-t border-gray-100 pt-2" {% if opened is defined and opened == item.id and panel is defined and panel == "bank" %}open{% endif %}>
+  <summary class="cursor-pointer text-xs text-gray-600">
+    Bullet bank{% if offered %} · <span class="font-medium text-purple-700">{{ offered | length }} from your resumes to look at</span>{% endif %}{% if kept %} · {{ kept | length }} kept{% endif %}
+  </summary>
+  <div class="mt-2 space-y-2 text-sm">
+    {% for b in offered %}
+    <div class="flex items-start gap-2">
+      <p class="flex-1 text-gray-700">{{ b.text }} {% if b.job %}<span class="text-xs text-gray-400">— written for {{ b.job }}</span>{% endif %}</p>
+      <button hx-post="/profile/{{ section }}/{{ item.id }}/bank/{{ b.id }}/keep" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+              class="text-xs text-blue-600 hover:underline">Keep</button>
+      <button hx-post="/profile/{{ section }}/{{ item.id }}/bank/{{ b.id }}/dismiss" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+              class="text-xs text-gray-500 hover:underline">Dismiss</button>
+    </div>
+    {% endfor %}
+    {% if kept %}
+    <p class="text-xs text-gray-500 {% if offered %}pt-1 border-t border-gray-100{% endif %}">Kept: the resume writer may use these in place of a bullet.</p>
+    {% for b in kept %}
+    <div class="flex items-start gap-2">
+      <p class="flex-1 text-gray-700">{{ b.text }}</p>
+      <button hx-post="/profile/{{ section }}/{{ item.id }}/bank/{{ b.id }}/use" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+              class="text-xs text-blue-600 hover:underline" title="Move it into this entry's bullets">Use in resumes</button>
+      <button hx-post="/profile/{{ section }}/{{ item.id }}/bank/{{ b.id }}/remove" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+              class="text-xs text-red-500 hover:underline">Remove</button>
+    </div>
+    {% endfor %}
+    {% endif %}
+    <form hx-post="/profile/{{ section }}/{{ item.id }}/bank" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+          class="flex items-center gap-2">
+      <input type="text" name="text" placeholder="Another way to say something this entry did"
+             class="flex-1 border border-gray-300 rounded px-2 py-1 text-sm">
+      <button class="text-xs text-blue-600 hover:underline">Keep it</button>
+    </form>
+  </div>
+</details>

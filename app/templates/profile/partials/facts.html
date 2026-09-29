@@ -5,7 +5,7 @@
 {% set asks = unanswered_bullets(item) %}
 {% set kept = item.facts | default([], true) | selectattr("answer", "defined") | list %}
 {% if asks or kept %}
-<details class="mt-3 border-t border-gray-100 pt-2" {% if opened is defined and opened == item.id %}open{% endif %}>
+<details class="mt-3 border-t border-gray-100 pt-2" {% if opened is defined and opened == item.id and (panel is not defined or panel == "facts") %}open{% endif %}>
   <summary class="cursor-pointer text-xs text-gray-600">
     {% if asks %}<span class="font-medium text-blue-700">{{ asks | length }} bullet{{ "s" if asks | length != 1 }} with no number</span> — add the figure and resumes can use it{% endif %}
     {% if asks and kept %} · {% endif %}
