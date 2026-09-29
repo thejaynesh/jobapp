@@ -45,6 +45,7 @@
     {% set section = "experience" %}{% set item = exp %}
     {% include "profile/partials/in_resume_switch.html" %}
     </div>
+    {% include "profile/partials/facts.html" %}
   </div>
   {% endfor %}
   <button hx-post="/profile/experience/add" hx-target="#experience-list" hx-swap="outerHTML" class="mt-2 text-blue-600 text-sm hover:underline">+ Add Experience</button>

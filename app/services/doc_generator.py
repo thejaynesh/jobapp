@@ -787,13 +787,17 @@ _COVER_LETTER_BANNED = [
 def _evidence_block(experience: list[dict], projects: list[dict]) -> str:
     """Concrete accomplishments the letter is allowed to draw from."""
     lines: list[str] = []
+    from app.services.bullet_facts import answers
+
     for e in experience[:3]:
         role = e.get("role") or e.get("title") or ""
         lines.append(f"EXPERIENCE — {role} at {e.get('company', '')}:")
         lines.extend(f"  - {b}" for b in (e.get("bullets") or [])[:3])
+        lines.extend(f"  - (fact) {a}" for a in answers(e))
     for p in projects[:2]:
         lines.append(f"PROJECT — {p.get('name', '')} ({p.get('description', '')}):")
         lines.extend(f"  - {b}" for b in (p.get("bullets") or [])[:3])
+        lines.extend(f"  - (fact) {a}" for a in answers(p))
     return "\n".join(lines)
 
 
@@ -903,6 +907,12 @@ def _ground_tailored_bullets(original_entries: list[dict], tailored: list[dict])
         (e.get("company") or "", e.get("title") or ""): e.get("bullets") or []
         for e in original_entries
     }
+    # Figures the candidate supplied for an entry (bullet_facts) are as much
+    # theirs as the ones in its bullets.
+    fact_numbers = {
+        (e.get("company") or "", e.get("title") or ""): _numbers_in(" ".join(e.get("facts") or []))
+        for e in original_entries
+    }
     grounded: list[dict] = []
     for entry in tailored if isinstance(tailored, list) else []:
         if not isinstance(entry, dict):
@@ -912,7 +922,7 @@ def _ground_tailored_bullets(original_entries: list[dict], tailored: list[dict])
             logger.warning("tailor_resume_bullets: dropped invented entry %s", key)
             continue
         originals = orig_map[key]
-        allowed_numbers: set[str] = set()
+        allowed_numbers: set[str] = set(fact_numbers.get(key) or ())
         for b in originals:
             allowed_numbers |= _numbers_in(b)
         bullets: list[str] = []
@@ -942,9 +952,13 @@ def tailor_resume_bullets(
     insights: dict | None = None,
     feedback: str | None = None,
 ) -> list[dict]:
+    from app.services.bullet_facts import answers
+
     experience = profile_data.get("experience", [])
     exp_json = [
-        {"company": e.get("company"), "title": e.get("title") or e.get("role") or "", "bullets": e.get("bullets", [])}
+        {"company": e.get("company"), "title": e.get("title") or e.get("role") or "",
+         "bullets": e.get("bullets", []),
+         **({"facts": answers(e)} if answers(e) else {})}
         for e in experience
     ]
     keywords = (insights or {}).get("keywords") or []
@@ -964,6 +978,9 @@ def tailor_resume_bullets(
                 "- One line each: at most ~30 words. Cut filler, keep specifics.\n"
                 "- Keep the same companies, titles, and bullet count; only reword and "
                 "re-emphasize.\n"
+                "- An entry's \"facts\" are figures and details the candidate supplied "
+                "for it. Use them to quantify that entry's bullets where they fit; they "
+                "are the only numbers you may add. Never move a fact to another entry.\n"
                 "Return a JSON array with the SAME structure: "
                 '[{"company": str, "title": str, "bullets": [str, ...]}]. '
                 "Return ONLY the JSON array."

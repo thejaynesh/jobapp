@@ -232,12 +232,11 @@ def update_list_item(db: Session, section: str, item_id: str, data: dict) -> Pro
     updated = copy.deepcopy(profile.data)
     for i, item in enumerate(updated[section]):
         if item.get("id") == item_id:
-            replacement = {"id": item_id, **data}
-            # The edit form does not carry the switch, so an edit must not
-            # quietly put a left-out entry back into every resume.
-            if IN_DOCUMENTS in item and IN_DOCUMENTS not in data:
-                replacement[IN_DOCUMENTS] = item[IN_DOCUMENTS]
-            updated[section][i] = replacement
+            # The edit form carries only the fields it shows, so what it does
+            # not show is kept: the "In resumes" switch (an edit must not
+            # quietly put a left-out entry back into every resume), the facts
+            # answered for its bullets, anything an import brought in.
+            updated[section][i] = {**item, **data, "id": item_id}
             break
     profile.data = updated
     db.flush()

@@ -218,4 +218,15 @@ def report(profile_data: dict) -> dict:
         result["readiness"]["warnings"].insert(
             0, f"Switched out of resumes for now: {', '.join(left_out)}.")
     result["left_out"] = left_out
+    from app.services.bullet_facts import count_unanswered
+
+    # A bullet with no figure gets none on any resume: the generator may not
+    # invent one, so the number has to come from here.
+    unquantified = count_unanswered(profile_data or {})
+    if unquantified:
+        result["readiness"]["warnings"].append(
+            f"{unquantified} bullet{'s have' if unquantified != 1 else ' has'} no number. "
+            "The Experience and Projects tabs ask for each one; an answer is kept as a "
+            "fact resumes and letters can use.")
+    result["unquantified"] = unquantified
     return result

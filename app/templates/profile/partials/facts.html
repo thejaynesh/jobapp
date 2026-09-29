@@ -1,0 +1,42 @@
+{# The numbers this entry's bullets leave out (services/bullet_facts): one
+   question per bullet with no figure, and the answers kept so far. Answers
+   are facts generation may use; the bullets themselves stay as written.
+   `section` and `item` come from the including template. #}
+{% set asks = unanswered_bullets(item) %}
+{% set kept = item.facts | default([], true) | selectattr("answer", "defined") | list %}
+{% if asks or kept %}
+<details class="mt-3 border-t border-gray-100 pt-2" {% if opened is defined and opened == item.id %}open{% endif %}>
+  <summary class="cursor-pointer text-xs text-gray-600">
+    {% if asks %}<span class="font-medium text-blue-700">{{ asks | length }} bullet{{ "s" if asks | length != 1 }} with no number</span> — add the figure and resumes can use it{% endif %}
+    {% if asks and kept %} · {% endif %}
+    {% if kept %}{{ kept | length }} fact{{ "s" if kept | length != 1 }} kept{% endif %}
+  </summary>
+  <div class="mt-2 space-y-3">
+    {% for ask in asks %}
+    <div class="text-sm">
+      <p class="text-gray-700">“{{ ask.bullet }}”</p>
+      <form hx-post="/profile/{{ section }}/{{ item.id }}/facts" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+            class="mt-1 flex flex-wrap items-center gap-2">
+        <input type="hidden" name="about" value="{{ ask.bullet }}">
+        <input type="text" name="answer" placeholder="{{ ask.question }}" aria-label="{{ ask.question }}"
+               class="flex-1 min-w-[16rem] border border-gray-300 rounded px-2 py-1 text-sm">
+        <button type="submit" class="bg-blue-600 text-white px-3 py-1 rounded text-xs hover:bg-blue-700">Keep</button>
+        <button type="button" hx-post="/profile/{{ section }}/{{ item.id }}/facts/skip"
+                class="text-xs text-gray-500 hover:underline" title="No number fits this one; stop asking">No number fits</button>
+      </form>
+    </div>
+    {% endfor %}
+    {% if kept %}
+    <ul class="text-xs text-gray-600 space-y-1">
+      {% for fact in kept %}
+      <li class="flex items-start gap-2">
+        <span class="flex-1"><span class="font-medium text-gray-800">{{ fact.answer }}</span>{% if fact.about %} <span class="text-gray-400">— for “{{ fact.about | truncate(90) }}”</span>{% endif %}</span>
+        <button hx-post="/profile/{{ section }}/{{ item.id }}/facts/{{ fact.id }}/delete" hx-target="#{{ section }}-list" hx-swap="outerHTML"
+                class="text-red-500 hover:underline">Remove</button>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+</details>
+{% endif %}

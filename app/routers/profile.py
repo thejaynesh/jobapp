@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import get_db
+from app.services import bullet_facts
 from app.services.locations import REGION_OPTIONS, normalize_prefs
 from app.services.profile_service import get_or_create_profile
 from app.config import live
@@ -18,6 +19,8 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 templates = build_templates()
 templates.env.globals["region_options"] = REGION_OPTIONS
 templates.env.globals["location_prefs"] = normalize_prefs
+# Each entry's bullets with no figure, and the question to ask for one.
+templates.env.globals["unanswered_bullets"] = bullet_facts.unanswered
 
 TABS = ["personal", "experience", "projects", "skills", "education",
         "screening", "templates", "narrative", "ai prompt", "check"]
@@ -392,6 +395,55 @@ def switch_in_resume(
     return templates.TemplateResponse(
         _SECTION_PARTIALS[section], {"request": request, "profile": profile.data},
     )
+
+
+def _facts_changed(request: Request, section: str, item_id: str, change) -> HTMLResponse:
+    """Apply a bullet_facts change and re-render the section's list, the entry's questions open."""
+    if section not in bullet_facts.SECTIONS:
+        raise HTTPException(status_code=404, detail="No such section")
+    try:
+        profile = change()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such entry")
+    return templates.TemplateResponse(
+        _SECTION_PARTIALS[section],
+        {"request": request, "profile": profile.data, "opened": item_id},
+    )
+
+
+@router.post("/{section}/{item_id}/facts", response_class=HTMLResponse)
+def add_fact(
+    request: Request, section: str, item_id: str,
+    about: str = Form(""), answer: str = Form(""), db: Session = Depends(get_db),
+):
+    """The number a bullet left out, kept on the entry for generation to use."""
+    response = _facts_changed(
+        request, section, item_id, lambda: bullet_facts.add(db, section, item_id, about, answer))
+    db.commit()
+    return response
+
+
+@router.post("/{section}/{item_id}/facts/skip", response_class=HTMLResponse)
+def skip_fact(
+    request: Request, section: str, item_id: str,
+    about: str = Form(""), db: Session = Depends(get_db),
+):
+    """No number fits this bullet; stop asking."""
+    response = _facts_changed(
+        request, section, item_id, lambda: bullet_facts.skip(db, section, item_id, about))
+    db.commit()
+    return response
+
+
+@router.post("/{section}/{item_id}/facts/{fact_id}/delete", response_class=HTMLResponse)
+def delete_fact(
+    request: Request, section: str, item_id: str, fact_id: str,
+    db: Session = Depends(get_db),
+):
+    response = _facts_changed(
+        request, section, item_id, lambda: bullet_facts.remove(db, section, item_id, fact_id))
+    db.commit()
+    return response
 
 
 # Templates

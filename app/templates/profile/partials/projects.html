@@ -39,6 +39,7 @@
     {% set section = "projects" %}{% set item = proj %}
     {% include "profile/partials/in_resume_switch.html" %}
     </div>
+    {% include "profile/partials/facts.html" %}
   </div>
   {% endfor %}
   <button hx-post="/profile/projects/add" hx-target="#projects-list" hx-swap="outerHTML" class="mt-2 text-blue-600 text-sm hover:underline">+ Add Project</button>
