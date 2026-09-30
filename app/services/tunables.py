@@ -234,7 +234,9 @@ TUNABLES: list[Tunable] = [
     ),
     Tunable(
         key="linkedin_max_pages", env="LINKEDIN_MAX_PAGES", kind="int",
-        minimum=1, maximum=20, group="LinkedIn",
+        # Above the code's default of 25: a maximum under the default made the
+        # field invalid as shipped, and the browser refused the whole form.
+        minimum=1, maximum=40, group="LinkedIn",
         label="LinkedIn pages per search",
         help="10 results a page. Deeper pages return looser matches and more "
              "undated postings, so more isn't always better.",
