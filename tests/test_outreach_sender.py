@@ -100,6 +100,31 @@ class TestBuildEmail:
 
 
 class TestSendMessage:
+    def test_editor_values_are_stored_with_the_delivery_reservation(self, db, smtp_on):
+        _, _, message = _fixtures(db)
+
+        def inspect_delivery(mail):
+            db.refresh(message)
+            assert message.send_state == "sending"
+            assert message.subject == mail["Subject"] == "Reviewed subject"
+            assert message.body == mail.get_body().get_content().strip() == "Reviewed body"
+
+        with patch("app.services.outreach_sender._deliver", side_effect=inspect_delivery):
+            send_message(db, message, draft={"subject": "Reviewed subject", "body": "Reviewed body"})
+        assert message.status == "sent"
+
+    def test_a_refused_send_does_not_modify_the_sent_record(self, db, smtp_on):
+        _, _, message = _fixtures(db)
+        message.status = "sent"
+        original = message.body
+        db.commit()
+        with patch("app.services.outreach_sender._deliver") as deliver:
+            with pytest.raises(SendError, match="already been sent"):
+                send_message(db, message, draft={"subject": "Wrong", "body": "Wrong"})
+        db.refresh(message)
+        assert message.body == original
+        deliver.assert_not_called()
+
     def test_refuses_when_sending_is_disabled(self, db):
         _, _, message = _fixtures(db)
         with pytest.raises(SendError, match="turned off"):

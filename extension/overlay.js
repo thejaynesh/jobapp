@@ -251,9 +251,9 @@
     if (job.status === "filtered_out") {
       pill(flags, job.filter_reason === "restricted" ? "US citizens only" : "filtered out", "bad");
     }
-    if (job.sponsorship_direction === "no_sponsorship") {
+    if (job.sponsorship_direction === "negative") {
       pill(flags, "no sponsorship", "warn");
-    } else if (job.sponsorship_direction === "sponsors") {
+    } else if (job.sponsorship_direction === "positive") {
       pill(flags, "sponsors visas", "ok");
     }
     if (flags.children.length) box.append(flags);
@@ -513,7 +513,7 @@
     button.disabled = true;
     button.textContent = "Filling…";
 
-    const reply = await ask("/api/agent/autofill-fields?site=" + encodeURIComponent(location.origin + location.pathname));
+    const reply = await ask("/api/agent/autofill-fields?site=" + encodeURIComponent(location.href));
     if (reply.error) {
       button.disabled = false;
       button.textContent = "Fill this form";
@@ -584,7 +584,7 @@
       }
       button.disabled = true;
       button.textContent = "Saving…";
-      const reply = await ask("/api/agent/remember-answers", { answers, site: location.origin + location.pathname });
+      const reply = await ask("/api/agent/remember-answers", { answers, site: location.href });
       button.disabled = false;
       button.textContent = "Remember my answers";
       const saved = (reply.data || {}).saved;

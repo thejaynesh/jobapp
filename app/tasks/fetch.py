@@ -56,9 +56,6 @@ def fetch_state() -> dict:
     the truth.
     """
     from app.services.fetch_lock import any_state
-    from app.services import capacity
-    if not capacity.allow_background():
-        return []
 
     return any_state(ALL_LOCK_KEYS)
 

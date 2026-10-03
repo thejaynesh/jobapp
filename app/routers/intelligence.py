@@ -44,18 +44,32 @@ def job_evidence(job_id: uuid.UUID, request: Request, db: Session = Depends(get_
 
 
 @router.post("/today/answer")
-def answer(question_id: str = Form(...), answer: str = Form(...), question_kind: str = Form("skill"), db: Session = Depends(get_db)):
+def answer(question_id: str = Form(...), answer: str = Form(...), question_kind: str = Form("skill"),
+           satisfaction: str = Form("unsure"), job_id: uuid.UUID | None = Form(None),
+           db: Session = Depends(get_db)):
     if not question_id.startswith("r-") or len(question_id) != 22 or not 1 <= len(answer.strip()) <= 1600:
         raise HTTPException(422, "A short factual answer is required")
+    if job_id is not None:
+        job = db.get(Job, job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        requirement = next((row for row in evidence.requirements(job) if row["id"] == question_id), None)
+        if requirement is None:
+            raise HTTPException(422, "This requirement has changed; review the posting again")
+        question_kind = requirement.get("kind", "skill")
+    if question_kind not in evidence.ANSWER_KINDS or satisfaction not in evidence.SATISFACTIONS:
+        raise HTTPException(422, "Choose whether you meet the requirement")
     profile = get_or_create_profile(db)
     data = copy.deepcopy(profile.data or {})
     answers = data.setdefault("requirement_answers", {})
     if len(answers) >= 500 and question_id not in answers:
         raise HTTPException(422, "Remove an old clarification before adding another")
-    answers[question_id] = {"text": answer.strip(), "at": datetime.now(timezone.utc).isoformat()}
+    now = datetime.now(timezone.utc)
+    answers[question_id] = {"text": answer.strip(), "at": now.isoformat(),
+                            "kind": question_kind, "satisfaction": satisfaction}
     if question_kind == "eligibility":
         from app.services.tunables import value
-        answers[question_id]["expires_at"] = (datetime.now(timezone.utc) + timedelta(days=value(data, "answer_expiry_days"))).isoformat()
+        answers[question_id]["expires_at"] = (now + timedelta(days=value(data, "answer_expiry_days"))).isoformat()
     profile.data = data
     db.commit()
     return RedirectResponse("/today", 303)
@@ -117,15 +131,11 @@ def milestone(application_id: uuid.UUID, kind: str = Form(...), note: str = Form
         raise HTTPException(404, "Application not found")
     if kind not in history.MILESTONES:
         raise HTTPException(422, "Unknown milestone")
+    # Take the exclusive lock before the event INSERT's foreign-key check
+    # acquires KEY SHARE; concurrent inserts cannot both upgrade that lock.
+    db.refresh(application, with_for_update=True)
     profile = get_or_create_profile(db).data or {}
-    payload = {"note": note[:800]}
-    if not application.applied_at and kind not in {"withdrawn"}:
-        history.record_decision(db, application.job, profile, "yes", origin="application", key=f"application:{application.id}:decision")
-        payload["posting"] = {"title": application.job.title, "company": application.job.company,
-            "url": application.job.url, "description": (application.job.description or "")[:50000]}
-        payload["profile_hash"] = evidence.fingerprint(evidence.facts(profile))
-        payload["document_confirmation"] = "inferred"
-    history.append(db, application, kind, payload=payload)
+    history.record_milestone(db, application, kind, profile, payload={"note": note[:800]})
     history.project_status(db, application, profile)
     db.commit()
     return RedirectResponse(f"/apps/{application_id}", 303)

@@ -132,16 +132,22 @@ def _decode(raw) -> str:
     if not raw:
         return ""
     try:
-        return str(make_header(decode_header(raw)))
+        text = str(make_header(decode_header(raw)))
     except Exception:
-        return str(raw)
+        text = str(raw)
+    # PostgreSQL text/JSONB cannot store U+0000. Treat it as malformed mail
+    # input here rather than retrying the same otherwise readable UID forever.
+    return text.replace("\x00", "")
 
 
 def _referenced_ids(message) -> list[str]:
     """Every Message-ID this mail quotes, newest reference first."""
     found: list[str] = []
     for header in ("In-Reply-To", "References"):
-        value = message.get(header) or ""
+        # The bytes parser can return a Header object for malformed non-ASCII
+        # input. Decode it before regex/string operations so one bad message
+        # cannot block the durable cursor and all mail behind it.
+        value = _decode(message.get(header))
         for match in _MESSAGE_ID_RE.findall(value):
             if match not in found:
                 found.append(match)
@@ -150,7 +156,7 @@ def _referenced_ids(message) -> list[str]:
 
 def _is_auto_reply(message) -> bool:
     for header in _AUTO_HEADERS:
-        value = (message.get(header) or "").lower()
+        value = _decode(message.get(header)).strip().lower()
         if value and value != "no":
             return True
     return False
@@ -168,7 +174,7 @@ def _body_text(message) -> str:
             continue
         if not payload:
             continue
-        chunks.append(payload.decode("utf-8", errors="replace"))
+        chunks.append(payload.decode("utf-8", errors="replace").replace("\x00", ""))
         if sum(len(c) for c in chunks) > 100000:
             break
     return "\n".join(chunks)
@@ -177,7 +183,7 @@ def _body_text(message) -> str:
 def _looks_like_bounce(message, sender: str) -> bool:
     if _BOUNCE_SENDERS.search(sender or ""):
         return True
-    content_type = (message.get("Content-Type") or "").lower()
+    content_type = _decode(message.get("Content-Type")).lower()
     return "report-type=delivery-status" in content_type
 
 
@@ -293,6 +299,8 @@ def _state(profile: Profile) -> dict:
 
 
 def _save_state(db, profile: Profile, state: dict) -> None:
+    # Mail retrieval can take minutes; preserve profile edits made meanwhile.
+    db.refresh(profile, with_for_update=True)
     data = dict(profile.data or {})
     data["mailbox"] = state
     profile.data = data
@@ -366,42 +374,35 @@ def poll(db, limit: int | None = None) -> dict:
         typ, data = client.uid("SEARCH", None, criteria)
         if typ != "OK":
             raise MailboxError("The mail server refused the search.")
-        uids = [u for u in (data[0] or b"").split() if u]
-        if last_uid:
-            # IMAP quirk: `UID n:*` always returns at least the mailbox's last
-            # message, even when its UID is below n — so every quiet poll
-            # re-fetched and re-scanned the newest mail. Keep only genuinely
-            # new UIDs.
-            def _above(uid) -> bool:
-                try:
-                    return int(uid) > last_uid
-                except ValueError:
-                    return True
-            uids = [u for u in uids if _above(u)]
-        if len(uids) > budget:
-            uids = uids[-budget:]
+        # A bounded batch must drain the oldest pending messages. Advancing to
+        # the newest batch's maximum UID would permanently skip the backlog.
+        # UID n:* can include the previous last UID when no new mail exists.
+        uids = sorted({int(u) for u in (data[0] or b"").split() if u.isdigit() and int(u) > last_uid})[:budget]
 
         highest = last_uid
         for uid in uids:
-            typ, fetched = client.uid("FETCH", uid, "(RFC822)")
+            typ, fetched = client.uid("FETCH", str(uid).encode(), "(RFC822)")
             if typ != "OK" or not fetched or not fetched[0]:
-                continue
-            try:
-                highest = max(highest, int(uid))
-            except ValueError:
-                pass
+                # Retry this UID before moving the cursor past it. If it was
+                # expunged, the next SEARCH omits it and draining can resume.
+                break
 
             raw = fetched[0][1]
             if not raw:
-                continue
+                break
             counts["scanned"] += 1
             try:
                 _process(db, email.message_from_bytes(raw), counts)
+                db.commit()
             except Exception as exc:
-                # One malformed mail must not stop the poll, or the whole
-                # mailbox stalls behind it forever.
-                logger.warning("mailbox: could not process a message: %s", exc)
+                # A processing/database failure is not evidence that the mail
+                # was handled. Keep the cursor before it for the next poll;
+                # prior messages were committed and cannot be lost on rollback.
+                db.rollback()
+                logger.warning("mailbox: could not process UID %s; will retry: %s", uid, exc)
                 counts["skipped"] += 1
+                break
+            highest = uid
 
         if highest:
             state["last_uid"] = highest

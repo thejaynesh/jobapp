@@ -1022,20 +1022,55 @@ class TestThePageStatedMoreThanTheDescription:
 
         assert job.salary_min is None
 
-    def test_details_are_only_taken_when_the_description_was_worth_storing(self, db):
-        # The early returns above this all mean "nothing about this page was
-        # better than what we hold"; that has to include its details.
-        job = _job(description=LONG, salary_min=None)
+    @pytest.mark.parametrize("description_case", ["same", "shorter", "manual"])
+    def test_metadata_improves_a_job_without_replacing_its_description(self, db, description_case):
+        job = _job(description=LONG, salary_min=None, location="",
+                   manual_fields=["description"] if description_case == "manual" else [])
         db.add(job)
         db.commit()
 
-        enrichment.apply_extraction(
+        found_text = {"same": LONG, "shorter": "Short.", "manual": LONG * 2}[description_case]
+        outcome = enrichment.apply_extraction(
             db, job,
-            enrichment.Extraction(description="Short.", method="llm",
-                                  details={"salary_min": 120000}),
+            enrichment.Extraction(description=found_text, method="json_ld",
+                                  posted_at="2026-08-01T00:00:00Z",
+                                  details={"salary_min": 60, "salary_max": 80,
+                                           "salary_currency": "USD", "salary_period": "hour",
+                                           "employment_type": "FULL_TIME", "location": "Boston, MA"}),
         )
+        db.commit()
+        db.refresh(job)
 
+        assert outcome["improved"] is True
+        assert outcome["chars_gained"] == 0
+        assert outcome["requeued"] is False
+        assert set(outcome["filled"]) == {"salary", "employment_type", "posted_at", "location"}
+        assert job.description == LONG
+        assert job.description_updated_at is None
+        assert (job.salary_min, job.salary_max) == (60, 80)
+        assert (job.salary_annual_min, job.salary_annual_max) == (124800, 166400)
+        assert job.employment_type == "full_time"
+        assert job.posted_at == datetime(2026, 8, 1, tzinfo=timezone.utc)
+        assert job.location == "Boston, MA"
+        assert db.query(Job.id).filter(Job.id == job.id, Job.salary_annual_max >= 150000).first()
+
+    def test_metadata_merges_still_honor_each_fields_manual_lock(self, db):
+        job = _job(description=LONG, location="", manual_fields=[
+            "description", "salary_min", "salary_max", "employment_type", "location", "posted_at"])
+        db.add(job)
+        db.commit()
+
+        outcome = enrichment.apply_extraction(db, job, enrichment.Extraction(
+            description=LONG * 2, method="json_ld", posted_at="2026-08-01T00:00:00Z",
+            details={"salary_min": 120000, "employment_type": "FULL_TIME", "location": "Boston, MA"}))
+
+        assert outcome["improved"] is False
+        assert outcome["filled"] == []
+        assert job.description == LONG
         assert job.salary_min is None
+        assert job.employment_type is None
+        assert job.posted_at is None
+        assert job.location == ""
 
 
 class TestALearnedLocationKeepsTheHashHonest:

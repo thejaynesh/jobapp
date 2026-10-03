@@ -77,6 +77,15 @@ def _rows(db, job) -> list[JobScore]:
 
 
 class TestEveryEvaluationIsKept:
+    def test_an_explicit_evaluated_length_is_kept(self, db):
+        job = _job(description="The description currently stored on the job.")
+        db.add(job)
+        db.commit()
+
+        row = score_history.record(db, job, outcome="filtered_out", description_chars=12)
+        db.commit()
+        assert row.description_chars == 12
+
     def test_the_first_score_is_recorded(self, db):
         db.add(Profile(data=PROFILE))
         job = _job()

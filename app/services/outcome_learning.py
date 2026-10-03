@@ -1,10 +1,7 @@
 """Mature cohorts and an experimental ranker; silence is never a negative label."""
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy.orm import joinedload
-
 from app.models.application import Application
-from app.models.intelligence import DecisionEvent
 from app.services import application_history, for_you
 from app.services.tunables import value
 
@@ -20,12 +17,7 @@ def cohort(db, profile, now=None):
     stages = application_history.milestones(db, [a.id for a in applications])
     channels = application_history.channels(db, [a.id for a in applications])
     groups = {}
-    decisions = (db.query(DecisionEvent).filter(DecisionEvent.job_id.in_([a.job_id for a in applications]),
-                 DecisionEvent.kind == "yes", DecisionEvent.payload["origin"].astext == "application")
-                 .order_by(DecisionEvent.occurred_at).all()) if applications else []
-    snapshots = {}
-    for event in decisions:
-        snapshots.setdefault(event.job_id, event)
+    snapshots = application_history.application_decisions(db, applications)
     rows, immature, unknown = [], 0, 0
     for app in applications:
         channel = channels.get(app.id, "not recorded")
@@ -39,7 +31,7 @@ def cohort(db, profile, now=None):
         success = bool(milestones & {"interview_invited", "interview_completed", "offered"})
         group["interviews"] += int(success)
         failure = "rejected" in milestones
-        snapshot = snapshots.get(app.job_id)
+        snapshot = snapshots.get(app.id)
         if not success and not failure:
             unknown += 1
             group["unknown"] += 1

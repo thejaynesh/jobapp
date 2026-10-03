@@ -67,7 +67,8 @@ def _current(application, doc_type):
 
 
 def set_status(db, application, status: ApplicationStatus, now: datetime | None = None,
-               profile_data: dict | None = None, record_event: bool = True) -> None:
+               profile_data: dict | None = None, record_event: bool = True,
+               reproject: bool = False) -> None:
     """Move an application to `status`, with everything that goes with the move."""
     from app.services.tunables import value
 
@@ -76,13 +77,17 @@ def set_status(db, application, status: ApplicationStatus, now: datetime | None 
         # Serialize transitions, including simultaneous clicks from two tabs.
         db.flush()
         db.refresh(application, attribute_names=["status", "status_changed_at", "applied_at", "sent_resume_id"], with_for_update=True)
-    if status == application.status and application.status_changed_at is not None:
+    if not reproject and status == application.status and application.status_changed_at is not None:
         return
     from app.services import application_history
     if record_event:
         application_history.record_status(db, application, status, profile_data or {}, now)
     application.status = status
     application.status_changed_at = now
+    if status == ApplicationStatus.not_applied:
+        application.applied_at = None
+        application.sent_resume_id = None
+        application.sent_cover_letter = None
     # Straight to "interviewing" from "not applied" still means it was sent.
     if status in SENT:
         if application.applied_at is None:

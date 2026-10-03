@@ -330,6 +330,17 @@ class TestMessageRoutes:
         response = client.post(f"/outreach/messages/{message.id}/save", data={"body": "x"})
         assert response.status_code == 409
 
+    @pytest.mark.parametrize("send_state", ["sending", "uncertain"])
+    def test_autosave_cannot_rewrite_a_reserved_delivery(self, client, db, message, send_state):
+        original = message.body
+        message.send_state = send_state
+        message.send_started_at = datetime.now(timezone.utc)
+        db.commit()
+        response = client.post(f"/outreach/messages/{message.id}/save", data={"body": "Delayed edit"})
+        assert response.status_code == 409
+        db.refresh(message)
+        assert message.body == original
+
     def test_regenerating_replaces_the_body(self, client, db, message):
         with patch("app.services.outreach.generation_chat", return_value="Rewritten, " + "x " * 30):
             response = client.post(f"/outreach/messages/{message.id}/regenerate",
@@ -352,6 +363,61 @@ class TestMessageRoutes:
         db.refresh(message)
         assert message.status == "sent"
         assert message.follow_up_due_at is not None
+
+    @pytest.mark.parametrize("channel", ["email", "linkedin"])
+    def test_manual_send_freezes_the_current_draft_before_late_autosave(self, client, db, message, channel):
+        message.channel = channel
+        db.commit()
+        draft = {"status": "sent", "save_draft": "true", "body": "The correction I copied and sent."}
+        if channel == "email":
+            draft["subject"] = "Reviewed subject"
+        response = client.post(f"/outreach/messages/{message.id}/status", data=draft)
+        assert response.status_code == 200
+        db.refresh(message)
+        assert message.status == "sent" and message.edited
+        assert message.subject == draft.get("subject")
+        assert message.body == draft["body"]
+        assert message.follow_up_due_at is not None
+        response = client.post(f"/outreach/messages/{message.id}/save", data={"body": "Earlier pending autosave"})
+        assert response.status_code == 409
+        db.refresh(message)
+        assert message.body == draft["body"]
+
+    @pytest.mark.parametrize("send_state,status_code", [("sending", 422), ("uncertain", 200)])
+    def test_manual_confirmation_preserves_the_reserved_smtp_body(self, client, db, message, send_state, status_code):
+        original = message.body
+        message.send_state = send_state
+        message.send_started_at = datetime.now(timezone.utc)
+        db.commit()
+        response = client.post(f"/outreach/messages/{message.id}/status", data={
+            "status": "sent", "save_draft": "true", "body": "Not the reserved body"})
+        assert response.status_code == status_code
+        db.refresh(message)
+        assert message.body == original
+        assert message.status == ("sent" if send_state == "uncertain" else "draft")
+
+    def test_repeated_manual_confirmation_cannot_rewrite_a_sent_message(self, client, db, message):
+        original = message.body
+        message.status = "sent"
+        db.commit()
+        response = client.post(f"/outreach/messages/{message.id}/status", data={
+            "status": "sent", "save_draft": "true", "body": "Another draft"})
+        assert response.status_code == 200
+        db.refresh(message)
+        assert message.body == original
+
+    def test_manual_confirmation_preserves_legacy_uncertain_delivery(self, client, db, message):
+        original = message.body
+        message.message_id = "<reserved-delivery@example.com>"
+        message.send_state = "idle"
+        message.send_error = None
+        db.commit()
+        assert message.delivery_uncertain
+        response = client.post(f"/outreach/messages/{message.id}/status", data={
+            "status": "sent", "save_draft": "true", "body": "Not the reserved body"})
+        assert response.status_code == 200
+        db.refresh(message)
+        assert message.status == "sent" and message.body == original
 
     def test_marking_replied_cancels_the_sequence(self, client, db, message):
         client.post(f"/outreach/messages/{message.id}/status", data={"status": "sent"})
@@ -393,6 +459,22 @@ class TestMessageRoutes:
         assert "Sent to sam@acme.com" in response.text
         db.refresh(message)
         assert message.status == "sent"
+
+    def test_send_uses_the_editor_even_before_its_autosave(self, client, db, message):
+        from app.services import outreach_sender
+
+        with patch.object(outreach_sender.settings, "OUTREACH_SEND_ENABLED", True), \
+             patch.object(outreach_sender.settings, "SMTP_HOST", "smtp.example.com"), \
+             patch.object(outreach_sender.settings, "SMTP_FROM_EMAIL", "jane@example.com"), \
+             patch("app.services.outreach_sender._deliver") as deliver:
+            response = client.post(f"/outreach/messages/{message.id}/send", data={
+                "save_draft": "true", "subject": "Reviewed subject", "body": "My approved correction."})
+        assert response.status_code == 200
+        mail = deliver.call_args.args[0]
+        assert mail["Subject"] == "Reviewed subject"
+        assert mail.get_body().get_content().strip() == "My approved correction."
+        db.refresh(message)
+        assert message.body == "My approved correction." and message.edited
 
     def test_404_for_an_unknown_message(self, client):
         assert client.post(f"/outreach/messages/{uuid.uuid4()}/delete").status_code == 404

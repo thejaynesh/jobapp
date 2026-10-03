@@ -30,7 +30,7 @@ def propose(db, message, received_at=None):
     kind = next((kind for kind, pattern in _EVENTS if re.search(pattern, text, re.I | re.S)), None)
     if kind is None:
         return 0
-    message_id = str(message.get("Message-ID") or "")[:500]
+    message_id = _decode(message.get("Message-ID"))[:500]
     identity = fingerprint(message_id or [str(message.get("From")), subject, body])
     # Only applications in the search workflow; a job merely discovered by a
     # crawler is not enough evidence that this email concerns the user.

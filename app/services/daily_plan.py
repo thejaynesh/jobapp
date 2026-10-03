@@ -47,7 +47,7 @@ def build(db, profile, minutes=None, now=None):
         for row in assessment["requirements"]:
             if row["status"] == "unknown" and row["priority"] == "required" and row["id"] not in answered:
                 questions[row["id"]] += 1
-                question_rows[row["id"]] = row
+                question_rows[row["id"]] = {**row, "job_id": str(job.id)}
         score = job.llm_score_deep if job.llm_score_deep is not None else job.llm_score
         is_exploration = job in exploration
         priority = (score or 40) + (10 if job.favourite else 0) + (8 if evidence.normal(job.company) in pins else 0)

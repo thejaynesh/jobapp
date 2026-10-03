@@ -445,8 +445,13 @@ def save_message(
     user is typing, and swapping the panel would move the cursor out of the box.
     """
     message = _get_message(db, message_id)
-    if message.status in ("sent", "replied"):
+    # Serialize a delayed autosave with the sender's reservation. Once SMTP
+    # starts, the stored body must stay the body handed to the mail server.
+    db.refresh(message, with_for_update=True)
+    if message.status in ("sent", "replied", "bounced"):
         raise HTTPException(status_code=409, detail="That message has already been sent.")
+    if message.send_state in ("sending", "uncertain") or message.delivery_uncertain:
+        raise HTTPException(status_code=409, detail="Delivery has started; this message cannot be edited.")
     message.subject = subject.strip() or None
     message.body = body
     message.edited = True
@@ -459,6 +464,9 @@ def update_message_status(
     message_id: uuid.UUID,
     request: Request,
     status: str = Form(...),
+    save_draft: bool = Form(False),
+    subject: str = Form(""),
+    body: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """
@@ -468,6 +476,16 @@ def update_message_status(
     works the same whether or not SMTP is configured.
     """
     message = _get_message(db, message_id)
+    db.refresh(message, with_for_update=True)
+    # Manual delivery uses the same live editor as Copy. Freeze that text
+    # with the sent status so a pending autosave cannot leave a stale record.
+    # Confirming an uncertain SMTP send instead preserves its reserved text.
+    if (status == "sent" and save_draft and message.status in ("draft", "approved", "skipped")
+            and message.send_state not in ("sending", "uncertain") and not message.delivery_uncertain):
+        subject = subject.strip() or None
+        if message.subject != subject or message.body != body:
+            message.subject, message.body = subject, body
+            message.edited = True
     try:
         set_message_status(db, message, status)
     except ValueError as exc:
@@ -490,6 +508,9 @@ def send(
     request: Request,
     allow_guessed: bool = Form(False),
     retry_uncertain: bool = Form(False),
+    save_draft: bool = Form(False),
+    subject: str = Form(""),
+    body: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """
@@ -502,7 +523,8 @@ def send(
 
     message = _get_message(db, message_id)
     try:
-        send_message(db, message, allow_guessed=allow_guessed, retry_uncertain=retry_uncertain)
+        send_message(db, message, allow_guessed=allow_guessed, retry_uncertain=retry_uncertain,
+                     draft={"subject": subject, "body": body} if save_draft else None)
     except SendError as exc:
         return _panel_for_contact(request, db, message.contact, {"ok": False, "message": str(exc)})
     except Exception as exc:

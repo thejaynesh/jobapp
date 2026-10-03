@@ -15,9 +15,10 @@ want to work here?"), so it is drafted fresh for each form instead
 like a credential or identity document, whoever sends it.
 """
 
+import hashlib
 import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 STORE_KEY = "remembered_answers"
 MAX_ANSWERS = 500
@@ -27,13 +28,64 @@ _VOLATILE = re.compile(r"available|availability|start|notice|salary|compensation
 
 
 def site_scope(url):
+    """A versioned employer identity, or a single-page identity if uncertain.
+
+    A locale or an ATS route such as /Recruiting is not an employer. Unknown
+    URL layouts therefore reuse answers only on the exact page. Hashing that
+    fallback also keeps query parameters out of the saved profile.
+    """
     try:
         parsed = urlsplit(str(url or ""))
-        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+        if (parsed.scheme not in {"https", "http"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
             return ""
-        # Shared ATS domains host many employers; origin alone is insufficient.
-        first = next((part for part in parsed.path.split("/") if part), "")
-        return parsed.hostname.lower() + "/" + first
+        host = parsed.hostname.lower()
+        parts = [part for part in parsed.path.split("/") if part]
+        query = parse_qs(parsed.query)
+        employer = None
+        if re.fullmatch(r"(?:boards|job-boards)(?:\.eu)?\.greenhouse\.io", host):
+            if len(parts) >= 2 and parts[0] == "embed" and parts[1] in {"job_app", "job_board"}:
+                values = query.get("for", [])
+                employer = values[0] if len(values) == 1 else None
+            elif parts and parts[0] != "embed":
+                employer = parts[0]
+        elif host == "jobs.dayforcehcm.com":
+            if len(parts) >= 2 and re.fullmatch(r"[a-z]{2}(?:-[a-z]{2})?", parts[0], re.I):
+                employer = parts[1]
+        elif host == "recruiting.paylocity.com":
+            if len(parts) >= 4 and [p.lower() for p in parts[:2]] == ["recruiting", "jobs"]:
+                route, identity = parts[2].lower(), parts[3]
+                if route == "all":
+                    employer = identity
+                elif route in {"details", "apply"} and identity.isdigit():
+                    # A posting URL has a job ID, not a company ID. Never
+                    # reuse that answer for another posting on this host.
+                    return f"v2:posting:{host}/{identity}"
+        elif host == "ats.rippling.com":
+            if parts[:3] == ["api", "v2", "board"]:
+                parts = parts[3:]
+            if parts and re.fullmatch(r"[a-z]{2}-[a-z]{2}", parts[0], re.I):
+                parts = parts[1:]
+            employer = parts[0] if parts else None
+        elif host == "jobs.jobvite.com":
+            if parts and parts[0] == "careers":
+                parts = parts[1:]
+            employer = parts[0] if parts else None
+        elif host in {"jobs.lever.co", "jobs.eu.lever.co", "jobs.ashbyhq.com", "apply.workable.com",
+                      "jobs.smartrecruiters.com",
+                      "jobs.gem.com", "recruiting.ultipro.com", "recruiting2.ultipro.com"}:
+            employer = parts[0] if parts else None
+        elif any(host.endswith("." + domain) for domain in (
+                "myworkdayjobs.com", "icims.com", "taleo.net", "recruitee.com",
+                "bamboohr.com", "applytojob.com", "breezy.hr", "pinpointhq.com",
+                "teamtailor.com", "jobs.personio.de", "jobs.personio.com")):
+            return f"v2:employer:{host}"
+        if (employer and re.fullmatch(r"[a-z0-9_.-]+", employer, re.I)
+                and employer.lower() not in {"jobs", "job", "apply", "embed", "careers", "api"}):
+            return f"v2:employer:{host}/{employer}"
+        address = urlunsplit((parsed.scheme, parsed.netloc.lower(), parsed.path,
+                              parsed.query, parsed.fragment))
+        return "v2:page:" + hashlib.sha256(address.encode()).hexdigest()
     except ValueError:
         return ""
 
@@ -59,11 +111,16 @@ def lookup(profile_data: dict, site="", now=None) -> dict:
     from app.services.tunables import value
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=int(value(profile_data, "answer_expiry_days")))
-    found, priorities = {}, {}
+    scope = site_scope(site)
+    if site and not scope:
+        return {}
+    found = {}
     for key, entry in entries(profile_data).items():
         if not isinstance(entry, dict) or not entry.get("answer"):
             continue
-        if entry.get("scope") and entry["scope"] != site_scope(site):
+        # Old host/first-path keys cannot prove an employer identity. Unscoped
+        # answers are available only to unscoped callers, never a named site.
+        if (entry.get("scope") or "") != scope:
             continue
         if _VOLATILE.search(entry.get("question") or key):
             try:
@@ -73,10 +130,7 @@ def lookup(profile_data: dict, site="", now=None) -> dict:
             except ValueError:
                 continue
         question = normalize_question(entry.get("question") or key)
-        priority = int(bool(entry.get("scope")))
-        if priority >= priorities.get(question, -1):
-            found[question] = entry["answer"]
-            priorities[question] = priority
+        found[question] = entry["answer"]
     return found
 
 
@@ -85,6 +139,9 @@ def remember(profile_data: dict, answers: list, site="") -> tuple[dict, int]:
     kept = dict(entries(profile_data))
     saved = 0
     now = datetime.now(timezone.utc).isoformat()
+    scope = site_scope(site)
+    if site and not scope:
+        return {**(profile_data or {}), STORE_KEY: kept}, 0
     for item in answers if isinstance(answers, list) else []:
         if not isinstance(item, dict):
             continue
@@ -95,7 +152,6 @@ def remember(profile_data: dict, answers: list, site="") -> tuple[dict, int]:
             continue
         if _SENSITIVE.search(question) or _SENSITIVE.search(answer):
             continue
-        scope = site_scope(site)
         storage_key = key + (" @ " + scope if scope else "")
         kept[storage_key] = {"question": question, "answer": answer, "at": now, "scope": scope}
         saved += 1

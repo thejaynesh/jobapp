@@ -106,15 +106,16 @@ def _prune(db, job_id, keep: int) -> None:
 
 
 def record(db, job, *, profile_data: dict | None = None,
-           outcome: str | None = None):
+           outcome: str | None = None, description_chars: int | None = None):
     """
     Append this evaluation's verdict. Returns the row, or None if it wasn't
     recorded.
 
-    Everything is read back off the job rather than passed in, because the job
+    Verdicts are read back off the job rather than passed in, because the job
     is where the evaluation just wrote its answer — and a second copy of that
     answer, assembled by the caller, is a second thing that can disagree with
-    what the job actually says.
+    what the job actually says. Concurrent evaluations supply the length of
+    the description they actually read, independently of the current row.
     """
     job_id = getattr(job, "id", None)
     if not isinstance(job_id, uuid.UUID) or db is None:
@@ -163,7 +164,8 @@ def record(db, job, *, profile_data: dict | None = None,
             filter_detail=_text(getattr(job, "filter_detail", None)),
             reasoning=_text(getattr(job, "llm_reasoning", None)) if scored else None,
             min_score=_float(min_score),
-            description_chars=len(getattr(job, "description", None) or ""),
+            description_chars=(description_chars if description_chars is not None
+                               else len(getattr(job, "description", None) or "")),
             trigger=_trigger(db, job, previous),
         )
     except Exception as exc:

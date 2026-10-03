@@ -978,7 +978,7 @@ def _rehash(db, job: Job) -> None:
 
 def apply_extraction(db, job: Job, found: Extraction) -> dict:
     """
-    Store a better description, and let the job be judged again.
+    Store fuller prose and missing facts, preserving each field's manual edit.
 
     The re-queue is the point of the whole feature. A job filtered out for
     "no description" was never rejected on its merits, so once it has one it
@@ -987,29 +987,16 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     from app.services.job_edits import is_manual
 
     outcome = {"improved": False, "chars_gained": 0, "requeued": False, "filled": []}
-    if not found or not found.description:
-        return outcome
-
-    # A description the user pasted is the posting they were actually reading.
-    # It loses on length to a listing page padded with boilerplate, which is
-    # exactly the comparison below — so it never gets made.
-    if is_manual(job, "description"):
+    if found is None:
         return outcome
 
     before = len(job.description or "")
-    gained = len(found.description) - before
-    if gained < MIN_IMPROVEMENT_CHARS:
-        return outcome
-
-    job.description = found.description
-    job.description_updated_at = datetime.now(timezone.utc)
-    outcome["improved"] = True
-    outcome["chars_gained"] = gained
-
-    if found.posted_at and not job.posted_at:
-        parsed = _parse_datetime(found.posted_at)
-        if parsed:
-            job.posted_at = parsed
+    gained = len(found.description or "") - before
+    description_improved = not is_manual(job, "description") and gained >= MIN_IMPROVEMENT_CHARS
+    if description_improved:
+        job.description = found.description
+        job.description_updated_at = datetime.now(timezone.utc)
+        outcome["chars_gained"] = gained
 
     # Everything else the page stated. Both extraction methods read salary and
     # employment type — `_details_from_ld` out of the JobPosting block, the LLM
@@ -1020,19 +1007,26 @@ def apply_extraction(db, job: Job, found: Extraction) -> dict:
     # columns and a raw "FULL_TIME" is not the vocabulary they store; merged
     # through `enrich_from`, because filling only what is missing and never
     # over a manual edit is one rule that belongs in one place.
-    details = found.details or {}
-    if details:
-        from app.services.deduplication import enrich_from
-        from app.services.job_details import normalize
+    # Structured fields do not depend on gaining more prose. A page can state
+    # pay in JSON-LD beside the exact description we already hold, including
+    # one the user pasted and locked. Each field keeps its own manual guard.
+    from app.services.deduplication import enrich_from
+    from app.services.job_details import normalize
 
-        outcome["filled"] = enrich_from(job, normalize(details))
+    details = found.details or {}
+    metadata = normalize(details) if details else {}
+    if found.posted_at:
+        metadata["posted_at"] = _parse_datetime(found.posted_at)
+    outcome["filled"] = enrich_from(job, metadata)
 
     location = details.get("location")
     if location and not (job.location or "").strip() and not is_manual(job, "location"):
         job.location = str(location)[:255]
         _rehash(db, job)
+        outcome["filled"].append("location")
 
-    if _worth_rescoring(job):
+    outcome["improved"] = description_improved or bool(outcome["filled"])
+    if description_improved and _worth_rescoring(job):
         job.status = JobStatus.new
         job.filter_reason = None
         job.filter_detail = None

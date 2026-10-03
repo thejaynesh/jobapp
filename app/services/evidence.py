@@ -6,9 +6,11 @@ Unknown is deliberately different from a failed requirement.
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-VERSION = 2
+VERSION = 3
+ANSWER_KINDS = {"skill", "experience", "education", "eligibility"}
+SATISFACTIONS = {"meets", "does_not_meet", "unsure"}
 _WORD = re.compile(r"[a-z0-9][a-z0-9+#.]*", re.I)
 _PREFERRED = re.compile(r"preferred|nice.to.have|bonus|optional|not required|do not require|no (?:prior |previous )?(?:\w+ )?experience (?:is )?(?:required|necessary)", re.I)
 
@@ -47,12 +49,12 @@ def facts(profile: dict) -> list[dict]:
 
     found = []
 
-    def add(text, source, entry_id, kind, heading=""):
+    def add(text, source, entry_id, kind, heading="", **metadata):
         text = " ".join(str(text or "").split())[:1600]
         if text:
             found.append({"id": "f-" + fingerprint([source, entry_id, text])[:20],
                           "text": text, "source": source, "entry_id": str(entry_id),
-                          "kind": kind, "heading": heading[:160]})
+                          "kind": kind, "heading": heading[:160], **metadata})
 
     for section in ("experience", "projects"):
         for n, entry in enumerate(profile.get(section) or []):
@@ -75,18 +77,31 @@ def facts(profile: dict) -> list[dict]:
         add(stories.as_evidence([story]), "stories", story.get("id", "story"), "story")
     for key, answer in active_answers(profile).items():
         if isinstance(answer, dict):
-            add(answer.get("text"), "clarification", key, "fact")
+            add(answer.get("text"), "clarification", key, "fact",
+                satisfaction=answer.get("satisfaction", "unsure"))
     return list({f["id"]: f for f in found}.values())
 
 
 def active_answers(profile):
+    from app.services.tunables import value
+
     found, now = {}, datetime.now(timezone.utc)
     for key, answer in (profile.get("requirement_answers") or {}).items():
         if not isinstance(answer, dict):
             continue
-        if answer.get("expires_at"):
+        expires_at = answer.get("expires_at")
+        # Earlier forms did not persist the requirement kind. Those answers
+        # can include eligibility claims, so they must not live forever. New
+        # skill/experience/education answers have a kind and do not expire.
+        if not expires_at and answer.get("kind") in {None, "eligibility"} and answer.get("at"):
             try:
-                expires = datetime.fromisoformat(answer["expires_at"])
+                saved_at = datetime.fromisoformat(answer["at"])
+                expires_at = (saved_at + timedelta(days=int(value(profile, "answer_expiry_days")))).isoformat()
+            except (TypeError, ValueError):
+                continue
+        if expires_at:
+            try:
+                expires = datetime.fromisoformat(expires_at)
                 if expires.tzinfo is None or expires <= now:
                     continue
             except (TypeError, ValueError):
@@ -181,13 +196,22 @@ def assess(job, profile, proposed=None) -> dict:
                     and all(negates(f["text"], [term]) for term in row["terms"])] if row["terms"] else []
         clarification = next((f for f in selected if f["source"] == "clarification" and f["entry_id"] == row["id"]), None)
         if clarification:
-            positive_alternative = len(row["terms"]) > 1 and any(contains(clarification["text"], term) and not negates(clarification["text"], [term]) for term in row["terms"])
-            if positive_alternative:
-                negative, matches = [], [clarification] + matches
-            elif re.match(r"^(?:no\b|never\b|not\b|i (?:do not|don't|have not|haven't|cannot|can't)\b)", normal(clarification["text"])):
-                negative = [clarification]
-            elif re.match(r"^(?:yes\b|i (?:have|am|can|did|built|worked|used|led|hold)\b)", normal(clarification["text"])):
-                matches = [clarification] + matches
+            if not row["terms"]:
+                # A prefix such as "I am" proves neither authorization nor a
+                # degree/years constraint: "I am not authorized" used to pass.
+                # Keep legacy free text unknown until the user states whether
+                # the actual quoted requirement is met.
+                satisfaction = clarification.get("satisfaction")
+                if satisfaction == "meets":
+                    matches = [clarification]
+                elif satisfaction == "does_not_meet":
+                    negative = [clarification]
+            else:
+                positive_alternative = len(row["terms"]) > 1 and any(contains(clarification["text"], term) and not negates(clarification["text"], [term]) for term in row["terms"])
+                if positive_alternative:
+                    negative, matches = [], [clarification] + matches
+                elif re.match(r"^(?:no\b|never\b|not\b|i (?:do not|don't|have not|haven't|cannot|can't|am not)\b)", normal(clarification["text"])):
+                    negative = [clarification]
         status = "conflicting" if negative else "supported" if matches and row["quote"] else "unknown"
         references = (negative or matches)[:3]
         inference = ""
@@ -201,8 +225,10 @@ def assess(job, profile, proposed=None) -> dict:
             if source and len(quote.strip()) >= 8 and normal(quote) in normal(source["text"]):
                 status, references = "transferable", [source]
                 inference = str(proposed_row.get("explanation") or "Related experience; verify the transfer.")[:500]
+        question = (f"What experience do you have with {row['label']}?" if row["terms"]
+                    else f"Do you meet this requirement: {row['label']}")
         rows.append({**row, "status": status, "facts": references, "inference": inference,
-                     "question": f"What experience do you have with {row['label']}?" if status == "unknown" else ""})
+                     "question": question if status == "unknown" else ""})
     return {"version": VERSION, "posting_hash": posting_hash(job),
             "profile_hash": fingerprint(facts(profile)), "requirements": rows,
             "supported": sum(r["status"] == "supported" for r in rows),

@@ -100,18 +100,28 @@
     </div>
 
     <script>
-      // Outreach drafts are copied out to a mail client or LinkedIn by hand, so
-      // the text is kept in a <template> next to each message: it survives the
-      // panel being swapped, and copies the sent version rather than whatever
-      // is currently in the edit box.
+      // Draft actions use the current editor, including changes still waiting
+      // for autosave. Sent messages have no editor and use their stored text.
       function copyOutreachMessage(button) {
+        var editor = document.getElementById("msg-editor-" + button.dataset.messageId);
+        var body = editor && editor.querySelector("textarea[name='body']");
         var tpl = document.getElementById("msg-text-" + button.dataset.messageId);
-        if (!tpl) return;
-        navigator.clipboard.writeText(tpl.content.textContent.trim()).then(function() {
+        if (!body && !tpl) return;
+        navigator.clipboard.writeText(body ? body.value : tpl.content.textContent.trim()).then(function() {
           var original = button.textContent;
           button.textContent = "Copied!";
           setTimeout(function(){ button.textContent = original; }, 1500);
         });
+      }
+
+      function updateOutreachMailLink(link) {
+        var editor = document.getElementById("msg-editor-" + link.dataset.messageId);
+        if (!editor) return;
+        var subject = editor.querySelector("input[name='subject']");
+        var body = editor.querySelector("textarea[name='body']");
+        link.href = "mailto:" + link.dataset.email + "?subject=" +
+          encodeURIComponent(subject ? subject.value : "") + "&body=" +
+          encodeURIComponent(body ? body.value : "");
       }
 
       var _toastId = 0;

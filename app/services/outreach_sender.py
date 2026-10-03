@@ -163,7 +163,7 @@ def _deliver(mail: EmailMessage) -> None:
 
 
 def send_message(db, message: OutreachMessage, allow_guessed: bool = False,
-                 retry_uncertain: bool = False) -> OutreachMessage:
+                 retry_uncertain: bool = False, draft: dict | None = None) -> OutreachMessage:
     """
     Send one drafted email and record the outcome.
 
@@ -177,7 +177,7 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False,
         db.flush()
         db.execute(text("SELECT pg_advisory_xact_lock(2006934001)"))
         db.refresh(message, with_for_update=True)
-        mail = _prepare_send(db, message, allow_guessed, retry_uncertain)
+        mail = _prepare_send(db, message, allow_guessed, retry_uncertain, draft)
         message.message_id = mail["Message-ID"]
         message.send_error = None
         message.send_state = "sending"
@@ -207,7 +207,7 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False,
     return message
 
 
-def _prepare_send(db, message, allow_guessed, retry_uncertain):
+def _prepare_send(db, message, allow_guessed, retry_uncertain, draft=None):
     blocked = sending_blocked_reason()
     if blocked:
         raise SendError(blocked)
@@ -254,5 +254,15 @@ def _prepare_send(db, message, allow_guessed, retry_uncertain):
 
     profile = db.query(Profile).first()
     profile_data = (profile.data if profile else {}) or {}
+
+    # The Send form carries what the user is looking at, even when its
+    # debounced autosave has not run. Save it under the same row lock as the
+    # delivery reservation, after the guards and before constructing the MIME.
+    if draft is not None:
+        subject = draft["subject"].strip() or None
+        body = draft["body"]
+        if message.subject != subject or message.body != body:
+            message.subject, message.body = subject, body
+            message.edited = True
 
     return build_email(message, profile_data, _attachments(db, message.application))

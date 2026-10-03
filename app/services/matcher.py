@@ -1,9 +1,11 @@
+import copy
 import json
 import logging
 import re
 import threading
 import time
 from difflib import SequenceMatcher
+from types import SimpleNamespace
 from typing import NamedTuple
 
 from openai import OpenAI, RateLimitError
@@ -1230,8 +1232,8 @@ def match_job(
     budget: dict | None = None,
 ) -> str:
     """
-    Score one job and file it. Returns 'matched', 'filtered_out', or
-    'rate_limited'.
+    Score one job and file it. Returns 'matched', 'filtered_out',
+    'rate_limited', or 'superseded' if its inputs changed during inference.
 
     Every verdict is appended to the job's score history before the next one
     can overwrite it. That matters because jobs are now re-scored routinely —
@@ -1242,11 +1244,13 @@ def match_job(
     A rate-limited pass records nothing: no decision was reached, the job stays
     `new`, and a row saying so would be a history of the weather.
     """
+    description_chars = len(job.description or "")
     outcome = _match_job(db, job, profile_data, api_key, base_url, model, budget)
-    if outcome != "rate_limited":
+    if outcome not in ("rate_limited", "superseded"):
         from app.services import score_history
 
-        score_history.record(db, job, profile_data=profile_data, outcome=outcome)
+        score_history.record(db, job, profile_data=profile_data, outcome=outcome,
+                             description_chars=description_chars)
     return outcome
 
 
@@ -1261,9 +1265,48 @@ def _match_job(
     thread; the middle one is the model calls, and touches nothing but the
     object it is handed.
     """
-    early = _screen(job, profile_data, _similarity_scorer(db, profile_data))
+    from sqlalchemy import inspect as sa_inspect
+
+    persisted = isinstance(job, Job) and sa_inspect(job).persistent
+    subject = _snapshot(job) if persisted else job
+    pending_changes = {}
+    persisted_inputs = None
+    if persisted:
+        state = sa_inspect(job)
+        pending_changes = {attr.key: copy.deepcopy(getattr(job, attr.key))
+                           for attr in state.mapper.column_attrs
+                           if state.attrs[attr.key].history.has_changes()}
+        # A caller may requeue or edit this row without committing first.
+        # Compare those fields with their stored originals after inference,
+        # then reapply the intended local values only if the fence succeeds.
+        # Untouched fields retain the snapshot's baseline: a later read must
+        # never make an already-stale snapshot look current.
+        changed_inputs = [field for field in pending_changes if field in _EVALUATION_INPUT_FIELDS]
+        if changed_inputs:
+            persisted_inputs = _evaluation_inputs(subject)
+            with db.no_autoflush:
+                stored = db.query(*(getattr(Job, field) for field in changed_inputs)).filter(
+                    Job.id == job.id).one_or_none()
+            if stored is None:
+                return "superseded"
+            persisted_inputs.update(copy.deepcopy(dict(stored._mapping)))
+    early = _screen(subject, profile_data, _similarity_scorer(db, profile_data))
     if early is not None:
+        if persisted:
+            for field in _SCREEN_OUTPUT_FIELDS + (
+                    "status", "llm_score", "llm_score_deep", "deep_matched_by",
+                    "filter_reason", "filter_detail"):
+                setattr(job, field, getattr(subject, field))
         return early
+    # A single-job batch or manual rematch can overlap an edit just as a
+    # concurrent batch can. Both screening and extraction stay on the plain
+    # snapshot until the reply has been checked against committed inputs.
+    # No writes or row locks are introduced before inference, and the caller
+    # still owns its transaction (including rollback on an unexpected error).
+    if persisted:
+        evaluation = _evaluate(subject, profile_data, api_key, base_url, model, budget)
+        return _file_current_evaluation(db, profile_data, evaluation, screened=True,
+            persisted_inputs=persisted_inputs, pending_changes=pending_changes)
     return _file(db, job, profile_data,
                  _evaluate(job, profile_data, api_key, base_url, model, budget))
 
@@ -1344,12 +1387,38 @@ def _screen(job, profile_data: dict, similar=None) -> str | None:
     return None
 
 
+# Fields whose change makes an in-flight evaluation obsolete. Screening's
+# own outputs (keyword score, similarity and sponsorship notes) are excluded:
+# those are committed before waiting for model replies. Edits, enrichment and
+# user decisions must all survive a reply based on an older version of the job.
+_SCREEN_OUTPUT_FIELDS = ("keyword_score", "similarity", "sponsorship_note", "sponsorship_direction")
+
+_EVALUATION_INPUT_FIELDS = (
+    "title", "company", "location", "is_remote", "description",
+    "experience_level", "description_updated_at", "manual_fields", "edited_at",
+    "salary_min", "salary_max", "salary_currency", "salary_period",
+    "salary_annual_min", "salary_annual_max", "employment_type", "required_years",
+    "required_skills", "nice_to_have_skills", "education_required", "benefits_note",
+    "language", "details_extracted_at", "status", "filter_reason", "filter_detail",
+    "closed_at", "dismiss_reason", "dismissed_at",
+)
+
+
+def _evaluation_inputs(job) -> dict:
+    return copy.deepcopy({field: getattr(job, field, None)
+                          for field in _EVALUATION_INPUT_FIELDS})
+
+
 class _Evaluation:
     """What the model calls found, for `_file` to write."""
 
     def __init__(self, subject):
         # The object evaluated: the job itself, or a snapshot of it.
         self.subject = subject
+        # Extraction mutates the snapshot, so the version we started with must
+        # be kept separately from the result we may eventually write.
+        self.inputs = _evaluation_inputs(subject)
+        self.description_chars = len(getattr(subject, "description", None) or "")
         self.extracted = False
         self.foreign: str | None = None
         self.rate_limited = False
@@ -1549,6 +1618,12 @@ class _Pacer:
             time.sleep(start - now)
 
 
+class _JobSnapshot(SimpleNamespace):
+    # Extraction can fill pay after the snapshot is taken. Share the ORM's
+    # computed property so the scoring prompt sees those newly extracted facts.
+    salary_label = Job.salary_label
+
+
 def _snapshot(job):
     """
     The job's columns as a plain object, for `_evaluate` on another thread.
@@ -1557,12 +1632,33 @@ def _snapshot(job):
     last commit expired runs a query, and a session is not to be used from two
     threads. The snapshot is only data.
     """
-    from types import SimpleNamespace
-
     from sqlalchemy import inspect as sa_inspect
 
-    return SimpleNamespace(**{attr.key: getattr(job, attr.key)
-                              for attr in sa_inspect(type(job)).column_attrs})
+    values = copy.deepcopy({attr.key: getattr(job, attr.key)
+                            for attr in sa_inspect(type(job)).column_attrs})
+    return _JobSnapshot(**values)
+
+
+def _file_current_evaluation(db, profile_data: dict, evaluation: _Evaluation, *, screened=False,
+                             persisted_inputs=None, pending_changes=None) -> str:
+    """Fence a completed model reply against edits made while it was running."""
+    # Acquire the row only after the model returns. The caller commits directly
+    # after filing and recording history, so no network call holds this lock.
+    # Refresh under the lock: earlier batch commits expire this ORM object, and
+    # merely comparing its original in-memory values would miss another writer.
+    with db.no_autoflush:
+        current = (db.query(Job).filter(Job.id == evaluation.subject.id)
+                   .with_for_update().populate_existing().one_or_none())
+    expected = persisted_inputs if persisted_inputs is not None else evaluation.inputs
+    if current is None or _evaluation_inputs(current) != expected:
+        logger.info("match: discarded superseded evaluation for %s", evaluation.subject.id)
+        return "superseded"
+    for field, value in (pending_changes or {}).items():
+        setattr(current, field, value)
+    if screened:
+        for field in _SCREEN_OUTPUT_FIELDS:
+            setattr(current, field, getattr(evaluation.subject, field))
+    return _file(db, current, profile_data, evaluation)
 
 
 def _match_concurrently(db, jobs, profile_data: dict, api_key: str, base_url: str,
@@ -1585,19 +1681,21 @@ def _match_concurrently(db, jobs, profile_data: dict, api_key: str, base_url: st
 
     from app.services import score_history
 
-    counts = {"processed": 0, "matched": 0, "filtered_out": 0, "rate_limited": 0, "errors": 0}
+    counts = {"processed": 0, "matched": 0, "filtered_out": 0, "rate_limited": 0,
+              "superseded": 0, "errors": 0}
     pacer = _Pacer(pace_interval)
 
     def evaluate(snapshot):
         pacer.wait()
         return _evaluate(snapshot, profile_data, api_key, base_url, model, budget)
 
-    def finish(job, outcome: str) -> None:
-        if outcome != "rate_limited":
-            score_history.record(db, job, profile_data=profile_data, outcome=outcome)
+    def finish(job, outcome: str, description_chars: int | None = None) -> None:
+        if outcome not in ("rate_limited", "superseded"):
+            score_history.record(db, job, profile_data=profile_data, outcome=outcome,
+                                 description_chars=description_chars)
         db.commit()
         counts["processed"] += 1
-        key = outcome if outcome in ("matched", "rate_limited") else "filtered_out"
+        key = outcome if outcome in ("matched", "rate_limited", "superseded") else "filtered_out"
         counts[key] += 1
         if outcome == "matched" and on_matched is not None:
             try:
@@ -1622,9 +1720,15 @@ def _match_concurrently(db, jobs, profile_data: dict, api_key: str, base_url: st
                              getattr(job, "id", "?"), exc)
                 db.rollback()
                 counts["errors"] += 1
+        # Screening can leave rows dirty; release those writes and the pooled
+        # connection before waiting on any slow model reply. Later writes are
+        # protected by the short row lock in _file_current_evaluation.
+        db.commit()
         for job, future in pending:
             try:
-                finish(job, _file(db, job, profile_data, future.result()))
+                evaluation = future.result()
+                finish(job, _file_current_evaluation(db, profile_data, evaluation),
+                       description_chars=evaluation.description_chars)
             except Exception as exc:
                 logger.error("match_all_new_jobs error on job %s: %s",
                              getattr(job, "id", "?"), exc)
@@ -1677,6 +1781,7 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
     matched = 0
     filtered_out = 0
     rate_limited = 0
+    superseded = 0
     errors = 0
     # One shared budget for the whole cycle: paid failover calls
     # (see _score_via_fallbacks) and second-opinion calls (see _deep_score),
@@ -1729,10 +1834,12 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
                                      job.id, exc)
             elif result == "rate_limited":
                 rate_limited += 1
+            elif result == "superseded":
+                superseded += 1
             else:
                 filtered_out += 1
             # Pace only when the LLM was actually called or attempted
-            if result in ("matched", "rate_limited") or job.llm_score is not None:
+            if result in ("matched", "rate_limited", "superseded") or job.llm_score is not None:
                 time.sleep(pace_interval)
         except Exception as exc:
             logger.error("match_all_new_jobs error on job %s: %s", getattr(job, "id", "?"), exc)
@@ -1750,5 +1857,5 @@ def match_all_new_jobs(db, limit: int | None = None, on_matched=None,
         budget["paid_calls"], remaining,
     )
     return {"processed": processed, "matched": matched, "filtered_out": filtered_out,
-            "rate_limited": rate_limited, "errors": errors,
+            "rate_limited": rate_limited, "superseded": superseded, "errors": errors,
             "paid_llm_calls": budget["paid_calls"], "remaining": remaining}
