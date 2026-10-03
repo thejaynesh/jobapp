@@ -3,20 +3,32 @@ name: Deploy to VPS
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: deploy-vps
-  cancel-in-progress: false
-
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.changes.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check deployment inputs
+        id: changes
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: python scripts/deploy_changed.py "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
   tests:
     uses: ./.github/workflows/test.yml
 
   image:
-    needs: tests
+    needs: [tests, changes]
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -39,23 +51,50 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: production
           push: true
           tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Keep intermediate dependency layers in GHCR even when the Actions
+          # cache is evicted. The VPS only pulls the resulting runtime image.
+          cache-from: |
+            type=registry,ref=${{ steps.name.outputs.image }}:buildcache
+            type=gha
+          cache-to: type=registry,ref=${{ steps.name.outputs.image }}:buildcache,mode=max
 
   deploy:
     needs: [tests, image]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Only releases enter this queue. A docs-only push must not replace a
+    # pending runtime release, and an active SSH deployment must finish.
+    concurrency:
+      group: deploy-vps
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       packages: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check release is still current
+        id: current
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if [[ "$(python scripts/deploy_changed.py "$DEPLOY_SHA" origin/main)" == deploy=false ]]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping superseded release: main has newer runtime changes or could not be compared."
+          fi
       - name: Deploy tested image via SSH
+        if: steps.current.outputs.deploy == 'true'
         uses: appleboy/ssh-action@v1.0.3
         env:
           DEPLOY_SHA: ${{ github.sha }}

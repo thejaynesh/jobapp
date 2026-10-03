@@ -6,9 +6,10 @@ on:
   workflow_call:
   pull_request:
 
-# A second push to the same branch makes the first run's answer irrelevant.
+# Superseded PR checks can stop. Release checks must finish independently: a
+# later docs-only push still needs an earlier runtime release to reach the VPS.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:

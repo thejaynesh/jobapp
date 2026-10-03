@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime
 
 # Install system deps: pdflatex, playwright deps, and the postgres client.
 #
@@ -31,12 +31,25 @@ RUN pg_dump --version && psql --version
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir ".[dev]"
+RUN pip install --no-cache-dir .
 
 # Install playwright chromium for scraping
 RUN playwright install-deps chromium || true
 RUN playwright install chromium
 
+RUN mkdir -p /storage/resumes /storage/cover_letters /storage/tex
+
+# Development keeps the test tools and source tree. Production never inherits
+# this stage, so a test change cannot invalidate its application layer.
+FROM runtime AS development
+RUN pip install --no-cache-dir ".[dev]"
 COPY . .
 
-RUN mkdir -p /storage/resumes /storage/cover_letters /storage/tex
+# Keep the large TeX, Chromium and Python dependency layers above the code.
+# Normal releases change only these small application layers on the VPS.
+FROM runtime AS production
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+COPY extension/ ./extension/
+COPY scripts/ ./scripts/

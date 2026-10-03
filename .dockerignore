@@ -6,8 +6,8 @@
 # is a slow disk rather than a big tree, which is exactly the case where not
 # copying something is the only way to make it faster.
 #
-# Deliberately conservative: `tests/` stays, because the image installs the
-# `dev` extra and running the suite inside the container should keep working.
+# Tests stay available to the development target. The production target copies
+# only runtime directories and does not install test dependencies.
 
 .git
 .gitignore
@@ -23,12 +23,19 @@ __pycache__/
 htmlcov/
 
 # Local virtualenvs, if anyone keeps one in the tree.
-.venv/
+.venv*/
 venv/
+node_modules/
+.claude/
+.codex/
+.agents/
 
 # Never bake secrets into an image. The compose files pass the real one in
 # with `env_file:` at run time; `.env.example` stays, it is documentation.
 .env
+.env.*
+!.env.example
+source-intake-*.txt
 
 # Generated documents and backups live on the `storage_data` volume.
 storage/

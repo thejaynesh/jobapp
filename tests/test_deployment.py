@@ -40,10 +40,31 @@ elif args[0] == "compose":
         sys.exit(1)
     elif command[:3] == ["exec", "-T", "web"] and mode == "readiness_failure":
         sys.exit(1)
+    elif command[:1] == ["up"] and command[-1] in {"web", "caddy", "worker-interactive", "worker", "beat"}:
+        # A rollback starts all four application services together. Fail only
+        # the individual startup step, so recovery can still be exercised.
+        if "--no-deps" in command and mode == command[-1] + "_startup_failure":
+            sys.exit(1)
+    elif command[:3] == ["exec", "-T", "caddy"]:
+        if "reload" in command and mode == "proxy_reload_failure":
+            sys.exit(1)
+        if "wget" in command and mode == "proxy_readiness_failure":
+            sys.exit(1)
+        probe = {"proxy_reload_transient": "reload", "proxy_readiness_transient": "wget"}.get(mode)
+        if probe and probe in command:
+            attempts = sum(probe in json.loads(line)["args"]
+                           for line in (root / "commands.jsonl").read_text().splitlines())
+            if attempts < 3:
+                sys.exit(1)
 '''
 
 
-@pytest.mark.parametrize("mode", ["success", "stopped_redis", "migration_failure", "readiness_failure", "redis_failure"])
+@pytest.mark.parametrize("mode", [
+    "success", "stopped_redis", "migration_failure", "readiness_failure", "redis_failure",
+    "web_startup_failure", "caddy_startup_failure", "worker-interactive_startup_failure",
+    "worker_startup_failure", "beat_startup_failure", "proxy_reload_failure", "proxy_readiness_failure",
+    "proxy_reload_transient", "proxy_readiness_transient",
+])
 def test_deployment_preserves_data_and_restores_failed_release(tmp_path, mode):
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -65,12 +86,29 @@ def test_deployment_preserves_data_and_restores_failed_release(tmp_path, mode):
     assert not any("build" in entry["args"] for entry in entries)
     login = next(entry for entry in entries if "login" in entry["args"])
     assert not Path(login["args"][1]).exists(), "temporary registry credentials must be removed"
-    if mode in ("success", "stopped_redis"):
+    if mode in ("success", "stopped_redis", "proxy_reload_transient", "proxy_readiness_transient"):
         assert run.returncode == 0, run.stderr
         assert "APP_IMAGE=" + IMAGE in saved
         migration = next(entry for entry in entries if "alembic" in entry["args"])
         assert migration["image"] == IMAGE
         assert any("reload" in entry["args"] for entry in entries)
+        startups = [entry for entry in entries if entry["args"][3:4] == ["up"]]
+        assert [entry["args"][-1] for entry in startups] == [
+            "redis", "web", "caddy", "worker-interactive", "worker", "beat",
+        ]
+        for entry in startups[1:]:
+            assert "--no-deps" in entry["args"] and "--no-build" in entry["args"]
+        ready_check = next(i for i, entry in enumerate(entries)
+                           if entry["args"][3:6] == ["exec", "-T", "web"])
+        proxy_check = next(i for i, entry in enumerate(entries) if "wget" in entry["args"])
+        interactive_start = entries.index(startups[3])
+        assert entries.index(migration) < entries.index(startups[1]) < ready_check
+        assert ready_check < entries.index(startups[2]) < proxy_check < interactive_start
+        if mode in ("proxy_reload_transient", "proxy_readiness_transient"):
+            probe = "reload" if mode == "proxy_reload_transient" else "wget"
+            checks = [i for i, entry in enumerate(entries) if probe in entry["args"]]
+            assert len(checks) == 3
+            assert checks[-1] < interactive_start
         if mode == "stopped_redis":
             start = next(i for i, entry in enumerate(entries) if entry["args"] == ["start", "old-redis"])
             enable = next(i for i, entry in enumerate(entries) if "CONFIG" in entry["args"])
@@ -85,3 +123,13 @@ def test_deployment_preserves_data_and_restores_failed_release(tmp_path, mode):
         assert "APP_IMAGE=" + previous in saved
         assert entries[-1]["image"] == previous
         assert entries[-1]["args"][-4:] == ["web", "worker", "worker-interactive", "beat"]
+        startup_services = [entry["args"][-1] for entry in entries
+                            if entry["args"][3:4] == ["up"] and "--no-deps" in entry["args"]]
+        ordered_services = ["web", "caddy", "worker-interactive", "worker", "beat"]
+        if mode.endswith("_startup_failure"):
+            failed_service = mode.removesuffix("_startup_failure")
+            assert startup_services == ordered_services[:ordered_services.index(failed_service) + 1]
+        elif mode in ("readiness_failure", "migration_failure"):
+            assert startup_services == (["web"] if mode == "readiness_failure" else [])
+        elif mode.startswith("proxy_"):
+            assert startup_services == ["web", "caddy"]

@@ -77,8 +77,8 @@ services:
   #
   # `image:` names what the build produces; the other three reference that name
   # and declare no build of their own, so `docker compose build` builds and
-  # exports once. The name is local and unversioned on purpose — nothing pushes
-  # this anywhere, and `up -d` runs after `build` in every path that deploys.
+  # exports once. The local fallback name supports development builds; the
+  # deployment workflow supplies an immutable GHCR digest and never builds here.
   # CPU, on a two-core machine
   # ------------------------
   # Nothing here had a limit or a priority, so a fetch cycle, a matching pass,
@@ -102,7 +102,9 @@ services:
   # preference — a bigger VPS wants bigger numbers. Change them in `.env` and
   # re-run `docker compose up -d`.
   web:
-    build: .
+    build:
+      context: .
+      target: production
     image: ${APP_IMAGE:-jobapp-app}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
     healthcheck:

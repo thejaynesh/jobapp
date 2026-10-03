@@ -134,10 +134,11 @@ when that interval, as currently set, has passed.
 ## Deploying
 
 Push to `main`; `.github/workflows/deploy.yml` first runs the reusable test
-workflow, builds the exact revision on GitHub Actions, publishes to GHCR, and
-deploys the resulting immutable digest. `scripts/deploy-vps.sh` preserves the
+workflow. Runtime changes build the production target on GitHub Actions,
+publish to GHCR, and deploy the resulting immutable digest; documentation and
+test-only pushes skip the VPS. `scripts/deploy-vps.sh` preserves the
 existing Redis volume, enables AOF before restarting Redis, stops workers for
-migrations, and checks `/ready` before declaring success. It restores the prior
-application image if migration or readiness fails. The script records APP_IMAGE
+migrations, and waits for web and proxy readiness before starting workers. It
+restores the prior application image if migration or readiness fails. The script records APP_IMAGE
 and REDIS_DATA_VOLUME in the VPS `.env`; no registry credentials are retained.
 See `docs/DEPLOYING.md`. Never build the production image on the restricted VPS.

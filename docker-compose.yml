@@ -28,7 +28,9 @@ services:
   # there. Same code, different commands, so building it once is enough; four
   # separate exports of a multi-gigabyte image was most of the build time.
   web:
-    build: .
+    build:
+      context: .
+      target: development
     image: jobapp-app-dev
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:

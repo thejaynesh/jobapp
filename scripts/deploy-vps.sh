@@ -95,7 +95,10 @@ stopped=true
 # --no-deps avoids replacing Redis before its data has been preserved.
 APP_IMAGE="$image" "${compose[@]}" run --rm --no-deps web alembic upgrade head
 save_env APP_IMAGE "$image"
-"${compose[@]}" up -d --no-build
+# Let the web processes finish schema checks and startup before the workers
+# begin importing task modules and draining the queues on the same small VPS.
+# --no-deps keeps this step from starting another application service early.
+"${compose[@]}" up -d --no-build --no-deps web
 
 ready=false
 for ((attempt=0; attempt<60; attempt++)); do
@@ -106,8 +109,25 @@ for ((attempt=0; attempt<60; attempt++)); do
   sleep 5
 done
 $ready || { echo "Application did not become ready" >&2; exit 1; }
-# Reload preserves established connections; restart would drop them.
-"${compose[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile
-"${compose[@]}" exec -T caddy wget -q -T 10 -O /dev/null http://web:8000/ready
+"${compose[@]}" up -d --no-build --no-deps caddy
+# A new proxy may still be starting its admin listener. Reload preserves
+# established connections; retry brief startup races before rolling back.
+proxy_ready=false
+for ((attempt=0; attempt<30; attempt++)); do
+  if "${compose[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile &&
+     "${compose[@]}" exec -T caddy wget -q -T 10 -O /dev/null http://web:8000/ready; then
+    proxy_ready=true
+    break
+  fi
+  sleep 2
+done
+$proxy_ready || { echo "Proxy did not become ready" >&2; exit 1; }
+
+# Restore work people are waiting on before batch processing; start the
+# scheduler last so it cannot add more work while the application warms up.
+# Keep rollback armed until every service has started successfully.
+"${compose[@]}" up -d --no-build --no-deps worker-interactive
+"${compose[@]}" up -d --no-build --no-deps worker
+"${compose[@]}" up -d --no-build --no-deps beat
 echo "Deployed ${DEPLOY_SHA:-unknown} as $image; readiness passed"
 stopped=false
