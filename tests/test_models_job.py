@@ -43,9 +43,7 @@ def test_job_status_enum(db):
     assert fetched.status == JobStatus.matched
 
 
-def test_job_dedupe_hash_unique(db):
-    from sqlalchemy.exc import IntegrityError
-
+def test_distinct_postings_can_share_a_content_fingerprint(db):
     job1 = Job(
         source="indeed",
         title="SWE",
@@ -68,8 +66,21 @@ def test_job_dedupe_hash_unique(db):
         dedupe_hash="samehash",
     )
     db.add(job2)
+    db.flush()
+    assert job1.id != job2.id
+    assert db.query(Job).filter_by(dedupe_hash="samehash").count() == 2
+
+
+def test_exact_posting_identity_is_unique(db):
+    from sqlalchemy.exc import IntegrityError
+
+    values = dict(source="indeed", title="SWE", company="Corp",
+                  fetched_at=datetime.now(timezone.utc), dedupe_hash="samehash",
+                  identity_key="a" * 64)
+    db.add(Job(url="https://example.com/1", **values))
+    db.flush()
 
     with pytest.raises(IntegrityError):
-        nested = db.begin_nested()
-        db.flush()
-        nested.commit()
+        with db.begin_nested():
+            db.add(Job(url="https://example.com/2", **values))
+            db.flush()
