@@ -108,8 +108,8 @@ def test_a_failed_or_empty_read_closes_nothing(db, board, change):
     assert _job(db, 1).closed_at is None and _job(db, 2).closed_at is None
 
 
-def test_a_row_another_source_stored_is_never_closed_this_way(db, board):
-    """Its id is the other source's; against the board's ids it would look gone."""
+def test_an_aggregator_posting_uses_its_confirmed_employer_listing_for_closure(db, board):
+    """Its original source ID stays intact; the employer sighting proves closure."""
     first = _std_job(source="simplify", source_job_id="simplify-1",
                      title="Software Engineer 2", company="acme", location="New York, NY",
                      url="https://job-boards.greenhouse.io/acme/jobs/4002")
@@ -117,10 +117,25 @@ def test_a_row_another_source_stored_is_never_closed_this_way(db, board):
     cycle(db, extra_jobs=[first])
     board.listing = [posting(1), posting(2)]
     cycle(db)
+    row = db.query(Job).filter_by(url="https://job-boards.greenhouse.io/acme/jobs/4002").one()
+    assert row.source_job_id == "simplify-1" and row.closed_at is None
     board.listing = [posting(1)]
     cycle(db)
-    row = db.query(Job).filter_by(url="https://job-boards.greenhouse.io/acme/jobs/4002").one()
-    assert row.source == "simplify" and row.board is None and row.closed_at is None
+    db.refresh(row)
+    assert row.source == "simplify" and row.board is None
+    assert row.closed_at is not None and row.closed_note == job_fetcher.VANISHED_NOTE
+
+
+def test_an_aggregator_posting_without_an_employer_sighting_stays_open(db, board):
+    first = _std_job(source="simplify", source_job_id="simplify-1",
+                     title="Software Engineer 2", company="acme", location="New York, NY",
+                     url="https://job-boards.greenhouse.io/acme/jobs/4002")
+    board.listing = []
+    cycle(db, extra_jobs=[first])
+    board.listing = [posting(1)]
+    assert cycle(db)["closed"] == 0
+    row = db.query(Job).filter_by(source="simplify").one()
+    assert row.source_job_id == "simplify-1" and row.closed_at is None
 
 
 def test_only_full_feed_boards_are_trusted_for_this():

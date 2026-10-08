@@ -259,10 +259,14 @@ class TestNothingAutomaticOverwritesAnEdit:
         # The second listing is still real and still worth recording.
         assert "https://elsewhere/1" in job.source_urls
 
-    def test_the_harvest_leaves_it_alone(self, db):
+    @pytest.mark.parametrize("address_already_recorded", [False, True])
+    def test_the_harvest_leaves_it_alone(self, db, address_already_recorded):
         from app.services.harvest import save_harvested_jobs
 
         job = self._edited(db, source="linkedin_harvest", source_job_id="998877")
+        if address_already_recorded:
+            job.source_urls = [*job.source_urls, job.url]
+            db.commit()
         counts = save_harvested_jobs(db, [{
             "source": "linkedin_harvest", "source_job_id": "998877",
             "url": job.url, "title": job.title, "company": job.company,
@@ -271,7 +275,11 @@ class TestNothingAutomaticOverwritesAnEdit:
         db.refresh(job)
 
         assert job.description == REAL_POSTING
-        assert counts["merged"] == 0
+        assert job_edits.is_manual(job, "description")
+        # Recording a missing source address is still an improvement; it must
+        # never unlock or replace the description the user wrote.
+        assert job.url in job.source_urls
+        assert counts["merged"] == (0 if address_already_recorded else 1)
 
     def test_the_detail_extractor_leaves_a_typed_salary_alone(self, db):
         # This runs on every description change, so without the check one pass

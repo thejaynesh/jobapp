@@ -139,10 +139,40 @@ class TestTheFetchCycleDoesNotSitOnTheRow:
             "the lock that stalled every agent poll"
         )
 
-    def test_it_re_reads_before_merging(self):
+    def test_it_re_reads_before_merging(self, db, monkeypatch):
         # The cycle runs for minutes and the agent poll writes the same blob
         # every one of them, so the copy taken at the start is stale by the
         # end. Writing it wholesale would revert every concurrent writer.
-        source = open("app/services/job_fetcher.py").read()
-        tail = source.split("counts[\"boards\"] = board_stats")[-1]
-        assert "db.refresh(profile)" in tail
+        import copy
+
+        from app.services import collection_ingest
+        from tests.test_fetch_task import _make_profile_with_targets, _std_job
+        from tests.test_save_path_batching import cycle
+
+        profile = _make_profile_with_targets(db)
+        original_store = collection_ingest.store
+        late_agent = {"agent_id": "active-laptop", "kinds": ["browse_page"]}
+        late_roles = ["Platform Engineer"]
+        writes = []
+
+        def store(*args, **kwargs):
+            result = original_store(*args, **kwargs)
+            # Update the database without changing the fetcher's cached ORM
+            # object. This models a writer arriving during job ingestion,
+            # after the first profile refresh and before the final merge.
+            data = copy.deepcopy(profile.data)
+            data["agent"] = late_agent
+            data["target_roles"] = late_roles
+            db.execute(Profile.__table__.update().where(Profile.id == profile.id).values(data=data))
+            writes.append(1)
+            assert profile.data.get("agent") != late_agent
+            return result
+
+        monkeypatch.setattr(collection_ingest, "store", store)
+        result = cycle(db, [_std_job()])
+
+        assert result["inserted"] == 1 and writes == [1]
+        db.refresh(profile)
+        assert profile.data["agent"] == late_agent
+        assert profile.data["target_roles"] == late_roles
+        assert profile.data["last_fetch"]["fetched"] == 1

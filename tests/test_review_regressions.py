@@ -48,29 +48,34 @@ def test_agent_poll_keeps_the_event_loop_responsive(monkeypatch):
 def test_merge_only_fetch_commits_each_batch(db, monkeypatch):
     from tests.test_save_path_batching import cycle
     from tests.test_fetch_task import _std_job, _make_profile_with_targets
-    from app.services import job_fetcher
+    from app.models.job import Job
+    from app.services import collection_ingest, job_fetcher
     _make_profile_with_targets(db)
     jobs = [_std_job(title=f"Engineer {i}", url=f"https://review.example/{i}",
                      source_job_id=f"review-{i}") for i in range(5)]
     assert cycle(db, jobs)["inserted"] == 5
     monkeypatch.setattr(job_fetcher, "_COMMIT_EVERY", 2)
     merged, commits = [], []
-    original_enrich, original_commit = job_fetcher.enrich_from, db.commit
+    original_store, original_commit = collection_ingest.store, db.commit
 
-    def enrich(*args, **kwargs):
-        outcome = original_enrich(*args, **kwargs)
-        merged.append(1)
-        return outcome
+    def store(*args, **kwargs):
+        outcome, job = original_store(*args, **kwargs)
+        if outcome == "merged":
+            merged.append(job.id)
+        return outcome, job
 
     def commit():
         commits.append(len(merged))
         original_commit()
 
-    monkeypatch.setattr(job_fetcher, "enrich_from", enrich)
+    monkeypatch.setattr(collection_ingest, "store", store)
     monkeypatch.setattr(db, "commit", commit)
-    result = cycle(db, [{**job, "description": "Build reliable distributed services. " * 20} for job in jobs])
+    description = "Build reliable distributed services. " * 20
+    result = cycle(db, [{**job, "description": description} for job in jobs])
     assert result["merged"] == 5
     assert 2 in commits and 4 in commits and 5 in commits
+    db.expire_all()
+    assert [job.description for job in db.query(Job).all()] == [description.strip()] * 5
 
 
 @pytest.mark.parametrize("ineligible", ["failed", "has_document"])
@@ -265,25 +270,39 @@ def test_concurrent_ingestion_applies_saved_result_once(monkeypatch):
 def test_failed_chunk_commit_stops_the_fetch(db, monkeypatch):
     from tests.test_save_path_batching import cycle
     from tests.test_fetch_task import _std_job, _make_profile_with_targets
-    from app.services import job_fetcher
+    from app.models.job import Job
+    from app.models.fetch_run import FetchRun
+    from app.services import collection_ingest, job_fetcher
     _make_profile_with_targets(db)
     jobs = [_std_job(title=f"Chunk {i}", url=f"https://chunk.example/{i}", source_job_id=str(i)) for i in range(5)]
     assert cycle(db, jobs)["inserted"] == 5
     merged = []
-    original_enrich, original_commit = job_fetcher.enrich_from, db.commit
-    def enrich(*args, **kwargs):
-        merged.append(1)
-        return original_enrich(*args, **kwargs)
+    original_store, original_commit = collection_ingest.store, db.commit
+    failed = False
+
+    def store(*args, **kwargs):
+        outcome, job = original_store(*args, **kwargs)
+        if outcome == "merged":
+            merged.append(job.id)
+        return outcome, job
+
     def commit():
-        if len(merged) == 2:
+        nonlocal failed
+        if len(merged) == 2 and not failed:
+            failed = True
             raise RuntimeError("connection lost committing chunk")
         original_commit()
+
     monkeypatch.setattr(job_fetcher, "_COMMIT_EVERY", 2)
-    monkeypatch.setattr(job_fetcher, "enrich_from", enrich)
+    monkeypatch.setattr(collection_ingest, "store", store)
     monkeypatch.setattr(db, "commit", commit)
     with pytest.raises(RuntimeError, match="committing chunk"):
         cycle(db, [{**job, "description": "Improved description. " * 30} for job in jobs])
     assert len(merged) == 2
+    db.expire_all()
+    assert [job.description for job in db.query(Job).all()] == ["Build things."] * 5
+    failed_run = db.query(FetchRun).filter_by(status="failed").one()
+    assert "committing chunk" in failed_run.error
 
 
 def test_readiness_reports_database_failure(monkeypatch):

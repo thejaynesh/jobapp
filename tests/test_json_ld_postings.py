@@ -8,8 +8,11 @@ recipe was refused for finding no jobs. These are read from Wellfound's own
 payload, trimmed.
 """
 
-from app.models.harvest_recipe import HarvestRecipe, HarvestSample
-from app.services import harvest_recipes
+from unittest.mock import Mock
+
+from app.models.harvest_recipe import HarvestLearningState, HarvestRecipe, HarvestSample
+from app.models.job import Job
+from app.services import harvest_recipes, harvest_samples, source_learning
 from app.services.harvest import extract_jobs
 
 PAGE = "https://wellfound.com/jobs/4666110-full-stack-engineer"
@@ -94,14 +97,31 @@ class TestTheRecipeReader:
 
 
 class TestLearnOnAHostTheReaderNowHandles:
-    def test_learn_says_no_recipe_is_needed_and_clears_the_host(self, db):
-        db.add(HarvestSample(host="wellfound.com", source_url=PAGE,
-                             payload=POSTING, bytes=100, found=0))
+    def test_learn_retains_readable_evidence_and_resolves_the_host_without_a_model(self, db, monkeypatch):
+        sample = HarvestSample(host="wellfound.com", source_url=PAGE,
+                               payload=POSTING, bytes=100, found=0)
+        state = HarvestLearningState(host="wellfound.com", endpoint_key=source_learning.ONBOARDING,
+                                     status="evidence_captured", evidence_hash="", attempts=0,
+                                     result={"url": PAGE})
+        db.add_all([sample, state])
         db.commit()
+        propose = Mock(side_effect=AssertionError("Readable evidence must not require a model"))
+        monkeypatch.setattr(harvest_recipes, "propose", propose)
+
         out = harvest_recipes.learn(db, "wellfound.com")
+
         assert out["ok"] and "already reads" in out["reason"]
-        assert db.query(HarvestSample).count() == 0
+        assert out["jobs"] == out["replay"]["inserted"] == 1
+        assert out["replay"]["invalid"] == 0
+        retained = db.query(HarvestSample).one()
+        assert retained.id == sample.id and retained.payload == POSTING
+        assert retained.found == 1 and "retained as validation evidence" in retained.note
+        job = db.query(Job).one()
+        assert (job.title, job.company, job.url) == ("Full-stack Engineer", "AIKOCorp", PAGE)
+        assert state.status == "ready" and state.result["found"] == 1
+        assert harvest_samples.hosts(db, all_hosts=True) == []
         assert db.query(HarvestRecipe).count() == 0
+        propose.assert_not_called()
 
 
 ZIP_PAGE = "https://www.ziprecruiter.com/jobs-search/4?days=7&search=Software"
@@ -218,14 +238,33 @@ class TestHiringCafe:
 
 
 class TestAHostWithAWorkingRecipeLeavesTheList:
-    def test_learn_clears_samples_the_active_recipe_reads(self, db):
+    def test_learn_retains_reference_evidence_and_resolves_the_host_with_its_active_recipe(self, db, monkeypatch):
         payload = {"results": [{"jobTitle": "Platform Engineer", "org": {"label": "Acme"},
                                 "link": "https://board.test/j/1"}]}
-        db.add(HarvestSample(host="board.test", source_url="https://board.test/s",
-                             payload=payload, bytes=100, found=0))
-        harvest_recipes.save(db, "board.test", {
+        sample = HarvestSample(host="board.test", source_url="https://board.test/s",
+                               payload=payload, bytes=100, found=0)
+        state = HarvestLearningState(host="board.test", endpoint_key=source_learning.ONBOARDING,
+                                     status="evidence_captured", evidence_hash="", attempts=0,
+                                     result={"url": "https://board.test/s"})
+        db.add_all([sample, state])
+        recipe = harvest_recipes.save(db, "board.test", {
             "roots": ["results"], "fields": {"title": ["jobTitle"], "company": ["org.label"],
                                              "url": ["link"]}}, {"ok": True})
+        propose = Mock(side_effect=AssertionError("A working recipe must not require another model call"))
+        monkeypatch.setattr(harvest_recipes, "propose", propose)
+
         out = harvest_recipes.learn(db, "board.test")
+
         assert out["ok"] and "active recipe already reads" in out["reason"]
-        assert db.query(HarvestSample).count() == 0
+        assert out["jobs"] == out["replay"]["inserted"] == 1
+        assert out["replay"]["invalid"] == 0
+        retained = db.query(HarvestSample).one()
+        assert retained.id == sample.id and retained.payload == payload
+        assert retained.found == 1 and "retained as validation evidence" in retained.note
+        job = db.query(Job).one()
+        assert (job.title, job.company, job.url) == ("Platform Engineer", "Acme", "https://board.test/j/1")
+        assert state.status == "ready" and state.result["found"] == 1
+        assert harvest_samples.hosts(db, all_hosts=True) == []
+        active = db.query(HarvestRecipe).one()
+        assert active.id == recipe.id and active.status == "active"
+        propose.assert_not_called()
