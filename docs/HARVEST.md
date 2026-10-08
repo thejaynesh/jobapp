@@ -42,7 +42,43 @@ list of aliases (`_TITLE_KEYS`, `_COMPANY_KEYS`, and so on).
 A redesign that moves the nesting around keeps working. So does a new site
 nobody wrote a parser for — which is why adding one is a single line.
 
-## Adding a site
+## Add a source and let it learn
+
+1. In **System → Add or learn a job source**, paste the careers page or a search
+   that shows the jobs you want. A recognized ATS board enters normal board
+   validation and fetching.
+2. For an unfamiliar site, open the extension options and use **Harvesting →
+   Add job site** with the same address. Approve that site's permission, enable
+   browser collection, and sign in on the site if necessary. The added site has
+   the same checkbox as built-in boards; untick it and Save to stop reading it.
+3. Choose **Retry capture** in System, or reload the job page in your browser.
+   Its own responses are captured, keeping distinct examples across API
+   endpoints and response shapes instead of repeated copies of one response.
+4. When a response cannot be read, the background worker first tries to infer
+   field paths from the evidence, then uses the configured **learn** model if
+   necessary. A recipe must produce real company names and absolute posting
+   links, and a repair must keep reading examples the previous recipe handled.
+5. A validated reader immediately replays the stored examples through normal
+   job ingestion. Replaying twice does not create duplicate postings. Working
+   examples remain available for checking future repairs.
+
+System shows the current stage and the next action: waiting for a browser,
+missing site permission, login required, evidence captured, queued or running
+learning, validated, or more evidence needed. Broker failures and lost worker
+claims are retryable. Repeated unsuccessful attempts stop until new evidence
+arrives or you explicitly retry. **Settings** controls automatic learning,
+retry interval, and attempts per unchanged evidence set. A successfully added
+source is revisited using the existing browser budget and cooldown; **Pause
+capture** stops those revisits.
+
+Captured evidence is bounded and trimmed, so its replay recovers those examples,
+not every posting from an earlier large response. The next capture applies the
+validated reader to the full live response. Search and detail endpoints keep
+independent readers, while old host-wide recipes remain fallbacks.
+
+### Adding a built-in site
+
+Custom sites above need no code changes. To ship a named board with the extension:
 
 1. Append a row to `HARVEST_SITES` in `extension/sites.js`:
 
@@ -64,9 +100,9 @@ nobody wrote a parser for — which is why adding one is a single line.
    "example.com": "example_harvest",
    ```
 
-   Skipping this does not break harvesting — the extractor never looks at the
-   host — but the site's yield is filed under LinkedIn's source name, where you
-   cannot tell the two apart.
+   Skipping this does not break harvesting. Its source is `browser_harvest`,
+   and the browser diagnostics still identify the host. It never borrows
+   LinkedIn's URL reconstruction for unrelated job IDs.
 
 3. Reload the extension, open its options page, tick the new box (it will ask
    for that host's permission), and browse a few job pages on that site.
@@ -516,36 +552,40 @@ The verdicts:
 
 ### Fixing a site that regressed
 
-1. Open a job page on that site with DevTools on the **Network** tab, filtered
-   to Fetch/XHR.
-2. Find the response carrying the job data — it will be the large JSON one that
-   appears when the posting renders.
-3. Compare its field names against the alias tuples in
-   `app/services/harvest.py`. You are looking for the keys holding the title,
-   the company, the location, the description, the URL, and the id.
-4. Add whichever names are new to the matching tuple. Order matters only in
-   that the first match wins, so put more specific names first.
-5. Add a fixture to `tests/test_harvest.py` with a trimmed copy of the payload.
+1. Open a search and a posting on the enabled site to capture its current
+   responses. Unread job-like examples automatically enter source learning.
+2. In **System**, inspect the source's learning status. Use **Retry learning**
+   after adding evidence, or give the learner a visible job title as a hint.
+3. A replacement reader must retain the previously working examples. When it
+   validates, stored examples are replayed automatically.
 
-Only the field names change; the walk does not. In practice this is a handful
-of strings rather than a parser.
+Navigation also records consecutive visits that make no progress. After the
+failure limit in **Settings**, a previously working pagination recipe retires
+and learning uses the page's current controls. A successful visit clears that
+failure streak.
+
+If the captured examples still cannot be read, a developer can inspect the
+JSON and extend the field aliases in `app/services/harvest.py`, with a trimmed
+regression fixture in `tests/test_harvest.py`.
 
 ### If you want to send me the payload
 
-Save the response body from step 2 to a file and strip anything personal from
-it — the job objects are all that matters. A single job's worth of JSON is
-enough to fix the aliases.
+Save the relevant job response from the browser's Network tab and strip
+anything personal from it — the job objects are all that matters. A single
+job's worth of JSON can be enough to identify a missing field mapping.
 
 ## What is not sent
 
-`interceptor.js` forwards a response only when all of the following hold:
+`interceptor.js` reads bounded JSON responses from enabled sites. Ordinary
+forwarding requires job-shaped fields and either a job/search endpoint or the
+site's own domain. Responses above 3 MB are dropped.
 
-- The request URL matches `/(job|posting|search|hiring)/i`.
-- The body is under 3 MB.
-- The body contains one of `"title"`, `"jobTitle"`, `"companyName"`,
-  `"jobPostingId"`.
+Unknown field names are retained through a separate diagnostic budget: at
+most ten job-endpoint probes and eight other same-site probes per page, each
+between 1.5 KB and 400 KB. These samples let the learner inspect unfamiliar
+structures without forwarding every response a page receives. Unrelated
+third-party responses are excluded.
 
-Anything else is dropped in the page, before it reaches the extension. Only
-sites you have ticked are instrumented at all — the content scripts are
-registered at runtime from the toggles, not declared in the manifest, so an
-unticked site has no script running on it.
+Only sites you have ticked are instrumented — the content scripts are
+registered at runtime from the toggles. An unticked site has no reader running
+on it, and custom sites require explicit Chrome permission.

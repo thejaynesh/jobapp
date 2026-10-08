@@ -1,5 +1,5 @@
 {# The outreach panel on an application. Swapped whole after every action. #}
-{% set searching = app.outreach_status == 'discovering' and not discovery_stale %}
+{% set searching = app and app.outreach_status == 'discovering' and not discovery_stale %}
 <div id="outreach-panel" class="bg-white border border-gray-200 rounded-lg p-5 shadow-sm"
      {% if searching %}
      hx-get="/outreach/apps/{{ app.id }}/panel"
@@ -9,22 +9,22 @@
 
   <div class="flex justify-between items-center mb-1">
     <h2 class="text-base font-semibold text-gray-800">Outreach</h2>
-    <form hx-post="/outreach/apps/{{ app.id }}/discover" hx-target="#outreach-panel" hx-swap="outerHTML">
+    {% if app %}<form hx-post="/outreach/apps/{{ app.id }}/discover" hx-target="#outreach-panel" hx-swap="outerHTML">
       <button type="submit"
         {% if searching %}disabled{% endif %}
         class="text-xs bg-gray-100 border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-200 disabled:opacity-50">
         {% if app.contacts %}Find more{% else %}Find contacts{% endif %}
       </button>
-    </form>
+    </form>{% endif %}
   </div>
 
-  <p class="text-[11px] text-gray-400 mb-3">
+  {% if app %}<p class="text-[11px] text-gray-400 mb-3">
     {% if app.outreach_checked_at %}
       Last searched {{ app.outreach_checked_at | when("%b %d, %H:%M") }}
     {% else %}
       Searches the posting, Hunter.io, and (if configured) LinkedIn.
     {% endif %}
-  </p>
+  </p>{% endif %}
 
   {% if notice %}
   <p class="text-xs mb-3 {% if notice.ok %}text-green-600{% else %}text-red-600{% endif %}">{{ notice.message }}</p>
@@ -34,7 +34,7 @@
   <p class="text-xs text-blue-600 mb-3">Searching for contacts&hellip;</p>
   {% elif discovery_stale %}
   <p class="text-xs text-red-500 mb-3">The last search never finished &mdash; the worker may have restarted. Try again.</p>
-  {% elif app.outreach_status == 'failed' and app.outreach_error %}
+  {% elif app and app.outreach_error %}
   <p class="text-xs text-red-500 mb-3">Last search failed: {{ app.outreach_error[:200] }}</p>
   {% endif %}
 
@@ -113,6 +113,20 @@
         {% endif %}
         <span class="text-[10px] text-gray-400">via {{ contact.source | replace("_", " ") }}</span>
       </div>
+      {% if contact.archived %}<p class="text-xs text-amber-700 mt-2">Archived contact. Relationship history is retained.</p>{% endif %}
+      {% if contact.evidence %}
+      <details class="mt-2 text-xs text-gray-600"><summary class="cursor-pointer">Why this contact · source evidence</summary>
+        {% for reason in contact.evidence.get('ranking_reasons', []) %}<p>{{ reason }}</p>{% endfor %}
+        {% if contact.evidence.get('company_domain') %}<p>Company domain: {{ contact.evidence.company_domain.get('domain') or 'unresolved' }} · {{ contact.evidence.company_domain.get('source') or 'no ownership evidence' }}</p>{% endif %}
+        {% for evidence in contact.evidence.get('sources', []) %}{% if evidence.get('uri') and evidence.uri.startswith(('https://','http://')) %}<p><a class="text-blue-600 underline" href="{{ evidence.uri }}" target="_blank" rel="noopener">{{ evidence.get('kind') or 'Published source' }} ↗</a>{% if evidence.get('last_seen_on') %} · last seen {{ evidence.last_seen_on }}{% endif %}</p>{% endif %}{% endfor %}
+        {% for source in contact.evidence.get('discovery', []) %}<p>{{ source.source }}: {{ source.status }}{% if source.get('cached') %} (cached){% endif %}{% if source.get('error') %} · {{ source.error }}{% endif %}</p>{% endfor %}
+        {% if contact.evidence.get('identity_conflict') %}<p class="text-amber-700">{{ contact.evidence.identity_conflict }}</p>{% endif %}
+      </details>
+      {% if contact.evidence.get('verification_pending') %}<p class="text-xs text-amber-700 mt-1">Email verification pending. Refresh for the result.</p>{% endif %}
+      {% if contact.evidence.get('verification_error') %}<p class="text-xs text-red-600 mt-1">{{ contact.evidence.verification_error }}</p>{% endif %}
+      {% endif %}
+      {% set conversation = conversations.get(contact.id) if conversations is defined else none %}
+      {% if conversation %}{% include "outreach/partials/relationship.html" %}{% endif %}
 
       {% for earlier in prior.get(contact.id, []) %}
       <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1 mt-2">
@@ -144,7 +158,7 @@
         {% set has_sent = contact.messages | selectattr("sent_at") | list | length > 0 %}
         <select name="kind" class="border border-gray-300 rounded px-2 py-1 text-xs">
           {% for kind in kinds %}
-          <option value="{{ kind }}" {% if kind == 'follow_up' and has_sent %}selected{% endif %}>
+          <option value="{{ kind }}" {% if conversation and conversation.status == 'reply_needed' %}{% if kind == 'reply' %}selected{% endif %}{% elif kind == 'follow_up' and has_sent %}selected{% endif %}>
             {{ kind | replace("_", " ") | title }}
           </option>
           {% endfor %}
@@ -209,7 +223,7 @@
   <p class="text-[11px] text-gray-400 mt-3">{{ archived_count }} archived contact(s) hidden.</p>
   {% endif %}
 
-  <details class="mt-4">
+  {% if app %}<details class="mt-4">
     <summary class="text-xs text-gray-500 cursor-pointer hover:text-blue-600">Add a contact by hand</summary>
     <form hx-post="/outreach/apps/{{ app.id }}/contacts" hx-target="#outreach-panel" hx-swap="outerHTML"
           class="mt-2 space-y-2">
@@ -230,5 +244,5 @@
         Add contact
       </button>
     </form>
-  </details>
+  </details>{% endif %}
 </div>

@@ -30,20 +30,6 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy.exc import IntegrityError
-
-from app.models.job import Job, JobStatus
-from app.services import posting_identity
-from app.services.deduplication import (
-    compute_dedupe_hash,
-    enrich_from,
-    was_archived,
-    find_existing_job,
-    merge_description,
-    merge_or_skip,
-    note_addresses,
-    note_source,
-)
 from app.services.descriptions import clean as clean_description
 from app.services.sources.base import parse_experience_level
 
@@ -112,10 +98,9 @@ def source_for_url(url: str | None) -> str:
     """
     Which harvest source a payload belongs to, from the page it came off.
 
-    Falls back to the LinkedIn name rather than inventing a source: an
-    unrecognised host means the interceptor was registered somewhere this
-    doesn't know about yet, and a wrong-but-known bucket is easier to notice
-    and correct than a new one appearing silently.
+    Unfamiliar sites use a generic browser source. Claiming they were LinkedIn
+    would synthesize LinkedIn posting URLs from unrelated numeric job IDs.
+    Missing URLs retain the original default for legacy callers.
     """
     from urllib.parse import urlparse
 
@@ -123,7 +108,7 @@ def source_for_url(url: str | None) -> str:
     for domain, source in HARVEST_SOURCES.items():
         if host == domain or host.endswith(f".{domain}"):
             return source
-    return HARVEST_SOURCE
+    return "browser_harvest" if host else HARVEST_SOURCE
 
 # Field aliases, most specific first. Several are checked because one payload
 # calls it `companyName` and another nests it under `companyDetails`.
@@ -1224,66 +1209,9 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
     """
     counts = {"inserted": 0, "merged": 0, "skipped": 0, "invalid": 0}
     now = datetime.now(timezone.utc)
+    linked_jobs = []
 
-    def _store(data, title, company, url, location, description,
-               source_job_id, dedupe_hash) -> str:
-        """One posting, stored or merged. Returns the outcome to count."""
-        source = data.get("source") or HARVEST_SOURCE
-        apply_url = data.get("apply_url") or None
-        existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
-                                     apply_url=apply_url)
-        if existing is not None:
-            note_source(existing, source)
-            improved = enrich_from(existing, data)
-            # The harvested copy usually carries a fuller description than the
-            # guest API managed, which is the main reason this path exists.
-            if url in existing.source_urls or (
-                source_job_id
-                and existing.source_job_id == source_job_id
-                and existing.source == source
-            ):
-                note_addresses(existing, url, apply_url)
-                if merge_description(existing, description):
-                    improved.append("description")
-            else:
-                improved += merge_or_skip(db, existing, url, description,
-                                          layer=3, data=data)
-            # Counted by whether the row got better, not by which branch it
-            # went down. The panel calls this number "enriched".
-            return "merged" if improved else "skipped"
-
-        # Already seen, judged and retired. Same reasoning as the fetcher's
-        # check: an archived posting is one we have an answer about, and
-        # re-inserting it buys a scoring call to reach that same answer again.
-        if was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url):
-            return "skipped"
-
-        job = Job(
-            source=source,
-            source_job_id=source_job_id,
-            source_urls=posting_identity.urls(url, apply_url),
-            seen_by=[source],
-            title=title,
-            company=company,
-            location=location,
-            is_remote=bool(data.get("is_remote")),
-            url=url,
-            apply_url=data.get("apply_url") or None,
-            description=description or None,
-            experience_level=data.get("experience_level"),
-            status=JobStatus.new,
-            fetched_at=now,
-            dedupe_hash=dedupe_hash,
-        )
-        # The same rule a second sighting gets, on a row where every column it
-        # looks at is still null. It is strictly more than the pay band this
-        # used to take: a card naming an employment type or a posting date had
-        # both thrown away on insert and then re-derived from prose by an LLM
-        # call later.
-        enrich_from(job, data)
-        db.add(job)
-        db.flush()
-        return "inserted"
+    from app.services.collection_ingest import store
 
     for data in jobs:
         title = (data.get("title") or "").strip()
@@ -1296,50 +1224,25 @@ def save_harvested_jobs(db, jobs: list[dict]) -> dict:
         location = (data.get("location") or "").strip()
         description = clean_description(data.get("description") or "")
         source_job_id = data.get("source_job_id")
-        dedupe_hash = compute_dedupe_hash(company, title, location)
-
-        # Savepoint + flush per job. extract_jobs dedupes on id/url, but two
-        # postings with different ids can share a dedupe_hash — and without a
-        # flush the second one can't see the first's pending insert, so the
-        # unique constraint fired at commit and the WHOLE batch was lost.
-        # Flushing makes the duplicate visible to find_existing_job; the
-        # savepoint contains anything that still slips through.
-        #
-        # Something still does, because this is the one ingest path that runs
-        # concurrently: the extension forwards a payload per response and
-        # several land at once across uvicorn workers, so a posting can be
-        # inserted by *another request* in the window between this one's SELECT
-        # and its INSERT. That is a unique-violation on `dedupe_hash` for a job
-        # neither request did anything wrong with, and it was being counted as
-        # `invalid` and dropped.
-        #
-        # Postgres reads committed, so a second attempt sees the row the other
-        # request committed and resolves it as a merge. One retry is the whole
-        # fix — a second collision would mean the row is gone again, which is
-        # not something retrying harder solves.
-        outcome = ""
-        for attempt in (1, 2):
-            try:
-                with db.begin_nested():
-                    outcome = _store(data, title, company, url, location,
-                                     description, source_job_id, dedupe_hash)
-                break
-            except IntegrityError:
-                if attempt == 1:
-                    continue
-                logger.warning(
-                    "harvest: %r at %s collided twice and was dropped",
-                    title, company,
-                )
-                outcome = "invalid"
-            except Exception as exc:
-                logger.warning("harvest: could not store %r at %s: %s",
-                               title, company, exc)
-                outcome = "invalid"
-                break
+        normalized = {**data, "source": data.get("source") or HARVEST_SOURCE,
+                      "title": title, "company": company, "url": url,
+                      "location": location, "description": description,
+                      "source_job_id": source_job_id}
+        try:
+            # The shared store isolates individual failures and retries an
+            # exact-posting collision once; browser and fetch paths agree.
+            outcome, _job = store(db, normalized, max_age_days=0, now=now)
+            if _job is not None:
+                linked_jobs.append(_job)
+        except Exception as exc:
+            logger.warning("harvest: could not store %r at %s: %s", title, company, exc)
+            outcome = "invalid"
         counts[outcome or "invalid"] += 1
 
     counts["boards"] = _mine_ats_boards(db, jobs)
+    if linked_jobs:
+        from app.services.company_identity import attach_known_companies
+        attach_known_companies(db, linked_jobs)
 
     db.commit()
     if counts["inserted"] or counts["merged"] or counts["boards"]:

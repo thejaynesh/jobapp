@@ -83,6 +83,7 @@ function onMessage(event) {
             type: "harvest",
             payload: data.payload,
             sourceUrl: data.sourceUrl,
+            pageUrl: String(location.href),
             // A near miss rather than a recognised job payload. Forwarded so
             // the server has evidence to learn from; marked so it can say so.
             probe: Boolean(data.probe),

@@ -21,6 +21,7 @@ celery_app = Celery(
         "app.tasks.browse", "app.tasks.discovery", "app.tasks.sponsorship",
         "app.tasks.recall", "app.tasks.schedule", "app.tasks.tracker",
         "app.tasks.intelligence",
+        "app.tasks.opportunities", "app.tasks.source_learning",
     ],
 )
 
@@ -108,6 +109,9 @@ celery_app.conf.update(
         "app.tasks.links.*": {"queue": "batch"},
         "app.tasks.match_eval.*": {"queue": "batch"},
         "app.tasks.intelligence.*": {"queue": "batch"},
+        "app.tasks.opportunities.maintain": {"queue": "batch"},
+        "app.tasks.opportunities.*": {"queue": "interactive"},
+        "app.tasks.source_learning.*": {"queue": "batch"},
         "app.tasks.providers.*": {"queue": "batch"},
         # Deliberately interactive: the user pressed something, or the laptop
         # is waiting for work to do.

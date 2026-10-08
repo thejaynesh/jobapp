@@ -26,6 +26,7 @@ from app.services.sources.base import (
     board_workers,
     cycle_cfg,
     described,
+    described_versions,
     fetch_boards_concurrently,
     parse_experience_level,
     saw_postings,
@@ -73,6 +74,7 @@ def _as_job(slug: str, item: dict, desc: str) -> dict:
         # on every edit, so an old requisition someone re-saved looked new
         # and a posting's age read as the age of its last typo fix.
         "posted_at": item.get("first_published") or item.get("updated_at") or None,
+        "updated_at": item.get("updated_at"),
     }
 
 
@@ -80,6 +82,7 @@ def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
     cutoff = age_cutoff(max_age_days)
     on_demand = bool(getattr(cycle_cfg(), "GREENHOUSE_DESCRIPTIONS_ON_DEMAND", True))
     known = described("greenhouse") if on_demand else frozenset()
+    versions = described_versions("greenhouse")
 
     def fresh(item: dict) -> bool:
         dated_raw = item.get("first_published") or item.get("updated_at") or ""
@@ -97,7 +100,10 @@ def fetch(company_slugs: list[str], max_age_days=None) -> list[dict]:
         if not on_demand:
             return [_as_job(slug, item, item.get("content", "")) for item in keep]
 
-        new = [item for item in keep if str(item.get("id", "")) not in known]
+        from app.services.listing_observations import parse_time
+        new = [item for item in keep if str(item.get("id", "")) not in known
+               or (str(item.get("id", "")) in versions and parse_time(item.get("updated_at"))
+                   != versions[str(item.get("id", ""))])]
         texts: dict[str, str] = {}
         if len(new) > max(_PER_POSTING_LIMIT, len(keep) // 4):
             texts = {str(item.get("id", "")): item.get("content") or ""

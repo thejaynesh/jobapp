@@ -181,6 +181,39 @@ def send_message_task(message_id: str, allow_guessed: bool = False) -> dict:
         db.close()
 
 
+@celery_app.task(name="app.tasks.outreach.verify_contact_email_task", bind=True, max_retries=3, soft_time_limit=90)
+def verify_contact_email_task(self, contact_id: str) -> dict:
+    """Finish a provider's asynchronous verification without blocking the UI."""
+    from app.config import settings
+    from app.models.outreach import Contact
+    from app.services.contact_finder import verify_email
+    db = SessionLocal()
+    try:
+        contact = db.get(Contact, uuid.UUID(contact_id))
+        if not contact or not contact.email:
+            return {"status": "missing"}
+        address = contact.email
+        result = verify_email(address, settings.HUNTER_IO_API_KEY)
+        if not result or result.get("pending"):
+            if self.request.retries < self.max_retries:
+                raise self.retry(countdown=30 * (self.request.retries + 1))
+            contact.evidence = {**(contact.evidence or {}), "verification_pending": False,
+                                "verification_error": "Verification did not complete. Try again from the contact."}
+            db.commit()
+            return {"status": "unavailable"}
+        db.refresh(contact)
+        if contact.email != address:
+            return {"status": "address_changed"}
+        contact.email_status, contact.email_confidence = result["status"], result["confidence"]
+        contact.evidence = {**(contact.evidence or {}), "verification_pending": False,
+            "verification_error": None, "verification": result.get("verification") or {},
+            "verification_checked_at": datetime.now(timezone.utc).isoformat()}
+        db.commit()
+        return {"status": result["status"]}
+    finally:
+        db.close()
+
+
 def _mark_failed(db, application_id: str, error: str) -> None:
     try:
         app = db.query(Application).filter(Application.id == uuid.UUID(application_id)).first()

@@ -14,7 +14,9 @@ from app.services.tunables import value
 def build(db, profile, minutes=None, now=None):
     now = now or datetime.now(timezone.utc)
     budget = max(5, min(240, int(minutes if minutes is not None else value(profile, "today_minutes"))))
-    actions = []
+    from app.services import opportunity_actions
+    actions = opportunity_actions.build(db, profile, now)
+    networking_due = sum(a["kind"] in {"reply", "network_followup"} for a in actions)
     due = db.query(Application).options(joinedload(Application.job)).filter(
         Application.next_action_due <= now.date(),
         Application.status.in_([ApplicationStatus.applied, ApplicationStatus.interviewing, ApplicationStatus.offered]),
@@ -84,7 +86,7 @@ def build(db, profile, minutes=None, now=None):
     explorers = [a for a in actions if a["kind"] == "explore"][:exploration_budget]
     regular = [a for a in actions if a["kind"] != "explore"]
     if explorers and budget >= explorers[0]["minutes"] + int(value(profile, "plan_application_minutes")):
-        index = next((i for i, a in enumerate(regular) if a["kind"] != "followup"), len(regular))
+        index = next((i for i, a in enumerate(regular) if a["kind"] not in {"followup", "reply", "network_followup"}), len(regular))
         regular.insert(index, explorers[0])
     for action in regular:
         family = evidence.normal(action["company"]) if action["kind"] in {"apply", "explore"} else None
@@ -95,5 +97,5 @@ def build(db, profile, minutes=None, now=None):
         if family:
             families.add(family)
     return {"actions": chosen, "minutes": budget, "planned_minutes": spent,
-            "due_count": len(due), "deferred_count": len(actions) - len(chosen),
+            "due_count": len(due) + networking_due, "deferred_count": len(actions) - len(chosen),
             "semantic_scores": semantic_scores, "pins": profile.get("plan_pins") or []}

@@ -15,10 +15,11 @@ actually useful.
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import Integer, func
+from sqlalchemy import Integer, func, select
 from sqlalchemy.orm import Session
 
 from app.models.fetch_run import FetchRun, FetchSourceRun
+from app.models.source_listing import FetchBoardRun
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ def record_run(
     error: str | None = None,
     group: str = "all",
     retention: int = DEFAULT_RETENTION,
+    run_id=None,
 ) -> FetchRun:
     """
     Persist one cycle. `per_source_outcome` maps source → what happened to its
@@ -62,7 +64,7 @@ def record_run(
     ]
     if error:
         status = "failed"
-    elif failed:
+    elif failed or counts.get("dropped") or any(s.get("incomplete") for s in (source_stats or {}).values()):
         status = "partial"
     else:
         status = "ok"
@@ -78,6 +80,7 @@ def record_run(
         merged=counts.get("merged", 0),
         skipped=counts.get("skipped", 0),
         stale=counts.get("stale", 0),
+        dropped=counts.get("dropped", 0),
         queries=list(queries or []),
         locations=list(locations or []),
         links_attempted=resolve_stats.get("attempted", 0),
@@ -89,6 +92,14 @@ def record_run(
         backfill=backfill,
         error=error,
     )
+    if run_id is not None:
+        existing = db.get(FetchRun, run_id)
+        if existing is not None:
+            for key, value in vars(run).items():
+                if not key.startswith("_") and key != "id":
+                    setattr(existing, key, value)
+            run = existing
+            db.query(FetchSourceRun).filter(FetchSourceRun.run_id == run_id).delete(synchronize_session=False)
     db.add(run)
     db.flush()
 
@@ -108,12 +119,14 @@ def record_run(
             run_id=run.id,
             source=source,
             enabled=bool(stats.get("enabled", True)),
-            status=classify(stats),
+            status=("partial" if outcome.get("inserted") or outcome.get("merged") else "failed")
+                   if outcome.get("dropped") else classify(stats),
             fetched=stats.get("count", 0),
             inserted=outcome.get("inserted", 0),
             merged=outcome.get("merged", 0),
             skipped=outcome.get("skipped", 0),
             stale=outcome.get("stale", 0),
+            dropped=outcome.get("dropped", 0),
             errors=list(stats.get("errors") or [])[:5],
         ))
 
@@ -146,7 +159,8 @@ def prune(db: Session, retention: int = DEFAULT_RETENTION) -> int:
         return 0
     deleted = (
         db.query(FetchRun)
-        .filter(FetchRun.started_at <= cutoff)
+        .filter(FetchRun.started_at <= cutoff, FetchRun.finished_at.isnot(None))
+        .filter(~FetchRun.id.in_(select(FetchBoardRun.run_id).where(FetchBoardRun.payload.isnot(None))))
         .delete(synchronize_session=False)
     )
     if deleted:

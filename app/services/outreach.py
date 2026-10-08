@@ -22,6 +22,8 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import or_
+
 from app.config import live, settings
 from app.llm.providers import collect_llm_log, generation_chat, start_llm_log
 from app.models.outreach import (
@@ -29,10 +31,11 @@ from app.models.outreach import (
     MESSAGE_STATUSES, OutreachMessage,
 )
 from app.services.company_domain import company_key, extract_domain, resolve_company_domain
+from app.services import networking
 from app.services.contact_finder import (
     contact_score, contacts_from_description, find_email, find_linkedin_contact,
     find_linkedin_contacts, guess_emails, hunter_contacts, hunter_domain_search,
-    hunter_email_finder, split_name, verify_email,
+    hunter_email_finder, split_name, verify_email, ranking_reasons,
 )
 from app.services.github_contacts import github_contacts
 from app.services.linkedin_links import company_links, contact_link
@@ -110,6 +113,12 @@ KIND_GUIDANCE = {
         "note in half a sentence, do NOT repeat its content or its examples, add one "
         "new piece of value, and make it trivially easy to ignore or answer. Never "
         "guilt-trip or imply they were rude not to reply."
+    ),
+    "reply": (
+        "Respond to the latest incoming reply. Address their actual questions or next "
+        "steps using the saved conversation and user feedback. Do not introduce a new "
+        "cold pitch, invent availability, accept a commitment, or claim an attachment "
+        "unless the supplied evidence supports it."
     ),
     "referral_request": (
         "Asking someone already at the company to refer the candidate. Be direct that "
@@ -216,7 +225,7 @@ def _links(profile_data: dict) -> str:
     return " | ".join(p for p in parts if p)
 
 
-def _evidence_lines(profile_data: dict, limit: int = 3) -> str:
+def _evidence_lines(profile_data: dict, limit: int = 3, job: dict | None = None) -> str:
     """
     The concrete accomplishments a message is allowed to cite.
 
@@ -229,12 +238,15 @@ def _evidence_lines(profile_data: dict, limit: int = 3) -> str:
     # A message to a recruiter cites only what the resume would.
     profile_data = for_documents(profile_data)
     lines: list[str] = []
-    for exp in (profile_data.get("experience") or [])[:2]:
+    terms = set(re.findall(r"[a-z]{3,}", " ".join([str((job or {}).get("title") or ""), " ".join((job or {}).get("matched_skills") or [])]).lower()))
+    def relevance(entry):
+        return len(terms & set(re.findall(r"[a-z]{3,}", str(entry).lower())))
+    for exp in sorted(profile_data.get("experience") or [], key=relevance, reverse=True)[:2]:
         role = exp.get("role") or exp.get("title") or ""
         lines.append(f"- {role} at {exp.get('company', '')}")
         lines.extend(f"    * {b}" for b in (exp.get("bullets") or [])[:limit])
         lines.extend(f"    * (fact) {a}" for a in answers(exp))
-    for proj in (profile_data.get("projects") or [])[:2]:
+    for proj in sorted(profile_data.get("projects") or [], key=relevance, reverse=True)[:2]:
         lines.append(f"- Project {proj.get('name', '')}: {proj.get('description', '')}")
         lines.extend(f"    * {b}" for b in (proj.get("bullets") or [])[:2])
         lines.extend(f"    * (fact) {a}" for a in answers(proj))
@@ -353,10 +365,12 @@ def build_messages(
         f"Candidate summary: {_summary(profile_data)}\n"
         f"Top skills: {', '.join(_skills_flat(profile_data)[:8])}\n"
         + (f"Links: {_links(profile_data)}\n" if _links(profile_data) else "")
-        + f"\nEvidence (the ONLY accomplishments you may cite):\n{_evidence_lines(profile_data)}\n"
+        + f"\nEvidence (the ONLY accomplishments you may cite):\n{_evidence_lines(profile_data, job=job)}\n"
         + f"\nRecipient: {contact_name or 'unknown name'}"
         + (f", {contact_title}" if contact_title else "")
         + f" at {job.get('company', '')} (relationship to the role: {contact_role})\n"
+        + (f"User-supplied relationship notes: {contact['notes']}\n" if contact.get("notes") else "")
+        + "A shared school or public organization membership does not establish a personal connection or current employment. Do not claim either without explicit evidence.\n"
         + f"Target role: {job.get('title', '')} at {job.get('company', '')}"
         + (f" ({job.get('location')})" if job.get("location") else "")
         + "\n"
@@ -393,7 +407,9 @@ def fallback_message(profile_data: dict, contact: dict, job: dict, channel: str,
     skills = _skills_flat(profile_data)[:3]
     skill_text = ", ".join(skills) if skills else "software engineering"
 
-    if kind == "follow_up":
+    if kind == "reply":
+        core = "Thank you for getting back to me. I appreciate the update."
+    elif kind == "follow_up":
         core = (
             f"I wrote last week about the {title} role at {company} — I know inboxes get "
             f"busy. My background is in {skill_text}, and I would still love a few minutes "
@@ -418,7 +434,7 @@ def fallback_message(profile_data: dict, contact: dict, job: dict, channel: str,
             "of you rather than only through the form."
         )
 
-    ask = "Would you be open to a short conversation?"
+    ask = "" if kind == "reply" else "Would you be open to a short conversation?"
     if spec["has_subject"]:
         body = f"{hello}\n\n{core}\n\n{ask}\n\nThanks,\n{name}"
     else:
@@ -550,6 +566,7 @@ def _contact_dict(contact: Contact) -> dict:
         "role": contact.role,
         "department": contact.department,
         "email": contact.email,
+        "notes": contact.notes,
     }
 
 
@@ -572,6 +589,7 @@ def _dedupe(candidates: list[dict]) -> list[dict]:
             merged[key] = dict(candidate)
             continue
         existing = merged[key]
+        _merge_verification(existing, candidate)
         for field, value in candidate.items():
             if value and not existing.get(field):
                 existing[field] = value
@@ -582,7 +600,11 @@ def _dedupe(candidates: list[dict]) -> list[dict]:
     result: list[dict] = []
     for key, candidate in merged.items():
         name = (candidate.get("name") or "").lower().strip()
-        if name and name in by_name:
+        if name and name in by_name and not (
+            candidate.get("email") and by_name[name].get("email")
+            and candidate["email"].lower() != by_name[name]["email"].lower()
+        ):
+            _merge_verification(by_name[name], candidate)
             for field, value in candidate.items():
                 if value and not by_name[name].get(field):
                     by_name[name][field] = value
@@ -591,6 +613,27 @@ def _dedupe(candidates: list[dict]) -> list[dict]:
             by_name[name] = candidate
         result.append(candidate)
     return result
+
+
+def _merge_verification(existing: dict, incoming: dict) -> None:
+    """Merge evidence separately from source ordering and confidence numbers."""
+    evidence = {**(existing.get("evidence") or {})}
+    other = incoming.get("evidence") or {}
+    sources = list(evidence.get("sources") or [])
+    for source in other.get("sources") or []:
+        if source not in sources:
+            sources.append(source)
+    evidence["sources"] = sources
+    rank = {"unknown": 0, "guessed": 1, "unverified": 2, "accept_all": 3, "verified": 4, "invalid": 5}
+    if rank.get(incoming.get("email_status"), 0) > rank.get(existing.get("email_status"), 0):
+        existing["email_status"] = incoming["email_status"]
+        existing["email_confidence"] = incoming.get("email_confidence") or 0
+        if other.get("verification"):
+            evidence["verification"] = other["verification"]
+    for key, value in other.items():
+        if key not in evidence:
+            evidence[key] = value
+    existing["evidence"] = evidence
 
 
 def _attach_guessed_emails(candidates: list[dict], domain: str, pattern: str, hunter_key: str) -> None:
@@ -608,8 +651,9 @@ def _attach_guessed_emails(candidates: list[dict], domain: str, pattern: str, hu
             found = hunter_email_finder(domain, first, last, hunter_key)
             if found.get("email"):
                 candidate["email"] = found["email"]
-                candidate["email_status"] = "unverified"
+                candidate["email_status"] = found.get("status") or "unverified"
                 candidate["email_confidence"] = found.get("score") or 50
+                candidate["evidence"] = {**(candidate.get("evidence") or {}), "verification": found.get("verification") or {}, "sources": found.get("sources") or []}
                 continue
         if not live().OUTREACH_GUESS_EMAILS:
             continue
@@ -643,14 +687,17 @@ def upsert_contact(db, application, data: dict) -> Contact:
             .first()
         )
     if existing is None and data.get("name"):
-        existing = (
+        matches = (
             db.query(Contact)
             .filter(
                 Contact.application_id == application.id,
                 Contact.name == data["name"],
             )
-            .first()
+            .filter(or_(Contact.email.is_(None), Contact.email == email) if email else Contact.id.isnot(None))
+            .limit(2).all()
         )
+        # A common name cannot collapse two addresses or disambiguate people.
+        existing = matches[0] if len(matches) == 1 else None
 
     if existing is None:
         contact = Contact(
@@ -672,7 +719,8 @@ def upsert_contact(db, application, data: dict) -> Contact:
             # not restate where they came from.
             pass
         elif data.get("email_confidence", 0) > (contact.email_confidence or 0):
-            contact.email_status = data.get("email_status") or contact.email_status
+            if contact.email_status != "invalid":
+                contact.email_status = data.get("email_status") or contact.email_status
             contact.email_confidence = int(data.get("email_confidence") or 0)
             contact.source = data.get("source") or contact.source
 
@@ -687,6 +735,13 @@ def upsert_contact(db, application, data: dict) -> Contact:
         contact.email = email
         contact.email_status = data.get("email_status") or "unverified"
         contact.email_confidence = int(data.get("email_confidence") or 0)
+    merged = {"email_status": contact.email_status, "email_confidence": contact.email_confidence, "evidence": contact.evidence or {}}
+    _merge_verification(merged, data)
+    contact.email_status, contact.email_confidence = merged["email_status"], merged["email_confidence"]
+    contact.evidence = merged["evidence"]
+    if getattr(application.job, "company_id", None):
+        contact.company_id = application.job.company_id
+    networking.ensure_person(db, contact)
     return contact
 
 
@@ -710,7 +765,9 @@ def discover_contacts(
     verify = live().OUTREACH_VERIFY_EMAILS if verify is None else verify
     max_contacts = max_contacts or live().OUTREACH_MAX_CONTACTS_PER_APP
 
-    domain, domain_source = resolve_company_domain(
+    from app.services.company_identity import verified_domain_for
+    known_domain = verified_domain_for(db, job)
+    domain, domain_source = (known_domain, "verified_company") if known_domain else resolve_company_domain(
         job.company,
         url=job.url or "",
         apply_url=getattr(job, "apply_url", "") or "",
@@ -723,21 +780,30 @@ def discover_contacts(
 
     candidates: list[dict] = []
     pattern = ""
+    diagnostics = []
+    key = company_key(job.company)
+    def source(name, fetch, scope=""):
+        result, diagnostic = networking.cached_discovery(db, key, domain, name, fetch, scope)
+        diagnostics.append(diagnostic)
+        return result
 
     # Ordered by how much each source's output can be trusted, because _dedupe
     # keeps the first non-empty value for every field. The posting's own
     # addresses come first: free, deliberate, and aimed at applicants.
-    candidates.extend(contacts_from_description(job.description or "", domain))
+    for candidate in contacts_from_description(job.description or "", domain):
+        candidate["evidence"] = {"sources": [{"uri": job.url, "kind": "job_description"}]}
+        candidates.append(candidate)
 
     if domain and hunter_key:
-        data = hunter_domain_search(domain, hunter_key, limit=20)
+        data = source("hunter", lambda: hunter_domain_search(domain, hunter_key, limit=20))
+        data = data if isinstance(data, dict) else {}
         pattern = data.get("pattern") or ""
         candidates.extend(hunter_contacts(domain, hunter_key, limit=10, data=data))
 
     # The company's own site: LinkedIn profile links and published addresses.
     if live().OUTREACH_USE_TEAM_PAGES and domain:
         try:
-            candidates.extend(team_page_contacts(domain, limit=max_contacts))
+            candidates.extend(source("team_page", lambda: team_page_contacts(domain, limit=max_contacts), str(max_contacts)))
         except Exception as exc:
             logger.error("discover_contacts: team pages failed for %s: %s", domain, exc)
 
@@ -745,7 +811,7 @@ def discover_contacts(
     if live().OUTREACH_USE_GITHUB and settings.GITHUB_TOKEN:
         try:
             candidates.extend(
-                github_contacts(job.company, domain, settings.GITHUB_TOKEN, limit=max_contacts)
+                source("github", lambda: github_contacts(job.company, domain, settings.GITHUB_TOKEN, limit=max_contacts), str(max_contacts))
             )
         except Exception as exc:
             logger.error("discover_contacts: github failed for %s: %s", job.company, exc)
@@ -756,13 +822,27 @@ def discover_contacts(
         # another chance at an account restriction, and one good query beats five.
         for query in titles[:max(1, live().OUTREACH_LINKEDIN_MAX_SEARCHES)]:
             candidates.extend(
-                find_linkedin_contacts(
+                source("linkedin", lambda: find_linkedin_contacts(
                     job.company, [query], settings.LINKEDIN_SESSION_COOKIE, limit=3
-                )
+                ), query)
             )
 
     candidates = _dedupe(candidates)
-    _attach_guessed_emails(candidates, domain, pattern, hunter_key)
+    # Spend enrichment credits only on the role-aware shortlist. Existing
+    # relationships are stronger evidence than an address with a high score.
+    from app.models.outreach import NetworkPerson
+    for candidate in candidates:
+        person = None
+        if candidate.get("email"):
+            person = db.query(NetworkPerson).filter_by(primary_email=candidate["email"].lower()).first()
+        if person is None and candidate.get("linkedin_url"):
+            person = db.query(NetworkPerson).filter_by(linkedin_url=networking.canonical_profile(candidate["linkedin_url"])).first()
+        if person:
+            candidate["relationship_kind"] = person.relationship_kind
+            candidate["do_not_contact"] = person.do_not_contact
+    candidates = [c for c in candidates if not c.get("do_not_contact")]
+    candidates.sort(key=lambda c: contact_score(c, _job_dict(job)), reverse=True)
+    _attach_guessed_emails(candidates[:max_contacts], domain, pattern, hunter_key)
 
     if not candidates and domain and live().OUTREACH_GUESS_EMAILS:
         # Nothing at all — the careers mailbox is a real, commonly monitored
@@ -776,13 +856,16 @@ def discover_contacts(
         for candidate in candidates[:max_contacts]:
             if candidate.get("email") and candidate.get("email_status") != "verified":
                 result = verify_email(candidate["email"], hunter_key)
-                if result:
+                if result and result.get("pending"):
+                    candidate["evidence"] = {**(candidate.get("evidence") or {}), "verification_pending": True}
+                elif result:
                     candidate["email_status"] = result["status"]
                     candidate["email_confidence"] = max(
                         int(candidate.get("email_confidence") or 0), result["confidence"]
                     )
+                    candidate["evidence"] = {**(candidate.get("evidence") or {}), "verification": result.get("verification") or {}, "verification_checked_at": _now().isoformat()}
 
-    candidates.sort(key=contact_score, reverse=True)
+    candidates.sort(key=lambda c: contact_score(c, _job_dict(job)), reverse=True)
     # A GitHub profile or an X handle is a way to reach someone even with no
     # address, so "reachable" is broader than email plus LinkedIn.
     kept = [
@@ -790,10 +873,25 @@ def discover_contacts(
         if c.get("email") or c.get("linkedin_url") or c.get("profile_url") or c.get("twitter")
     ][:max_contacts]
 
-    stored = [upsert_contact(db, application, c | {"domain": c.get("domain") or domain})
-              for c in kept]
+    stored = []
+    for candidate in kept:
+        candidate["evidence"] = {**(candidate.get("evidence") or {}),
+            "company_domain": {"domain": domain, "source": domain_source},
+            "ranking_reasons": ranking_reasons(candidate, _job_dict(job)), "discovery": diagnostics}
+        stored.append(upsert_contact(db, application, candidate | {"domain": candidate.get("domain") or domain}))
+    application.outreach_error = "; ".join(f"{d['source']}: {d['error']}" for d in diagnostics if d.get("error"))[:500] or None
     application.outreach_checked_at = _now()
     db.commit()
+    for contact in stored:
+        if (contact.evidence or {}).get("verification_pending"):
+            from app.tasks.outreach import verify_contact_email_task
+            try:
+                verify_contact_email_task.apply_async(args=[str(contact.id)], countdown=30)
+            except Exception:
+                logger.warning("Could not queue pending verification for %s", contact.id)
+                contact.evidence = {**(contact.evidence or {}), "verification_pending": False,
+                    "verification_error": "Could not queue verification; try again."}
+                db.commit()
     logger.info("discover_contacts %s: stored %d contact(s)", application.id, len(stored))
     return stored
 
@@ -815,11 +913,13 @@ def default_channel(contact: Contact) -> str:
         return "email"
     if contact.linkedin_url:
         return "linkedin"
+    if contact.twitter:
+        return "twitter"
     return "email"
 
 
 def next_step(contact: Contact) -> int:
-    steps = [m.sequence_step for m in (contact.messages or [])]
+    steps = [m.sequence_step for m in (contact.messages or []) if m.status != "skipped"]
     return (max(steps) + 1) if steps else 1
 
 
@@ -837,8 +937,10 @@ def draft_message(
     kind = kind if kind in MESSAGE_KINDS else "initial"
     application = application or contact.application
     job = application.job if application else None
+    conversation = networking.conversation_for(db, contact)
 
-    prior = [m for m in (contact.messages or []) if m.status in ("sent", "replied")]
+    prior = [m for m in conversation.messages if m.status in ("sent", "replied") and m.channel == channel]
+    prior.sort(key=lambda m: m.sent_at or m.created_at)
     result = compose_message(
         _profile_data(db),
         _contact_dict(contact),
@@ -847,8 +949,11 @@ def draft_message(
         kind=kind,
         tone=tone,
         feedback=feedback,
-        thread=_thread_context(prior),
+        thread=networking.relationship_context(db, contact),
     )
+    if channel == "email" and kind in {"follow_up", "reply", "thank_you"} and prior:
+        original = prior[-1].subject or ""
+        result["subject"] = original if original.lower().startswith("re:") else f"Re: {original}"
 
     message = OutreachMessage(
         contact_id=contact.id,
@@ -862,8 +967,15 @@ def draft_message(
         generated_by=result["generated_by"],
         feedback=feedback,
         status="draft",
+        conversation=conversation,
     )
     db.add(message)
+    if conversation.status == "researching":
+        conversation.status = "ready"
+    if not conversation.next_action or conversation.next_action in {
+            "Await reply", "Review draft", "Review reply and decide the next step", "Follow-up draft failed; review and retry"}:
+        conversation.next_action = "Review draft"
+        conversation.next_action_due_at = _now()
     db.commit()
     return message
 
@@ -875,8 +987,10 @@ def regenerate_message(db, message: OutreachMessage, feedback: str | None = None
     Only drafts are rewritten — a sent message is a record of what was actually
     said and must not change under the user.
     """
-    if message.status in ("sent", "replied", "bounced"):
+    if message.sent_at or message.status in ("sent", "replied", "bounced"):
         raise ValueError("A message that has already been sent cannot be rewritten.")
+    if message.send_state in {"sending", "uncertain"} or message.delivery_uncertain:
+        raise ValueError("Resolve the delivery result before rewriting this message.")
 
     contact = message.contact
     application = message.application or contact.application
@@ -894,9 +1008,23 @@ def regenerate_message(db, message: OutreachMessage, feedback: str | None = None
         kind=message.kind,
         tone=message.tone,
         feedback=feedback or message.feedback,
-        thread=_thread_context(prior),
+        thread=networking.relationship_context(db, contact),
     )
+    # Generation can take long enough for another tab to send this draft.
+    # Recheck under the same row lock used by the sender before replacing it.
+    db.refresh(message, with_for_update=True)
+    if message.sent_at or message.status in {"sent", "replied", "bounced"}:
+        raise ValueError("A message that has already been sent cannot be rewritten.")
+    if message.send_state in {"sending", "uncertain"} or message.delivery_uncertain:
+        raise ValueError("Resolve the delivery result before rewriting this message.")
     message.subject = result["subject"]
+    if message.channel == "email" and message.kind in {"follow_up", "reply", "thank_you"}:
+        previous = [m for m in networking.conversation_for(db, contact).messages
+                    if m.id != message.id and m.status in {"sent", "replied"} and m.channel == "email"]
+        previous.sort(key=lambda m: m.sent_at or m.created_at)
+        if previous:
+            original = previous[-1].subject or ""
+            message.subject = original if original.lower().startswith("re:") else f"Re: {original}"
     message.body = result["body"]
     message.generated_by = result["generated_by"]
     message.feedback = feedback or message.feedback
@@ -932,18 +1060,43 @@ def mark_sent(db, message: OutreachMessage, when: datetime | None = None) -> Out
     Used both by the SMTP sender and by the "I sent this myself" button, so the
     sequence works identically whether or not sending is configured.
     """
+    if message.sent_at or message.status in {"sent", "replied", "bounced"}:
+        return message
     when = when or _now()
     message.status = "sent"
     message.sent_at = when
     message.send_error = None
     message.send_state = "idle"
+    conversation = networking.conversation_for(db, message.contact)
+    message.conversation = conversation
+    previous_status = conversation.status
+    paused = networking.pause_reason(db, message.contact, message.application, kind=message.kind)
+    advanced = previous_status in {"intro_requested", "introduced", "referral_offered", "referral_submitted", "closed", "snoozed"}
+    response = message.kind in {"reply", "thank_you"}
+    if not advanced:
+        conversation.status = "awaiting_reply" if message.kind != "thank_you" else "researching"
+    conversation.last_activity_at = when
+
+    # One shared conversation has one unanswered sequence. A new outbound
+    # message supersedes chasers for an older role, without erasing history.
+    for previous in conversation.messages:
+        if previous.id == message.id:
+            continue
+        previous.follow_up_due_at = None
+        if (previous.kind == "follow_up" and previous.status in {"draft", "approved"}
+                and previous.send_state not in {"sending", "uncertain"} and not previous.delivery_uncertain):
+            previous.status = "skipped"
 
     days = followup_days()
     index = message.sequence_step - 1
-    if index < len(days):
+    if 0 <= index < len(days) and not response and not advanced and not paused:
         message.follow_up_due_at = when + timedelta(days=days[index])
     else:
         message.follow_up_due_at = None
+    automated = {"Await reply", "Review draft", "Review reply and decide the next step", "Follow-up draft failed; review and retry"}
+    if not conversation.next_action or conversation.next_action in automated:
+        conversation.next_action = "Await reply" if message.follow_up_due_at else None
+        conversation.next_action_due_at = message.follow_up_due_at
     db.commit()
     return message
 
@@ -961,12 +1114,19 @@ def mark_replied(db, message: OutreachMessage, when: datetime | None = None) -> 
     message.replied_at = when or _now()
     message.follow_up_due_at = None
 
-    for other in list(message.contact.messages or []):
+    conversation = networking.conversation_for(db, message.contact)
+    message.conversation = conversation
+    conversation.status = "reply_needed"
+    conversation.next_action = "Review reply and decide the next step"
+    conversation.next_action_due_at = when or _now()
+    conversation.last_activity_at = when or _now()
+    contacts = networking.same_person_contacts(db, message.contact)
+    for other in [m for c in contacts for m in (c.messages or [])]:
         if other.id == message.id:
             continue
         other.follow_up_due_at = None
         if other.status in ("draft", "approved") and other.kind == "follow_up":
-            db.delete(other)
+            other.status = "skipped"
     db.commit()
     return message
 
@@ -976,10 +1136,21 @@ def set_message_status(db, message: OutreachMessage, status: str) -> OutreachMes
         raise ValueError(f"Unknown message status: {status}")
     if message.send_in_progress:
         raise ValueError("Wait for the active email delivery before changing its status.")
+    if (message.send_state in {"sending", "uncertain"} or message.delivery_uncertain) and status not in {"sent", "replied"}:
+        raise ValueError("Resolve the delivery result before changing this message's status.")
+    delivered = message.sent_at is not None or message.status in {"sent", "replied", "bounced"}
+    if delivered and status in {"draft", "approved"}:
+        raise ValueError("A delivered message cannot become an editable draft or be sent again.")
+    if delivered and status == "sent":
+        if message.status != "sent":
+            raise ValueError("This message already has a delivery outcome; its history cannot be reset.")
+        return message
     if status == "sent":
         return mark_sent(db, message)
     if status == "replied":
         return mark_replied(db, message)
+    if status == "bounced" and message.contact and message.contact.email:
+        networking.record_address_bounce(db, message.contact.email)
     message.status = status
     if status in CLOSED_MESSAGE_STATUSES:
         message.follow_up_due_at = None
@@ -1015,15 +1186,33 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
     """
     drafted: list[OutreachMessage] = []
     for message in due_follow_ups(db, limit=limit):
+        db.refresh(message, with_for_update=True)
+        if message.follow_up_due_at is None or message.status != "sent":
+            db.commit()
+            continue
         contact = message.contact
-        message.follow_up_due_at = None
-        if contact is None or contact.archived:
+        if contact is None or contact.archived or contact.email_status == "invalid":
+            message.follow_up_due_at = None
+            db.commit()
+            continue
+        conversation = networking.conversation_for(db, contact)
+        reason = networking.pause_reason(db, contact, message.application)
+        if reason or conversation.status in {"reply_needed", "introduced", "referral_offered", "referral_submitted"}:
+            # Snoozing postpones the clock; a closed application/relationship
+            # ends this sequence. Other conversation actions remain intact.
+            message.follow_up_due_at = conversation.snoozed_until if conversation.status == "snoozed" else None
             db.commit()
             continue
         if any(m.status == "replied" for m in (contact.messages or [])):
+            message.follow_up_due_at = None
             db.commit()
             continue
         if next_step(contact) > max_sequence_steps():
+            message.follow_up_due_at = None
+            db.commit()
+            continue
+        if any(m.kind == "follow_up" and m.status in {"draft", "approved"} for m in conversation.messages):
+            message.follow_up_due_at = None
             db.commit()
             continue
         # Cleared before the attempt, and committed whether or not it works.
@@ -1048,6 +1237,10 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
         # was drafted per run and the rest waited for the next tick. With the
         # clear already committed, a plain rollback discards only the failed
         # draft.
+        message.followup_attempts = (message.followup_attempts or 0) + 1
+        message.followup_error = None
+        message.follow_up_due_at = None
+        message_id = message.id
         db.commit()
         try:
             drafted.append(
@@ -1062,6 +1255,14 @@ def draft_due_follow_ups(db, limit: int = 25) -> list[OutreachMessage]:
         except Exception as exc:
             logger.error("draft_due_follow_ups: contact %s failed: %s", contact.id, exc)
             db.rollback()
+            message = db.get(OutreachMessage, message_id)
+            message.followup_error = str(exc)[:500]
+            if message.followup_attempts < int(live().OUTREACH_FOLLOWUP_MAX_ATTEMPTS):
+                message.follow_up_due_at = _now() + timedelta(hours=live().OUTREACH_FOLLOWUP_RETRY_HOURS)
+            conversation = message.conversation or networking.conversation_for(db, message.contact)
+            conversation.next_action = "Follow-up draft failed; review and retry"
+            conversation.next_action_due_at = _now()
+            db.commit()
     db.commit()
     logger.info("draft_due_follow_ups: drafted %d follow-up(s)", len(drafted))
     return drafted
@@ -1087,8 +1288,17 @@ def run_outreach(db, application, draft: bool = True) -> list[Contact]:
         return contacts
 
     for contact in contacts:
+        if contact.archived or contact.email_status == "invalid" or (contact.person and contact.person.do_not_contact):
+            continue
         if contact.messages:
             continue  # already has a thread — don't start a second one
+        if not (contact.email or contact.linkedin_url or contact.twitter):
+            conversation = networking.conversation_for(db, contact)
+            if not conversation.next_action:
+                conversation.next_action = "Review the public profile and find a contact channel"
+                conversation.next_action_due_at = _now()
+                db.commit()
+            continue
         try:
             draft_message(db, contact, application=application)
         except Exception as exc:
@@ -1130,14 +1340,12 @@ def prior_conversations(db, contact: Contact, limit: int = 5) -> list[dict]:
     twice — but writing to them a second time without knowing about the first is
     how outreach turns into spam. The panel shows this before you hit send.
     """
-    if not contact.email:
-        return []
+    identifiers = [c.id for c in networking.same_person_contacts(db, contact)]
     rows = (
         db.query(OutreachMessage)
         .join(Contact, OutreachMessage.contact_id == Contact.id)
         .filter(
-            Contact.company_key == contact.company_key,
-            Contact.email == contact.email,
+            Contact.id.in_(identifiers),
             Contact.id != contact.id,
             OutreachMessage.sent_at.isnot(None),
         )
@@ -1157,7 +1365,8 @@ def prior_conversations(db, contact: Contact, limit: int = 5) -> list[dict]:
 
 def outreach_stats(db) -> dict:
     """Counts for the outreach page header."""
-    from sqlalchemy import func as sa_func
+    from sqlalchemy import func as sa_func, cast, String, case, or_
+    from app.models.outreach import OutreachInteraction
 
     rows = dict(
         db.query(OutreachMessage.status, sa_func.count(OutreachMessage.id))
@@ -1166,12 +1375,23 @@ def outreach_stats(db) -> dict:
     )
     sent = rows.get("sent", 0) + rows.get("replied", 0)
     replied = rows.get("replied", 0)
+    identity = sa_func.coalesce(cast(Contact.person_id, String), sa_func.lower(Contact.email), Contact.linkedin_url, cast(Contact.id, String))
+    sent_filter = or_(OutreachMessage.sent_at.isnot(None), OutreachMessage.status.in_(("sent", "replied", "bounced")))
+    people = db.query(sa_func.count(sa_func.distinct(identity))).select_from(OutreachMessage).join(Contact).filter(sent_filter).scalar() or 0
+    answered = db.query(sa_func.count(sa_func.distinct(identity))).select_from(OutreachMessage).join(Contact).filter(OutreachMessage.status == "replied").scalar() or 0
+    cohort_rows = db.query(Contact.source, Contact.role, OutreachMessage.channel,
+        sa_func.count(sa_func.distinct(identity)),
+        sa_func.count(sa_func.distinct(case((OutreachMessage.status == "replied", identity))))).select_from(OutreachMessage).join(Contact).filter(sent_filter).group_by(Contact.source, Contact.role, OutreachMessage.channel).all()
     return {
         "contacts": db.query(Contact).filter(Contact.archived.is_(False)).count(),
         "drafts": rows.get("draft", 0) + rows.get("approved", 0),
         "sent": sent,
         "replied": replied,
         "bounced": rows.get("bounced", 0),
-        "reply_rate": round(replied / sent * 100) if sent else 0,
+        "reply_rate": round(answered / people * 100) if people else 0,
+        "people_contacted": people, "people_replied": answered,
+        "referrals_submitted": db.query(sa_func.count(sa_func.distinct(OutreachInteraction.conversation_id))).filter(OutreachInteraction.kind == "referral_submitted").scalar() or 0,
+        "cohorts": [{"source": source, "role": role, "channel": channel, "contacted": contacted, "replied": responses}
+                    for source, role, channel, contacted, responses in cohort_rows],
         "due": len(due_follow_ups(db, limit=200)),
     }

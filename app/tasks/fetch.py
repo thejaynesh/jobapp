@@ -156,11 +156,11 @@ def _due(group: str) -> bool:
         profile = db.query(Profile).first()
         hours = tunable(profile.data if profile else {}, _INTERVAL_KEYS[group])
         last = (
-            db.query(FetchRun.started_at)
+            db.query(FetchRun.started_at, FetchRun.status)
             .filter(FetchRun.group == group)
             .order_by(FetchRun.started_at.desc())
             .limit(1)
-            .scalar()
+            .first()
         )
     except Exception as exc:
         logger.warning("fetch: could not tell whether %s is due: %s", group, exc)
@@ -169,6 +169,12 @@ def _due(group: str) -> bool:
         db.close()
     if last is None:
         return True
+    # The dispatcher checks the live group lease first. Once that lease has
+    # expired, an unfinished durable run is recovery work, not a successful
+    # poll that should postpone the next attempt for a full interval.
+    if last.status == "running":
+        return True
+    last = last.started_at
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
     elapsed = (datetime.now(timezone.utc) - last).total_seconds()

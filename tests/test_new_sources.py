@@ -9,6 +9,7 @@ hand structured details to the fetcher at all.
 """
 
 import uuid
+import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -420,6 +421,10 @@ class TestRestingDeadSources:
 
 
 class TestAdapterSuppliedDetails:
+    @pytest.fixture(autouse=True)
+    def _isolate_query_expansion(self, monkeypatch):
+        monkeypatch.setattr("app.services.query_expansion.expand_search_queries",
+                            lambda *args, **kwargs: (["Backend Engineer"], None))
     """
     An adapter handed structured pay used to have it thrown away and re-derived
     from prose by a model call. USAJOBS states it on every posting.
@@ -500,8 +505,8 @@ class TestAdapterSuppliedDetails:
             title="Backend Engineer", company="Acme", location="Remote",
             url="https://x/9", status=JobStatus.new,
             fetched_at=datetime.now(timezone.utc),
-            # The real hash, so the cross-post actually collides with it —
-            # which is the path the backfill lives on.
+            # Similar text is no longer proof of the same requisition; the
+            # exact URL on the later sighting supplies that identity.
             dedupe_hash=compute_dedupe_hash("Acme", "Backend Engineer", "Remote"),
         )
         db.add(existing)
@@ -509,7 +514,7 @@ class TestAdapterSuppliedDetails:
 
         raw = [{
             "source": "usajobs", "source_job_id": "10", "title": "Backend Engineer",
-            "company": "Acme", "location": "Remote", "url": "https://x/10",
+            "company": "Acme", "location": "Remote", "url": "https://x/9",
             "description": "Build things.",
             "salary_min": 120000.0, "salary_max": 160000.0, "salary_currency": "USD",
         }]

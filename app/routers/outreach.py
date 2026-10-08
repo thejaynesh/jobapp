@@ -3,16 +3,18 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 from app.templating import build as build_templates
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, func
 
 from app.config import live, settings
 from app.database import get_db
 from app.models.application import Application
 from app.models.outreach import (
     CONTACT_ROLES, Contact, MESSAGE_CHANNELS, MESSAGE_KINDS, MESSAGE_STATUSES,
-    OutreachMessage,
+    OutreachMessage, OutreachConversation, NetworkPerson, CONVERSATION_STATUSES, RELATIONSHIP_KINDS,
 )
 from app.services.outreach import (
     TONES, draft_message, outreach_stats, regenerate_message, run_outreach,
@@ -20,6 +22,7 @@ from app.services.outreach import (
 )
 
 logger = logging.getLogger(__name__)
+from app.services import networking
 
 # One router, no prefix: the page and its HTMX fragments live under /outreach,
 # while the JSON trigger stays where the API had it.
@@ -73,9 +76,14 @@ def panel_context(db: Session, app_obj: Application) -> dict:
     from app.services.outreach_sender import sending_blocked_reason
 
     contacts = [c for c in app_obj.contacts if not c.archived]
+    conversations = {c.id: networking.conversation_for(db, c) for c in contacts}
+    db.commit()
     return {
         "app": app_obj,
         "contacts": contacts,
+        "conversations": conversations,
+        "conversation_statuses": CONVERSATION_STATUSES,
+        "relationship_kinds": RELATIONSHIP_KINDS,
         "archived_count": sum(1 for c in app_obj.contacts if c.archived),
         # Pre-built LinkedIn searches — the path that works with no API key and
         # no risk to the user's account.
@@ -102,12 +110,27 @@ def _panel_for_contact(request: Request, db: Session, contact: Contact, notice: 
     A contact can outlive its application, in which case there is no panel to
     swap and the caller gets a one-line confirmation instead.
     """
-    if contact.application is None:
-        return HTMLResponse(
-            f'<span class="text-xs text-green-600">{(notice or {}).get("message", "Saved")}</span>'
-        )
+    if contact.application is None or "/outreach/contacts/" in request.headers.get("HX-Current-URL", ""):
+        return _contact_panel(request, db, contact, notice)
     db.refresh(contact.application)
     return _panel(request, db, contact.application, notice)
+
+
+def _contact_context(db, contact):
+    from app.services.outreach import contact_message_link, prior_conversations
+    from app.services.outreach_sender import sending_blocked_reason
+    conversation = networking.conversation_for(db, contact)
+    db.commit()
+    return dict(app=None, contacts=[contact], archived_count=0, conversations={contact.id: conversation},
+        conversation_statuses=CONVERSATION_STATUSES, relationship_kinds=RELATIONSHIP_KINDS,
+        contact_links={contact.id: contact_message_link(contact)}, prior={contact.id: prior_conversations(db, contact)},
+        search_links=[], discovery_stale=False, channels=MESSAGE_CHANNELS, kinds=MESSAGE_KINDS,
+        tones=list(TONES), roles=CONTACT_ROLES, send_blocked=sending_blocked_reason())
+
+
+def _contact_panel(request, db, contact, notice=None):
+    return templates.TemplateResponse("outreach/partials/panel.html",
+        {"request": request, **_contact_context(db, contact), "notice": notice})
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +138,7 @@ def _panel_for_contact(request: Request, db: Session, contact: Contact, notice: 
 # ---------------------------------------------------------------------------
 
 @router.get("/outreach", response_class=HTMLResponse)
-def outreach_home(request: Request, q: str = "", channel: str = "",
+def outreach_home(request: Request, q: str = "", channel: str = "", page: int = 1, state: str = "",
                   db: Session = Depends(get_db)):
     """
     Everything in flight, in the order it needs attention.
@@ -127,43 +150,36 @@ def outreach_home(request: Request, q: str = "", channel: str = "",
     from app.services.outreach import due_follow_ups
     from app.services.outreach_sender import sending_blocked_reason
 
-    messages = (
-        db.query(OutreachMessage)
-        .order_by(OutreachMessage.created_at.desc())
-        .limit(400)
-        .all()
-    )
-
+    page = max(1, page)
+    query = db.query(OutreachMessage).join(Contact, Contact.id == OutreachMessage.contact_id)
     if q:
-        q_lower = q.lower()
-        messages = [
-            m for m in messages
-            if q_lower in (m.contact.display_name or "").lower()
-            or q_lower in (m.contact.company or "").lower()
-            or q_lower in (m.body or "").lower()
-            or q_lower in (m.subject or "").lower()
-        ]
+        query = query.filter(or_(Contact.name.icontains(q, autoescape=True), Contact.email.icontains(q, autoescape=True),
+            Contact.company.icontains(q, autoescape=True), OutreachMessage.body.icontains(q, autoescape=True),
+            OutreachMessage.subject.icontains(q, autoescape=True)))
     if channel:
-        messages = [m for m in messages if m.channel == channel]
+        query = query.filter(OutreachMessage.channel == channel)
+    if state in MESSAGE_STATUSES:
+        query = query.filter(OutreachMessage.status == state)
+    total = query.count()
+    messages = query.order_by(OutreachMessage.created_at.desc(), OutreachMessage.id).offset((page - 1) * 50).limit(50).all()
 
     by_status: dict[str, list] = {status: [] for status in MESSAGE_STATUSES}
     for message in messages:
         by_status.setdefault(message.status, []).append(message)
 
-    contactless = (
+    contact_query = (
         db.query(Contact)
         .filter(Contact.archived.is_(False), ~Contact.messages.any())
-        .order_by(Contact.created_at.desc())
-        .limit(50)
-        .all()
     )
     if q:
-        q_lower = q.lower()
-        contactless = [
-            c for c in contactless
-            if q_lower in (c.display_name or "").lower()
-            or q_lower in (c.company or "").lower()
-        ]
+        contact_query = contact_query.filter(or_(Contact.name.icontains(q, autoescape=True), Contact.company.icontains(q, autoescape=True)))
+    contactless = contact_query.order_by(Contact.created_at.desc()).offset((page - 1) * 50).limit(50).all()
+    actions_query = db.query(OutreachConversation).join(NetworkPerson).filter(
+        OutreachConversation.status != "closed", NetworkPerson.do_not_contact.is_(False),
+        or_(OutreachConversation.snoozed_until.is_(None), OutreachConversation.snoozed_until <= networking.now()))
+    if q:
+        actions_query = actions_query.filter(or_(NetworkPerson.name.icontains(q, autoescape=True), OutreachConversation.company.icontains(q, autoescape=True)))
+    actions = actions_query.order_by(OutreachConversation.next_action_due_at.asc().nullslast(), OutreachConversation.last_activity_at.desc()).limit(50).all()
 
     return templates.TemplateResponse(
         "outreach/index.html",
@@ -174,7 +190,7 @@ def outreach_home(request: Request, q: str = "", channel: str = "",
             "awaiting": [m for m in by_status["sent"] if not m.replied_at],
             "replied": by_status["replied"],
             "closed": by_status["bounced"] + by_status["skipped"],
-            "due": due_follow_ups(db, limit=50),
+            "due": [m for m in messages if m.follow_up_due_at and m.follow_up_due_at <= networking.now() and m.status == "sent"],
             "no_message_contacts": contactless,
             "send_blocked": sending_blocked_reason(),
             "channels": MESSAGE_CHANNELS,
@@ -182,8 +198,34 @@ def outreach_home(request: Request, q: str = "", channel: str = "",
             "tones": list(TONES),
             "q": q,
             "channel_filter": channel,
+            "state_filter": state, "page": page, "total": total, "has_more": page * 50 < total or len(contactless) == 50,
+            "actions": actions, "relationship_kinds": RELATIONSHIP_KINDS,
         },
     )
+
+
+@router.get("/outreach/contacts/{contact_id}", response_class=HTMLResponse)
+def contact_workspace(contact_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    contact = _get_contact(db, contact_id)
+    return templates.TemplateResponse("outreach/contact.html", {"request": request, "contact": contact,
+        **_contact_context(db, contact), "notice": None})
+
+
+@router.get("/outreach/contacts/{contact_id}/panel", response_class=HTMLResponse)
+def contact_panel(contact_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    return _contact_panel(request, db, _get_contact(db, contact_id))
+
+
+@router.get("/outreach/conversations/{conversation_id}")
+def open_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)):
+    conversation = db.get(OutreachConversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found")
+    candidates = db.query(Contact).filter_by(person_id=conversation.person_id).order_by(Contact.archived, Contact.created_at.desc()).all()
+    contact = next((row for row in candidates if networking.conversation_key(row.company) == conversation.company_key), None)
+    if not contact:
+        raise HTTPException(404, "Contact not found")
+    return RedirectResponse(f"/outreach/contacts/{contact.id}", status_code=303)
 
 
 @router.get("/outreach/apps/{app_id}/panel", response_class=HTMLResponse)
@@ -274,6 +316,9 @@ def add_contact(
                       {"ok": False, "message": f"{email} is not an email address."})
 
     first, last = split_name(name)
+    existing = db.query(Contact).filter(Contact.application_id == app_id, Contact.email == email).first() if email else None
+    if existing:
+        return _panel(request, db, app_obj, {"ok": True, "message": "This address is already saved for this application."})
     contact = Contact(
         application_id=app_obj.id,
         company=app_obj.job.company,
@@ -292,6 +337,7 @@ def add_contact(
         domain=registrable_domain(email.rsplit("@", 1)[-1]) if email else None,
     )
     db.add(contact)
+    networking.conversation_for(db, contact)
     db.commit()
     return _panel(request, db, app_obj, {"ok": True, "message": f"Added {contact.display_name}."})
 
@@ -325,6 +371,9 @@ def update_contact(
     contact.notes = notes.strip() or None
     if role in CONTACT_ROLES:
         contact.role = role
+    person = networking.ensure_person(db, contact)
+    if contact.name:
+        person.name = contact.name
     db.commit()
     return _panel_for_contact(request, db, contact, {"ok": True, "message": "Contact saved."})
 
@@ -365,14 +414,150 @@ def verify_contact_email(contact_id: uuid.UUID, request: Request, db: Session = 
     if not result:
         return _panel_for_contact(request, db, contact,
                                   {"ok": False, "message": "The verifier didn't answer — try again later."})
+    if result.get("pending"):
+        contact.evidence = {**(contact.evidence or {}), "verification_pending": True}
+        db.commit()
+        from app.tasks.outreach import verify_contact_email_task
+        try:
+            verify_contact_email_task.apply_async(args=[str(contact.id)], countdown=30)
+        except Exception:
+            contact.evidence = {**contact.evidence, "verification_pending": False, "verification_error": "Could not queue verification; try again."}
+            db.commit()
+            return _panel_for_contact(request, db, contact, {"ok": False, "message": "Could not queue verification; try again."})
+        return _panel_for_contact(request, db, contact, {"ok": True, "message": "Verification is pending. The result will be saved automatically."})
     contact.email_status = result["status"]
     contact.email_confidence = result["confidence"]
+    contact.evidence = {**(contact.evidence or {}), "verification_pending": False,
+        "verification": result.get("verification") or {}, "verification_checked_at": networking.now().isoformat()}
     db.commit()
     return _panel_for_contact(
         request, db, contact,
         {"ok": result["status"] != "invalid",
          "message": f"{contact.email} is {result['status'].replace('_', ' ')}."},
     )
+
+
+class ContactCapture(BaseModel):
+    company: str
+    name: str = ""
+    title: str = ""
+    email: str = ""
+    linkedin_url: str = ""
+    profile_url: str = ""
+    source_url: str = ""
+    notes: str = ""
+    application_id: uuid.UUID | None = None
+    relationship_kind: str = "unknown"
+
+
+def _capture_contact(db, data: ContactCapture, source="browser"):
+    from urllib.parse import urlparse
+    from app.services.company_domain import company_key
+    from app.services.contact_finder import split_name, EMAIL_RE
+    company = data.company.strip()[:200]
+    if not company:
+        raise HTTPException(422, "A company is required")
+    email = data.email.strip().lower()
+    if email and not EMAIL_RE.fullmatch(email):
+        raise HTTPException(422, "Enter a valid email address")
+    linkedin = networking.canonical_profile(data.linkedin_url)
+    if data.linkedin_url and not linkedin:
+        raise HTTPException(422, "Enter an individual LinkedIn profile URL")
+    for url in (data.profile_url, data.source_url):
+        if url and (urlparse(url).scheme not in {"http", "https"} or not urlparse(url).hostname):
+            raise HTTPException(422, "Source and profile URLs must use HTTP or HTTPS")
+    if not (email or linkedin or data.profile_url):
+        raise HTTPException(422, "Provide an email or public profile")
+    application = _get_application(db, data.application_id) if data.application_id else None
+    if application:
+        company = application.job.company
+    query = db.query(Contact).filter_by(application_id=data.application_id, company_key=company_key(company))
+    existing = query.filter(Contact.email == email).first() if email else query.filter(Contact.linkedin_url == linkedin).first() if linkedin else None
+    contact = existing or Contact(application_id=data.application_id, company=company, company_key=company_key(company),
+        email=email or None, linkedin_url=linkedin, email_status="unverified" if email else "unknown", source=source, role="unknown")
+    if not existing:
+        db.add(contact)
+    contact.name = data.name.strip()[:200] or contact.name
+    contact.title = data.title.strip()[:300] or contact.title
+    contact.first_name, contact.last_name = split_name(contact.name or "")
+    contact.profile_url = data.profile_url.strip() or contact.profile_url
+    contact.linkedin_url = contact.linkedin_url or linkedin
+    if data.notes.strip() and data.notes.strip() not in (contact.notes or ""):
+        contact.notes = "\n\n".join(filter(None, [contact.notes, data.notes.strip()]))[:5000]
+    evidence = dict(contact.evidence or {})
+    sources = list(evidence.get("sources") or [])
+    source_url = data.source_url or linkedin or data.profile_url
+    if source_url and not any(item.get("uri") == source_url for item in sources if isinstance(item, dict)):
+        sources.append({"uri": source_url, "kind": source, "recorded_at": networking.now().isoformat()})
+    contact.evidence = {**evidence, "sources": sources}
+    if application:
+        contact.company_id = application.job.company_id
+    person = networking.ensure_person(db, contact)
+    if data.relationship_kind in RELATIONSHIP_KINDS and data.relationship_kind != "unknown":
+        person.relationship_kind = data.relationship_kind
+    networking.conversation_for(db, contact)
+    db.commit()
+    return contact
+
+
+@router.post("/api/outreach/contacts/capture", status_code=201)
+@router.post("/api/agent/outreach-contact", status_code=201)
+def capture_contact(data: ContactCapture, db: Session = Depends(get_db)):
+    contact = _capture_contact(db, data)
+    return {"contact_id": str(contact.id), "url": f"/outreach/contacts/{contact.id}"}
+
+
+@router.post("/outreach/contacts")
+def add_network_contact(company: str = Form(...), name: str = Form(""), title: str = Form(""),
+    email: str = Form(""), linkedin_url: str = Form(""), notes: str = Form(""),
+    relationship_kind: str = Form("unknown"), db: Session = Depends(get_db)):
+    contact = _capture_contact(db, ContactCapture(company=company, name=name, title=title, email=email,
+        linkedin_url=linkedin_url, notes=notes, relationship_kind=relationship_kind), source="manual")
+    return RedirectResponse(f"/outreach/contacts/{contact.id}", status_code=303)
+
+
+@router.post("/outreach/contacts/{contact_id}/relationship", response_class=HTMLResponse)
+def update_relationship(contact_id: uuid.UUID, request: Request, status: str = Form("researching"),
+    relationship_kind: str = Form("unknown"), relationship_notes: str = Form(""),
+    next_action: str = Form(""), due: str = Form(""), snooze: str = Form(""),
+    notes: str = Form(""), interaction: str = Form(""), do_not_contact: bool = Form(False),
+    db: Session = Depends(get_db)):
+    contact = _get_contact(db, contact_id)
+    if status not in CONVERSATION_STATUSES or relationship_kind not in RELATIONSHIP_KINDS:
+        raise HTTPException(422, "Choose a valid conversation and relationship status")
+    def date_value(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            from app.services.timefmt import zone
+            return (parsed.replace(tzinfo=zone()) if parsed.tzinfo is None else parsed).astimezone(timezone.utc)
+        except ValueError:
+            raise HTTPException(422, "Choose a valid date")
+    due_at, snoozed_until = date_value(due), date_value(snooze)
+    if status == "snoozed" and (snoozed_until is None or snoozed_until <= networking.now()):
+        raise HTTPException(422, "Choose a future date to snooze this conversation")
+    conversation = networking.conversation_for(db, contact)
+    previous = conversation.status
+    conversation.status, conversation.notes = status, notes.strip()[:5000] or None
+    conversation.next_action = next_action.strip()[:500] or None
+    conversation.next_action_due_at = due_at
+    conversation.snoozed_until = snoozed_until if status == "snoozed" else None
+    if status == "snoozed":
+        conversation.next_action_due_at = snoozed_until
+    person = conversation.person
+    person.relationship_kind, person.relationship_notes = relationship_kind, relationship_notes.strip()[:5000] or None
+    person.do_not_contact = do_not_contact
+    if interaction.strip() or status != previous:
+        networking.record_interaction(db, conversation, status, interaction.strip() or f"Conversation marked {status.replace('_', ' ')} by you.")
+    if status in {"closed", "reply_needed", "introduced", "referral_offered", "referral_submitted"} or do_not_contact:
+        for linked in networking.same_person_contacts(db, contact):
+            for message in linked.messages:
+                message.follow_up_due_at = None
+                if message.kind == "follow_up" and message.status in {"draft", "approved"}:
+                    message.status = "skipped"
+    db.commit()
+    return _panel_for_contact(request, db, contact, {"ok": True, "message": "Relationship and next action saved."})
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +633,7 @@ def save_message(
     # Serialize a delayed autosave with the sender's reservation. Once SMTP
     # starts, the stored body must stay the body handed to the mail server.
     db.refresh(message, with_for_update=True)
-    if message.status in ("sent", "replied", "bounced"):
+    if message.sent_at or message.status in ("sent", "replied", "bounced"):
         raise HTTPException(status_code=409, detail="That message has already been sent.")
     if message.send_state in ("sending", "uncertain") or message.delivery_uncertain:
         raise HTTPException(status_code=409, detail="Delivery has started; this message cannot be edited.")
@@ -481,7 +666,7 @@ def update_message_status(
     # with the sent status so a pending autosave cannot leave a stale record.
     # Confirming an uncertain SMTP send instead preserves its reserved text.
     if (status == "sent" and save_draft and message.status in ("draft", "approved", "skipped")
-            and message.send_state not in ("sending", "uncertain") and not message.delivery_uncertain):
+            and not message.sent_at and message.send_state not in ("sending", "uncertain") and not message.delivery_uncertain):
         subject = subject.strip() or None
         if message.subject != subject or message.body != body:
             message.subject, message.body = subject, body
@@ -491,7 +676,7 @@ def update_message_status(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     labels = {
-        "sent": "Marked as sent — a follow-up will be drafted if there's no reply.",
+        "sent": "Marked as sent." + (" A follow-up is scheduled if there's no reply." if message.follow_up_due_at else ""),
         "replied": "Marked as replied. Follow-ups for this contact are cancelled.",
         "skipped": "Skipped.",
         "approved": "Approved.",
@@ -542,8 +727,11 @@ def send(
 def delete_message(message_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
     """Throw away a draft. Sent messages stay, since they are a record."""
     message = _get_message(db, message_id)
-    if message.status in ("sent", "replied"):
+    db.refresh(message, with_for_update=True)
+    if message.sent_at or message.status in ("sent", "replied", "bounced"):
         raise HTTPException(status_code=409, detail="A sent message can't be deleted.")
+    if message.send_state in {"sending", "uncertain"} or message.delivery_uncertain:
+        raise HTTPException(status_code=409, detail="Resolve this delivery before deleting the message.")
     contact = message.contact
     db.delete(message)
     db.commit()

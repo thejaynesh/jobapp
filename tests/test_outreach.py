@@ -559,7 +559,7 @@ class TestRegenerateMessage:
 class TestSequence:
     def _sent_message(self, db, days_ago: float = 0.0) -> OutreachMessage:
         app = _make_application(db)
-        contact = _make_contact(db, app)
+        contact = _make_contact(db, app, email=f"sam-{uuid.uuid4().hex}@acme.com")
         message = OutreachMessage(contact_id=contact.id, application_id=app.id,
                                   body="Hello.", status="draft", sequence_step=1)
         db.add(message)
@@ -581,8 +581,11 @@ class TestSequence:
         assert message.status == "sent"
 
     def test_the_last_step_schedules_nothing_further(self, db):
-        message = self._sent_message(db)
-        message.sequence_step = len(followup_days()) + 1
+        previous = self._sent_message(db)
+        message = OutreachMessage(contact_id=previous.contact_id, application_id=previous.application_id,
+            body="One last note.", status="draft", kind="follow_up", sequence_step=len(followup_days()) + 1)
+        db.add(message)
+        db.flush()
         mark_sent(db, message)
         assert message.follow_up_due_at is None
 
@@ -601,7 +604,8 @@ class TestSequence:
         db.refresh(contact)
         mark_replied(db, message)
         db.refresh(contact)
-        assert [m.kind for m in contact.messages] == ["initial"]
+        assert [m.kind for m in contact.messages if m.status != "skipped"] == ["initial"]
+        assert any(m.kind == "follow_up" and m.status == "skipped" for m in contact.messages)
 
     def test_due_follow_ups_finds_an_elapsed_one(self, db):
         self._sent_message(db, days_ago=30)
@@ -831,7 +835,7 @@ class TestOutreachStats:
         assert stats["drafts"] == 1
         assert stats["sent"] == 2      # a reply was also sent
         assert stats["replied"] == 1
-        assert stats["reply_rate"] == 50
+        assert stats["reply_rate"] == 100  # the same person, despite two messages
 
     def test_reply_rate_is_zero_with_nothing_sent(self, db):
         assert outreach_stats(db)["reply_rate"] == 0

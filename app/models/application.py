@@ -100,13 +100,13 @@ class Application(Base):
     contacts: Mapped[list["Contact"]] = relationship(
         "Contact",
         back_populates="application",
-        cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="Contact.created_at",
     )
     outreach_messages: Mapped[list["OutreachMessage"]] = relationship(
         "OutreachMessage",
         back_populates="application",
-        cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="OutreachMessage.created_at",
     )
 

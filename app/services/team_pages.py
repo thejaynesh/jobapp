@@ -21,6 +21,7 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from urllib.parse import urljoin
 
 import httpx
@@ -61,12 +62,17 @@ def _fetch(url: str) -> str:
     try:
         resp = httpx.get(url, headers=_HEADERS, timeout=TIMEOUT, follow_redirects=True)
         if resp.status_code >= 400:
+            if resp.status_code != 404:
+                from app.services.networking import source_issue
+                source_issue(f"Team page HTTP {resp.status_code}")
             return ""
         # A team page is HTML; anything else is a redirect to a download or an API.
         if "html" not in resp.headers.get("content-type", "").lower():
             return ""
         return resp.text or ""
     except Exception as exc:
+        from app.services.networking import source_issue
+        source_issue(f"Team page request failed: {type(exc).__name__}")
         logger.debug("team page fetch failed for %s: %s", url, exc)
         return ""
 
@@ -209,6 +215,8 @@ def people_from_html(html: str, domain: str, page_url: str = "") -> list[dict]:
             "source": "team_page",
         })
 
+    for candidate in records:
+        candidate["evidence"] = {"sources": [{"uri": page_url, "kind": "company_team_page"}] if page_url else []}
     return [c for c in records if c.get("name") or c.get("email")]
 
 
@@ -228,7 +236,8 @@ def team_page_contacts(domain: str, limit: int = 5, workers: int = 3) -> list[di
     seen: set[str] = set()
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for url, html in zip(urls, pool.map(_fetch, urls)):
+        context = copy_context()
+        for url, html in zip(urls, pool.map(lambda url: context.copy().run(_fetch, url), urls)):
             if not html:
                 continue
             for contact in people_from_html(html, domain, url):

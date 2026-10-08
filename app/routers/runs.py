@@ -212,6 +212,27 @@ def _recover(db: Session) -> None:
         pass
 
 
+def _collection_context(db: Session) -> dict:
+    """Show what individual board requests proved, including recoverable batches."""
+    from datetime import datetime, timezone
+    from sqlalchemy import or_
+    from app.models.company_board import CompanyBoard
+    from app.models.source_listing import FetchBoardRun
+
+    recent = db.query(FetchBoardRun.source, FetchBoardRun.board, FetchBoardRun.status,
+        FetchBoardRun.observed_at, FetchBoardRun.observed_total, FetchBoardRun.returned,
+        FetchBoardRun.inserted, FetchBoardRun.merged, FetchBoardRun.error_category,
+        FetchBoardRun.error, FetchBoardRun.cursor.isnot(None).label("has_cursor"),
+        FetchBoardRun.payload.isnot(None).label("recovery_pending")).order_by(
+            FetchBoardRun.observed_at.desc(), FetchBoardRun.id).limit(20).all()
+    return {
+        "recent": recent,
+        "recovery_pending": db.query(FetchBoardRun).filter(FetchBoardRun.payload.isnot(None)).count(),
+        "boards_due": db.query(CompanyBoard).filter(CompanyBoard.active.is_(True),
+            or_(CompanyBoard.next_due_at.is_(None), CompanyBoard.next_due_at <= datetime.now(timezone.utc))).count(),
+    }
+
+
 def _system_context(db: Session) -> dict:
     """
     The state of the subsystems that have no page of their own.
@@ -227,6 +248,12 @@ def _system_context(db: Session) -> dict:
         "agent": None, "mailbox": None, "corpus": None, "pool": None,
         "pipeline": None, "providers": None, "backups": None, "errors": [],
     }
+
+    try:
+        context["collection"] = _collection_context(db)
+    except Exception as exc:
+        _recover(db)
+        logger.warning("runs: collection completeness unavailable: %s", exc)
 
     try:
         from app.services import pipeline
@@ -251,7 +278,7 @@ def _system_context(db: Session) -> dict:
 
     try:
         from app.services import (
-            browse_plan, crawl_recipes, harvest_recipes, harvest_samples,
+            browse_plan, crawl_recipes, harvest_recipes, harvest_samples, source_learning,
         )
 
         context["agent"] = {
@@ -283,6 +310,7 @@ def _system_context(db: Session) -> dict:
                 - len(harvest_samples.hosts(db))
             ),
             "recipes": harvest_recipes.listing(db, limit=10),
+            "learning": source_learning.listing(db),
             # Boards a visit could not get past the first page of, and what
             # has been worked out about how they paginate.
             "uncrawlable": crawl_recipes.hosts_needing_a_recipe(db),
@@ -425,7 +453,7 @@ def learn_harvest_recipe(request: Request, host: str = Form(...),
         # a refused proposal, a model that was down and a success all looked
         # like a button that did nothing.
         flash = (
-            f"{host}: learned — {outcome['reason']}. New visits are read with it."
+            f"{host}: learned — {outcome['reason']}. Recovered {outcome.get('replay', {}).get('inserted', 0)} new jobs and enriched {outcome.get('replay', {}).get('merged', 0)} existing jobs."
             if outcome["ok"] else f"{host}: not learned — {outcome['reason']}"
         )
     except Exception as exc:
@@ -454,12 +482,14 @@ def show_harvest_samples(request: Request, host: str, db: Session = Depends(get_
 
     host = (host or "").strip().lower()
     rows = harvest_samples.for_host(db, host, limit=8)
-    recipe = harvest_recipes.active_for(db, host)
     samples = []
     for row in sorted(rows, key=lambda r: harvest_recipes.jobbiness(r.payload), reverse=True):
+        recipe = harvest_recipes.active_for(db, host, row.source_url or "")
         text = _json.dumps(row.payload, indent=1, ensure_ascii=False)
         samples.append({
             "source_url": row.source_url,
+            "endpoint": harvest_samples.sample_endpoint(row),
+            "observations": row.observations or 1,
             "bytes": row.bytes,
             "created_at": row.created_at,
             "jobbiness": harvest_recipes.jobbiness(row.payload),
@@ -473,6 +503,31 @@ def show_harvest_samples(request: Request, host: str, db: Session = Depends(get_
         {"request": request, "host": host, "samples": samples,
          "titles": harvest_recipes.title_candidates([r.payload for r in rows], 12)},
     )
+
+
+@router.post("/source-learning", response_class=HTMLResponse)
+def add_learning_source(request: Request, url: str = Form(...), db: Session = Depends(get_db)):
+    from app.services import source_learning
+    outcome = source_learning.onboard(db, url)
+    return templates.TemplateResponse("runs/_system.html", {
+        "request": request, "system": _system_context(db), "browse_flash": outcome["reason"]})
+
+
+@router.post("/source-learning/retry", response_class=HTMLResponse)
+def retry_source_learning(request: Request, host: str = Form(...), endpoint: str = Form(""),
+                          db: Session = Depends(get_db)):
+    from app.services import source_learning
+    outcome = source_learning.request_learning(db, host.strip().lower(), endpoint, force=True)
+    return templates.TemplateResponse("runs/_system.html", {
+        "request": request, "system": _system_context(db), "browse_flash": outcome["reason"]})
+
+
+@router.post("/source-learning/pause", response_class=HTMLResponse)
+def pause_learning_source(request: Request, host: str = Form(...), db: Session = Depends(get_db)):
+    from app.services import source_learning
+    source_learning.pause(db, host.strip().lower())
+    return templates.TemplateResponse("runs/_system.html", {
+        "request": request, "system": _system_context(db), "browse_flash": "Automatic source capture paused."})
 
 
 @router.post("/agent/forget-samples", response_class=HTMLResponse)

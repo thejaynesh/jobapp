@@ -341,6 +341,12 @@ def _yc_discovery_off_by_default(monkeypatch):
     monkeypatch.setattr(settings, "YC_DISCOVERY_ENABLED", False)
 
 
+@pytest.fixture(autouse=True)
+def _source_learning_off_by_default(monkeypatch):
+    """Unrelated harvest fixtures must not publish learning work to Redis."""
+    monkeypatch.setattr(settings, "HARVEST_AUTO_LEARN_ENABLED", False)
+
+
 @pytest.fixture
 def client(db):
     from app.main import app

@@ -165,14 +165,15 @@ def domains_in_text(text: str) -> list[str]:
 
 
 def domain_responds(domain: str, timeout: float = 6.0) -> bool:
-    """Whether a guessed domain is a real site, so we don't query Hunter for noise."""
+    """A successful same-domain response; this alone does not prove ownership."""
     for scheme in ("https", "http"):
         try:
             resp = httpx.head(
                 f"{scheme}://{domain}", timeout=timeout, follow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; jobapp/1.0)"},
             )
-            if resp.status_code < 500:
+            final_host = extract_domain(str(resp.url))
+            if 200 <= resp.status_code < 300 and registrable_domain(final_host) == registrable_domain(domain):
                 return True
         except Exception:
             continue
@@ -187,12 +188,14 @@ def resolve_company_domain(
     verify: bool = True,
 ) -> tuple[str, str]:
     """
-    Best guess at the employer's domain, with the evidence that produced it.
+    A domain linked by the posting, with the evidence that produced it.
 
     Returns (domain, source) where source is one of "apply_url", "url",
     "description", "name", or "" when nothing looked plausible. Ordering is by
     how much the evidence is worth: an apply link the resolver already followed
-    through to the employer beats a name guess by a distance.
+    through to the employer beats a name guess by a distance. Name guesses are
+    returned only for callers explicitly requesting verify=False and must not
+    be treated as ownership evidence.
     """
     for candidate_url, label in ((apply_url, "apply_url"), (url, "url")):
         domain = registrable_domain(extract_domain(candidate_url or ""))
@@ -205,15 +208,15 @@ def resolve_company_domain(
         # A domain whose name echoes the company is far better evidence than the
         # first link in a description, which is often a partner or a CDN.
         for domain in text_domains:
-            if key and key in domain.replace(".", "").replace("-", ""):
+            if key and key == registrable_domain(domain).split(".")[0].replace("-", ""):
                 return domain, "description"
 
-    for guess in domain_candidates_from_name(company):
-        if not verify or domain_responds(guess):
-            return guess, "name"
-
-    if text_domains:
-        return text_domains[0], "description"
+    # A live website only proves that somebody owns the name. Preserve name
+    # guesses for explicit exploratory callers, never for contact discovery.
+    if not verify:
+        guesses = domain_candidates_from_name(company)
+        if guesses:
+            return guesses[0], "name"
 
     logger.info("resolve_company_domain: nothing plausible for %r", company)
     return "", ""

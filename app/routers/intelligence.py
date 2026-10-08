@@ -80,8 +80,13 @@ def pins(companies: str = Form(""), db: Session = Depends(get_db)):
     profile = get_or_create_profile(db)
     data = copy.deepcopy(profile.data or {})
     data["plan_pins"] = list(dict.fromkeys(line.strip()[:120] for line in companies.splitlines() if line.strip()))[:50]
+    from app.services import company_identity
+    watched = company_identity.sync_pins(db, data["plan_pins"])
     profile.data = data
     db.commit()
+    from app.routers.companies import _queue
+    for company in watched:
+        _queue(company.id)
     return RedirectResponse("/today", 303)
 
 

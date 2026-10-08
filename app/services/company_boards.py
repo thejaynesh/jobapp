@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 # Origins the user chose deliberately — never auto-retire these, however quiet.
 PROTECTED_ORIGINS = frozenset({"configured", "seed"})
 
-# Consecutive empty cycles before an auto-discovered board is retired. Generous
-# on purpose: a transient API error looks identical to an empty board here.
+# Consecutive confirmed missing-endpoint responses before an auto-discovered
+# board retires. Empty boards and transient failures remain eligible to probe.
 DEFAULT_MAX_EMPTY_CYCLES = 8
 
 # Origins we trust without a probe. A slug the user typed and a slug from the
@@ -188,13 +188,19 @@ def board_slugs(db: Session, ats: str, limit: int) -> list[str]:
     """Reserve a quarter of a capped poll for untried or oldest-polled boards."""
     if limit <= 0:
         return []
+    from sqlalchemy import or_
+    from app.models.company import Company
+    watched = CompanyBoard.company_id.in_(db.query(Company.id).filter(Company.watched.is_(True)))
     eligible = (
         db.query(CompanyBoard.slug)
         .filter(CompanyBoard.ats == ats, CompanyBoard.active.is_(True))
+        .filter(or_(CompanyBoard.next_due_at.is_(None), CompanyBoard.next_due_at <= datetime.now(timezone.utc)))
     )
     ranked = (
         eligible
         .order_by(
+            watched.desc(),
+            CompanyBoard.last_new_count.desc(),
             CompanyBoard.last_job_count.desc(),
             CompanyBoard.total_job_count.desc(),
             CompanyBoard.last_seen_at.desc(),
@@ -350,22 +356,27 @@ def record_fetch_results(
     attempted: list[str],
     counts: dict[str, int],
     had_errors: bool = False,
-    max_empty_cycles: int = DEFAULT_MAX_EMPTY_CYCLES,
+    max_empty_cycles: int | None = None,
+    results: dict | None = None,
+    observed_at: datetime | None = None,
 ) -> None:
     """
     Record what each polled board returned this cycle.
 
-    `counts` maps slug → jobs returned; slugs in `attempted` but absent from
-    `counts` returned nothing. A board that errored is indistinguishable from an
-    empty one here, and deliberately so: a dead slug 404s every cycle and should
-    retire, while a transient failure is a single tick that the next good cycle
-    resets. `had_errors` covers the case we *can* tell apart — a whole-ATS
-    outage — where nothing should be counted against any board.
+    Structured results distinguish quiet boards, partial pages, temporary
+    failures and missing endpoints. Backoff uses all failures; retirement
+    requires consecutive confirmed missing endpoints. Legacy `counts` cannot
+    prove an endpoint disappeared and never retire it.
     """
     if not attempted:
         return
 
-    now = datetime.now(timezone.utc)
+    from datetime import timedelta
+    from app.config import live
+    cfg = live()
+    if max_empty_cycles is None:
+        max_empty_cycles = cfg.ATS_BOARD_MAX_EMPTY_CYCLES
+    now = observed_at or datetime.now(timezone.utc)
     boards = (
         db.query(CompanyBoard)
         .filter(CompanyBoard.ats == ats, CompanyBoard.slug.in_(attempted))
@@ -373,7 +384,42 @@ def record_fetch_results(
     )
     retired = 0
     for board in boards:
+        if board.last_fetched_at and _aware(board.last_fetched_at) > now:
+            continue
+        result = (results or {}).get(board.slug)
+        if result is not None:
+            board.last_fetched_at = now
+            board.last_job_count = result.total if result.total is not None else len(result.jobs)
+            board.last_new_count = result.inserted + result.merged
+            board.fetch_cursor = result.cursor
+            if result.error:
+                board.consecutive_failures = (board.consecutive_failures or 0) + 1
+                board.consecutive_not_found = ((board.consecutive_not_found or 0) + 1
+                                               if result.error_category == "not_found" else 0)
+                hours = min(cfg.BOARD_MAX_PROBE_HOURS,
+                            cfg.BOARD_FAILURE_BACKOFF_HOURS * 2 ** min(board.consecutive_failures - 1, 8))
+                board.next_due_at = now + timedelta(hours=hours)
+                # A specific confirmed missing endpoint is different from a
+                # healthy company without fresh jobs. Transient/auth failures
+                # never count as evidence the company stopped hiring.
+                if result.error_category == "not_found" and board.consecutive_not_found >= max_empty_cycles and board.origin not in PROTECTED_ORIGINS:
+                    board.active = False
+                    board.inactive_reason = "Repeated HTTP 404/410 from the board endpoint"
+                    retired += 1
+                continue
+            board.last_success_at = now
+            board.consecutive_failures = 0
+            board.consecutive_not_found = 0
+            board.total_job_count += len(result.jobs)
+            if result.cursor or board.last_new_count or result.complete is not True:
+                board.next_due_at = None
+                board.consecutive_empty = 0
+            else:
+                board.consecutive_empty += 1
+                board.next_due_at = now + timedelta(hours=min(cfg.BOARD_EMPTY_PROBE_HOURS, cfg.BOARD_MAX_PROBE_HOURS))
+            continue
         count = counts.get(board.slug, 0)
+        board.consecutive_not_found = 0
         board.last_fetched_at = now
         board.last_job_count = count
         if count:
@@ -383,12 +429,9 @@ def record_fetch_results(
         if had_errors:
             continue
         board.consecutive_empty += 1
-        if (
-            board.consecutive_empty >= max_empty_cycles
-            and board.origin not in PROTECTED_ORIGINS
-        ):
-            board.active = False
-            retired += 1
+        # Legacy readers cannot distinguish zero matches from an empty board.
+        # Keep them eligible for probes; only structured endpoint failures can
+        # retire a board now.
 
     if retired:
         logger.info("company_boards: retired %d silent %s boards", retired, ats)
@@ -480,6 +523,10 @@ def reactivate(db: Session, board_id) -> CompanyBoard | None:
         return None
     board.active = True
     board.consecutive_empty = 0
+    board.consecutive_failures = 0
+    board.consecutive_not_found = 0
+    board.inactive_reason = None
+    board.next_due_at = None
     logger.info("company_boards: reactivated %s/%s", board.ats, board.slug)
     return board
 

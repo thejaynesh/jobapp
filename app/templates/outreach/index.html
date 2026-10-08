@@ -12,7 +12,7 @@
       ('Drafts', stats.drafts, 'text-gray-800'),
       ('Sent', stats.sent, 'text-blue-600'),
       ('Replied', stats.replied, 'text-green-600'),
-      ('Reply rate', stats.reply_rate ~ '%', 'text-green-600'),
+      ('People reply rate', stats.reply_rate ~ '%', 'text-green-600'),
       ('Follow-ups due', stats.due, 'text-amber-600')] %}
   <div class="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
     <p class="text-[11px] uppercase tracking-wide text-gray-400">{{ label }}</p>
@@ -20,6 +20,27 @@
   </div>
   {% endfor %}
 </div>
+<p class="text-xs text-gray-500 mb-4">{{ stats.people_contacted }} unique people approached · {{ stats.people_replied }} people replied · {{ stats.referrals_submitted }} confirmed referrals submitted. Follow-ups count once per person in the reply rate.</p>
+
+<details class="bg-white border rounded-lg p-4 mb-5"><summary class="font-medium cursor-pointer">Add a relationship before you have a specific role</summary>
+<form method="post" action="/outreach/contacts" class="grid sm:grid-cols-2 gap-3 mt-4 text-sm">
+  <label>Company<input name="company" required class="block w-full border rounded p-2 mt-1"></label>
+  <label>Name<input name="name" class="block w-full border rounded p-2 mt-1"></label>
+  <label>Title<input name="title" class="block w-full border rounded p-2 mt-1"></label>
+  <label>Email<input name="email" type="email" class="block w-full border rounded p-2 mt-1"></label>
+  <label>LinkedIn profile<input name="linkedin_url" type="url" class="block w-full border rounded p-2 mt-1"></label>
+  <label>Relationship<select name="relationship_kind" class="block w-full border rounded p-2 mt-1">{% for kind in relationship_kinds %}<option>{{ kind }}</option>{% endfor %}</select></label>
+  <label class="sm:col-span-2">Context<textarea name="notes" class="block w-full border rounded p-2 mt-1" placeholder="How you know them and what you want to discuss"></textarea></label>
+  <button class="bg-gray-800 text-white rounded px-4 py-2">Save contact</button>
+</form></details>
+
+{% if actions %}<section class="mb-6"><h2 class="text-lg font-semibold mb-2">Relationship actions</h2>
+<div class="grid sm:grid-cols-2 gap-3">{% for conversation in actions %}<a href="/outreach/conversations/{{ conversation.id }}" class="block border rounded-lg p-4 bg-white hover:border-blue-400">
+  <p class="font-medium">{{ conversation.person.name or conversation.person.primary_email or 'Contact' }} · {{ conversation.company }}</p>
+  <p class="text-sm text-gray-600 mt-1">{{ conversation.next_action or (conversation.status | replace('_', ' ') | title) }}</p>
+  <p class="text-xs text-gray-500 mt-2">{{ conversation.status | replace('_', ' ') }}{% if conversation.next_action_due_at %} · {{ conversation.next_action_due_at | when('%b %d') }}{% endif %}</p>
+</a>{% endfor %}</div></section>{% endif %}
+<div id="outreach-workspace" class="mb-5"></div>
 
 {% set has_filters = q or channel_filter %}
 <form method="get" action="/outreach" class="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-6">
@@ -33,6 +54,7 @@
       <option value="{{ ch }}" {% if channel_filter == ch %}selected{% endif %}>{{ ch | replace("_", " ") | title }}</option>
       {% endfor %}
     </select>
+    <select name="state" aria-label="Message status" class="border rounded px-3 py-1.5 text-sm"><option value="">All statuses</option>{% for value in ['draft','approved','sent','replied','bounced','skipped'] %}<option value="{{ value }}" {% if state_filter == value %}selected{% endif %}>{{ value | title }}</option>{% endfor %}</select>
 
     <button type="submit" class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700">Apply</button>
 
@@ -85,6 +107,8 @@
   <div class="text-xs text-gray-600 whitespace-pre-wrap leading-relaxed mt-1 max-h-40 overflow-y-auto">{{ msg.body }}</div>
 
   <div class="flex flex-wrap items-center gap-3 mt-2">
+    <button hx-get="/outreach/contacts/{{ msg.contact.id }}/panel" hx-target="#outreach-workspace" hx-swap="innerHTML" class="text-xs text-blue-700 font-medium">Review, edit and send</button>
+    <a href="/outreach/contacts/{{ msg.contact.id }}" class="text-xs text-gray-500">Relationship history</a>
     <button type="button" data-message-id="{{ msg.id }}" onclick="copyOutreachMessage(this)"
             class="text-xs text-blue-600 hover:underline">Copy</button>
     {% if msg.application %}
@@ -160,10 +184,8 @@
           {{ contact.company }}{% if contact.title %} &middot; {{ contact.title }}{% endif %}
         </p>
       </div>
-      {% if contact.application %}
-      <a href="/apps/{{ contact.application.id }}#outreach-panel"
+      <a href="/outreach/contacts/{{ contact.id }}"
          class="text-xs text-blue-600 hover:underline shrink-0">Draft a message</a>
-      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -180,5 +202,14 @@
   </div>
 </details>
 {% endif %}
+
+<nav class="flex justify-between items-center py-4 text-sm" aria-label="Outreach pagination">
+{% if page > 1 %}<a class="text-blue-600" href="/outreach?q={{ q | urlencode }}&channel={{ channel_filter | urlencode }}&state={{ state_filter | urlencode }}&page={{ page - 1 }}">← Previous</a>{% else %}<span></span>{% endif %}
+<span class="text-gray-500">Page {{ page }} · {{ total }} matching messages</span>
+{% if has_more %}<a class="text-blue-600" href="/outreach?q={{ q | urlencode }}&channel={{ channel_filter | urlencode }}&state={{ state_filter | urlencode }}&page={{ page + 1 }}">Next →</a>{% else %}<span></span>{% endif %}
+</nav>
+
+{% if stats.cohorts %}<details class="border rounded p-4 mb-6"><summary class="cursor-pointer text-sm font-medium">Outcomes by contact source, role and channel</summary>
+<div class="overflow-x-auto"><table class="w-full text-xs mt-3"><thead><tr class="text-left"><th>Source</th><th>Role</th><th>Channel</th><th>People approached</th><th>People replied</th></tr></thead><tbody>{% for cohort in stats.cohorts %}<tr class="border-t"><td class="py-2">{{ cohort.source }}</td><td>{{ cohort.role | replace('_', ' ') }}</td><td>{{ cohort.channel }}</td><td>{{ cohort.contacted }}</td><td>{{ cohort.replied }}</td></tr>{% endfor %}</tbody></table></div><p class="text-xs text-gray-500 mt-2">Historical counts, including conversations still awaiting replies. Small samples and different audiences do not establish causation.</p></details>{% endif %}
 
 {% endblock %}

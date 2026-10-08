@@ -2,6 +2,7 @@
 // the extension's service worker is imported with `chrome` stubbed.
 // Load background.js under a stub `chrome`, seeded from argv[2] (JSON state),
 // wait for its startup sync, and print the overlay registration it leaves.
+import { pathToFileURL } from "node:url";
 const state = JSON.parse(process.argv[2]);
 const registered = new Map((state.registered || []).map((s) => [s.id, s]));
 const granted = new Set(state.granted || []);
@@ -46,7 +47,7 @@ function build(base, path) {
 globalThis.chrome = build(overrides, []);
 globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}), text: async () => "" });
 
-await import(process.argv[3]);
+await import(pathToFileURL(process.argv[3]).href);
 await new Promise((resolve) => setTimeout(resolve, 200));
-console.log(JSON.stringify(registered.get("jobapp-overlay") || null));
+console.log(JSON.stringify(process.argv[4] === "all" ? [...registered.values()] : registered.get("jobapp-overlay") || null));
 process.exit(0);

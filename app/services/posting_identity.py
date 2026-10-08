@@ -27,7 +27,57 @@ else returns None and is compared as written, as before.
 """
 
 import re
-from urllib.parse import unquote
+import hashlib
+from urllib.parse import unquote, urlsplit, urlunsplit
+
+# Employer readers can authoritatively correct their own posting. Aggregator
+# cards remain enrichment evidence; their shorter summaries are not revisions.
+AUTHORITATIVE_SOURCES = frozenset({
+    "greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
+    "workday", "icims", "bamboohr", "teamtailor", "jobvite", "personio", "oracle",
+    "successfactors", "phenom", "eightfold", "jibe", "rippling", "pinpoint",
+    "jazzhr", "taleo", "paylocity", "avature", "amazon", "apple", "tiktok", "usajobs",
+})
+
+
+def board_scope(source: str, url: str | None, board: str | None = None) -> str:
+    if source not in AUTHORITATIVE_SOURCES:
+        return ""
+    # The hostname exists on old rows too, so discovering a board slug later
+    # does not change its identity. Canonical URLs handle path-scoped tenants.
+    return (urlsplit(url or "").hostname or board or "").lower()
+
+
+def listing_key(source: str, url: str, external_id=None, board=None) -> str:
+    scope = board_scope(source, url, board)
+    identity = str(external_id) if external_id not in (None, "") else canonical(url) or url
+    return hashlib.sha256(f"{source}|{scope}|{identity}".encode()).hexdigest()
+
+
+def job_key(source: str, url: str, external_id=None, apply_url=None, board=None) -> str:
+    address = canonical(apply_url) or canonical(url)
+    if address:
+        return hashlib.sha256(f"canonical|{address}".encode()).hexdigest()
+    if external_id not in (None, ""):
+        return listing_key(source, url, external_id, board)
+    parsed = urlsplit(url)
+    address = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ""))
+    return hashlib.sha256(f"url|{address}".encode()).hexdigest()
+
+
+def conflicts(job, source: str, url: str, external_id=None, apply_url=None) -> bool:
+    """Do not perpetuate aliases created by the old title-hash merge rule."""
+    if source == job.source and external_id and job.source_job_id:
+        if str(external_id) == str(job.source_job_id):
+            return False
+        if url == job.url:
+            # An adapter may have begun namespacing a formerly local ID.
+            return False
+        incoming, original = canonical(url), canonical(job.url)
+        return not (incoming and incoming == original)
+    incoming = canonical(apply_url) or canonical(url)
+    original = canonical(job.apply_url) or canonical(job.url)
+    return bool(incoming and original and incoming != original)
 
 _RULES: list[tuple[re.Pattern, "callable"]] = [
     # Greenhouse ids are global, so every form of link to one posting —

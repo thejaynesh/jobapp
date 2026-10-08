@@ -127,7 +127,7 @@ def classify_role(title: str = "", department: str = "", email: str = "") -> str
     return "unknown"
 
 
-def contact_score(contact: dict) -> int:
+def contact_score(contact: dict, job: dict | None = None) -> int:
     """
     How worth writing to this person is. Used to rank a discovery run's finds so
     the per-application cap keeps the best few.
@@ -148,9 +148,35 @@ def contact_score(contact: dict) -> int:
         score += 10
     if contact.get("linkedin_url"):
         score += 8
-    if not contact.get("email") and not contact.get("linkedin_url"):
+    if not any(contact.get(field) for field in ("email", "linkedin_url", "profile_url", "twitter")):
         score -= 50
+    if job:
+        role_words = set(re.findall(r"[a-z]{3,}", (job.get("title") or "").lower())) - {
+            "engineer", "engineering", "senior", "staff", "principal", "manager", "software", "the", "and",
+        }
+        evidence_words = set(re.findall(r"[a-z]{3,}", f"{contact.get('title') or ''} {contact.get('department') or ''}".lower()))
+        score += min(30, len(role_words & evidence_words) * 15)
+        if contact.get("relationship_kind") in {"friend", "colleague", "introduced"}:
+            score += 45
+        elif contact.get("relationship_kind") == "alumni":
+            score += 10
+        if contact.get("source") == "description" and contact.get("role") == "recruiter":
+            score += 20
     return score
+
+
+def ranking_reasons(contact: dict, job: dict) -> list[str]:
+    reasons = [f"{(contact.get('role') or 'unknown').replace('_', ' ')}"]
+    if contact.get("source") == "description":
+        reasons.append("published in this posting")
+    if contact.get("relationship_kind") in {"friend", "colleague", "introduced"}:
+        reasons.append("existing relationship recorded by you")
+    if contact_score(contact, job) > contact_score(contact):
+        reasons.append("relationship or role context improves fit")
+    if contact.get("source") == "github":
+        reasons.append("public organization member; current employment needs confirmation")
+    reasons.append(f"address: {contact.get('email_status') or 'unknown'}")
+    return reasons
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +228,26 @@ def _hunter_get(url: str, params: dict, api_key: str) -> dict:
     """A Hunter call that returns `data` or {} — quota and network errors alike."""
     if not api_key:
         return {}
+    from app.config import live
+    from app.services.networking import source_issue
+    timeout = live().OUTREACH_VERIFY_TIMEOUT_SECONDS if url == HUNTER_EMAIL_VERIFIER_URL else HTTP_TIMEOUT
     try:
-        resp = httpx.get(url, params={**params, "api_key": api_key}, timeout=HTTP_TIMEOUT)
+        resp = httpx.get(url, params={**params, "api_key": api_key}, timeout=timeout)
+        if resp.status_code == 202:
+            return {"pending": True}
         payload = resp.json() if resp.content else {}
     except Exception as exc:
+        source_issue(f"Hunter request failed: {type(exc).__name__}")
         logger.error("hunter %s failed: %s", url.rsplit("/", 1)[-1], exc)
         return {}
     errors = payload.get("errors")
     if errors:
         detail = "; ".join(e.get("details", "") for e in errors if isinstance(e, dict))
         logger.warning("hunter %s rejected the call: %s", url.rsplit("/", 1)[-1], detail)
+        source_issue(f"Hunter HTTP {resp.status_code}: {detail}")
+        return {}
+    if resp.status_code >= 400:
+        source_issue(f"Hunter HTTP {resp.status_code}")
         return {}
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
@@ -220,9 +256,11 @@ def _hunter_get(url: str, params: dict, api_key: str) -> dict:
 def _verifier_status(result: str) -> str:
     return {
         "deliverable": "verified",
+        "valid": "verified",
         "risky": "accept_all",
         "accept_all": "accept_all",
         "undeliverable": "invalid",
+        "invalid": "invalid",
         "unknown": "unverified",
     }.get((result or "").lower(), "unverified")
 
@@ -250,7 +288,10 @@ def hunter_email_finder(domain: str, first: str, last: str, api_key: str) -> dic
     email = data.get("email")
     if not email:
         return {}
-    return {"email": email, "score": int(data.get("score") or 0)}
+    verification = data.get("verification") or {}
+    return {"email": email, "score": int(data.get("score") or 0),
+            "status": _verifier_status(verification.get("status") or ""),
+            "verification": verification, "sources": data.get("sources") or []}
 
 
 def verify_email(email: str, api_key: str) -> dict:
@@ -263,9 +304,13 @@ def verify_email(email: str, api_key: str) -> dict:
     data = _hunter_get(HUNTER_EMAIL_VERIFIER_URL, {"email": email}, api_key)
     if not data:
         return {}
+    if data.get("pending"):
+        return {"pending": True}
     return {
-        "status": _verifier_status(data.get("result") or data.get("status") or ""),
+        "status": _verifier_status(data.get("status") or data.get("result") or ""),
         "confidence": int(data.get("score") or 0),
+        "verification": data.get("verification") or {},
+        "sources": data.get("sources") or [],
     }
 
 
@@ -317,9 +362,7 @@ def hunter_contacts(domain: str, api_key: str, limit: int = 10, data: dict | Non
         title = (entry.get("position") or "").strip()
         department = (entry.get("department") or "").strip()
         verification = entry.get("verification") or {}
-        status = _verifier_status(verification.get("status") or "") if verification else (
-            "verified" if entry.get("type") == "personal" else "unverified"
-        )
+        status = _verifier_status(verification.get("status") or "")
         found.append({
             "name": name or None,
             "first_name": first or None,
@@ -336,6 +379,7 @@ def hunter_contacts(domain: str, api_key: str, limit: int = 10, data: dict | Non
             "domain": domain,
             "source": "hunter",
             "pattern": pattern,
+            "evidence": {"verification": verification, "sources": entry.get("sources") or []},
         })
 
     found.sort(key=contact_score, reverse=True)

@@ -120,7 +120,8 @@ class TestWorkdayDetailBudget:
 
         monkeypatch.setattr(httpx, "post", post)
         monkeypatch.setattr(workday, "_fetch_detail", detail)
-        monkeypatch.setattr(workday, "_MAX_DETAILS_PER_TENANT", 2)
+        from app.config import settings
+        monkeypatch.setattr(settings, "WORKDAY_MAX_DETAILS_PER_BOARD", 2)
         jobs = workday.fetch(["acme:wd1:Ext"], ["Software Engineer"])
         assert len(jobs) == 4
         assert sorted(described) == ["/job/c", "/job/d"]

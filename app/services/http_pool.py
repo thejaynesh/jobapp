@@ -166,4 +166,6 @@ def _after_fork() -> None:
     _router, _router_pid = None, None
 
 
-os.register_at_fork(after_in_child=_after_fork)
+# Windows starts independent worker processes and has no fork hook.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)

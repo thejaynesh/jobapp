@@ -9,8 +9,9 @@
  * narrower and honest.
  */
 
-import { HARVEST_SITES } from "./sites.js";
+import { harvestSites, customHarvestSite, siteForUrl } from "./sites.js";
 import { OVERLAY_CORE, OVERLAY_MORE } from "./overlay_hosts.js";
+let HARVEST_SITES = [];
 
 // ── Collapsible sections ──────────────────────────────────────────
 document.querySelectorAll(".section-head").forEach((btn) => {
@@ -41,6 +42,7 @@ document.querySelectorAll(".section-head").forEach((btn) => {
 function renderHarvestSites() {
   const container = document.getElementById("harvest-sites");
   if (!container) return;
+  container.replaceChildren();
   for (const site of HARVEST_SITES) {
     const item = document.createElement("label");
     item.className = "harvest-item";
@@ -64,8 +66,6 @@ function renderHarvestSites() {
     container.append(item);
   }
 }
-
-renderHarvestSites();
 
 function updateHarvestBadge() {
   const total = HARVEST_SITES.length;
@@ -164,6 +164,8 @@ function originPattern(url) {
 }
 
 async function load() {
+  HARVEST_SITES = await harvestSites();
+  renderHarvestSites();
   const stored = await chrome.storage.local.get({
     serverUrl: "", token: "", enabled: false, overlay: false, overlayMore: false,
     useTabs: true, solveChecks: true, agentId: "", status: {}, events: [],
@@ -392,4 +394,29 @@ async function test() {
 
 els.save.addEventListener("click", save);
 els.test.addEventListener("click", test);
+document.getElementById("add-harvest-site")?.addEventListener("click", async () => {
+  const input = document.getElementById("custom-harvest-url");
+  try {
+    const candidate = customHarvestSite(normalizeUrl(input.value));
+    const site = siteForUrl(candidate.origin + "/", HARVEST_SITES) || candidate;
+    // Requested directly from the user's click, with the same per-site scope
+    // as built-in boards. Server tasks can never grant this permission.
+    if (!(await chrome.permissions.request({ origins: site.matches }))) {
+      say("Site permission was declined. Add it again when you want to capture this source.", "err");
+      return;
+    }
+    const { customHarvestOrigins = [] } = await chrome.storage.local.get({ customHarvestOrigins: [] });
+    const origins = Array.isArray(customHarvestOrigins) ? customHarvestOrigins : [];
+    await chrome.storage.local.set({
+      customHarvestOrigins: site.origin ? [...new Set([...origins, site.origin])] : origins,
+      [site.storageKey]: true,
+    });
+    await chrome.runtime.sendMessage({ type: "sync-harvest" });
+    input.value = "";
+    await load();
+    say(`${site.label} is ready to capture. Reload its job page or use Retry capture in Runs.`);
+  } catch (error) {
+    say(error.message || "Could not add that job site.", "err");
+  }
+});
 load();

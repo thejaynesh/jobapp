@@ -18,6 +18,7 @@ stays off rather than burning the budget and failing halfway.
 
 import logging
 import re
+from urllib.parse import urlparse
 
 import httpx
 
@@ -52,14 +53,20 @@ def _get(path: str, token: str, params: dict | None = None):
         resp = httpx.get(f"{GITHUB_API}{path}", headers=headers, params=params or {},
                          timeout=TIMEOUT, follow_redirects=True)
     except Exception as exc:
+        from app.services.networking import source_issue
+        source_issue(f"GitHub request failed: {type(exc).__name__}")
         logger.error("github %s failed: %s", path, exc)
         return None
     if resp.status_code == 404:
         return None
     if resp.status_code == 403 and "rate limit" in (resp.text or "").lower():
+        from app.services.networking import source_issue
+        source_issue("GitHub rate limit reached")
         logger.warning("github rate limit reached — set GITHUB_TOKEN to raise it")
         return None
     if resp.status_code >= 400:
+        from app.services.networking import source_issue
+        source_issue(f"GitHub HTTP {resp.status_code}")
         logger.warning("github %s returned %s", path, resp.status_code)
         return None
     try:
@@ -72,12 +79,9 @@ def _org_matches_company(org: dict, company: str, domain: str) -> bool:
     """
     Whether this org demonstrably belongs to the employer we're looking at.
 
-    Evidence is weighed, not just collected. A published link back to the
-    company's domain is proof; a matching display name is good; a login that
-    merely equals the domain's first label is weak, and is only trusted when the
-    org publishes nothing that contradicts it — `github.com/stripe` owned by
-    someone whose blog is their own side project is exactly the case that would
-    otherwise send messages to strangers.
+    Require a published website or email at the employer's actual domain.
+    A matching display name or slug is only a search candidate. Parse hostnames
+    so a company name in an unrelated URL's path or subdomain cannot qualify.
     """
     if not org:
         return False
@@ -91,18 +95,16 @@ def _org_matches_company(org: dict, company: str, domain: str) -> bool:
     ]
     published = [v for v in published if v]
 
-    if domain and any(domain in value for value in published):
+    hosts = []
+    for value in published:
+        host = value.rsplit("@", 1)[-1] if "@" in value and "/" not in value else urlparse(value if "://" in value else f"https://{value}").hostname
+        if host:
+            hosts.append(registrable_domain(host))
+    if domain and domain in hosts:
         return True
 
-    key = company_key(company)
-    if key and key == company_key(org.get("name") or ""):
-        return True
-
-    # Something is published and none of it points at this company.
-    if published:
-        return False
-
-    return bool(key and domain and login == domain.split(".")[0])
+    # Names and slugs are discovery candidates, not company ownership evidence.
+    return False
 
 
 def find_org(company: str, domain: str, token: str) -> str | None:
@@ -169,6 +171,8 @@ def _contact_from_user(user: dict, company: str, domain: str) -> dict | None:
         "profile_url": user.get("html_url") or None,
         "domain": domain or None,
         "source": "github",
+        "evidence": {"sources": [{"uri": user.get("html_url"), "kind": "public_profile"}],
+                     "employment_status": "unconfirmed", "claimed_company": user.get("company")},
     }
 
 

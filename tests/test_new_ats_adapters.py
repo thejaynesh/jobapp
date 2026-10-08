@@ -87,7 +87,7 @@ class TestBambooHRAdapter:
         assert len(results) == 1
         job = results[0]
         assert job["source"] == "bamboohr"
-        assert job["source_job_id"] == "1234"
+        assert job["source_job_id"] == "acme:1234"
         assert job["title"] == "Senior Backend Engineer"
         assert job["location"] == "Austin, TX"
         assert job["url"] == "https://acme.bamboohr.com/careers/1234"

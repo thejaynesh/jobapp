@@ -210,8 +210,8 @@ def _parallel_sites() -> int:
 
 
 def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
-             probe: bool = False) -> dict:
-    from app.services import agent_events, harvest_recipes, harvest_samples
+             probe: bool = False, page_url: str = "") -> dict:
+    from app.services import agent_events, harvest_recipes, harvest_samples, source_learning
     from app.services.harvest import extract_jobs, save_harvested_jobs, source_for_url
 
     # The page it came off decides the source name. The extractor is
@@ -231,15 +231,16 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
     # to look unreadable for days while the reader was recognising a hundred
     # and fifty postings in every response.
     refused: dict[str, int] = {}
-    recipe = harvest_recipes.active_for(db, host)
+    recipe = harvest_recipes.active_for(db, host, source_url)
     if recipe:
         jobs = harvest_recipes.apply_recipe(payload, recipe, source,
-                                            page_url=source_url)
+                                            page_url=page_url or source_url)
         if jobs:
             read_by = "recipe"
+            jobs = harvest_recipes.read_jobs(payload, source, page_url or source_url, recipe)
     if not jobs:
         jobs = extract_jobs(payload, source=source, refused=refused,
-                            page_url=source_url)
+                            page_url=page_url or source_url)
 
     if not jobs:
         counts = {"found": 0, "inserted": 0, "merged": 0, "skipped": 0,
@@ -250,6 +251,7 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
         harvest_samples.record(
             db, host, payload, source_url=source_url, found=0,
             probe=bool(probe),
+            page_url=page_url,
             note=(
                 # A probe named none of the keys the reader looks for, which is
                 # a different thing from a payload that did and still yielded
@@ -262,6 +264,9 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
         )
     else:
         counts = {"found": len(jobs), "source": source, **save_harvested_jobs(db, jobs)}
+        if recipe:
+            harvest_samples.record(db, host, payload, source_url=source_url, page_url=page_url,
+                                   found=len(jobs), probe=bool(probe), note="Working learned-reader evidence")
 
     # A harvest that found nothing is the single most common outcome and used
     # to leave no trace at all, so "the interceptor is forwarding rubbish" and
@@ -270,7 +275,15 @@ def _harvest(db: Session, payload, source_url: str = "", agent_id: str = "",
         db, "harvest", url=source_url, agent_id=agent_id,
         ok=True, summary={"source": source, "read_by": read_by, **counts},
     )
+    source_learning.note_capture(db, source_url, counts, page_url=page_url, read_by=read_by)
     db.commit()
+    if not jobs and harvest_recipes.jobbiness(payload):
+        try:
+            queued = source_learning.request_learning(db, host, harvest_samples.endpoint_key(source_url))
+            counts["learning_queued"] = bool(queued.get("queued"))
+        except Exception as exc:
+            db.rollback()
+            logger.warning("agent: source learning could not be queued for %s: %s", host, exc)
     return counts
 
 
@@ -298,6 +311,7 @@ async def harvest(request: Request, db: Session = Depends(get_db)):
             _harvest, db, payload, body.get("source_url") or "",
             str(body.get("agent_id") or "")[:120],
             bool(body.get("probe")),
+            str(body.get("page_url") or "")[:1000],
         )
     except Exception as exc:
         # Never charge a parsing bug of ours to the browser that volunteered

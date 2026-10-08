@@ -70,6 +70,11 @@
       font: inherit; font-size: 12px; line-height: 1.45; color: #111;
       border: 1px solid #d1d5db; border-radius: 6px; padding: 6px;
     }
+    .contact-form label { display: block; margin-top: 8px; font-size: 12px; }
+    .contact-form input, .contact-form textarea {
+      display: block; width: 100%; box-sizing: border-box; margin-top: 3px;
+      padding: 6px; border: 1px solid #d1d5db; border-radius: 5px; font: inherit;
+    }
   `;
 
   let root = null;
@@ -219,6 +224,7 @@
       addPrepare(box, serverUrl, "Save and write documents");
       addFillButton(box);
       addDraftButton(box);
+      addContactButton(box, data, serverUrl);
       return;
     }
 
@@ -279,6 +285,75 @@
     addDraftButton(box);
     addResumeButton(box);
     addAppliedButton(box, application);
+    addContactButton(box, data, serverUrl);
+  }
+
+  function addContactButton(box, data, serverUrl) {
+    const button = document.createElement("button");
+    button.className = "action secondary";
+    button.textContent = "Save a contact from this page";
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      const form = document.createElement("form");
+      form.className = "contact-form";
+      line(form, "Review the person and company before saving. Only these fields are sent to your tracker.");
+      const selected = (window.getSelection()?.toString() || "").trim().slice(0, 160);
+      const fields = {};
+      function field(name, labelText, value = "", type = "text") {
+        const label = document.createElement("label");
+        label.textContent = labelText;
+        const input = document.createElement(name === "notes" ? "textarea" : "input");
+        if (name !== "notes") input.type = type;
+        input.name = name;
+        input.value = value;
+        if (name === "company") input.required = true;
+        label.append(input);
+        form.append(label);
+        fields[name] = input;
+      }
+      field("company", "Company", data.job?.company || "");
+      field("name", "Name", selected.includes("@") ? "" : selected);
+      field("title", "Their role");
+      field("email", "Email", /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(selected) ? selected : "", "email");
+      field("linkedin_url", "LinkedIn profile", "", "url");
+      field("notes", "Relationship or posting context");
+      const save = document.createElement("button");
+      save.className = "action";
+      save.type = "submit";
+      save.textContent = "Save contact";
+      const cancel = document.createElement("button");
+      cancel.className = "action secondary";
+      cancel.type = "button";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => { form.remove(); button.disabled = false; });
+      form.append(save, cancel);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value.trim()]));
+        if (!payload.email && !payload.linkedin_url) {
+          line(form, "Add an email or individual LinkedIn profile.");
+          return;
+        }
+        const source = new URL(location.href);
+        payload.source_url = source.origin + source.pathname;
+        if (data.application?.id) payload.application_id = data.application.id;
+        save.disabled = true;
+        save.textContent = "Saving…";
+        const reply = await ask("/api/agent/outreach-contact", payload);
+        save.disabled = false;
+        save.textContent = "Save contact";
+        if (reply.error) {
+          line(form, String(reply.error));
+          return;
+        }
+        form.remove();
+        button.disabled = false;
+        line(box, "Contact saved. Review the relationship and draft in JobApp.");
+        addLink(box, reply.serverUrl || serverUrl, reply.data?.url, "Open saved contact");
+      });
+      box.append(form);
+    });
+    box.append(button);
   }
 
   function addFillButton(box) {

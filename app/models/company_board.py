@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -16,8 +16,8 @@ class CompanyBoard(Base):
     list, links spotted in fetched postings, community job lists, apply URLs
     resolved out of aggregator redirects, and careers pages we sniffed — and
     the registry keeps them all in one place with enough history to rank them.
-    Boards that keep coming back empty get retired so the per-cycle budget goes
-    to the ones actually producing jobs.
+    Quiet boards receive less frequent probes; only repeated confirmed missing
+    endpoints retire automatically.
     """
 
     __tablename__ = "company_boards"
@@ -55,3 +55,11 @@ class CompanyBoard(Base):
     last_fetched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    consecutive_not_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_new_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    fetch_cursor: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)

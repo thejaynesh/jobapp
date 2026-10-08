@@ -154,6 +154,7 @@
           channel: CHANNEL,
           payload,
           sourceUrl: String(sourceUrl || location.href),
+          pageUrl: String(location.href),
           probe: Boolean(probe),
         },
         location.origin,

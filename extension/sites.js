@@ -240,10 +240,57 @@ function patternMatches(pattern, url) {
 }
 
 /** The site a URL belongs to, or null if it is not one we know. */
-export function siteForUrl(url) {
+export function siteForUrl(url, sites = HARVEST_SITES) {
   return (
-    HARVEST_SITES.find((site) =>
+    sites.find((site) =>
       site.matches.some((pattern) => patternMatches(pattern, url)),
     ) || null
   );
+}
+
+/** Build the same opt-in site definition for a user-supplied exact origin. */
+export function customHarvestSite(raw) {
+  const parsed = new URL(raw);
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password ||
+      !/^[a-z0-9.-]+$/i.test(parsed.hostname)) {
+    throw new Error("Enter the HTTP(S) address of a job site.");
+  }
+  const origin = `${parsed.protocol}//${parsed.hostname}`;
+  const id = "custom-" + Array.from(origin, (ch) => ch.charCodeAt(0).toString(16)).join("");
+  return { id, origin, label: parsed.hostname, storageKey: `harvest-${id}`,
+           matches: [`${origin}/*`], note: "Added by you. Only this origin is read; untick and Save to stop." };
+}
+
+/** Custom sites use exactly the existing per-site toggles and permissions. */
+export async function harvestSites() {
+  const { customHarvestOrigins = [] } = await chrome.storage.local.get({ customHarvestOrigins: [] });
+  const sites = [...HARVEST_SITES];
+  for (const origin of Array.isArray(customHarvestOrigins) ? customHarvestOrigins.slice(0, 100) : []) {
+    try {
+      const site = customHarvestSite(origin);
+      if (!siteForUrl(site.origin + "/", sites)) sites.push(site);
+    } catch (_) { /* malformed local configuration cannot register a script */ }
+  }
+  return sites;
+}
+
+/** A capture task may use only a site the user enabled and permissioned. */
+export async function requireHarvestSite(url, { requireKnown = false } = {}) {
+  const site = siteForUrl(url, await harvestSites());
+  if (!site && requireKnown) {
+    throw new Error(`Add ${new URL(url).hostname} under Harvesting → Add job site in the extension options, ` +
+                    "approve its site permission, then Retry capture in Runs.");
+  }
+  if (site) {
+    const stored = await chrome.storage.local.get({ [site.storageKey]: false });
+    if (!stored[site.storageKey]) {
+      throw new Error(`${site.label} is turned off under Harvesting in the extension options. ` +
+                      "Tick it and Save, then Retry capture in Runs.");
+    }
+    if (!(await chrome.permissions.contains({ origins: site.matches }))) {
+      throw new Error(`Reading ${site.label} needs its site permission. Tick it under Harvesting in the ` +
+                      "extension options, Save and approve permission, then Retry capture in Runs.");
+    }
+  }
+  return site;
 }

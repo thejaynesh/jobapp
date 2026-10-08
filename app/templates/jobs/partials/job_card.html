@@ -31,6 +31,10 @@
           <span class="text-gray-300" title="This source didn't report a posting date">·  no posted date</span>
         {% endif %}
       </p>
+      {% if not job.description or job.description | length < 600 %}
+      <p class="text-xs text-amber-700 mt-1">Details incomplete · this posting still needs a full description.</p>
+      {% endif %}
+      {% if job.company_id %}<a class="text-xs text-blue-600" href="/companies">Employer research and watchlist</a>{% endif %}
     </div>
     <div class="text-right shrink-0">
       {% set shown_score = job.effective_score %}

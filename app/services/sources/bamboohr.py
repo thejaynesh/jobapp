@@ -109,7 +109,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
         items = data.get("result") if isinstance(data, dict) else data
         if not isinstance(items, list):
             return []
-        saw_postings(_text(item.get("id")) or _text(item.get("jobOpeningId"))
+        saw_postings(f"{slug}:{_text(item.get('id')) or _text(item.get('jobOpeningId'))}"
                      for item in items if isinstance(item, dict))
 
         jobs = []
@@ -123,7 +123,7 @@ def fetch(company_slugs: list[str]) -> list[dict]:
             location = _location(item)
             jobs.append({
                 "source": "bamboohr",
-                "source_job_id": job_id,
+                "source_job_id": f"{slug}:{job_id}",
                 "title": title,
                 "company": _text(item.get("companyName")) or slug,
                 "location": location,
@@ -148,7 +148,7 @@ def _fill_descriptions(slug: str, jobs: list[dict]) -> None:
         return
 
     def _one(job: dict) -> None:
-        description = _detail_description(slug, job["source_job_id"])
+        description = _detail_description(slug, job["source_job_id"].rsplit(":", 1)[-1])
         if description:
             job["description"] = description
             job["experience_level"] = parse_experience_level(job["title"], description)

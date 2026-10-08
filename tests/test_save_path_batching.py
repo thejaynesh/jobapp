@@ -49,7 +49,7 @@ def test_the_chunk_answers_as_the_per_posting_lookups_do(db):
         dict(source="simplify", url=LEVER.format(uid[0]), source_job_id=None,
              dedupe_hash="h0"),
         dict(source="simplify", url=LEVER.format(uid[1]), source_job_id=None, dedupe_hash="h1"),
-        dict(source="greenhouse", url="https://new/1", source_job_id="77", dedupe_hash="h2"),
+        dict(source="greenhouse", url="https://elsewhere/moved/1", source_job_id="77", dedupe_hash="h2"),
         dict(source="lever", url="https://new/2", source_job_id=None,
              dedupe_hash=compute_dedupe_hash("Hashco", "Engineer", "Remote")),
         dict(source="lever", url=LEVER.format(uid[4]), source_job_id=None, dedupe_hash="h4"),
@@ -64,7 +64,7 @@ def test_the_chunk_answers_as_the_per_posting_lookups_do(db):
         assert known.existing_id(*args, apply_url=p.get("apply_url")) == (one.id if one else None), p
         assert known.archived(*args, apply_url=p.get("apply_url")) \
             == was_archived(db, *args, apply_url=p.get("apply_url")), p
-    assert {by_url.id, by_canonical.id, by_id.id, by_hash.id} <= set(
+    assert {by_url.id, by_canonical.id, by_id.id} <= set(
         known.existing_id(p["source"], p["url"], p["source_job_id"], p["dedupe_hash"],
                           apply_url=p.get("apply_url")) for p in postings)
 

@@ -1,7 +1,7 @@
 """
 Payloads a site sent that we made nothing of, and what we learned to read them.
 
-Two tables, one idea. `HarvestSample` is evidence — a bounded copy of a
+`HarvestSample` is evidence — a bounded copy of a
 response the shape-based walker could not turn into jobs. `HarvestRecipe` is
 the conclusion — a declarative description of where that site keeps its jobs,
 interpreted by our own code.
@@ -15,7 +15,7 @@ those, and six months later nobody can say why it broke.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,6 +40,12 @@ class HarvestSample(Base):
     )
     host: Mapped[str] = mapped_column(String(160), nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    page_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    endpoint_key: Mapped[str] = mapped_column(String(300), nullable=False, default="", server_default="")
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shape_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    observations: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Truncated on the way in. These are responses to a logged-in session and
     # can carry names and account identifiers, so this is a diagnostic sample
@@ -78,10 +84,9 @@ class HarvestRecipe(Base):
     __tablename__ = "harvest_recipes"
     __table_args__ = (
         Index("ix_harvest_recipes_host", "host"),
-        # At most one active recipe per host: two would make extraction depend
-        # on row order, which fails looking exactly like the site changing.
+        # Search and detail endpoints retain independent validated readers.
         Index(
-            "uq_harvest_recipes_active", "host",
+            "uq_harvest_recipes_active", "host", "endpoint_key",
             unique=True, postgresql_where=text("status = 'active'"),
         ),
     )
@@ -90,6 +95,7 @@ class HarvestRecipe(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     host: Mapped[str] = mapped_column(String(160), nullable=False)
+    endpoint_key: Mapped[str] = mapped_column(String(300), nullable=False, default="", server_default="")
     recipe: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed")
 
@@ -110,3 +116,22 @@ class HarvestRecipe(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<HarvestRecipe {self.host} {self.status}>"
+
+
+class HarvestLearningState(Base):
+    """A bounded, retryable learning attempt for one observed response endpoint."""
+
+    __tablename__ = "harvest_learning_states"
+    __table_args__ = (UniqueConstraint("host", "endpoint_key", name="uq_harvest_learning_endpoint"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    host: Mapped[str] = mapped_column(String(160), nullable=False)
+    endpoint_key: Mapped[str] = mapped_column(String(300), nullable=False, default="", server_default="")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="waiting")
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

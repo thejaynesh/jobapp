@@ -48,7 +48,7 @@ class ArchivedJob(Base):
     url: Mapped[str] = mapped_column(String, nullable=False)
     # Unique for the same reason it is unique on `jobs`: two rows claiming the
     # same posting would make "have we seen this?" ambiguous.
-    dedupe_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    dedupe_hash: Mapped[str] = mapped_column(String, nullable=False)
 
     # ---- What makes the row readable by a human ---------------------------
     title: Mapped[str] = mapped_column(String, nullable=False)

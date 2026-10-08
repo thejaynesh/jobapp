@@ -691,6 +691,9 @@ def bulk_action(
         done += 1
     db.commit()
     logger.info("jobs bulk %s: %d done, %d skipped", action, done, skipped)
+    if action == "star":
+        from app.tasks.opportunities import queue_shortlist
+        queue_shortlist([job.id for job in jobs], decision_profile)
     return HTMLResponse(
         f'<span class="text-xs">{done} done{f", {skipped} skipped" if skipped else ""}</span>',
         headers={"HX-Refresh": "true"},
@@ -877,11 +880,8 @@ def toggle_favourite(job_id: uuid.UUID, request: Request, db: Session = Depends(
     """
     Star or unstar a job.
 
-    Deliberately touches nothing but the two favourite columns. Starring a job
-    the matcher filtered out is a common and meaningful thing to do — it is the
-    clearest disagreement with a verdict there is — and silently re-opening it
-    would turn a bookmark into an override the user did not ask for. The one
-    consequence is that a favourite is never archived.
+    Preserve the match verdict. Optional preparation researches the posting and
+    contacts without sending anything; the settings page controls that work.
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
@@ -892,6 +892,9 @@ def toggle_favourite(job_id: uuid.UUID, request: Request, db: Session = Depends(
     from app.services.application_history import record_decision
     record_decision(db, job, _profile_data(db), "yes" if job.favourite else "reset")
     db.commit()
+    if job.favourite:
+        from app.tasks.opportunities import queue_shortlist
+        queue_shortlist([job.id], _profile_data(db))
 
     return templates.TemplateResponse(
         "jobs/partials/job_card.html",

@@ -97,6 +97,9 @@ class CrawlRecipe(Base):
     best_pages: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         # See the migration: now() is transaction-start time, which makes
         # "newest first" arbitrary among rows written together.

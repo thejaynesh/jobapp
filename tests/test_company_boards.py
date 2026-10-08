@@ -184,13 +184,13 @@ class TestFetchResults:
         assert board.total_job_count == 10
         assert board.last_fetched_at is not None
 
-    def test_a_silent_board_is_retired_eventually(self, db):
+    def test_a_silent_board_stays_available_for_future_probes(self, db):
         board = _board(db, slug="silent")
         for _ in range(DEFAULT_MAX_EMPTY_CYCLES):
             record_fetch_results(db, "greenhouse", ["silent"], {})
         db.flush()
         db.refresh(board)
-        assert board.active is False
+        assert board.active is True
 
     def test_one_good_cycle_resets_the_streak(self, db):
         board = _board(db, slug="seasonal")
@@ -258,18 +258,20 @@ class TestRetiredBoards:
         result = retired_boards(db)
         assert [b.slug for b in result] == ["dead"]
 
-    def test_a_board_retired_by_silence_shows_up(self, db):
-        """End to end: going quiet is what makes a board visible as broken."""
+    def test_a_board_repeatedly_confirmed_missing_shows_up(self, db):
+        """A missing endpoint is evidence; quiet hiring is not."""
         from app.services.company_boards import retired_boards
+        from app.services.sources.base import BoardResult
         _board(db, slug="wentquiet")
         for _ in range(DEFAULT_MAX_EMPTY_CYCLES):
-            record_fetch_results(db, "greenhouse", ["wentquiet"], {})
+            record_fetch_results(db, "greenhouse", ["wentquiet"], {}, results={
+                "wentquiet": BoardResult(error="404", error_category="not_found")})
         db.flush()
 
         result = retired_boards(db)
         assert len(result) == 1
         assert result[0].slug == "wentquiet"
-        assert result[0].consecutive_empty == DEFAULT_MAX_EMPTY_CYCLES
+        assert result[0].consecutive_failures == DEFAULT_MAX_EMPTY_CYCLES
 
     def test_empty_when_everything_is_healthy(self, db):
         from app.services.company_boards import retired_boards

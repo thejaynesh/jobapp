@@ -34,6 +34,8 @@
   </p>
   {% endif %}
 
+  {% include "runs/partials/collection.html" %}
+
   {# ---- Pipeline ------------------------------------------------------- #}
   {# Where work is between "fetched" and "documents written". Each stage
      already reported itself — a log line, a status column, a Redis list —
@@ -240,6 +242,34 @@
           <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">no token</span>
         {% endif %}
       </div>
+
+      {% if system.agent %}
+        <section id="source-learning" class="mt-3 pt-3 border-t border-gray-100">
+          <h3 class="text-sm font-medium text-gray-700">Add or learn a job source</h3>
+          <p class="text-xs text-gray-500 mt-1">Paste a careers page or a search showing jobs. Known boards join collection; unfamiliar pages are captured by your connected browser and learned from real examples.</p>
+          <form hx-post="/runs/source-learning" hx-target="#system-panel" hx-swap="outerHTML" class="flex flex-wrap gap-2 mt-2">
+            <input type="url" name="url" required placeholder="https://company.example/careers" aria-label="Job source URL" class="flex-1 min-w-52 border rounded px-2 py-1 text-xs">
+            <button class="border border-blue-600 text-blue-600 rounded px-2 py-1 text-xs">Add source</button>
+          </form>
+          {% for state in system.agent.learning or [] %}
+          <div class="mt-2 p-2 border rounded text-xs">
+            <p class="font-medium">{{ state.host }} <span class="text-gray-400">{{ state.endpoint_key if state.endpoint_key != '@source' else '' }}</span> · {{ state.status | replace('_', ' ') }}</p>
+            <p class="text-gray-600 mt-1">{{ state.note or 'Waiting for captured examples.' }}</p>
+            {% if state.next_retry_at %}<p class="text-gray-400">Next retry {{ state.next_retry_at | when('%b %d, %H:%M') }}</p>{% endif %}
+            {% if state.result and state.result.get('replay') %}<p class="text-green-700">Recovered {{ state.result.replay.inserted }} new jobs; improved {{ state.result.replay.merged }}.</p>{% endif %}
+            {% if state.endpoint_key == '@source' and state.result and state.result.get('url') %}
+            <a href="{{ state.result.url }}" target="_blank" rel="noopener" class="text-blue-600">Open source</a>
+            {% if state.status != 'board_registered' %}
+            <form hx-post="/runs/source-learning" hx-target="#system-panel" hx-swap="outerHTML" class="inline ml-2"><input type="hidden" name="url" value="{{ state.result.url }}"><button class="text-blue-600">Retry capture</button></form>
+            {% if state.status != 'paused' %}<form hx-post="/runs/source-learning/pause" hx-target="#system-panel" hx-swap="outerHTML" class="inline ml-2"><input type="hidden" name="host" value="{{ state.host }}"><button class="text-gray-500">Pause capture</button></form>{% endif %}
+            {% endif %}
+            {% elif state.status not in ('queued', 'learning') %}
+            <form hx-post="/runs/source-learning/retry" hx-target="#system-panel" hx-swap="outerHTML" class="mt-1"><input type="hidden" name="host" value="{{ state.host }}"><input type="hidden" name="endpoint" value="{{ state.endpoint_key }}"><button class="text-blue-600">Retry learning</button></form>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </section>
+      {% endif %}
 
       {% if not system.agent %}
         <p class="text-xs text-gray-400">Queue unavailable.</p>
@@ -509,6 +539,8 @@
           </table>
         </div>
         {% endif %}
+
+
 
         {# Hosts whose payloads the generic reader made nothing of. It takes any
            object with a title, a company and an id, so what lands here either

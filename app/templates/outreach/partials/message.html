@@ -1,5 +1,7 @@
 {# One drafted or sent message. `msg` is an OutreachMessage. #}
 {% set spec = {'email': 'Email', 'linkedin': 'LinkedIn', 'linkedin_note': 'Connection note', 'twitter': 'X DM'} %}
+{% set has_history = msg.sent_at or msg.status in ('sent', 'replied', 'bounced') %}
+{% set delivery_claimed = msg.send_state in ('sending', 'uncertain') or msg.delivery_uncertain %}
 <div class="border border-gray-100 rounded p-3 bg-gray-50/60">
 
   <div class="flex flex-wrap items-center gap-2 mb-2">
@@ -31,8 +33,9 @@
   {% if msg.send_error %}
   <p class="text-xs text-red-600 mb-2">{{ msg.send_error }}</p>
   {% endif %}
+  {% if msg.followup_error %}<p class="text-xs text-red-600 mb-2">Follow-up draft: {{ msg.followup_error }} · attempt {{ msg.followup_attempts }}. {% if msg.follow_up_due_at %}A bounded retry is scheduled.{% else %}Review and draft again when ready.{% endif %}</p>{% endif %}
 
-  {% if msg.status in ('sent', 'replied') %}
+  {% if has_history or delivery_claimed %}
     {% if msg.subject %}<p class="text-xs font-medium text-gray-700 mb-1">{{ msg.subject }}</p>{% endif %}
     <div class="text-xs text-gray-700 whitespace-pre-wrap leading-relaxed">{{ msg.body }}</div>
   {% else %}
@@ -71,14 +74,14 @@
     </a>
     {% endif %}
 
-    {% if msg.status not in ('sent', 'replied') %}
+    {% if not has_history %}
       {% if msg.status in ('draft', 'approved') and msg.channel == 'email' and not send_blocked and msg.contact.email %}
       <form id="msg-send-{{ msg.id }}" hx-post="/outreach/messages/{{ msg.id }}/send"
             hx-include="#msg-editor-{{ msg.id }}"
             hx-disabled-elt="#msg-editor-{{ msg.id }} input, #msg-editor-{{ msg.id }} textarea, #msg-send-{{ msg.id }} button"
             hx-target="#outreach-panel" hx-swap="outerHTML"
             hx-confirm="{% if msg.delivery_uncertain %}Have you checked your Sent folder? Retrying may send a duplicate email to {{ msg.contact.email }}.{% else %}Send this email to {{ msg.contact.email }}?{% endif %}">
-        <input type="hidden" name="save_draft" value="true">
+        <input type="hidden" name="save_draft" value="{{ 'false' if delivery_claimed else 'true' }}">
         {% if msg.delivery_uncertain %}<input type="hidden" name="retry_uncertain" value="true">{% endif %}
         {% if msg.contact.email_status == 'guessed' %}
         <input type="hidden" name="allow_guessed" value="true">
@@ -100,6 +103,7 @@
         </button>
       </form>
 
+      {% if not delivery_claimed %}
       <form hx-post="/outreach/messages/{{ msg.id }}/regenerate" hx-target="#outreach-panel" hx-swap="outerHTML"
             {% if msg.edited %}hx-confirm="Your edits will be replaced. Rewrite it?"{% endif %}>
         <button type="submit" class="text-xs text-gray-600 hover:text-blue-600">Rewrite</button>
@@ -108,6 +112,7 @@
       <form hx-post="/outreach/messages/{{ msg.id }}/delete" hx-target="#outreach-panel" hx-swap="outerHTML">
         <button type="submit" class="text-xs text-gray-400 hover:text-red-600">Delete</button>
       </form>
+      {% endif %}
     {% else %}
       <form hx-post="/outreach/messages/{{ msg.id }}/status" hx-target="#outreach-panel" hx-swap="outerHTML">
         <input type="hidden" name="status" value="replied">

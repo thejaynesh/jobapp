@@ -9,8 +9,6 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
 
 from app.models.company_board import CompanyBoard
 from app.services import company_boards, fetch_lock
@@ -19,14 +17,10 @@ from app.services.sources.listing_fallbacks import extract_listing_jobs
 
 
 @pytest.fixture
-def board_db():
-    # These selection/probe queries need only the board table. SQLite keeps
-    # this bounded regression suite independent of a running Postgres server.
-    engine = create_engine("sqlite://")
-    CompanyBoard.__table__.create(engine)
-    with Session(engine) as session:
-        yield session
-    engine.dispose()
+def board_db(db):
+    # Board selection now also consults employer watches and persisted JSONB
+    # pagination cursors, so exercise the actual PostgreSQL schema.
+    return db
 
 
 def board(db, slug, ats="greenhouse", **kwargs):

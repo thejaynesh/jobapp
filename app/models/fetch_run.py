@@ -46,6 +46,7 @@ class FetchRun(Base):
     merged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stale: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     # What the cycle actually searched for — worth keeping, since query
     # expansion changes it and that changes everything downstream.
@@ -93,6 +94,7 @@ class FetchSourceRun(Base):
     merged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     stale: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     errors: Mapped[list] = mapped_column(ARRAY(String), default=list)
 

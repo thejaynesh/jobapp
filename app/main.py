@@ -30,6 +30,7 @@ from app.routers.funnel import router as funnel_router
 from app.routers.agent import router as agent_router
 from app.routers.activity import router as activity_router
 from app.routers.intelligence import router as intelligence_router
+from app.routers.companies import router as companies_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -232,6 +233,7 @@ app.include_router(funnel_router)
 app.include_router(llm_router)
 app.include_router(activity_router)
 app.include_router(intelligence_router)
+app.include_router(companies_router)
 
 
 def _is_htmx(request: Request) -> bool:

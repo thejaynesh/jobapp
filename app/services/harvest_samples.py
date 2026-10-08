@@ -25,9 +25,13 @@ machine, which is why keeping it at all is reasonable — but it is also why it
 is trimmed hard, capped, and expired rather than accumulated.
 """
 
+import hashlib
 import json
 import logging
+import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlsplit
 
 from app.config import live
 
@@ -55,7 +59,59 @@ def _ttl_days() -> int:
     return max(1, int(getattr(live(), "HARVEST_SAMPLE_TTL_DAYS", 30)))
 
 
-def trim(value, depth: int = 0):
+def endpoint_key(url: str) -> str:
+    """Stable response route, without searches, tokens or page counters."""
+    try:
+        parsed = urlsplit(url or "")
+        if not parsed.hostname:
+            return ""
+        path = re.sub(r"/[0-9a-f]{8}-[0-9a-f-]{20,}(?=/|$)|/\d+(?=/|$)", "/:id", parsed.path, flags=re.I)
+        operation = parse_qs(parsed.query).get("operationName", [""])[0]
+        suffix = "?operation=" + operation if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,79}", operation) else ""
+        return ((path or "/").rstrip("/") or "/")[:210] + suffix
+    except ValueError:
+        return ""
+
+
+def fingerprint(payload) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def shape_hash(payload) -> str:
+    def shape(node, depth=0):
+        if depth > MAX_DEPTH:
+            return "deep"
+        if isinstance(node, dict):
+            return {str(k): shape(v, depth + 1) for k, v in sorted(node.items(), key=lambda p: str(p[0]))[:60]}
+        if isinstance(node, list):
+            return sorted({json.dumps(shape(v, depth + 1), sort_keys=True) for v in node[:MAX_ARRAY_ITEMS]})
+        return type(node).__name__
+    return fingerprint(shape(payload))
+
+
+def sample_endpoint(sample) -> str:
+    return sample.endpoint_key or endpoint_key(sample.source_url or "")
+
+
+_REFERENCE_KEY = re.compile(r"(?:^id$|id$|urn$|ref$|reference$)", re.I)
+
+
+def _references(value) -> set[str]:
+    """Identifiers retained job examples may need to join to company records."""
+    found = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, (str, int)) and (_REFERENCE_KEY.search(str(key)) or str(item).startswith("urn:")):
+                found.add(str(item))
+            elif isinstance(item, (dict, list)):
+                found.update(_references(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_references(item))
+    return found
+
+
+def trim(value, depth: int = 0, references: set[str] | None = None):
     """
     A structurally smaller copy of `value`, still valid JSON.
 
@@ -67,9 +123,21 @@ def trim(value, depth: int = 0):
     if depth > MAX_DEPTH:
         return "…"
     if isinstance(value, dict):
-        return {str(k)[:80]: trim(v, depth + 1) for k, v in list(value.items())[:60]}
+        return {str(k)[:80]: trim(v, depth + 1, references) for k, v in list(value.items())[:60]}
     if isinstance(value, list):
-        return [trim(item, depth + 1) for item in value[:MAX_ARRAY_ITEMS]]
+        selected = value[:MAX_ARRAY_ITEMS]
+        if references:
+            # A normalized company table need not list the retained jobs'
+            # employers first. Keep matching identities as bounded extras.
+            for item in value[MAX_ARRAY_ITEMS:]:
+                if len(selected) >= MAX_ARRAY_ITEMS * 2:
+                    break
+                if isinstance(item, dict) and any(
+                    _REFERENCE_KEY.search(str(key)) and isinstance(ident, (str, int)) and str(ident) in references
+                    for key, ident in item.items()
+                ):
+                    selected.append(item)
+        return [trim(item, depth + 1, references) for item in selected]
     if isinstance(value, str):
         return value[:600]
     return value
@@ -78,6 +146,11 @@ def trim(value, depth: int = 0):
 def _fits(payload) -> dict | list:
     """Trim until it is under the byte cap, or give up and keep the shape."""
     trimmed = trim(payload)
+    for _ in range(2):
+        references = _references(trimmed)
+        if not references:
+            break
+        trimmed = trim(payload, references=references)
     try:
         if len(json.dumps(trimmed)) <= MAX_SAMPLE_BYTES:
             return trimmed
@@ -95,9 +168,9 @@ def _fits(payload) -> dict | list:
 
 
 def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
-           note: str = "", probe: bool = False) -> bool:
+           note: str = "", probe: bool = False, page_url: str = "") -> bool:
     """
-    Keep this payload, displacing a slighter one if the host is full.
+    Keep bounded, distinct evidence across response endpoints and shapes.
 
     Displacing, and that is the change that matters. This used to refuse
     outright once a host held five, which made the *first five payloads a host
@@ -120,11 +193,9 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
     JobRight came to be represented by five copies of a video SDK's config
     while its own listings were turned away for lack of room.
 
-    Between two of the same kind, size decides, and on this question it is a
-    good tiebreak: a job list is kilobytes and a telemetry ping is bytes. It is
-    a heuristic and it is allowed to be — the cost of getting it wrong is one
-    diagnostic sample, and the cost of the old rule was every board whose jobs
-    arrive late.
+    Endpoint and shape diversity precede size. Keep an older working example
+    while admitting new unread examples, so a repair can be checked against
+    what previously worked. Identical responses refresh one observation.
 
     Never raises. This runs inside the harvest, and a sample that could not be
     written must not cost the jobs that were.
@@ -137,10 +208,10 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
     try:
         from app.models.harvest_recipe import HarvestSample
 
-        try:
-            size = len(json.dumps(payload))
-        except (TypeError, ValueError):
-            size = 0
+        size = len(json.dumps(payload, default=str))
+        digest, shape = fingerprint(payload), shape_hash(payload)
+        endpoint = endpoint_key(source_url)
+        now = datetime.now(timezone.utc)
 
         held = (
             db.query(HarvestSample)
@@ -149,19 +220,51 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
             .order_by(HarvestSample.probe.desc(), HarvestSample.bytes.asc())
             .all()
         )
+        duplicate = next((row for row in held if row.fingerprint == digest
+                          and sample_endpoint(row) == endpoint and bool(row.probe) == bool(probe)), None)
+        if duplicate:
+            duplicate.last_seen_at = now
+            duplicate.observations = (duplicate.observations or 1) + 1
+            if found:
+                duplicate.found = max(duplicate.found or 0, int(found))
+                duplicate.note = str(note)[:200] or duplicate.note
+            db.flush()
+            return False
         if len(held) >= _keep():
-            weakest = held[0]
-            # A sample that already yielded jobs is evidence that worked, and
-            # is never displaced by one nobody has read yet.
-            if weakest.found:
-                return False
+            from app.services.harvest_recipes import jobbiness
+            groups = Counter((sample_endpoint(row), row.shape_hash or shape_hash(row.payload)) for row in held)
+            incoming_group = (endpoint, shape)
+            diverse = incoming_group not in groups
+            protected = {}
+            for row in sorted(held, key=lambda r: r.created_at or now):
+                group = (sample_endpoint(row), row.shape_hash or shape_hash(row.payload))
+                if row.found:
+                    protected.setdefault(group, row.id)
+            candidates = [row for row in held if row.id not in protected.values()]
+            replacing_healthy = not candidates
+            if not candidates:
+                # Healthy snapshots must not make a redesign uncapturable.
+                if found or not jobbiness(payload):
+                    return False
+                candidates = [min(held, key=lambda r: r.last_seen_at or r.created_at or now)]
+            # A new endpoint/shape displaces redundant evidence first. Within
+            # one shape retain old and new examples so a repair has a baseline.
+            weakest = min(candidates, key=lambda row: (
+                not row.probe, bool(jobbiness(row.payload)),
+                groups[(sample_endpoint(row), row.shape_hash or shape_hash(row.payload))] <= 1,
+                row.bytes, row.created_at or now))
+            useful = bool(jobbiness(payload))
+            redundant = groups[(sample_endpoint(weakest), weakest.shape_hash or shape_hash(weakest.payload))] > 1
+            # Prefer to preserve working evidence, without letting a full
+            # set of healthy snapshots suppress every later redesign.
             if bool(weakest.probe) != bool(probe):
                 # Different kinds, so the kind decides and size does not come
                 # into it: a forward displaces a probe however small, and a
                 # probe never displaces a forward however large.
                 if probe:
                     return False
-            elif weakest.bytes >= size:
+            elif not (useful and (replacing_healthy or diverse and redundant or groups[incoming_group] >= 2
+                                   or not jobbiness(weakest.payload))) and weakest.bytes >= size:
                 return False
             db.delete(weakest)
             db.flush()
@@ -175,6 +278,9 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
         db.add(HarvestSample(
             host=str(host)[:160],
             source_url=(str(source_url)[:1000] or None),
+            page_url=str(page_url)[:1000] or None,
+            endpoint_key=endpoint, fingerprint=digest, shape_hash=shape,
+            last_seen_at=now, observations=1,
             payload=_fits(payload),
             bytes=size,
             found=int(found or 0),
@@ -196,17 +302,19 @@ def record(db, host: str, payload, *, source_url: str = "", found: int = 0,
         return False
 
 
-def for_host(db, host: str, limit: int = 5) -> list:
+def for_host(db, host: str, limit: int = 5, endpoint: str | None = None) -> list:
     """This host's samples, newest first — what a recipe is proposed from."""
     from app.models.harvest_recipe import HarvestSample
 
-    return (
+    rows = (
         db.query(HarvestSample)
         .filter(HarvestSample.host == host)
         .order_by(HarvestSample.created_at.desc())
-        .limit(max(1, limit))
         .all()
     )
+    if endpoint is not None:
+        rows = [row for row in rows if sample_endpoint(row) == endpoint]
+    return rows[:max(1, limit)]
 
 
 def _related(host: str, domains: set[str]) -> bool:
@@ -268,6 +376,7 @@ def hosts(db, all_hosts: bool = False) -> list[dict]:
             func.count(HarvestSample.id),
             func.max(HarvestSample.created_at),
         )
+        .filter(HarvestSample.found == 0)
         .group_by(HarvestSample.host)
         .order_by(func.count(HarvestSample.id).desc())
         .all()
@@ -277,11 +386,15 @@ def hosts(db, all_hosts: bool = False) -> list[dict]:
         db.query(HarvestRecipe.host).filter(HarvestRecipe.status == "active").all()
     }
     ours = worth_learning(db)
+    # Unknown first-party job evidence is the onboarding case, not telemetry.
+    from app.services.harvest_recipes import jobbiness
+    evidenced = {row.host for row in db.query(HarvestSample).filter(HarvestSample.found == 0).all()
+                 if jobbiness(row.payload) and not row.probe}
     return [
         {"host": host, "samples": int(count or 0), "last_seen": last,
          "has_recipe": host in active}
         for host, count, last in rows
-        if all_hosts or _related(host, ours)
+        if all_hosts or _related(host, ours) or host in evidenced
     ]
 
 
@@ -310,6 +423,10 @@ def drop_unrelated(db) -> int:
     ours = worth_learning(db)
     stored = {row[0] for row in db.query(HarvestSample.host).distinct().all()}
     junk = [host for host in stored if not _related(host, ours)]
+    from app.services.harvest_recipes import jobbiness
+    evidence = {row.host for row in db.query(HarvestSample).filter(HarvestSample.host.in_(junk)).all()
+                if not row.probe and jobbiness(row.payload)}
+    junk = [host for host in junk if host not in evidence]
     if not junk:
         return 0
     removed = (
@@ -327,7 +444,7 @@ def drop_unrelated(db) -> int:
 
 
 def clear(db, host: str) -> int:
-    """Drop a host's samples. Called once a recipe for it is working."""
+    """Explicitly forget a host's captured samples."""
     from app.models.harvest_recipe import HarvestSample
 
     removed = (
@@ -342,11 +459,12 @@ def clear(db, host: str) -> int:
 def prune(db) -> int:
     """Expire samples nobody turned into a recipe. Returns how many went."""
     from app.models.harvest_recipe import HarvestSample
+    from sqlalchemy import func
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=_ttl_days())
     removed = (
         db.query(HarvestSample)
-        .filter(HarvestSample.created_at < cutoff)
+        .filter(func.coalesce(HarvestSample.last_seen_at, HarvestSample.created_at) < cutoff)
         .delete(synchronize_session=False)
     )
     db.commit()

@@ -84,6 +84,26 @@ def set_status(db, application, status: ApplicationStatus, now: datetime | None 
         application_history.record_status(db, application, status, profile_data or {}, now)
     application.status = status
     application.status_changed_at = now
+    if status in (ApplicationStatus.rejected, ApplicationStatus.withdrawn):
+        # A closed role must not keep producing cold chasers. Relationship
+        # notes and user-authored actions remain useful after the role ends.
+        from app.models.outreach import OutreachMessage
+        affected = db.query(OutreachMessage).filter(OutreachMessage.application_id == application.id).all()
+        conversations = {}
+        for message in affected:
+            message.follow_up_due_at = None
+            if message.kind in {"initial", "follow_up", "referral_request"} and message.status in {"draft", "approved"}:
+                message.status = "skipped"
+            if message.conversation:
+                conversations[message.conversation.id] = message.conversation
+        for conversation in conversations.values():
+            other_active = any(m.application_id != application.id and m.application is not None
+                and m.application.status not in (ApplicationStatus.rejected, ApplicationStatus.withdrawn)
+                and m.status in {"draft", "approved", "sent"} for m in conversation.messages)
+            if not other_active and conversation.next_action in {"Await reply", "Review draft", "Follow-up draft failed; review and retry"}:
+                conversation.next_action, conversation.next_action_due_at = None, None
+                if conversation.status in {"ready", "awaiting_reply"}:
+                    conversation.status = "researching"
     if status == ApplicationStatus.not_applied:
         application.applied_at = None
         application.sent_resume_id = None

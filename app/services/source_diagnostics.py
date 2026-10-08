@@ -111,6 +111,8 @@ def classify(entry: dict) -> str:
     """
     if not entry.get("enabled", True):
         return "disabled"
+    if entry.get("incomplete"):
+        return "partial"
     count, errors = entry.get("count", 0), entry.get("errors") or []
     if count and errors:
         return "partial"

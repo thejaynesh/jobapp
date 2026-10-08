@@ -329,12 +329,11 @@ class TestHarvestBeyondLinkedIn:
         assert source_for_url("https://www.glassdoor.com/job-listing/1") == "glassdoor_harvest"
         assert source_for_url("https://acme.wd5.myworkdayjobs.com/x") == "workday_harvest"
 
-    def test_an_unknown_host_falls_back_rather_than_inventing_a_source(self):
-        # A wrong-but-known bucket is easier to notice than a new source name
-        # appearing silently.
+    def test_an_unknown_host_does_not_claim_to_be_linkedin(self):
+        # A newly added source must not inherit LinkedIn's URL reconstruction.
         from app.services.harvest import source_for_url
 
-        assert source_for_url("https://example.com/jobs") == "linkedin_harvest"
+        assert source_for_url("https://example.com/jobs") == "browser_harvest"
         assert source_for_url("") == "linkedin_harvest"
 
     def test_an_indeed_payload_is_read_with_indeed_field_names(self):
@@ -807,6 +806,12 @@ class TestASecondSourceFillsInTheGaps:
     matched to the row, and thrown away.
     """
 
+    def existing(self, db, **extra):
+        # The employer link proves these are cross-posts of one requisition.
+        # Matching company/title/location alone must never prove identity.
+        return make_job(db, source_urls=["https://www.linkedin.com/jobs/view/3901234567/",
+            "https://boards.greenhouse.io/embed/job_app?token=9"], **extra)
+
     def card(self, **extra):
         return [{
             "title": "Senior Backend Engineer",
@@ -817,20 +822,20 @@ class TestASecondSourceFillsInTheGaps:
         }]
 
     def test_a_cross_post_s_employment_type_reaches_the_row(self, db):
-        make_job(db, description="short")
+        self.existing(db, description="short")
         counts = harvest.save_harvested_jobs(
             db, self.card(employment_type="contract"))
         assert counts["merged"] == 1
         assert db.query(Job).one().employment_type == "contract"
 
     def test_a_cross_post_s_apply_link_reaches_the_row(self, db):
-        make_job(db, description="short")
+        self.existing(db, description="short")
         harvest.save_harvested_jobs(
             db, self.card(apply_url="https://acme.com/apply/9"))
         assert db.query(Job).one().apply_url == "https://acme.com/apply/9"
 
     def test_remote_is_gained_from_whichever_source_says_so(self, db):
-        make_job(db, description="short", is_remote=False)
+        self.existing(db, description="short", is_remote=False)
         harvest.save_harvested_jobs(db, self.card(is_remote=True))
         assert db.query(Job).one().is_remote is True
 
@@ -838,7 +843,7 @@ class TestASecondSourceFillsInTheGaps:
         # "Merged" is the number the harvest panel calls "enriched". Counting
         # every sighting as one made a source look like it was contributing
         # when it was repeating itself.
-        job = make_job(db, description="A long stored description. " * 20)
+        job = self.existing(db, description="A long stored description. " * 20)
         counts = harvest.save_harvested_jobs(db, self.card(url=job.url))
         assert counts["merged"] == 0
         assert counts["skipped"] == 1
@@ -846,19 +851,19 @@ class TestASecondSourceFillsInTheGaps:
     def test_a_listing_at_a_new_address_counts_even_with_no_new_fields(self, db):
         # The URL itself is the gain: `source_urls` is how the overlay finds
         # this row from whichever posting the user happens to be looking at.
-        make_job(db, description="A long stored description. " * 20)
+        self.existing(db, description="A long stored description. " * 20)
         counts = harvest.save_harvested_jobs(db, self.card())
         assert counts["merged"] == 1
         assert "https://boards.greenhouse.io/acme/jobs/9" in (
             db.query(Job).one().source_urls)
 
     def test_the_same_posting_again_still_counts_a_fuller_description(self, db):
-        make_job(db, description="short")
+        self.existing(db, description="short")
         counts = harvest.save_harvested_jobs(db, harvest.extract_jobs(VOYAGER))
         assert counts["merged"] == 1
 
     def test_an_edited_field_survives_a_cross_post(self, db):
-        job = make_job(db, description="short", employment_type="full_time")
+        job = self.existing(db, description="short", employment_type="full_time")
         job.manual_fields = ["employment_type"]
         db.commit()
         harvest.save_harvested_jobs(db, self.card(employment_type="internship"))
@@ -1004,8 +1009,8 @@ class TestTwoRequestsStoringTheSamePostingAtOnce:
     The harvest is the one ingest path that runs concurrently — the extension
     forwards a payload per response and several land at once across uvicorn
     workers. So a posting can be inserted by *another* request in the window
-    between this one's SELECT and its INSERT, and the unique constraint on
-    `dedupe_hash` fires for a job neither request did anything wrong with.
+    between this one's SELECT and its INSERT. Exact posting identity must
+    absorb the collision without charging the valid posting as invalid.
 
     It was being counted as `invalid` and dropped, five times a minute once the
     reader started recognising Greenhouse's cards.
@@ -1028,10 +1033,10 @@ class TestTwoRequestsStoringTheSamePostingAtOnce:
         from app.services.deduplication import compute_dedupe_hash
 
         rival = Job(
-            source="greenhouse", source_job_id="other",
-            source_urls=["https://example.com/rival"],
+            source=card["source"], source_job_id=card["source_job_id"],
+            source_urls=[card["url"]],
             title=card["title"], company=card["company"],
-            location=card["location"], url="https://example.com/rival",
+            location=card["location"], url=card["url"],
             status=JobStatus.new, fetched_at=datetime.now(timezone.utc),
             dedupe_hash=compute_dedupe_hash(
                 card["company"], card["title"], card["location"]),
@@ -1043,21 +1048,24 @@ class TestTwoRequestsStoringTheSamePostingAtOnce:
     def test_the_loser_of_the_race_merges_instead_of_being_dropped(self, db):
         from unittest.mock import patch
 
-        from app.services import harvest
+        from app.services import collection_ingest, harvest
+        from sqlalchemy.exc import IntegrityError
 
         card = self._card()
         self._rival(db, card)
 
-        real_find = harvest.find_existing_job
+        real_find = collection_ingest.find_existing_job
         calls = {"n": 0}
 
         def racing_find(*args, **kwargs):
-            # The first look misses, which is what a SELECT does when the other
-            # request's INSERT has not committed yet. The second sees it.
+            # Simulate the concurrent conflict at the shared store seam;
+            # a retry sees the winner by exact URL/source identity.
             calls["n"] += 1
-            return None if calls["n"] == 1 else real_find(*args, **kwargs)
+            if calls["n"] == 1:
+                raise IntegrityError("concurrent insert", None, RuntimeError("unique posting"))
+            return real_find(*args, **kwargs)
 
-        with patch.object(harvest, "find_existing_job", side_effect=racing_find):
+        with patch.object(collection_ingest, "find_existing_job", side_effect=racing_find):
             counts = harvest.save_harvested_jobs(db, [card])
 
         assert counts["invalid"] == 0, "the job was not dropped"
@@ -1070,12 +1078,14 @@ class TestTwoRequestsStoringTheSamePostingAtOnce:
         # and the count has to stay honest about the one that was lost.
         from unittest.mock import patch
 
-        from app.services import harvest
+        from app.services import collection_ingest, harvest
+        from sqlalchemy.exc import IntegrityError
 
         card = self._card()
         self._rival(db, card)
 
-        with patch.object(harvest, "find_existing_job", return_value=None):
+        with patch.object(collection_ingest, "find_existing_job",
+                          side_effect=IntegrityError("concurrent insert", None, RuntimeError("unique posting"))):
             counts = harvest.save_harvested_jobs(db, [card])
 
         assert counts["invalid"] == 1

@@ -174,8 +174,7 @@ class TestDeduplicationStillWorks:
             "unrelated-hash",
         ) is True
 
-    def test_an_archived_content_hash_is_recognised(self, db):
-        # Layer 3: a cross-post from a different board entirely.
+    def test_a_new_requisition_is_not_suppressed_by_an_archived_title(self, db):
         _job(db, company="Acme", title="Backend Engineer", location="Remote")
         archive.archive(db)
         # The cosmetic variations the hash is normalized to absorb: a company
@@ -184,7 +183,7 @@ class TestDeduplicationStillWorks:
                                    "Remote")
 
         assert was_archived(db, "lever", "https://elsewhere/1", "other-id",
-                            same) is True
+                            same) is False
 
     def test_an_unrelated_posting_is_not(self, db):
         _job(db)
@@ -230,22 +229,20 @@ class TestDeduplicationStillWorks:
         assert counts["inserted"] == 1
 
     def test_the_fetcher_guards_the_same_way(self, db):
-        # The fetcher's insert loop is inline in `fetch_and_save_jobs`, so it
-        # is checked here by construction rather than driven end to end: both
-        # paths call the one guard with the same arguments, and a future
-        # edit that drops it from one of them fails this.
-        import inspect
-
-        from app.services import harvest, job_fetcher
-
-        for module in (job_fetcher, harvest):
-            source = inspect.getsource(module)
-            assert ("was_archived(db, source, url, source_job_id, dedupe_hash, "
-                    "apply_url=apply_url)") in source, module.__name__
+        from app.services.job_fetcher import fetch_and_save_jobs
+        from tests.test_fetch_task import _make_profile_with_targets, _patch_adapters, _std_job
+        job = _job(db)
+        url, identifier = job.url, job.source_job_id
+        archive.archive(db)
+        _make_profile_with_targets(db)
+        with _patch_adapters([_std_job(source="greenhouse", url=url, source_job_id=identifier)]):
+            counts = fetch_and_save_jobs(db)
+        assert counts["inserted"] == 0
+        assert db.query(Job).count() == 0
 
 
 class TestATombstoneThatAlreadyExists:
-    def test_the_live_row_goes_without_a_second_tombstone(self, db):
+    def test_distinct_postings_keep_distinct_tombstones_despite_shared_hash(self, db):
         # `dedupe_hash` is unique on both tables, so an insert that collided
         # would fail the constraint and roll back the whole batch — losing
         # every job in the pass, not just the awkward one.
@@ -266,10 +263,10 @@ class TestATombstoneThatAlreadyExists:
 
         result = archive.archive(db)
 
-        assert result["archived"] == 0
-        assert result["skipped"] == 1
+        assert result["archived"] == 1
+        assert result["skipped"] == 0
         assert db.query(Job).count() == 0
-        assert db.query(ArchivedJob).count() == 1
+        assert db.query(ArchivedJob).count() == 2
 
 
 class TestReporting:

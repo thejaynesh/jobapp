@@ -939,41 +939,11 @@ def select_targets(db, profile_data: dict | None = None, limit: int = 200) -> li
 # ---------------------------------------------------------------------------
 
 def _rehash(db, job: Job) -> None:
-    """
-    Keep the dedupe hash agreeing with the location we just learned.
-
-    The hash is sha256 of the normalized company, title and location, and
-    everything that asks "have we seen this posting?" asks by that hash. Filling
-    in a location the ingest path never had leaves the stored hash computed from
-    a blank one, so the next sighting of the same job — which now *does* carry
-    the location — hashes differently, misses, and is stored a second time.
-
-    The one thing that can go wrong is that the recomputed hash is already
-    taken, which means this posting and that one are the same job under a
-    different address. That is a merge, not a rename, and doing it here in the
-    middle of an enrichment pass is the wrong place for it: the location is
-    still worth keeping, so it is written and the old hash left standing. The
-    row is then a duplicate rather than a lost job, which is the right way round
-    under "find every job", and the next hash-recompute migration folds it.
-    """
-    from sqlalchemy import select
-
+    """Refresh the similarity fingerprint; different requisitions may share it."""
     from app.services.deduplication import compute_dedupe_hash
 
-    fresh = compute_dedupe_hash(job.company or "", job.title or "", job.location or "",
-                                job.url or "")
-    if fresh == job.dedupe_hash:
-        return
-    taken = db.execute(
-        select(Job.id).where(Job.dedupe_hash == fresh, Job.id != job.id).limit(1)
-    ).first()
-    if taken:
-        logger.info(
-            "enrichment: job %s learned a location that collides with job %s; "
-            "keeping both and leaving the hash alone", job.id, taken[0],
-        )
-        return
-    job.dedupe_hash = fresh
+    job.dedupe_hash = compute_dedupe_hash(job.company or "", job.title or "",
+                                         job.location or "", job.url or "")
 
 
 def apply_extraction(db, job: Job, found: Extraction) -> dict:

@@ -474,14 +474,14 @@ def _learn_to_crawl(db, url: str, result: dict, pages_done: int,
     batches = int(result.get("batches") or 0)
 
     try:
-        with db.begin_nested():
+        if crawl_recipes.active_for(db, host):
+            # Grade before opening a savepoint: note_outcome commits, and a
+            # retired reader must capture the current layout below.
+            crawl_recipes.note_outcome(db, host, pages_done, batches)
             if crawl_recipes.active_for(db, host):
-                # Both measures, because which one means "it worked" depends on
-                # the recipe's mode: a scroll recipe can never report more than
-                # one page however far down the list it got.
-                crawl_recipes.note_outcome(db, host, pages_done, batches)
                 return
 
+        with db.begin_nested():
             navigation = result.get("navigation")
             if isinstance(navigation, dict) and navigation.get("controls") is not None:
                 crawl_recipes.record(
@@ -575,6 +575,8 @@ def _ingest_browse_page(db, task: BrowserTask) -> None:
 
     _learn_to_crawl(db, payload.get("url") or "", result, pages_done,
                     reached_the_board=bool(signed_in) and not blocked)
+    from app.services import source_learning
+    source_learning.note_visit(db, task)
 
     asked_pages = browse_plan._max_pages(payload.get("url") or "", db)
     if asked_pages > 1 and pages_done <= 1 and not rate_limited:

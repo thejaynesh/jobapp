@@ -109,7 +109,7 @@ def normalize_location(location: str) -> str:
 def compute_dedupe_hash(company: str, title: str, location: str,
                         identity: str = "") -> str:
     """
-    The cross-source identity of a posting: who, what and where.
+    A similarity fingerprint for duplicate candidates, never a unique identity.
 
     Without a company there is no "who", and the hash degenerates to title and
     location — so every blank-company "Software Engineer / Remote" from every
@@ -185,6 +185,10 @@ def find_existing_job(
     dedupe_hash: str,
     apply_url: str | None = None,
 ) -> Job | None:
+    from app.models.source_listing import SourceListing
+    listing = db.get(SourceListing, posting_identity.listing_key(source, url, source_job_id))
+    if listing is not None and listing.job_id is not None:
+        return db.get(Job, listing.job_id)
     # Layer 1: URL already in source_urls array — as written, or as the ATS
     # posting's canonical address (`posting_identity`), which is what joins
     # SimplifyJobs' `…/apply` link to the board's own posting URL.
@@ -197,21 +201,25 @@ def find_existing_job(
     # per fetched posting. `&&` (`.overlap`) is one of the operators the GIN
     # index answers, so asking for any of a posting's addresses is one lookup.
     ids = ids_by_address(db, Job, posting_identity.urls(url, apply_url))
-    if ids:
-        return db.get(Job, ids[0])
+    for row_id in ids:
+        candidate = db.get(Job, row_id)
+        if candidate is not None and not posting_identity.conflicts(candidate, source, url, source_job_id, apply_url):
+            return candidate
 
     # Layer 2: source + source_job_id match
     if source_job_id:
-        job = (
+        candidates = (
             db.query(Job)
             .filter(Job.source == source, Job.source_job_id == source_job_id)
-            .first()
+            .all()
         )
-        if job:
-            return job
+        for job in candidates:
+            if posting_identity.board_scope(source, job.url) == posting_identity.board_scope(source, url):
+                return job
 
-    # Layer 3: content hash (cross-posted job)
-    return db.query(Job).filter(Job.dedupe_hash == dedupe_hash).first()
+    # The content fingerprint is only a duplicate *candidate*. Requisitions
+    # and reopened positions regularly share it; never silently merge them.
+    return None
 
 
 def was_archived(
@@ -237,6 +245,11 @@ def was_archived(
     answer to "have we seen this?" here is yes, and the caller skips it.
     """
     from app.models.archived_job import ArchivedJob
+    from app.models.source_listing import SourceListing
+
+    listing = db.get(SourceListing, posting_identity.listing_key(source, url, source_job_id))
+    if listing is not None and listing.job_id is None:
+        return True
 
     # `.contains`, not `.any` — see `find_existing_job`. Migration 0028 added a
     # GIN index here for exactly this lookup and `.any()` could never use it.
@@ -244,16 +257,15 @@ def was_archived(
         return True
 
     if source_job_id:
-        query = db.query(ArchivedJob.id).filter(
+        query = db.query(ArchivedJob).filter(
             ArchivedJob.source == source,
             ArchivedJob.source_job_id == source_job_id,
         )
-        if query.first():
-            return True
+        for job in query:
+            if posting_identity.board_scope(source, job.url) == posting_identity.board_scope(source, url):
+                return True
 
-    return db.query(ArchivedJob.id).filter(
-        ArchivedJob.dedupe_hash == dedupe_hash
-    ).first() is not None
+    return False
 
 
 class KnownPostings:
@@ -264,8 +276,8 @@ class KnownPostings:
     and three more to rule out a tombstone — for every posting of every cycle,
     most of them postings it had seen the cycle before. This asks each of the
     six questions once for the whole chunk, through the same indexes, and
-    answers the postings from memory in the same layer order: address, then
-    the source's own id, then the content hash.
+    answers from exact listing identity, canonical address and scoped source
+    ID. Content fingerprints never silently turn a candidate into a merge.
 
     It learns as the chunk is saved (`remember`): a posting stored or merged
     earlier in the chunk is found by a later sighting of it, as it was when
@@ -276,6 +288,7 @@ class KnownPostings:
         from sqlalchemy import tuple_
 
         from app.models.archived_job import ArchivedJob
+        from app.models.source_listing import SourceListing
 
         addresses: set[str] = set()
         pairs: set[tuple[str, str]] = set()
@@ -288,51 +301,55 @@ class KnownPostings:
                 hashes.add(p["dedupe_hash"])
 
         self.by_address: dict[str, object] = {}
-        self.by_pair: dict[tuple[str, str], object] = {}
+        self.by_pair: dict[tuple[str, str, str], object] = {}
         self.by_hash: dict[str, object] = {}
         self.archived_addresses: set[str] = set()
-        self.archived_pairs: set[tuple[str, str]] = set()
+        self.archived_pairs: set[tuple[str, str, str]] = set()
         self.archived_hashes: set[str] = set()
         # The matched rows, when the caller loads them; held to keep them in
         # the session's (weak) identity map for the chunk.
         self.rows: list = []
+        listing_keys = [posting_identity.listing_key(p["source"], p["url"], p.get("source_job_id")) for p in postings]
+        self.by_listing = dict(db.query(SourceListing.identity_key, SourceListing.job_id).filter(
+            SourceListing.identity_key.in_(listing_keys))) if listing_keys else {}
 
         pair_list, hash_list = list(pairs), list(hashes)
         if addresses:
             self.by_address.update(ids_by_each_address(db, Job, addresses))
             self.archived_addresses.update(ids_by_each_address(db, ArchivedJob, addresses))
         if pair_list:
-            for job_id, source, source_job_id in db.query(
-                    Job.id, Job.source, Job.source_job_id).filter(
+            for job_id, source, source_job_id, url in db.query(
+                    Job.id, Job.source, Job.source_job_id, Job.url).filter(
                     tuple_(Job.source, Job.source_job_id).in_(pair_list)):
-                self.by_pair.setdefault((source, source_job_id), job_id)
+                self.by_pair.setdefault((source, source_job_id, posting_identity.board_scope(source, url)), job_id)
             self.archived_pairs.update(
-                (source, source_job_id) for source, source_job_id in db.query(
-                    ArchivedJob.source, ArchivedJob.source_job_id).filter(
+                (source, source_job_id, posting_identity.board_scope(source, url)) for source, source_job_id, url in db.query(
+                    ArchivedJob.source, ArchivedJob.source_job_id, ArchivedJob.url).filter(
                     tuple_(ArchivedJob.source, ArchivedJob.source_job_id).in_(pair_list)))
-        if hash_list:
-            self.by_hash.update(db.query(Job.dedupe_hash, Job.id).filter(
-                Job.dedupe_hash.in_(hash_list)))
-            self.archived_hashes.update(h for (h,) in db.query(ArchivedJob.dedupe_hash).filter(
-                ArchivedJob.dedupe_hash.in_(hash_list)))
 
     def existing_id(self, source: str, url: str, source_job_id, dedupe_hash: str,
                     apply_url: str | None = None):
         """The id `find_existing_job` would have returned the row of, or None."""
+        listed = self.by_listing.get(posting_identity.listing_key(source, url, source_job_id))
+        if listed is not None:
+            return listed
         for address in posting_identity.urls(url, apply_url):
             if address in self.by_address:
                 return self.by_address[address]
-        if source_job_id and (source, str(source_job_id)) in self.by_pair:
-            return self.by_pair[(source, str(source_job_id))]
-        return self.by_hash.get(dedupe_hash)
+        pair = (source, str(source_job_id), posting_identity.board_scope(source, url))
+        if source_job_id and pair in self.by_pair:
+            return self.by_pair[pair]
+        return None
 
     def archived(self, source: str, url: str, source_job_id, dedupe_hash: str,
                  apply_url: str | None = None) -> bool:
         """What `was_archived` would have said."""
         return (
+            (posting_identity.listing_key(source, url, source_job_id) in self.by_listing
+             and self.by_listing[posting_identity.listing_key(source, url, source_job_id)] is None)
+            or
             any(a in self.archived_addresses for a in posting_identity.urls(url, apply_url))
-            or bool(source_job_id and (source, str(source_job_id)) in self.archived_pairs)
-            or dedupe_hash in self.archived_hashes
+            or bool(source_job_id and (source, str(source_job_id), posting_identity.board_scope(source, url)) in self.archived_pairs)
         )
 
     def remember(self, job: Job) -> None:
@@ -340,9 +357,13 @@ class KnownPostings:
         for address in job.source_urls or ():
             self.by_address.setdefault(address, job.id)
         if job.source_job_id:
-            self.by_pair.setdefault((job.source, str(job.source_job_id)), job.id)
+            self.by_pair.setdefault((job.source, str(job.source_job_id), posting_identity.board_scope(job.source, job.url)), job.id)
         if job.dedupe_hash:
             self.by_hash.setdefault(job.dedupe_hash, job.id)
+
+    def remember_sighting(self, job: Job, data: dict) -> None:
+        self.remember(job)
+        self.by_listing[posting_identity.listing_key(data["source"], data["url"], data.get("source_job_id"))] = job.id
 
 
 def find_duplicate_application_job(db: Session, job) -> Job | None:

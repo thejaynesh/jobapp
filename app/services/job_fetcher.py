@@ -132,7 +132,7 @@ VANISHED_NOTE = "no longer listed on its board"
 # Board adapters that take the cycle's role queries.
 _SEARCHED_BOARDS = frozenset({
     "oracle", "successfactors", "phenom", "eightfold", "jibe", "rippling", "taleo",
-    "avature",
+    "avature", "smartrecruiters",
 })
 
 
@@ -176,6 +176,9 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
         entry["errors"].append(error)
     # When this source last reported, for its duration (see `_run_all_adapters`).
     entry["_last"] = time.monotonic()
+    if jobs and any(not j.get("_ingested_outcome") for j in jobs):
+        from app.services.sources.base import BoardResult, publish_batch
+        publish_batch(source, "", BoardResult(jobs=jobs, error=error))
 
 
 def _run_combos(
@@ -1110,7 +1113,7 @@ def _sources_not_due(db: Session, cfg) -> dict[str, str]:
     return waiting
 
 
-_LOOKUP_CHUNK = 500
+_LOOKUP_CHUNK = _COMMIT_EVERY
 
 
 def _known_postings(db: Session, chunk: list[dict]):
@@ -1140,11 +1143,11 @@ def _known_postings(db: Session, chunk: list[dict]):
         with db.begin_nested():
             known = KnownPostings(db, postings)
             ids = set(known.by_address.values()) | set(known.by_pair.values()) \
-                | set(known.by_hash.values())
+                | {job_id for job_id in known.by_listing.values() if job_id is not None}
             # Held on `known` for the chunk: the session keeps only weak
             # references, and an unreferenced row would be read again by `db.get`.
             known.rows = db.query(Job).filter(
-                Job.id.in_(list(ids))).all() if ids else []
+                Job.id.in_(list(ids))).order_by(Job.id).with_for_update().all() if ids else []
         return known
     except Exception as exc:
         logger.warning("job_fetcher: batched lookup failed, asking per posting: %s", exc)
@@ -1306,6 +1309,7 @@ def _update_board_registry(
     resolve_stats,
     updated_data: dict,
     career_links: dict | None = None,
+    board_results: dict | None = None,
 ) -> dict:
     """
     Fold this cycle's findings back into the board registry:
@@ -1329,6 +1333,7 @@ def _update_board_registry(
 
     # Per-board yield, so next cycle's budget favours boards that produce.
     for ats, attempted in (ats_slugs or {}).items():
+        attempted = [slug for slug in attempted if not getattr((board_results or {}).get((ats, slug)), "recorded", False)]
         if not attempted:
             continue
         # Only for ATSes this run actually polled. A run that did not touch
@@ -1345,6 +1350,7 @@ def _update_board_registry(
             db, ats, attempted, per_slug,
             had_errors=bool((source_stats.get(ats) or {}).get("errors")),
             max_empty_cycles=live().ATS_BOARD_MAX_EMPTY_CYCLES,
+            results={slug: value for (source, slug), value in (board_results or {}).items() if source == ats and slug},
         )
 
     return stats
@@ -1416,8 +1422,43 @@ def _sniff_career_sites(db: Session, raw_jobs: list[dict], resolve_stats,
     return new_boards
 
 
-def fetch_and_save_jobs(
+def fetch_and_save_jobs(db: Session, only: set[str] | None = None, group: str | None = None) -> dict:
+    """Durable run lifecycle, including failures before the first job arrives."""
+    from app.models.fetch_run import FetchRun
+    # Called under the group's lease. Prior unfinished runs lost their worker;
+    # their completed batches remain committed and pending batches replay below.
+    db.query(FetchRun).filter(FetchRun.group == (group or "all"), FetchRun.status == "running").update(
+        {FetchRun.status: "partial", FetchRun.finished_at: datetime.now(timezone.utc),
+         FetchRun.error: "Worker interrupted; completed batches preserved, pending batches replayed on recovery"},
+        synchronize_session=False)
+    run = FetchRun(started_at=datetime.now(timezone.utc), group=group or "all", status="running")
+    db.add(run)
+    db.commit()
+    run_id = run.id
+    try:
+        result = _fetch_and_save_jobs(db, only, group, run_id=run_id)
+        db.expire_all()
+        saved = db.get(FetchRun, run_id)
+        if saved and saved.finished_at is None:
+            saved.finished_at = datetime.now(timezone.utc)
+            saved.status = "failed" if result.get("error") else "ok"
+            saved.error = result.get("error")
+            db.commit()
+        return result
+    except Exception as exc:
+        db.rollback()
+        saved = db.get(FetchRun, run_id)
+        if saved:
+            saved.finished_at = datetime.now(timezone.utc)
+            saved.status = "failed"
+            saved.error = str(exc)[:2000]
+            db.commit()
+        raise
+
+
+def _fetch_and_save_jobs(
     db: Session, only: set[str] | None = None, group: str | None = None,
+    run_id=None,
 ) -> dict:
     """
     Run one fetch cycle.
@@ -1526,7 +1567,7 @@ def fetch_and_save_jobs(
         try:
             from app.services.ats_validation import validate_configured_slugs
             validated_configured, slug_cache, slug_report = validate_configured_slugs(
-                configured_ats_slugs(settings), profile.data.get("ats_slug_cache")
+                configured_ats_slugs(cfg), profile.data.get("ats_slug_cache")
             )
         except Exception as exc:
             logger.error("job_fetcher: slug validation failed: %s", exc)
@@ -1592,21 +1633,38 @@ def fetch_and_save_jobs(
         # The overlay (`cfg`, above) is `settings` with the profile's UI
         # overrides on top, so every adapter picks them up through the `cfg.X`
         # reads it already does.
-        from app.services.sources.base import collect_board_sightings, known_descriptions
+        from app.services.sources.base import collect_board_sightings, known_descriptions, collection_results
+        from app.services.collection_batches import sink_for, replay
+        from app.models.company_board import CompanyBoard
+        counts["replayed"] = replay(db, max_age_days=cfg.MAX_JOB_AGE_DAYS)
+        cursors = {(b.ats, b.slug): b.fetch_cursor for b in db.query(CompanyBoard)
+                   .filter(CompanyBoard.fetch_cursor.isnot(None))}
         described = {}
+        versions = {}
         if getattr(cfg, "GREENHOUSE_DESCRIPTIONS_ON_DEMAND", True) and \
                 (only is None or "greenhouse" in only):
             described["greenhouse"] = _described_ids(db, "greenhouse")
+            from app.models.source_listing import SourceListing
+            versions["greenhouse"] = {r.external_id: r.upstream_updated_at for r in db.query(SourceListing)
+                                      .filter(SourceListing.source == "greenhouse")}
         with SourceLogCapture() as capture, collect_board_sightings() as sightings, \
-                known_descriptions(described):
+                known_descriptions(described, versions), collection_results(
+                    sink_for(db, run_id, max_age_days=cfg.MAX_JOB_AGE_DAYS), cursors) as board_results:
             raw_jobs, source_stats = _run_all_adapters(
                 queries, locations, cfg, ats_slugs, loc_prefs, only,
                 resting=_resting_sources(db), manual=manual,
                 not_due=_sources_not_due(db, cfg),
             )
         merge_into_stats(source_stats, capture.messages, capture.errors)
+        for (source, board), result in board_results.items():
+            if board and (result.complete is False or result.error):
+                entry = source_stats.setdefault(source, {"count": 0, "errors": [], "enabled": True})
+                entry["incomplete"] = entry.get("incomplete", 0) + 1
+                if result.error and result.error not in entry["errors"]:
+                    entry["errors"].append(result.error[:300])
     except Exception as exc:
         logger.error("job_fetcher: _run_all_adapters failed: %s", exc)
+        counts["error"] = str(exc)
         return counts
 
     counts["fetched"] = len(raw_jobs)
@@ -1655,6 +1713,7 @@ def fetch_and_save_jobs(
                 board_stats = _update_board_registry(
                     db, raw_jobs, ats_slugs, source_stats,
                     resolve_stats, updated_data, career_links=harvested_links,
+                    board_results=board_results,
                 )
             db.commit()
             from app.services.company_boards import summary
@@ -1740,177 +1799,43 @@ def fetch_and_save_jobs(
         )
         entry[outcome] += 1
 
-    known: KnownPostings | None = None
+    from app.services.collection_ingest import store as store_posting
+    linked_jobs = []
+    known = None
     for index, job_data in enumerate(raw_jobs):
-        # Which of the next chunk's postings are already stored, or archived,
-        # asked of the database once for the chunk (`KnownPostings`) rather
-        # than once per posting per question. A chunk that cannot be looked up
-        # this way falls back to asking posting by posting.
-        if index % _LOOKUP_CHUNK == 0:
-            known = _known_postings(db, raw_jobs[index:index + _LOOKUP_CHUNK])
-        # Each job gets its own savepoint: a flush that fails (a constraint
-        # violation, an over-long value) used to leave the session in a failed
-        # state, so every job after it errored and the final commit lost the
-        # whole cycle's inserts. Rolling back to the savepoint discards only
-        # the bad row.
         try:
-            with db.begin_nested():
-                url = job_data.get("url", "")
-                source = job_data.get("source", "")
-                source_job_id = job_data.get("source_job_id")
-                company = job_data.get("company", "")
-                title = job_data.get("title", "")
-                location = job_data.get("location", "")
-                # Canonicalized here rather than in each adapter, so a new
-                # source cannot reintroduce HTML soup by forgetting to.
-                description = clean_description(job_data.get("description", ""))
-                apply_url = job_data.get("apply_url")
-
-                # Skip stale postings: they're usually filled or unresponsive, and
-                # they waste LLM matching calls and applications.
-                posted_at = _parse_posted_at(job_data.get("posted_at"))
-                if posted_at and max_age_days and (now - posted_at).days > max_age_days:
-                    counts["stale"] += 1
-                    _tally(source, "stale")
-                    continue
-
-                dedupe_hash = compute_dedupe_hash(company, title, location, url)
-                if known is not None:
-                    existing_id = known.existing_id(source, url, source_job_id, dedupe_hash,
-                                                    apply_url=apply_url)
-                    existing = db.get(Job, existing_id) if existing_id is not None else None
-                else:
-                    existing = find_existing_job(db, source, url, source_job_id, dedupe_hash,
-                                                 apply_url=apply_url)
-
-                if existing is not None:
-                    # What this sighting knows, in the shape the shared merge
-                    # reads. `posted_at` goes in already parsed: the merge
-                    # refuses to guess at a date string, because a mis-parsed
-                    # one silently ages a job out of the pipeline.
-                    sighting = {**job_data, **_adapter_details(job_data),
-                                "apply_url": apply_url, "posted_at": posted_at}
-
-                    # Worth taking even on a job we are otherwise skipping. The
-                    # pay this listing states and the last one didn't is the
-                    # same windfall whether the two are cross-posts or the same
-                    # posting fetched twice.
-                    #
-                    # This used to be an inline backfill that checked only for
-                    # null — and so was the one automatic writer in the codebase
-                    # that did not consult `manual_fields`. A user who cleared a
-                    # wrong salary by hand had it refilled on the next cycle.
-                    improved = enrich_from(existing, sighting)
-
-                    same_row = url in existing.source_urls or (
-                        source_job_id
-                        and existing.source_job_id == source_job_id
-                        and existing.source == source
-                    )
-                    _note_board(existing, job_data)
-                    note_source(existing, source)
-                    if same_row:
-                        # The same posting again, not a cross-post: its URL is
-                        # already ours, so only the contents can be news —
-                        # and its canonical address, on a row stored before
-                        # there were any.
-                        note_addresses(existing, url, apply_url)
-                        if merge_description(existing, description):
-                            improved.append("description")
-                    else:
-                        improved += merge_or_skip(db, existing, url, description,
-                                                  layer=3, data=sighting)
-                    if known is not None:
-                        known.remember(existing)
-
-                    # "Merged" means the row got better, not that it was
-                    # touched. It is the number the panel reports as "enriched",
-                    # and counting every cross-post as one made a source look
-                    # like it was contributing when it was repeating itself.
-                    outcome = "merged" if improved else "skipped"
-                    counts[outcome] += 1
-                    _tally(source, outcome)
-                    continue
-
-                # Seen, judged and retired months ago. Without this check
-                # archiving would be worse than useless: every archived posting
-                # still on its board comes back as new on the next fetch, costs
-                # a scoring call, reaches the same verdict, and is archived
-                # again sixty days later. There is nothing to merge into — the
-                # description is what archiving discarded — so it is a skip.
-                if (known.archived(source, url, source_job_id, dedupe_hash, apply_url=apply_url)
-                        if known is not None else
-                        was_archived(db, source, url, source_job_id, dedupe_hash, apply_url=apply_url)):
-                    counts["skipped"] += 1
-                    _tally(source, "skipped")
-                    continue
-
-                new_job = Job(
-                    source=source,
-                    source_job_id=source_job_id,
-                    # The URL as written, and the posting's canonical address
-                    # (`posting_identity`) that the next source's link to it
-                    # will share.
-                    source_urls=posting_identity.urls(url, apply_url),
-                    seen_by=[source],
-                    title=title,
-                    company=company,
-                    location=location,
-                    is_remote=job_data.get("is_remote", False),
-                    url=url,
-                    apply_url=apply_url,
-                    # NULL, not "", when cleaning found nothing worth keeping:
-                    # "no description" is a state the pipeline acts on (the
-                    # filter names it, enrichment goes looking for one), and it
-                    # should read the same whether the source sent an empty
-                    # field or a Cloudflare page.
-                    description=description or None,
-                    # No default. `"mid"` was never a finding — it was the
-                    # fallback — and writing it made "the posting says
-                    # mid-level" and "no adapter told us" the same value, which
-                    # is the bug `base.parse_experience_level` and
-                    # `harvest._normalize` both document at length as fixed.
-                    # This ingest path was the one they missed.
-                    experience_level=job_data.get("experience_level"),
-                    status=JobStatus.new,
-                    fetched_at=now,
-                    posted_at=posted_at,
-                    dedupe_hash=dedupe_hash,
-                    board=_board_key(job_data),
-                    **_adapter_details(job_data),
-                )
-                db.add(new_job)
-                db.flush()
-                if known is not None:
-                    known.remember(new_job)
-                counts["inserted"] += 1
-                _tally(source, "inserted")
-
+            if (job_data.get("_ingested_outcome")
+                    and job_data.get("apply_url") == job_data.get("_ingested_apply_url")
+                    and job_data.get("company") == job_data.get("_ingested_company")):
+                outcome = job_data["_ingested_outcome"]
+                counts[outcome] += 1
+                _tally(job_data.get("source") or "unknown", outcome)
+                continue
+            if known is None or index % _LOOKUP_CHUNK == 0:
+                known = _known_postings(db, raw_jobs[index:index + _LOOKUP_CHUNK])
+            outcome, job = store_posting(db, job_data, max_age_days=max_age_days, now=now, known=known)
+            # Incremental ingestion already committed this sighting. Preserve
+            # its original outcome while allowing resolved links/names to merge.
+            prior = job_data.get("_ingested_outcome")
+            if prior == "inserted" or (prior == "merged" and outcome == "skipped"):
+                outcome = prior
+            counts[outcome] += 1
+            _tally(job_data.get("source") or "unknown", outcome)
+            if job is not None:
+                linked_jobs.append(job)
         except Exception as exc:
-            # A job that fell out here is a job we fetched and then lost, and
-            # the four outcome counters above all sum to less than `fetched`
-            # without it — so the cycle reported "230 fetched, 229 accounted
-            # for" and nobody could say which one went missing or why. Name the
-            # posting, and count it, so a source that has started emitting rows
-            # we cannot store shows up as a number instead of a discrepancy.
             counts["dropped"] += 1
-            _tally(job_data.get("source", "") or "unknown", "dropped")
-            logger.error(
-                "job_fetcher: dropped a job from %s — %s at %s (%s): %s",
-                job_data.get("source") or "?", job_data.get("title") or "?",
-                job_data.get("company") or "?", job_data.get("url") or "?", exc,
-            )
-        finally:
-            # Includes merges and early-continue paths. Savepoints isolate bad
-            # rows but retain write locks until this outer transaction commits.
-            if (index + 1) % _COMMIT_EVERY == 0:
-                try:
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    # Do not report rolled-back rows as successfully saved, or
-                    # continue using identities for inserts that no longer exist.
-                    raise
+            _tally(job_data.get("source") or "unknown", "dropped")
+            logger.error("job_fetcher: dropped %s at %s (%s) from %s: %s",
+                         job_data.get("title"), job_data.get("company"), job_data.get("url"), job_data.get("source"), exc)
+        if (index + 1) % _COMMIT_EVERY == 0:
+            from app.services.company_identity import attach_known_companies
+            attach_known_companies(db, linked_jobs)
+            db.commit()
+            linked_jobs = []
+    if linked_jobs:
+        from app.services.company_identity import attach_known_companies
+        attach_known_companies(db, linked_jobs)
 
     # Postings their board no longer lists. After the loop, so a posting that
     # moved (a new id for the same role) has had its new row stored first.
@@ -1925,11 +1850,20 @@ def fetch_and_save_jobs(
     # mailbox poller and a settings save all write this same blob — the copy
     # taken above is stale, and writing it wholesale would revert them.
     try:
-        db.refresh(profile)
+        db.refresh(profile, with_for_update=True)
         fresh = copy.deepcopy(profile.data or {})
         for key in _FETCH_CYCLE_KEYS:
             if key in merged_data:
-                fresh[key] = merged_data[key]
+                incoming = merged_data[key]
+                if key == "discovered_ats":
+                    merged = dict(fresh.get(key) or {})
+                    for ats, slugs in (incoming or {}).items():
+                        merged[ats] = list(dict.fromkeys([*(merged.get(ats) or []), *slugs]))
+                    fresh[key] = merged
+                elif key.endswith("_cache") or key == "ats_slug_report":
+                    fresh[key] = {**(fresh.get(key) or {}), **(incoming or {})}
+                else:
+                    fresh[key] = incoming
         profile.data = fresh
     except Exception as exc:
         # The jobs are what this cycle is for. Losing the cycle's own bookkeeping
@@ -1982,6 +1916,7 @@ def fetch_and_save_jobs(
             board_stats=board_stats,
             backfill=backfill_report,
             group=group or "all",
+            run_id=run_id,
         )
         db.commit()
     except Exception as exc:
@@ -2004,10 +1939,15 @@ def _described_ids(db: Session, source: str) -> set[str]:
     from sqlalchemy import func
 
     from app.models.archived_job import ArchivedJob
+    from app.models.source_listing import SourceListing
+    from datetime import timedelta
+    fresh_since = datetime.now(timezone.utc) - timedelta(hours=live().SOURCE_DETAIL_REFRESH_HOURS)
 
     stored = (
         db.query(Job.source_job_id)
+        .join(SourceListing, SourceListing.job_id == Job.id)
         .filter(Job.source == source, Job.source_job_id.isnot(None),
+                SourceListing.source == source, SourceListing.details_checked_at >= fresh_since,
                 func.length(Job.description) >= _DESCRIBED_MIN_CHARS)
         .all()
     )
@@ -2064,6 +2004,30 @@ def _close_vanished(db: Session, sightings: dict) -> int:
         return 0
     now = datetime.now(timezone.utc)
     closed = 0
+    from app.models.source_listing import SourceListing
+    affected = set()
+    observed = set()
+    for (source, slug), ids in (sightings or {}).items():
+        if source not in FULL_FEED_BOARDS or not ids:
+            continue
+        for listing in db.query(SourceListing).filter(SourceListing.source == source,
+                SourceListing.board == slug, SourceListing.job_id.isnot(None)):
+            if listing.external_id not in ids:
+                listing.closed_at = now
+                affected.add(listing.job_id)
+            else:
+                listing.closed_at = None
+                listing.last_seen_at = now
+                observed.add(listing.job_id)
+    if observed:
+        db.query(Job).filter(Job.id.in_(observed)).update({Job.last_seen_at: now}, synchronize_session=False)
+    db.flush()
+    still_open = {row[0] for row in db.query(SourceListing.job_id).filter(
+        SourceListing.job_id.in_(affected), SourceListing.source.in_(FULL_FEED_BOARDS),
+        SourceListing.closed_at.is_(None))} if affected else set()
+    for job in db.query(Job).filter(Job.id.in_(affected - still_open), Job.closed_at.is_(None)):
+        job.closed_at, job.closed_note = now, VANISHED_NOTE
+        closed += 1
     boards = sorted(listed)
     for start in range(0, len(boards), 500):
         rows = (
@@ -2072,7 +2036,7 @@ def _close_vanished(db: Session, sightings: dict) -> int:
             .all()
         )
         for job in rows:
-            if job.source_job_id and job.source_job_id not in listed[job.board]:
+            if job.closed_at is None and job.id not in (still_open | observed) and job.source_job_id and job.source_job_id not in listed[job.board]:
                 job.closed_at = now
                 job.closed_note = VANISHED_NOTE
                 closed += 1

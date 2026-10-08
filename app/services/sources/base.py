@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable
+from dataclasses import dataclass, field
 from app.config import live
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,58 @@ def raise_if_blocked(resp, source: str) -> None:
 # that failed listed nothing and says nothing about what has closed.
 _SIGHTINGS: ContextVar = ContextVar("board_sightings", default=None)
 _sighting = threading.local()
+_RESULTS: ContextVar = ContextVar("board_results", default=None)
+_BATCH_SINK: ContextVar = ContextVar("collection_batch_sink", default=None)
+_CURSORS: ContextVar = ContextVar("collection_cursors", default=None)
+
+
+@dataclass
+class BoardResult:
+    """What was observed, including coverage we could not finish this pass."""
+    jobs: list[dict] = field(default_factory=list)
+    complete: bool | None = None
+    total: int | None = None
+    cursor: dict | None = None
+    error_category: str | None = None
+    error: str | None = None
+    inserted: int = 0
+    merged: int = 0
+    dropped: int = 0
+    recorded: bool = False
+
+    @property
+    def status(self):
+        if self.error:
+            return "partial" if self.jobs else "failed"
+        return "partial" if self.complete is False else "complete" if self.complete else "unknown"
+
+
+@contextmanager
+def collection_results(sink=None, cursors=None):
+    results = {}
+    tokens = (_RESULTS.set(results), _BATCH_SINK.set(sink), _CURSORS.set(cursors or {}))
+    try:
+        yield results
+    finally:
+        _RESULTS.reset(tokens[0])
+        _BATCH_SINK.reset(tokens[1])
+        _CURSORS.reset(tokens[2])
+
+
+def board_cursor(source: str, board: str) -> dict:
+    return dict((_CURSORS.get() or {}).get((source, board)) or {})
+
+
+def publish_batch(source: str, board: str, result: BoardResult) -> None:
+    store = _RESULTS.get()
+    if store is not None:
+        store[(source, board)] = result
+    sink = _BATCH_SINK.get()
+    if sink is not None:
+        try:
+            sink(source, board, result)
+        except Exception as exc:
+            logger.error("collection batch persistence failed for %s/%s: %s", source, board, exc)
 
 
 @contextmanager
@@ -94,15 +147,22 @@ def collect_board_sightings():
 # (`sources.greenhouse`). Loaded by the fetcher once per cycle; read by the
 # adapter in the calling thread, since it does not reach the board workers.
 _DESCRIBED: ContextVar = ContextVar("described_postings", default=None)
+_VERSIONS: ContextVar = ContextVar("described_versions", default=None)
 
 
 @contextmanager
-def known_descriptions(by_source: dict[str, set[str]] | None):
+def known_descriptions(by_source: dict[str, set[str]] | None, versions=None):
     token = _DESCRIBED.set(by_source or {})
+    version_token = _VERSIONS.set(versions or {})
     try:
         yield
     finally:
         _DESCRIBED.reset(token)
+        _VERSIONS.reset(version_token)
+
+
+def described_versions(source: str) -> dict:
+    return (_VERSIONS.get() or {}).get(source) or {}
 
 
 def described(source: str) -> frozenset[str]:
@@ -121,7 +181,7 @@ def saw_postings(ids) -> None:
 
 def fetch_boards_concurrently(
     slugs: list[str],
-    fetch_one: Callable[[str], list[dict]],
+    fetch_one: Callable[[str], list[dict] | BoardResult],
     label: str,
     workers: int = DEFAULT_BOARD_WORKERS,
 ) -> list[dict]:
@@ -143,16 +203,29 @@ def fetch_boards_concurrently(
     def _guarded(slug: str) -> list[dict]:
         _sighting.ids = None
         try:
-            jobs = fetch_one(slug) or []
+            answer = fetch_one(slug)
+            result = answer if isinstance(answer, BoardResult) else BoardResult(jobs=answer or [])
+            jobs = result.jobs
         except Exception as exc:
             board_logger.error("%s fetch error for slug '%s': %s", label, slug, exc)
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            category = "rate_limited" if status == 429 else "not_found" if status in (404, 410) else "unauthorized" if status in (401, 403) else "request_failed"
+            publish_batch(label.lower(), slug, BoardResult(error=str(exc), error_category=category))
             return []
         listed = getattr(_sighting, "ids", None)
-        if sightings is not None and listed is not None:
+        if result.complete is None and listed is not None:
+            result.complete = True
+        if result.total is None and listed is not None:
+            result.total = len(listed)
+        if sightings is not None and listed is not None and result.complete:
             with lock:
                 sightings[(label.lower(), slug)] = listed
         for job in jobs:
             job.setdefault("ats_slug", slug)
+            if listed is not None and str(job.get("source_job_id")) in listed:
+                job["_listed_open"] = True
+        publish_batch(label.lower(), slug, result)
         return jobs
 
     # Each board runs in a copy of this thread's context, so the cycle's

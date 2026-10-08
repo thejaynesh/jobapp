@@ -28,7 +28,7 @@
 
 // The sites harvesting can read. Shared with the options page rather than
 // written out in both — see sites.js for how to add one.
-import { HARVEST_SITES, siteForUrl } from "./sites.js";
+import { harvestSites, requireHarvestSite } from "./sites.js";
 import { OVERLAY_CORE, OVERLAY_FILES, OVERLAY_MORE, overlayMatches } from "./overlay_hosts.js";
 
 const ALARM_NAME = "jobapp-poll";
@@ -1259,18 +1259,7 @@ const HANDLERS = {
     // same logged-in session, no data for it — and it matters most in exactly
     // the case the checkbox exists for, which is a site that has warned you
     // about the volume.
-    const site = siteForUrl(url);
-    if (site) {
-      const stored = await chrome.storage.local.get({
-        [site.storageKey]: false,
-      });
-      if (!stored[site.storageKey]) {
-        throw new Error(
-          `${site.label} is turned off in the extension's options, so this ` +
-            `page was not opened.`,
-        );
-      }
-    }
+    await requireHarvestSite(url, { requireKnown: payload.purpose === "source_learning" });
 
     const settleMs = clampSeconds(payload.settle_seconds, 6, 1, 60) * 1000;
     const gapMs = clampSeconds(payload.gap_seconds, 20, 5, 300) * 1000;
@@ -1516,6 +1505,7 @@ async function canReachTheWeb() {
  * running on a site the options page shows as on.
  */
 async function enabledHarvestHosts() {
+  const HARVEST_SITES = await harvestSites();
   const keys = Object.fromEntries(
     HARVEST_SITES.map((site) => [site.storageKey, false]),
   );
@@ -1879,6 +1869,7 @@ async function registeredIds(ids) {
 }
 
 async function syncHarvestScripts() {
+  const HARVEST_SITES = await harvestSites();
   const keys = Object.fromEntries(
     HARVEST_SITES.map((site) => [site.storageKey, false]),
   );
@@ -2056,13 +2047,14 @@ function hostOf(url) {
   }
 }
 
-async function forwardHarvest(payload, sourceUrl, probe) {
+async function forwardHarvest(payload, sourceUrl, probe, pageUrl = "") {
   const config = await getConfig();
   if (!config.serverUrl || !config.token) return;
   try {
     const counts = await api("/api/agent/harvest", {
       payload,
       source_url: sourceUrl,
+      page_url: pageUrl,
       probe: Boolean(probe),
       // So the server files the event under the browser it came from. Several
       // can be running, and "harvest stopped working" is usually only true of
@@ -2264,7 +2256,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Only from a tab we injected into. A message with no tab came from an
     // extension page, which has no business offering harvested jobs.
     if (!sender.tab) return false;
-    forwardHarvest(message.payload, message.sourceUrl, message.probe);
+    forwardHarvest(message.payload, message.sourceUrl, message.probe, message.pageUrl || sender.tab?.url || "");
     return false;
   }
   if (message?.type === "harvest-stats") {

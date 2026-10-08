@@ -109,9 +109,11 @@ class TestFetchAndSaveJobs:
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
         j1 = _std_job(url="https://adzuna.com/1", source_job_id="AZ1",
-                      title="SWE", company="ACME", location="NYC")
+                      title="SWE", company="ACME", location="NYC",
+                      apply_url="https://boards.greenhouse.io/acme/jobs/123")
         j2 = _std_job(url="https://indeed.com/1", source_job_id=None,
-                      title="SWE", company="ACME", location="NYC", source="indeed")
+                      title="SWE", company="ACME", location="NYC", source="indeed",
+                      apply_url="https://boards.greenhouse.io/acme/jobs/123")
         with _patch_adapters([j1]):
             fetch_and_save_jobs(db)
         with _patch_adapters([j2]):
@@ -971,12 +973,12 @@ class TestTheSecondSourceContributesWhatTheFirstMissed:
 
     def cross_post(self, **extra):
         return _std_job(url="https://indeed.com/x", source_job_id=None,
-                        source="indeed", **extra)
+                        source="indeed", apply_url="https://boards.greenhouse.io/acme/jobs/123", **extra)
 
     def first(self, db, **extra):
         from app.services.job_fetcher import fetch_and_save_jobs
         _make_profile_with_targets(db)
-        with _patch_adapters([_std_job(url="https://adzuna.com/x", **extra)]):
+        with _patch_adapters([_std_job(url="https://adzuna.com/x", apply_url="https://boards.greenhouse.io/acme/jobs/123", **extra)]):
             fetch_and_save_jobs(db)
 
     def then(self, db, job):

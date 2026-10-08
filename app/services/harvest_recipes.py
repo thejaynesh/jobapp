@@ -48,6 +48,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +230,7 @@ def looks_like_a_name(value: str) -> bool:
 
 
 def validate(payload_samples: list, recipe: dict, source: str = "harvest",
-             page_urls: list | None = None) -> dict:
+             page_urls: list | None = None, baseline: dict | None = None) -> dict:
     """
     Try a recipe against real payloads. Returns what happened and a verdict.
 
@@ -249,6 +250,14 @@ def validate(payload_samples: list, recipe: dict, source: str = "harvest",
     urls = list(page_urls or []) + [""] * len(payload_samples)
     for payload, page_url in zip(payload_samples, urls):
         jobs = apply_recipe(payload, recipe, source, page_url=page_url or "")
+        if baseline:
+            previous = apply_recipe(payload, baseline, source, page_url=page_url or "")
+            if {j["url"] for j in previous} - {j["url"] for j in jobs}:
+                outcome["reason"] = "repair loses postings that the active reader still reads; keep the active reader"
+                return outcome
+        if any(urlsplit(job["url"]).scheme not in ("http", "https") or not urlsplit(job["url"]).hostname for job in jobs):
+            outcome["reason"] = "posting links must be absolute HTTP(S) URLs from the evidence"
+            return outcome
         if jobs:
             matched += 1
         total += len(jobs)
@@ -260,7 +269,7 @@ def validate(payload_samples: list, recipe: dict, source: str = "harvest",
     if not total:
         outcome["reason"] = "found no jobs in any sample"
         return outcome
-    if named < total * 0.6:
+    if named < total:
         # Most of what it called a company is an identifier — the exact bug
         # this is supposed to fix, arrived by a different route.
         outcome["reason"] = (
@@ -334,7 +343,7 @@ def _clean(raw: str) -> str:
 
 
 def propose(samples: list, host: str, profile_data: dict | None = None,
-            located: list | None = None, hint: str = "") -> dict:
+            located: list | None = None, hint: str = "", feedback: str = "") -> dict:
     """
     Ask a model how to read this host. Returns `{recipe, error}`.
 
@@ -352,6 +361,8 @@ def propose(samples: list, host: str, profile_data: dict | None = None,
             json.dumps(payload, indent=1)[:12000] for payload in payloads
         )
         prompt = _PROMPT.format(host=host, samples=rendered)
+        if feedback:
+            prompt += "\nA prior proposal failed validation: " + feedback[:1200] + "\nRepair that error using only the evidence."
         if located:
             where = ", ".join(f"{root}.{key}" if root else key for root, key in located[:6])
             prompt += (f"\n\nA job titled {hint!r} is on this page, and appears in "
@@ -380,8 +391,11 @@ def propose(samples: list, host: str, profile_data: dict | None = None,
         if isinstance(value, list) and value:
             fields[name] = [str(v) for v in value[:MAX_ALIASES]]
 
+    roots = parsed.get("roots") or []
+    if isinstance(roots, str):
+        roots = [roots]
     recipe = {
-        "roots": [str(r) for r in (parsed.get("roots") or [])[:MAX_ROOTS]],
+        "roots": [str(r) for r in roots[:MAX_ROOTS]],
         "fields": fields,
         "note": str(parsed.get("note") or "")[:300],
     }
@@ -401,30 +415,34 @@ def propose(samples: list, host: str, profile_data: dict | None = None,
 # Storing them
 # ---------------------------------------------------------------------------
 
-def active_for(db, host: str) -> dict | None:
+def active_for(db, host: str, source_url: str | None = None) -> dict | None:
     """The recipe in use for this host, or None. Never raises."""
     if not host:
         return None
     try:
         from app.models.harvest_recipe import HarvestRecipe
 
-        row = (
+        query = (
             db.query(HarvestRecipe)
             .filter(HarvestRecipe.host == host, HarvestRecipe.status == "active")
-            .first()
         )
+        if source_url is not None:
+            from app.services.harvest_samples import endpoint_key
+            endpoint = endpoint_key(source_url)
+            query = query.filter(HarvestRecipe.endpoint_key.in_(["", endpoint]))
+        row = query.order_by(HarvestRecipe.endpoint_key.desc(), HarvestRecipe.created_at.desc()).first()
         return row.recipe if row else None
     except Exception as exc:
         logger.warning("harvest_recipes: could not read a recipe for %s: %s", host, exc)
         return None
 
 
-def save(db, host: str, recipe: dict, outcome: dict, model: str = "") -> object:
+def save(db, host: str, recipe: dict, outcome: dict, model: str = "", endpoint: str = "") -> object:
     """
     Store a proposal, and activate it when validation was satisfied.
 
     Activating replaces whatever was active, in one transaction: the partial
-    unique index allows exactly one per host, so retiring the old one is not
+    unique index allows exactly one per endpoint, so retiring the old one is not
     tidiness, it is the only way the insert succeeds.
     """
     from app.models.harvest_recipe import HarvestRecipe
@@ -433,13 +451,15 @@ def save(db, host: str, recipe: dict, outcome: dict, model: str = "") -> object:
     if accepted:
         (
             db.query(HarvestRecipe)
-            .filter(HarvestRecipe.host == host, HarvestRecipe.status == "active")
+            .filter(HarvestRecipe.host == host, HarvestRecipe.status == "active",
+                    HarvestRecipe.endpoint_key == endpoint)
             .update({"status": "rejected", "note": "superseded"},
                     synchronize_session=False)
         )
 
     row = HarvestRecipe(
         host=str(host)[:160],
+        endpoint_key=endpoint,
         recipe=recipe,
         status="active" if accepted else "proposed",
         jobs_found=int(outcome.get("jobs") or 0),
@@ -668,8 +688,9 @@ def builtin_reads(sample, host: str = "", recipe: dict | None = None) -> int:
     """
     from app.services.harvest import extract_jobs, source_for_url
 
-    page = sample.source_url or ""
-    source = source_for_url(page or f"https://{host}/")
+    response_url = sample.source_url or ""
+    page = getattr(sample, "page_url", None) or response_url
+    source = source_for_url(response_url or f"https://{host}/")
     try:
         found = len(extract_jobs(sample.payload, source=source, page_url=page))
         if not found and recipe:
@@ -679,7 +700,8 @@ def builtin_reads(sample, host: str = "", recipe: dict | None = None) -> int:
         return 0
 
 
-def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> dict:
+def _learn_endpoint(db, host: str, profile_data: dict | None = None, hint: str = "",
+                    endpoint: str | None = None) -> dict:
     """
     Propose, validate and store in one go. What the button calls.
 
@@ -689,7 +711,7 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
     """
     from app.services import harvest_samples, model_roles
 
-    samples = harvest_samples.for_host(db, host, limit=8)
+    samples = harvest_samples.for_host(db, host, limit=50, endpoint=endpoint)
     if not samples:
         return {"ok": False, "reason": "No samples stored for this host yet."}
 
@@ -698,32 +720,30 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
     # The built-in reader first. It keeps learning formats (schema.org
     # JobPosting most recently), so a host can land on this list for a payload
     # it now reads — and a recipe for that would be a second copy of code that
-    # already works. Its samples are cleared so the host leaves the list.
+    # already works. Recovered samples stay as regression evidence.
     builtin = sum(builtin_reads(row, host) for row in samples)
-    recipe = active_for(db, host)
-    by_recipe = 0 if builtin or not recipe else sum(
-        builtin_reads(row, host, recipe) for row in samples)
-    if builtin or by_recipe:
-        harvest_samples.clear(db, host)
-        db.commit()
+    recipe = active_for(db, host, samples[0].source_url or "")
+    by_recipe = sum(builtin_reads(row, host, recipe) for row in samples) if recipe else 0
+    unread = [row for row in samples if not builtin_reads(row, host, recipe) and jobbiness(row.payload)]
+    if (builtin or by_recipe) and not unread:
+        replayed = replay(db, host, samples, recipe)
         who = ("the built-in reader already reads these" if builtin
                else "the active recipe already reads these")
         return {"ok": True, "jobs": builtin or by_recipe,
-                "reason": f"{who} ({builtin or by_recipe} job(s)), so nothing new is "
-                          "needed — cleared them from the list; new visits are read "
-                          "as they arrive"}
+                "replay": replayed,
+                "reason": f"{who} ({builtin or by_recipe} job(s)); replayed stored evidence into the job pipeline"}
     # The most job-like payloads first. The store keeps whatever arrived, and
     # the first three were often analytics — which is what the model was shown.
-    ranked = sorted(samples, key=lambda row: jobbiness(row.payload), reverse=True)
+    ranked = sorted(samples, key=lambda row: (row in unread, jobbiness(row.payload)), reverse=True)
     payloads = [row.payload for row in ranked]
-    page_urls = [row.source_url or "" for row in ranked]
+    page_urls = [getattr(row, "page_url", None) or row.source_url or "" for row in ranked]
     located = []
     if hint:
         located = [pair for payload in payloads for pair in locate_text(payload, hint)]
         ranked = sorted(ranked, key=lambda row: bool(locate_text(row.payload, hint)),
                         reverse=True)
         payloads = [row.payload for row in ranked]
-        page_urls = [row.source_url or "" for row in ranked]
+        page_urls = [getattr(row, "page_url", None) or row.source_url or "" for row in ranked]
     elif not jobbiness(payloads[0]):
         return {"ok": False,
                 "reason": f"none of the {len(samples)} stored payloads look like job "
@@ -747,28 +767,105 @@ def learn(db, host: str, profile_data: dict | None = None, hint: str = "") -> di
         drafted = recipe_from_title(payloads, title)
         if not drafted:
             continue
-        outcome = validate(payloads, drafted, page_urls=page_urls)
+        outcome = validate(payloads, drafted, page_urls=page_urls, baseline=recipe)
+        if unread and not any(apply_recipe(row.payload, drafted, "harvest", getattr(row, "page_url", None) or row.source_url or "") for row in unread):
+            continue
         if outcome["ok"]:
-            row = save(db, host, drafted, outcome, model=f"read from {source}")
+            row = save(db, host, drafted, outcome, model=f"read from {source}", endpoint=endpoint or "")
+            replayed = replay(db, host, samples, drafted)
             return {"ok": True,
                     "reason": outcome["reason"] + f" (read from {source}, no model)",
-                    "jobs": outcome["jobs"], "recipe": drafted, "id": str(row.id)}
+                    "jobs": outcome["jobs"], "recipe": drafted, "id": str(row.id), "replay": replayed}
 
     proposal = propose(ranked, host, profile_data, located=located, hint=hint)
     if proposal["error"]:
         return {"ok": False, "reason": proposal["error"]}
 
     provider = model_roles.resolve(profile_data, "learn")
-    outcome = validate(payloads, proposal["recipe"], page_urls=page_urls)
+    outcome = validate(payloads, proposal["recipe"], page_urls=page_urls, baseline=recipe)
+    if unread and not any(apply_recipe(row.payload, proposal["recipe"], "harvest", getattr(row, "page_url", None) or row.source_url or "") for row in unread):
+        outcome.update(ok=False, reason="the proposal still cannot read the new job-like evidence")
+    if not outcome["ok"]:
+        repair = propose(ranked, host, profile_data, located=located, hint=hint,
+                         feedback=outcome["reason"] + ("; preserve this working recipe: " + json.dumps(recipe) if recipe else ""))
+        if not repair["error"]:
+            proposal = repair
+            outcome = validate(payloads, proposal["recipe"], page_urls=page_urls, baseline=recipe)
+            if unread and not any(apply_recipe(row.payload, proposal["recipe"], "harvest", getattr(row, "page_url", None) or row.source_url or "") for row in unread):
+                outcome.update(ok=False, reason="the proposal still cannot read the new job-like evidence")
     row = save(db, host, proposal["recipe"], outcome,
-               model=provider.model if provider else "")
+               model=provider.model if provider else "", endpoint=endpoint or "")
+    replayed = replay(db, host, samples, proposal["recipe"]) if outcome["ok"] else {}
     return {
         "ok": outcome["ok"],
         "reason": outcome["reason"],
         "jobs": outcome["jobs"],
         "recipe": proposal["recipe"],
         "id": str(row.id),
+        "replay": replayed,
     }
+
+
+def read_jobs(payload, source: str, page_url: str, recipe: dict | None = None) -> list[dict]:
+    """A learned reader may enrich the built-in reader, never hide its jobs."""
+    from app.services.harvest import extract_jobs
+    found = {job["url"]: job for job in extract_jobs(payload, source=source, page_url=page_url)}
+    if recipe:
+        for job in apply_recipe(payload, recipe, source, page_url):
+            if looks_like_a_name(job["company"]) and urlsplit(job["url"]).scheme in ("https", "http"):
+                old = found.get(job["url"], {})
+                merged = {**old, **{key: value for key, value in job.items() if value not in (None, "", [])}}
+                if len(old.get("description") or "") > len(merged.get("description") or ""):
+                    merged["description"] = old["description"]
+                found[job["url"]] = merged
+    return list(found.values())
+
+
+def replay(db, host: str, samples: list, recipe: dict | None = None) -> dict:
+    """Recover captured postings now; deduplication makes repeat replay harmless."""
+    from app.services.harvest import save_harvested_jobs, source_for_url
+    from app.services import source_learning
+    counts = {"inserted": 0, "merged": 0, "skipped": 0, "invalid": 0, "found": 0}
+    for sample in samples:
+        page = sample.source_url or ""
+        jobs = read_jobs(sample.payload, source_for_url(page or f"https://{host}/"),
+                         getattr(sample, "page_url", None) or page, recipe)
+        if not jobs:
+            continue
+        outcome = save_harvested_jobs(db, jobs)
+        source_learning.note_capture(db, page, {"found": len(jobs), **outcome},
+                                     page_url=getattr(sample, "page_url", "") or "", read_by="validated reader")
+        for name in counts:
+            counts[name] += len(jobs) if name == "found" else outcome.get(name, 0)
+        if not outcome.get("invalid"):
+            sample.found = len(jobs)
+            sample.note = "Replayed through normal ingestion; retained as validation evidence"
+    db.commit()
+    return counts
+
+
+def learn(db, host: str, profile_data: dict | None = None, hint: str = "",
+          endpoint: str | None = None) -> dict:
+    """Learn endpoints independently so a search API cannot replace a detail reader."""
+    from app.services import harvest_samples
+    host = (host or "").strip().lower()
+    rows = harvest_samples.for_host(db, host, limit=100, endpoint=endpoint)
+    if not rows:
+        return {"ok": False, "reason": "No samples stored for this host yet."}
+    groups = list(dict.fromkeys(harvest_samples.sample_endpoint(row) for row in rows))
+    if hint:
+        hinted = [harvest_samples.sample_endpoint(row) for row in rows if locate_text(row.payload, hint)]
+        if hinted:
+            groups = list(dict.fromkeys(hinted))
+    results = [_learn_endpoint(db, host, profile_data, hint, group) for group in groups]
+    if len(results) == 1:
+        return results[0]
+    return {"ok": any(row["ok"] for row in results), "complete": all(row["ok"] for row in results),
+            "jobs": sum(row.get("jobs", 0) for row in results),
+            "reason": "; ".join(f"{group or 'legacy'}: {row['reason']}" for group, row in zip(groups, results)),
+            "endpoints": results,
+            "replay": {name: sum(row.get("replay", {}).get(name, 0) for row in results)
+                       for name in ("inserted", "merged", "skipped", "invalid", "found")}}
 
 
 def listing(db, limit: int = 30) -> list:

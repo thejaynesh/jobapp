@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Employers — JobApp{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold">Employers to watch</h1>
+<p class="text-gray-600 mt-2 mb-5">Keep career boards, openings and contact research connected. Confirm an employer's website so contact discovery can reuse the right domain.</p>
+{% if error %}<p role="alert" class="text-red-700 bg-red-50 border border-red-200 rounded p-3 mb-4">{{ error }}</p>{% endif %}
+<form method="post" action="/companies" class="bg-white border rounded-lg p-5 grid md:grid-cols-2 gap-4">
+  <label class="text-sm">Employer name<input name="name" required maxlength="200" value="{{ values.get('name', '') }}" class="block border rounded p-2 w-full mt-1"></label>
+  <label class="text-sm">Confirmed employer website<input name="website" placeholder="https://example.com" value="{{ values.get('website', '') }}" class="block border rounded p-2 w-full mt-1"><span class="text-xs text-gray-500">The company's own website; leave empty if uncertain.</span></label>
+  <label class="text-sm">Careers or ATS URL<input name="careers_url" placeholder="https://jobs.example.com" value="{{ values.get('careers_url', '') }}" class="block border rounded p-2 w-full mt-1"></label>
+  <label class="text-sm">Other names for this same employer<textarea name="aliases" rows="2" class="block border rounded p-2 w-full mt-1">{{ values.get('aliases', '') }}</textarea><span class="text-xs text-gray-500">One confirmed alias per line.</span></label>
+  <button class="bg-blue-600 text-white rounded px-4 py-2 md:col-span-2">Save and watch employer</button>
+</form>
+<div class="space-y-4 mt-6">
+{% for company in companies %}
+<article class="bg-white rounded-lg border p-5">
+  <div class="flex flex-wrap justify-between gap-3"><h2 class="font-semibold">{{ company.name }}</h2><span class="text-sm text-gray-500">{{ 'Watching' if company.watched else 'Paused' }}</span></div>
+  <p class="text-sm mt-2">{{ board_counts.get(company.id, 0) }} career boards · {{ job_counts.get(company.id, 0) }} open postings{% if company.domain %} · {{ company.domain }}{% endif %}</p>
+  <p class="text-sm text-gray-600 mt-2">{{ company.research_note or 'Research is queued for this employer.' }}</p>
+  {% if company.last_researched_at %}<p class="text-xs text-gray-500 mt-1">Last researched {{ company.last_researched_at | when }}</p>{% endif %}
+  <div class="flex flex-wrap gap-3 items-center mt-3 text-sm">
+    <a href="/jobs?q={{ company.name | urlencode }}" class="text-blue-600">Review jobs</a>
+    <a href="/outreach?q={{ company.name | urlencode }}" class="text-blue-600">Conversations</a>
+    {% if company.careers_url %}<a href="{{ company.careers_url }}" target="_blank" rel="noopener noreferrer" class="text-blue-600">Careers page</a>{% endif %}
+    <form method="post" action="/companies/{{ company.id }}/refresh"><button class="border rounded px-3 py-1">Refresh research</button></form>
+    <form method="post" action="/companies/{{ company.id }}/watch"><input type="hidden" name="watched" value="{{ 'false' if company.watched else 'true' }}"><button class="border rounded px-3 py-1">{{ 'Pause watch' if company.watched else 'Resume watch' }}</button></form>
+    {% if company.research_status == 'needs_learning' and company.careers_url %}<form method="post" action="/runs/source-learning"><input type="hidden" name="url" value="{{ company.careers_url }}"><button class="border rounded px-3 py-1">Learn this careers site</button></form>{% endif %}
+  </div>
+</article>
+{% else %}<p class="text-gray-500">Add an employer above to discover its boards and prioritize its openings.</p>{% endfor %}
+</div>
+<p class="text-sm mt-5"><a class="text-blue-600" href="/runs">Source learning and collection progress</a> · <a class="text-blue-600" href="/settings">Refresh and preparation settings</a></p>
+{% endblock %}

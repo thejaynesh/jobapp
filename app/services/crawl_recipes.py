@@ -35,6 +35,8 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+from app.config import live
+
 logger = logging.getLogger(__name__)
 
 # The modes a recipe may claim. Closed set: free text here would eventually
@@ -1012,12 +1014,13 @@ def note_outcome(db, host: str, pages_reached: int, batches: int = 0) -> None:
         return
 
     row.best_pages = max(row.best_pages or 0, got)
+    row.consecutive_failures = (row.consecutive_failures or 0) + 1 if got <= floor else 0
     # Three tries before judging: one visit can get nowhere because the board
     # had a single page of results that day, which is not the recipe's fault.
-    if row.tries >= 3 and row.best_pages <= floor:
+    if row.consecutive_failures >= live().CRAWL_RECIPE_FAILURE_LIMIT:
         row.status = "rejected"
         row.note = (
-            f"Retired after {row.tries} visits that got nowhere. "
+            f"Retired after {row.consecutive_failures} consecutive visits that got nowhere. "
             f"{row.note or ''}"
         ).strip()[:2000]
         logger.info(

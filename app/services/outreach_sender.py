@@ -24,7 +24,7 @@ from email.utils import formataddr, make_msgid
 from sqlalchemy import or_, text
 
 from app.config import live, settings
-from app.models.outreach import OutreachMessage
+from app.models.outreach import Contact, OutreachMessage
 from app.services.outreach import candidate_email, candidate_name, mark_sent
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def sending_configured() -> bool:
 def sending_blocked_reason() -> str:
     """Why the send button is disabled, or "" when it isn't."""
     if not live().OUTREACH_SEND_ENABLED:
-        return "Email sending is turned off (set OUTREACH_SEND_ENABLED=true to enable it)."
+        return "Email sending is turned off. You can enable it in Settings."
     if not settings.SMTP_HOST:
         return "No SMTP server is configured (set SMTP_HOST and friends)."
     return ""
@@ -104,6 +104,19 @@ def build_email(message: OutreachMessage, profile_data: dict, attachments: list[
     )
     mail["Subject"] = message.subject or f"Regarding the role at {contact.company}"
     mail["Message-ID"] = make_msgid()
+    if message.kind in {"follow_up", "reply", "thank_you"}:
+        prior = [m for m in ((message.conversation.messages if message.conversation else contact.messages) or [])
+                 if m.id != message.id and m.message_id and m.status in ("sent", "replied")]
+        prior.sort(key=lambda m: m.sent_at or m.created_at)
+        references = [m.message_id for m in prior]
+        if message.conversation:
+            inbound = [i for i in message.conversation.interactions if i.kind == "reply" and i.message_id]
+            inbound.sort(key=lambda i: i.occurred_at)
+            if inbound:
+                references.append(inbound[-1].message_id)
+        if references:
+            mail["In-Reply-To"] = references[-1]
+            mail["References"] = " ".join(references[-20:])
     if from_email:
         mail["Reply-To"] = from_email
     mail.set_content(message.body or "")
@@ -202,7 +215,11 @@ def send_message(db, message: OutreachMessage, allow_guessed: bool = False,
         db.commit()
         raise
 
-    mark_sent(db, message)
+    # A fast reply can arrive while SMTP is returning. Do not replace that
+    # durable reply with a stale local 'sent' state and restart the sequence.
+    db.refresh(message)
+    if message.status != "replied":
+        mark_sent(db, message)
     logger.info("outreach_sender: sent message %s", message.id)
     return message
 
@@ -216,7 +233,7 @@ def _prepare_send(db, message, allow_guessed, retry_uncertain, draft=None):
             f"{message.channel.replace('_', ' ')} messages are sent by hand — "
             "copy the text and mark it sent."
         )
-    if message.status in ("sent", "replied"):
+    if message.sent_at or message.status in ("sent", "replied", "bounced"):
         raise SendError("That message has already been sent.")
     if message.status not in ("draft", "approved"):
         raise SendError("Only a draft or approved message can be sent.")
@@ -237,6 +254,16 @@ def _prepare_send(db, message, allow_guessed, retry_uncertain, draft=None):
             "That address is a pattern guess, not a confirmed one. Send it anyway "
             "only if you accept it may bounce."
         )
+    from app.services import networking
+    conversation = networking.conversation_for(db, contact)
+    message.conversation = conversation
+    paused = networking.pause_reason(db, contact, message.application, kind=message.kind)
+    if paused:
+        raise SendError(paused)
+    if message.kind == "follow_up" and conversation.status in {"reply_needed", "introduced", "referral_offered", "referral_submitted"}:
+        raise SendError("The conversation has progressed. Review the reply or next action instead of sending an unanswered-message follow-up.")
+    if (contact.evidence or {}).get("verification_pending"):
+        raise SendError("Email verification is still pending. Wait for the result before sending.")
     since = datetime.now(timezone.utc) - timedelta(days=1)
     reserved = db.query(OutreachMessage).filter(
         OutreachMessage.channel == "email", OutreachMessage.id != message.id,
@@ -247,9 +274,33 @@ def _prepare_send(db, message, allow_guessed, retry_uncertain, draft=None):
     if reserved >= live().OUTREACH_MAX_SENDS_PER_DAY:
         raise SendError(
             f"Daily send limit reached ({live().OUTREACH_MAX_SENDS_PER_DAY}). "
-            "Try again tomorrow, or raise OUTREACH_MAX_SENDS_PER_DAY."
+            "Try again tomorrow, or raise the daily send limit in Settings."
         )
-
+    contacts = networking.same_person_contacts(db, contact)
+    identities = [c.id for c in contacts]
+    unresolved = or_(OutreachMessage.send_state.in_(("sending", "uncertain")),
+        OutreachMessage.status.in_(("draft", "approved")) & OutreachMessage.message_id.isnot(None)
+        & OutreachMessage.send_error.is_(None) & (OutreachMessage.send_state == "idle"))
+    pending_delivery = db.query(OutreachMessage).filter(OutreachMessage.contact_id.in_(identities),
+        OutreachMessage.id != message.id, OutreachMessage.sent_at.is_(None),
+        unresolved).first()
+    if pending_delivery:
+        raise SendError("Another message to this person is being delivered or has an uncertain outcome. Resolve that delivery first.")
+    cooldown = int(live().OUTREACH_CONTACT_COOLDOWN_DAYS)
+    if cooldown > 0 and message.kind in {"initial", "referral_request", "reconnect"}:
+        recent = db.query(OutreachMessage).filter(OutreachMessage.contact_id.in_([c.id for c in contacts]),
+            OutreachMessage.id != message.id, OutreachMessage.sent_at >= datetime.now(timezone.utc) - timedelta(days=cooldown)).first()
+        if recent:
+            raise SendError("You contacted this person recently. Continue their existing conversation or wait for the contact cooldown in Settings.")
+    company_cap = int(live().OUTREACH_COMPANY_CONTACTS_PER_WEEK)
+    if company_cap > 0 and message.kind in {"initial", "referral_request", "reconnect"}:
+        recent_people = {row[0] for row in db.query(Contact.person_id).join(OutreachMessage).filter(
+            Contact.company_key == contact.company_key,
+            OutreachMessage.id != message.id,
+            or_(OutreachMessage.sent_at >= datetime.now(timezone.utc) - timedelta(days=7),
+                unresolved)).distinct().all() if row[0]}
+        if contact.person_id not in recent_people and len(recent_people) >= company_cap:
+            raise SendError("This company's weekly contact limit is reached. Continue an existing conversation or adjust the limit in Settings.")
     from app.models.profile import Profile
 
     profile = db.query(Profile).first()
@@ -258,7 +309,7 @@ def _prepare_send(db, message, allow_guessed, retry_uncertain, draft=None):
     # The Send form carries what the user is looking at, even when its
     # debounced autosave has not run. Save it under the same row lock as the
     # delivery reservation, after the guards and before constructing the MIME.
-    if draft is not None:
+    if draft is not None and not message.delivery_uncertain:
         subject = draft["subject"].strip() or None
         body = draft["body"]
         if message.subject != subject or message.body != body:

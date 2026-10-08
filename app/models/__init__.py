@@ -4,9 +4,12 @@ from app.models.archived_job import ArchivedJob
 from app.models.profile import Profile
 from app.models.application import Application, ApplicationDocument, ApplicationStatus, DocType
 from app.models.company_board import CompanyBoard
+from app.models.company import Company
+from app.models.source_listing import SourceListing, ListingRevision, FetchBoardRun
 from app.models.fetch_run import FetchRun, FetchSourceRun
+from app.models.source_listing import SourceListing, ListingRevision, FetchBoardRun
 from app.models.enrichment_run import EnrichmentRun
-from app.models.outreach import Contact, OutreachMessage
+from app.models.outreach import Contact, OutreachMessage, NetworkPerson, OutreachConversation, OutreachInteraction, ContactDiscoveryCache
 from app.models.browser_task import BrowserTask
 from app.models.agent_event import AgentEvent
 from app.models.interview_report import InterviewReport

@@ -53,6 +53,8 @@ class Every:
 HOUR, MINUTE = 3600, 60
 
 SCHEDULE: tuple[Every, ...] = (
+    Every("watch-employers", "app.tasks.opportunities.maintain", "watched_company_refresh_hours", HOUR),
+    Every("learn-unread-sources", "app.tasks.source_learning.sweep_source_learning", "harvest_learn_retry_minutes", MINUTE),
     Every("intelligence-maintenance", "app.tasks.intelligence.maintain", "intelligence_interval_hours", HOUR),
     Every("retry-browser-ingestion", "app.tasks.browse.retry_ingestion",
           "agent_ingest_retry_minutes", MINUTE),

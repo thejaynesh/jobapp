@@ -7,6 +7,10 @@ from app.services.sources.base import (
     board_workers,
     fetch_boards_concurrently,
     parse_experience_level,
+    BoardResult,
+    board_cursor,
+    cycle_cfg,
+    rank_by_title,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,19 +40,49 @@ def _fetch_description(slug: str, posting_id: str) -> str:
     return "\n\n".join(parts)
 
 
-def fetch(company_slugs: list[str]) -> list[dict]:
+def fetch(company_slugs: list[str], queries: list[str] | None = None) -> list[dict]:
     """Fetch jobs from SmartRecruiters' public postings API (no key required)."""
 
-    def _fetch_one(slug: str) -> list[dict]:
-        resp = httpx.get(_LIST_API.format(slug=slug), timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+    cfg = cycle_cfg()
+    pages = max(1, int(getattr(cfg, "SMARTRECRUITERS_MAX_PAGES", 10)))
+    detail_limit = max(0, int(getattr(cfg, "SMARTRECRUITERS_DETAIL_LIMIT", _MAX_DETAIL_FETCHES)))
 
-        items = data.get("content", [])
+    def _fetch_one(slug: str) -> BoardResult:
+        initial = max(0, int(board_cursor("smartrecruiters", slug).get("offset", 0)))
+        offset = initial
+        items, seen = [], set()
+        complete, total, error = False, None, None
+        for _ in range(pages):
+            try:
+                address = _LIST_API.format(slug=slug) + (f"&offset={offset}" if offset else "")
+                resp = httpx.get(address, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                rows = data.get("content", [])
+                if not isinstance(rows, list):
+                    raise ValueError("postings response has no content list")
+                raw_total = data.get("totalFound")
+                total = int(raw_total) if raw_total is not None else None
+                new = [item for item in rows if str(item.get("id", "")) not in seen]
+                if rows and not new:
+                    error = "pagination repeated a page; resume needs verification"
+                    break
+                items.extend(new)
+                seen.update(str(item.get("id", "")) for item in new)
+                offset += len(rows)
+                if len(rows) < 100 or (total is not None and offset >= total):
+                    complete = initial == 0
+                    break
+            except Exception as exc:
+                if not items:
+                    raise
+                error = str(exc)
+                break
+        more = bool(error or (total is not None and offset < total) or (len(items) >= pages * 100 and total is None))
         # Descriptions gate the downstream skill filter, so fetch the capped
         # batch of them in parallel rather than serially per posting.
         detail_ids = [
-            str(item.get("id", "")) for item in items[:_MAX_DETAIL_FETCHES]
+            str(item.get("id", "")) for item in rank_by_title(items, queries or [], lambda item: item.get("name", ""))[:detail_limit]
             if item.get("id")
         ]
         descriptions: dict[str, str] = {}
@@ -80,7 +114,9 @@ def fetch(company_slugs: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, description),
                 "posted_at": item.get("releasedDate"),
             })
-        return jobs
+        return BoardResult(jobs=jobs, complete=complete, total=total,
+                           cursor={"offset": offset} if more else None,
+                           error=error, error_category="pagination" if error else None)
 
     return fetch_boards_concurrently(
         company_slugs, _fetch_one, "SmartRecruiters", board_workers()

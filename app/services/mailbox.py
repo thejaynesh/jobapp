@@ -148,7 +148,7 @@ def _referenced_ids(message) -> list[str]:
         # input. Decode it before regex/string operations so one bad message
         # cannot block the durable cursor and all mail behind it.
         value = _decode(message.get(header))
-        for match in _MESSAGE_ID_RE.findall(value):
+        for match in reversed(_MESSAGE_ID_RE.findall(value)):
             if match not in found:
                 found.append(match)
     return found
@@ -209,14 +209,13 @@ def _message_by_reference(db, references: list[str]) -> OutreachMessage | None:
     """The sent message a reply is quoting. Exact, or nothing."""
     if not references:
         return None
-    return (
-        db.query(OutreachMessage)
-        .filter(
-            OutreachMessage.message_id.in_(references),
-            OutreachMessage.status == "sent",
-        )
-        .first()
-    )
+    from sqlalchemy import or_
+    for reference in references:
+        found = db.query(OutreachMessage).filter(OutreachMessage.message_id == reference,
+            or_(OutreachMessage.status.in_(("sent", "replied")), OutreachMessage.send_state.in_(("sending", "uncertain")))).first()
+        if found:
+            return found
+    return None
 
 
 def _message_by_sender(db, sender: str, received_at: datetime | None) -> OutreachMessage | None:
@@ -232,14 +231,11 @@ def _message_by_sender(db, sender: str, received_at: datetime | None) -> Outreac
     """
     if not sender:
         return None
-    contact = db.query(Contact).filter(Contact.email.ilike(sender)).first()
-    if not contact:
-        return None
-
     query = (
         db.query(OutreachMessage)
+        .join(Contact, Contact.id == OutreachMessage.contact_id)
         .filter(
-            OutreachMessage.contact_id == contact.id,
+            Contact.email.ilike(sender),
             OutreachMessage.status == "sent",
         )
         .order_by(OutreachMessage.sent_at.desc())
@@ -273,18 +269,8 @@ def _record_bounce(db, address: str) -> int:
     failure is the first hard fact about one, and it stops both the retry and
     the pattern that produced it from looking equally plausible next time.
     """
-    contacts = db.query(Contact).filter(Contact.email.ilike(address)).all()
-    if not contacts:
-        return 0
-
-    affected = 0
-    for contact in contacts:
-        contact.email_status = "invalid"
-        for message in list(contact.messages or []):
-            if message.status == "sent":
-                message.status = "bounced"
-                message.follow_up_due_at = None
-                affected += 1
+    from app.services.networking import record_address_bounce
+    affected = record_address_bounce(db, address)
     db.commit()
     logger.info("mailbox: %s bounced — address marked invalid", address)
     return affected
@@ -457,5 +443,23 @@ def _process(db, message, counts: dict) -> None:
     if target is None:
         return
 
+    from app.services import networking
+    conversation = networking.conversation_for(db, target.contact)
+    incoming_id = _decode(message.get("Message-ID")).strip() or None
+    body = []
+    for part in message.walk():
+        if part.get_content_type() != "text/plain" or part.get_content_disposition() == "attachment":
+            continue
+        try:
+            raw = part.get_payload(decode=True)
+            if raw:
+                body.append(raw.decode(part.get_content_charset() or "utf-8", errors="replace"))
+        except (LookupError, TypeError):
+            continue
+    interaction = networking.record_interaction(db, conversation, "reply", "\n".join(body), incoming_id, received_at)
+    if incoming_id and interaction is None:
+        return
+    if target.sent_at is None:
+        target.sent_at = target.send_started_at or received_at or datetime.now(timezone.utc)
     _record_reply(db, target, received_at)
     counts["replies"] += 1

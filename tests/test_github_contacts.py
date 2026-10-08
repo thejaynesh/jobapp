@@ -18,9 +18,9 @@ class TestOrgMatching:
         org = {"login": "stripe", "blog": "https://stripe.com", "name": "Stripe"}
         assert _org_matches_company(org, "Stripe", "stripe.com") is True
 
-    def test_accepts_a_matching_display_name_when_there_is_no_domain(self):
+    def test_name_alone_does_not_prove_company_ownership(self):
         org = {"login": "acmehq", "name": "Acme, Inc."}
-        assert _org_matches_company(org, "Acme Inc", "") is True
+        assert _org_matches_company(org, "Acme Inc", "") is False
 
     def test_rejects_an_unrelated_org_with_a_similar_login(self):
         # Acting on the wrong org means messaging total strangers, so a bare
@@ -28,10 +28,10 @@ class TestOrgMatching:
         org = {"login": "stripe", "blog": "https://someones-side-project.dev", "name": "stripe cli"}
         assert _org_matches_company(org, "Stripe", "stripe.com") is False
 
-    def test_accepts_a_bare_slug_match_when_nothing_contradicts_it(self):
+    def test_bare_slug_is_not_company_ownership(self):
         # Plenty of real company orgs publish no blog or email at all.
         org = {"login": "stripe", "name": ""}
-        assert _org_matches_company(org, "Stripe", "stripe.com") is True
+        assert _org_matches_company(org, "Stripe", "stripe.com") is False
 
     def test_rejects_generic_orgs(self):
         org = {"login": "community", "blog": "https://acme.com"}

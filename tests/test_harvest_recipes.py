@@ -625,9 +625,9 @@ class TestTheEvidenceStoreKeepsTheBestFiveNotTheFirstFive:
     def _fill(self, db, host, sizes, found=0, probe=False):
         from app.services import harvest_samples
 
-        for size in sizes:
+        for n, size in enumerate(sizes):
             harvest_samples.record(
-                db, host, {"pad": "x" * max(0, size - 12)}, found=found,
+                db, host, {"pad": chr(97 + n) * max(0, size - 12)}, found=found,
                 probe=probe)
         db.commit()
 
@@ -672,7 +672,7 @@ class TestTheEvidenceStoreKeepsTheBestFiveNotTheFirstFive:
         self._fill(db, "worked.example", [200], found=3)
         smallest = min(self._sizes(db, "worked.example"))
         self._fill(db, "worked.example", [9_000, 9_100, 9_200, 9_300])
-        assert not harvest_samples.record(db, "worked.example", {"pad": "x" * 100_000})
+        assert harvest_samples.record(db, "worked.example", {"pad": "x" * 100_000})
         db.commit()
 
         assert smallest in self._sizes(db, "worked.example")
@@ -703,9 +703,9 @@ class TestAForwardOutranksAProbe:
     def _fill(self, db, host, sizes, found=0, probe=False):
         from app.services import harvest_samples
 
-        for size in sizes:
+        for n, size in enumerate(sizes):
             harvest_samples.record(
-                db, host, {"pad": "x" * max(0, size - 12)}, found=found,
+                db, host, {"pad": chr(97 + n) * max(0, size - 12)}, found=found,
                 probe=probe)
         db.commit()
 
@@ -771,7 +771,7 @@ class TestAForwardOutranksAProbe:
 
         self._fill(db, "lucky.example", [200], found=3, probe=True)
         self._fill(db, "lucky.example", [9_000] * 4, probe=True)
-        assert not harvest_samples.record(
+        assert harvest_samples.record(
             db, "lucky.example", {"pad": "x" * 100_000}, probe=False)
         db.commit()
 

@@ -158,7 +158,7 @@ def _origin(host: str) -> str:
 
 
 def sniff_host(host: str, seed_html: str = "", posting_url: str | None = None,
-               company: str | None = None) -> dict[str, list[str]]:
+               company: str | None = None, allow_guess: bool = True) -> dict[str, list[str]]:
     """
     Look for ATS boards belonging to `host`.
 
@@ -205,6 +205,8 @@ def sniff_host(host: str, seed_html: str = "", posting_url: str | None = None,
                             host, board, job_id)
                 return {"greenhouse": [board]}
 
+    if not allow_guess:
+        return {}
     # Nothing embedded — try the domain name as a slug on the common boards.
     guess = domain_slug(host)
     if guess:

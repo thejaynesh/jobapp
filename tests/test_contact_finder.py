@@ -211,6 +211,7 @@ class TestHunterEmailFinder:
         with patch("app.services.contact_finder.httpx.get", return_value=_response(payload)):
             assert hunter_email_finder("acme.com", "Jane", "Doe", "key") == {
                 "email": "jane.doe@acme.com", "score": 88,
+                "status": "unverified", "verification": {}, "sources": [],
             }
 
     def test_empty_when_hunter_has_nobody(self):
@@ -225,7 +226,7 @@ class TestVerifyEmail:
     def test_maps_deliverable_to_verified(self):
         payload = {"data": {"result": "deliverable", "score": 97}}
         with patch("app.services.contact_finder.httpx.get", return_value=_response(payload)):
-            assert verify_email("jane@acme.com", "key") == {"status": "verified", "confidence": 97}
+            assert verify_email("jane@acme.com", "key") == {"status": "verified", "confidence": 97, "verification": {}, "sources": []}
 
     def test_maps_undeliverable_to_invalid(self):
         payload = {"data": {"result": "undeliverable", "score": 0}}

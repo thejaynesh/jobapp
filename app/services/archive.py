@@ -162,12 +162,11 @@ def archive(db, days: int | None = None, limit: int | None = None) -> dict:
     if not rows:
         return {"archived": 0, "skipped": 0, "enabled": True, "remaining": 0}
 
-    # A hash already in the archive means this posting was archived under a
-    # different job row — a cross-post the dedupe layers missed at fetch time.
-    # The tombstone is already doing its job, so the live row can simply go.
+    # Preserve one tombstone per actual job. A repeated title at an employer
+    # is not evidence that two requisitions were the same opening.
     seen = {
-        value for (value,) in db.query(ArchivedJob.dedupe_hash).filter(
-            ArchivedJob.dedupe_hash.in_([job.dedupe_hash for job in rows])
+        value for (value,) in db.query(ArchivedJob.id).filter(
+            ArchivedJob.id.in_([job.id for job in rows])
         )
     }
 
@@ -176,10 +175,10 @@ def archive(db, days: int | None = None, limit: int | None = None) -> dict:
     doomed = []
     for job in rows:
         doomed.append(job.id)
-        if job.dedupe_hash in seen:
+        if job.id in seen:
             duplicates += 1
             continue
-        seen.add(job.dedupe_hash)
+        seen.add(job.id)
         db.add(ArchivedJob(
             id=job.id,
             source=job.source,

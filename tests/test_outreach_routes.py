@@ -27,7 +27,7 @@ def app_record(db):
     application = Application(job_id=job.id)
     db.add(application)
     db.add(Profile(data=PROFILE))
-    db.flush()
+    db.commit()  # Browser requests act on persisted records, including after rollback.
     return application
 
 
@@ -37,7 +37,7 @@ def contact(db, app_record):
                      name="Sam Recruiter", title="Technical Recruiter", email="sam@acme.com",
                      email_status="verified", role="recruiter", source="hunter")
     db.add(record)
-    db.flush()
+    db.commit()
     return record
 
 
@@ -47,7 +47,7 @@ def message(db, app_record, contact):
                              channel="email", subject="Backend Engineer",
                              body="Hi Sam, here is a draft.", status="draft")
     db.add(record)
-    db.flush()
+    db.commit()
     return record
 
 

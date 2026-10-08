@@ -14,6 +14,8 @@ from app.services.sources.base import (
     fetch_boards_concurrently,
     parse_experience_level,
     rank_by_title,
+    BoardResult,
+    board_cursor,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,26 +191,39 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
     """
     cooldown = _cooldown_setting()
     _GATE.new_cycle(cooldown)
+    cfg = cycle_cfg()
+    detail_budget = max(0, int(getattr(cfg, "WORKDAY_MAX_DETAILS_PER_BOARD", _MAX_DETAILS_PER_TENANT)))
+    query_budget = max(1, int(getattr(cfg, "WORKDAY_MAX_QUERIES_PER_BOARD", _MAX_QUERIES_PER_TENANT)))
+    request_budget = max(1, int(getattr(cfg, "WORKDAY_MAX_LIST_REQUESTS_PER_BOARD", _MAX_LIST_REQUESTS_PER_TENANT)))
+    page_budget = max(1, int(getattr(cfg, "WORKDAY_MAX_PAGES_PER_QUERY", _MAX_PAGES_PER_QUERY)))
 
-    def _fetch_one(spec: str) -> list[dict]:
+    def _fetch_one(spec: str) -> BoardResult:
         parsed = parse_tenant_spec(spec)
         if not parsed:
-            return []
+            return BoardResult(error="invalid Workday board specification", error_category="configuration")
         tenant, host, site = parsed
         retried: set[tuple[str, int]] = set()
 
         jobs: list[dict] = []
         seen_paths: set[str] = set()
         postings: list[dict] = []
-        pending = deque((query, 0) for query in dict.fromkeys(queries)
-                        if query.strip())
-        pending = deque(list(pending)[:_MAX_QUERIES_PER_TENANT])
+        requested = [q for q in dict.fromkeys(queries) if q.strip()]
+        saved = board_cursor("workday", spec)
+        entries = saved.get("pending") if saved.get("queries") == requested else None
+        pending = deque((str(q), int(offset)) for q, offset in entries) if entries else deque((q, 0) for q in requested)
+        deferred = []
+        admitted = list(dict.fromkeys(q for q, _ in pending))[:query_budget]
+        deferred.extend((q, offset) for q, offset in pending if q not in admitted)
+        pending = deque((q, offset) for q, offset in pending if q in admitted)
         query_paths: dict[str, set[str]] = {}
+        query_pages: dict[str, int] = {}
+        errors = []
         requests = 0
-        while pending and requests < _MAX_LIST_REQUESTS_PER_TENANT:
+        while pending and requests < request_budget:
             if cooldown and not _GATE.open(host):
                 logger.warning("Workday: %s keeps refusing; leaving %s for this cycle",
                                host, spec)
+                errors.append("Workday cluster rate limit")
                 break
             query, offset = pending.popleft()
             requests += 1
@@ -225,11 +240,16 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
                     if (query, offset) not in retried:
                         retried.add((query, offset))
                         pending.appendleft((query, offset))
+                    else:
+                        deferred.append((query, offset))
+                        errors.append("Workday cluster rate limit")
                     continue
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as exc:
                 logger.error("Workday fetch error (%s / %r): %s", spec, query, exc)
+                deferred.append((query, offset))
+                errors.append(str(exc))
                 continue
             rows = data.get("jobPostings") or []
             paths = {item.get("externalPath") for item in rows if item.get("externalPath")}
@@ -246,11 +266,14 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
                 total = int(data.get("total"))
             except (TypeError, ValueError):
                 total = next_offset + 1
-            if (has_new and len(rows) == _PAGE_SIZE and next_offset < total
-                    and offset // _PAGE_SIZE + 1 < _MAX_PAGES_PER_QUERY):
-                pending.append((query, next_offset))
+            query_pages[query] = query_pages.get(query, 0) + 1
+            if has_new and len(rows) == _PAGE_SIZE and next_offset < total:
+                if query_pages[query] < page_budget:
+                    pending.append((query, next_offset))
+                else:
+                    deferred.append((query, next_offset))
 
-        described = _detail_paths(postings, queries, _MAX_DETAILS_PER_TENANT)
+        described = _detail_paths(postings, queries, detail_budget)
         for item in postings:
             path = item["externalPath"]
             title = (item.get("title") or "").strip()
@@ -280,6 +303,10 @@ def fetch(tenant_specs: list[str], queries: list[str]) -> list[dict]:
                 "experience_level": parse_experience_level(title, description),
                 "posted_at": posted_at,
             })
-        return jobs
+        remaining = list(dict.fromkeys([*pending, *deferred]))
+        return BoardResult(jobs=jobs, complete=not remaining and not errors,
+                           cursor={"queries": requested, "pending": remaining} if remaining else None,
+                           error="; ".join(errors[:3]) or None,
+                           error_category="request_failed" if errors else None)
 
     return fetch_boards_concurrently(tenant_specs, _fetch_one, "Workday", board_workers())

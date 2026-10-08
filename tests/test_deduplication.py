@@ -141,14 +141,13 @@ class TestFindExistingJob:
         assert result is not None
         assert result.id == job.id
 
-    def test_layer3_dedupe_hash_match(self, db):
+    def test_a_content_hash_alone_is_not_a_posting_identity(self, db):
         from app.services.deduplication import find_existing_job
         job = _make_job(db, url="https://ex.com/3", source_job_id="ORIG",
                         dedupe_hash="c" * 32)
         result = find_existing_job(db, source="indeed", url="https://indeed.com/999",
                                    source_job_id="DIFF", dedupe_hash="c" * 32)
-        assert result is not None
-        assert result.id == job.id
+        assert result is None
 
     def test_no_match_returns_none(self, db):
         from app.services.deduplication import find_existing_job

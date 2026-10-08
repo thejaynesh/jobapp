@@ -1128,7 +1128,8 @@ class TestALearnedLocationKeepsTheHashHonest:
         db.commit()
 
         assert job.location == "Boston, MA"
-        assert job.dedupe_hash != taken
+        assert job.dedupe_hash == taken
+        assert db.query(Job).count() == 2
 
     def test_a_job_that_already_had_a_location_is_left_entirely_alone(self, db):
         job = _job(description="stub", location="Remote")

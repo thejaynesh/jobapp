@@ -3,7 +3,7 @@ import uuid
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, Float, SmallInteger, Text, DateTime, Enum as SAEnum
+from sqlalchemy import String, Boolean, Float, SmallInteger, Text, DateTime, ForeignKey, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -85,7 +85,12 @@ class Job(Base):
     posted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    dedupe_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    # Similarity is not identity: two requisitions may have identical titles.
+    dedupe_hash: Mapped[str] = mapped_column(String, nullable=False)
+    identity_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    company_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL"), nullable=True)
     # Liveness: whether the posting is still up on the employer's side. A job
     # applied to three weeks after it closed is wasted effort, and nothing else
     # in the pipeline ever looks at a posting again once it is stored.

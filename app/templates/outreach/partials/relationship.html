@@ -1,0 +1,39 @@
+<details class="mt-3 border rounded p-3 bg-blue-50/30" {% if conversation.status == 'reply_needed' %}open{% endif %}>
+  <summary class="cursor-pointer text-sm font-medium">Relationship · {{ conversation.status | replace('_', ' ') | title }}{% if conversation.next_action %} · {{ conversation.next_action }}{% endif %}</summary>
+  <p class="text-xs text-gray-500 mt-2">This history follows the person across roles. Shared university alone does not imply you know each other.</p>
+  {% if conversation.interactions %}
+  <div class="mt-3 space-y-2 max-h-80 overflow-y-auto">
+    {% for event in conversation.interactions[-10:] %}<div class="border-l-2 border-blue-200 pl-3 text-xs">
+      <p class="font-medium">{{ event.kind | replace('_', ' ') | title }} · {{ event.occurred_at | when('%b %d, %Y') }}</p>
+      <p class="whitespace-pre-wrap">{{ event.body }}</p>
+    </div>{% endfor %}
+  </div>
+  {% endif %}
+  {% if conversation.status == 'reply_needed' %}
+  <form hx-post="/outreach/contacts/{{ contact.id }}/draft" hx-target="#outreach-panel" hx-swap="outerHTML" class="mt-3">
+    <input type="hidden" name="kind" value="reply">
+    <button class="bg-blue-600 text-white text-xs rounded px-3 py-2">Draft a reply</button>
+    <p class="text-xs text-gray-500 mt-1">Uses the incoming message and conversation history. Review the answer before sending.</p>
+  </form>
+  {% endif %}
+  {% set earlier_messages = conversation.messages | selectattr('sent_at') | list %}
+  {% if earlier_messages %}<details class="text-xs mt-3"><summary class="cursor-pointer">Messages across roles (latest {{ [earlier_messages|length, 5]|min }})</summary>
+  {% for earlier in earlier_messages[-5:] %}<div class="border-l-2 border-gray-200 pl-3 mt-2"><p class="font-medium">{{ earlier.sent_at | when('%b %d, %Y') }}{% if earlier.application %} · {{ earlier.application.job.title }}{% endif %}</p><p class="whitespace-pre-wrap">{{ earlier.body }}</p></div>{% endfor %}
+  </details>{% endif %}
+  <form hx-post="/outreach/contacts/{{ contact.id }}/relationship" hx-target="#outreach-panel" hx-swap="outerHTML" class="mt-3 space-y-3 text-xs">
+    <div class="grid sm:grid-cols-2 gap-3">
+      <label>How you know them<select name="relationship_kind" class="block w-full border rounded p-2 mt-1">{% for kind in relationship_kinds %}<option value="{{ kind }}" {% if conversation.person.relationship_kind == kind %}selected{% endif %}>{{ kind | title }}</option>{% endfor %}</select></label>
+      <label>Conversation stage<select name="status" class="block w-full border rounded p-2 mt-1">{% for state in conversation_statuses %}<option value="{{ state }}" {% if conversation.status == state %}selected{% endif %}>{{ state | replace('_', ' ') | title }}</option>{% endfor %}</select></label>
+    </div>
+    <label class="block">Relationship context<textarea name="relationship_notes" rows="2" class="block w-full border rounded p-2 mt-1" placeholder="Who introduced you, shared work, or context you can truthfully mention">{{ conversation.person.relationship_notes or '' }}</textarea></label>
+    <label class="block">Conversation notes<textarea name="notes" rows="2" class="block w-full border rounded p-2 mt-1">{{ conversation.notes or '' }}</textarea></label>
+    <label class="block">Record an interaction<textarea name="interaction" rows="2" class="block w-full border rounded p-2 mt-1" placeholder="What they said or promised; record confirmed introductions and referrals here"></textarea></label>
+    <label class="block">Next action<input name="next_action" value="{{ conversation.next_action or '' }}" class="block w-full border rounded p-2 mt-1" placeholder="Send a short project summary"></label>
+    <div class="grid sm:grid-cols-2 gap-3">
+      <label>Action date<input name="due" type="date" value="{{ conversation.next_action_due_at | when('%Y-%m-%d') if conversation.next_action_due_at else '' }}" class="block w-full border rounded p-2 mt-1"></label>
+      <label>Snooze until<input name="snooze" type="date" value="{{ conversation.snoozed_until | when('%Y-%m-%d') if conversation.snoozed_until else '' }}" class="block w-full border rounded p-2 mt-1"></label>
+    </div>
+    <label class="flex gap-2 items-center"><input type="checkbox" name="do_not_contact" value="true" {% if conversation.person.do_not_contact %}checked{% endif %}>Do not contact this person (all roles)</label>
+    <button class="bg-gray-800 text-white rounded px-3 py-2">Save relationship and next action</button>
+  </form>
+</details>
