@@ -60,6 +60,6 @@ class CompanyBoard(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     consecutive_not_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_new_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
-    fetch_cursor: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    fetch_cursor: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     company_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL"), nullable=True, index=True)

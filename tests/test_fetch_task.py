@@ -10,6 +10,24 @@ from app.services.profile_service import get_or_create_profile, save_section
 _NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _incidental_http_is_local(monkeypatch):
+    """Orchestrator fixtures must not ask fixture hosts or model providers.
+
+    Faking the adapters still leaves link resolution, career-site sniffing,
+    slug probes and query expansion able to use HTTP. Mock their common
+    transport seam, keeping those production paths enabled and letting each
+    test's explicit higher-level HTTP mock take precedence.
+    """
+    import httpx
+
+    def unavailable(transport, request):
+        return httpx.Response(404, request=request,
+                              text="No external response configured for this test")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", unavailable)
+
+
 def _make_profile_with_targets(db):
     get_or_create_profile(db)
     profile = db.query(Profile).first()

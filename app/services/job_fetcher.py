@@ -1636,9 +1636,10 @@ def _fetch_and_save_jobs(
         from app.services.sources.base import collect_board_sightings, known_descriptions, collection_results
         from app.services.collection_batches import sink_for, replay
         from app.models.company_board import CompanyBoard
+        from app.models.source_listing import has_resume_cursor
         counts["replayed"] = replay(db, max_age_days=cfg.MAX_JOB_AGE_DAYS)
         cursors = {(b.ats, b.slug): b.fetch_cursor for b in db.query(CompanyBoard)
-                   .filter(CompanyBoard.fetch_cursor.isnot(None))}
+                   .filter(has_resume_cursor(CompanyBoard.fetch_cursor))}
         described = {}
         versions = {}
         if getattr(cfg, "GREENHOUSE_DESCRIPTIONS_ON_DEMAND", True) and \

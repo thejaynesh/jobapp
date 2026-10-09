@@ -160,7 +160,7 @@ def prune(db: Session, retention: int = DEFAULT_RETENTION) -> int:
     deleted = (
         db.query(FetchRun)
         .filter(FetchRun.started_at <= cutoff, FetchRun.finished_at.isnot(None))
-        .filter(~FetchRun.id.in_(select(FetchBoardRun.run_id).where(FetchBoardRun.payload.isnot(None))))
+        .filter(~FetchRun.id.in_(select(FetchBoardRun.run_id).where(FetchBoardRun.has_pending_payload())))
         .delete(synchronize_session=False)
     )
     if deleted:

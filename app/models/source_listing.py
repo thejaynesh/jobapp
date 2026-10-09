@@ -2,11 +2,16 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, and_, case, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+
+
+def has_resume_cursor(column):
+    """SQL predicate for a real cursor, never SQL/JSON null or an empty object."""
+    return func.coalesce(and_(func.jsonb_typeof(column) == "object", column != {}), False)
 
 
 class SourceListing(Base):
@@ -56,9 +61,22 @@ class FetchBoardRun(Base):
     inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     merged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     dropped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cursor: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    cursor: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     error_category: Mapped[str | None] = mapped_column(String, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Committed before ingestion and cleared only after job changes commit.
     # A killed worker leaves a replayable batch, not lost network work.
-    payload: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    payload: Mapped[list | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+
+    @classmethod
+    def has_pending_payload(cls):
+        """SQL predicate for real recovery work, including pre-fix rows.
+
+        JSON null is not SQL NULL. An IS NOT NULL check would repeatedly
+        consume already-cleared batches and exhaust recovery's batch limit.
+        CASE also keeps malformed scalar/object values out of array_length.
+        """
+        return case(
+            (func.jsonb_typeof(cls.payload) == "array", func.jsonb_array_length(cls.payload) > 0),
+            else_=False,
+        )

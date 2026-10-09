@@ -217,17 +217,17 @@ def _collection_context(db: Session) -> dict:
     from datetime import datetime, timezone
     from sqlalchemy import or_
     from app.models.company_board import CompanyBoard
-    from app.models.source_listing import FetchBoardRun
+    from app.models.source_listing import FetchBoardRun, has_resume_cursor
 
     recent = db.query(FetchBoardRun.source, FetchBoardRun.board, FetchBoardRun.status,
         FetchBoardRun.observed_at, FetchBoardRun.observed_total, FetchBoardRun.returned,
         FetchBoardRun.inserted, FetchBoardRun.merged, FetchBoardRun.error_category,
-        FetchBoardRun.error, FetchBoardRun.cursor.isnot(None).label("has_cursor"),
-        FetchBoardRun.payload.isnot(None).label("recovery_pending")).order_by(
+        FetchBoardRun.error, has_resume_cursor(FetchBoardRun.cursor).label("has_cursor"),
+        FetchBoardRun.has_pending_payload().label("recovery_pending")).order_by(
             FetchBoardRun.observed_at.desc(), FetchBoardRun.id).limit(20).all()
     return {
         "recent": recent,
-        "recovery_pending": db.query(FetchBoardRun).filter(FetchBoardRun.payload.isnot(None)).count(),
+        "recovery_pending": db.query(FetchBoardRun).filter(FetchBoardRun.has_pending_payload()).count(),
         "boards_due": db.query(CompanyBoard).filter(CompanyBoard.active.is_(True),
             or_(CompanyBoard.next_due_at.is_(None), CompanyBoard.next_due_at <= datetime.now(timezone.utc))).count(),
     }

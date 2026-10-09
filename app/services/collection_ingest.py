@@ -51,6 +51,8 @@ def store(db, data: dict, *, max_age_days=0, now=None, known=None) -> tuple[str,
                     improved = observe(db, job, normalized, now)
                     if not normalized.get("_stale_revision"):
                         improved.extend(enrich_from(job, normalized))
+                    elif normalized.get("_stale_observation_only"):
+                        improved.extend(enrich_from(job, normalized, missing_only=True))
                     note_source(job, source)
                     if job.source == source and source_id and url in (job.source_urls or []):
                         job.source_job_id = source_id

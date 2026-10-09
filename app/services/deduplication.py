@@ -515,7 +515,7 @@ _FILL_IF_NULL = (
 _FILL_IF_EMPTY = ("required_skills", "nice_to_have_skills")
 
 
-def enrich_from(job: Job, data: dict) -> list[str]:
+def enrich_from(job: Job, data: dict, *, missing_only: bool = False) -> list[str]:
     """
     Take from a second sighting whatever the stored job is missing.
 
@@ -527,6 +527,10 @@ def enrich_from(job: Job, data: dict) -> list[str]:
     `data` uses the ingest dicts' own keys. `posted_at` must already be a
     datetime; a source's raw string is ignored rather than guessed at, because
     a mis-parsed date silently ages a job out of the pipeline.
+
+    An out-of-order observation uses `missing_only`: even False is retained
+    for remote policy, and an existing pay unit cannot be replaced while
+    filling its missing amounts. It can add unknown facts, not corrections.
     """
     from app.services.job_edits import is_manual
 
@@ -546,7 +550,10 @@ def enrich_from(job: Job, data: dict) -> list[str]:
     if (incoming_min is not None or incoming_max is not None) \
             and job.salary_min is None and job.salary_max is None \
             and not is_manual(job, "salary_min") \
-            and not is_manual(job, "salary_max"):
+            and not is_manual(job, "salary_max") \
+            and (not missing_only or all(
+                getattr(job, field, None) is None and not is_manual(job, field)
+                for field in ("salary_currency", "salary_period"))):
         job.salary_min = incoming_min
         job.salary_max = incoming_max
         job.salary_currency = data.get("salary_currency")
@@ -584,7 +591,7 @@ def enrich_from(job: Job, data: dict) -> list[str]:
     # says remote is asserting something; a source that says nothing produces
     # exactly the same false. So true can be gained and never lost, which is
     # the only direction that cannot destroy information.
-    if data.get("is_remote") and not job.is_remote and not is_manual(job, "is_remote"):
+    if not missing_only and data.get("is_remote") and not job.is_remote and not is_manual(job, "is_remote"):
         job.is_remote = True
         filled.append("is_remote")
 

@@ -4,7 +4,7 @@
     <h3 id="collection-health-title" class="text-sm font-semibold text-gray-700">Collection coverage</h3>
     <span class="text-xs text-gray-500">{{ system.collection.boards_due }} boards due · {{ system.collection.recovery_pending }} batches awaiting recovery</span>
   </div>
-  <p class="text-xs text-gray-500 mb-3">Recent board requests. A partial response keeps its jobs and resumes when supported. Missing jobs are closed only after a confirmed complete response from their authoritative board.</p>
+  <p class="text-xs text-gray-500 mb-3">Boards due are eligible for upcoming scheduled runs. Saved counts include only new and updated jobs. Partial responses keep their jobs and resume when supported. Missing jobs are closed only after a confirmed complete response from their authoritative board.</p>
   {% if system.collection.recent %}
   <div class="overflow-x-auto">
     <table class="w-full text-xs text-left">
@@ -13,8 +13,8 @@
         {% for batch in system.collection.recent %}
         <tr>
           <td class="py-2 pr-3 max-w-xs break-words">{{ batch.source }}{% if batch.board %}<span class="block text-gray-500">{{ batch.board }}</span>{% endif %}</td>
-          <td class="pr-3 {% if batch.status == 'failed' %}text-red-700{% elif batch.status != 'complete' %}text-amber-700{% else %}text-green-700{% endif %}">
-            {{ batch.status|replace('_', ' ') }}
+          <td class="pr-3 {% if batch.status == 'failed' %}text-red-700{% elif batch.status == 'partial' %}text-amber-700{% elif batch.status == 'complete' %}text-green-700{% else %}text-gray-500{% endif %}">
+            {{ 'Coverage unverified' if batch.status == 'unknown' else batch.status|replace('_', ' ') }}
             {% if batch.has_cursor %}<span class="block text-gray-500">More pages to collect</span>{% endif %}
             {% if batch.recovery_pending %}<span class="block text-amber-700">Recovery pending</span>{% endif %}
             {% if batch.error %}<span class="block text-gray-500 max-w-xs break-words">{{ batch.error_category or 'Request error' }}: {{ batch.error|truncate(180) }}</span>{% endif %}

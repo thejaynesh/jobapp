@@ -44,12 +44,18 @@ def observe(db, job, data: dict, now=None) -> list[str]:
     listing.last_seen_at = max(previous_seen, now) if previous_seen else now
     job.last_seen_at = max(parse_time(job.last_seen_at), now) if job.last_seen_at else now
     updated = parse_time(data.get("updated_at"))
-    older = bool((previous_seen and now < previous_seen)
-                 or (listing.closed_at and now < parse_time(listing.closed_at))
-                 or (updated and listing.upstream_updated_at
-                 and updated < parse_time(listing.upstream_updated_at)))
-    if older:
+    older_observation = bool(previous_seen and now < previous_seen)
+    before_closure = bool((listing.closed_at and now < parse_time(listing.closed_at))
+                          or (job.closed_at and now < parse_time(job.closed_at)))
+    older_revision = bool(updated and listing.upstream_updated_at
+                          and updated < parse_time(listing.upstream_updated_at))
+    if older_observation or before_closure or older_revision:
         data["_stale_revision"] = True
+        # Observation times precede transaction locks. A concurrent sighting
+        # can arrive earlier but commit later, and still supply an unknown
+        # field. That is different from a superseded upstream revision or a
+        # sighting made before the listing closed.
+        data["_stale_observation_only"] = older_observation and not before_closure and not older_revision
         return []
     listing.closed_at = None
     if source in posting_identity.AUTHORITATIVE_SOURCES and (

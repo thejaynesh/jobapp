@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from app.models.job import Job
 from app.models.fetch_run import FetchRun
@@ -123,6 +124,27 @@ def test_identical_observation_updates_freshness_without_another_revision(db):
     assert db.query(ListingRevision).count() == 1
 
 
+@pytest.mark.parametrize("source", ["adzuna", "greenhouse"])
+def test_earlier_observation_fills_missing_facts_without_reverting_newer_values(db, source):
+    _, job = store(db, posting(source=source, salary_min=150000,
+        salary_currency="USD", salary_period="year", is_remote=False,
+        description="The current onsite role."), now=NOW)
+    outcome, same = store(db, posting(source=source, employment_type="contract",
+        salary_min=90000, salary_currency="EUR", salary_period="month", is_remote=True,
+        description="An older remote description that is much longer. " * 20),
+        now=NOW - timedelta(seconds=1))
+    db.commit()
+    db.refresh(job)
+
+    assert outcome == "merged" and same.id == job.id
+    assert job.employment_type == "contract"
+    assert (job.salary_min, job.salary_currency, job.salary_period) == (150000, "USD", "year")
+    assert job.is_remote is False
+    assert job.description == "The current onsite role."
+    assert job.last_seen_at == NOW
+    assert db.query(ListingRevision).count() == 1
+
+
 def test_revision_retention_uses_saved_profile_override(db):
     from app.models.profile import Profile
     db.add(Profile(data={"settings": {"collection_revision_history": 2}}))
@@ -160,11 +182,12 @@ def test_replaying_old_batch_cannot_reopen_a_more_recently_closed_posting(db):
     db.flush()
     db.add(FetchBoardRun(run_id=run.id, source="greenhouse", board="acme",
         status="complete", observed_at=NOW - timedelta(days=1), observed_total=1, returned=1,
-        inserted=0, merged=0, dropped=0, payload=[posting()]))
+        inserted=0, merged=0, dropped=0, payload=[posting(employment_type="contract", is_remote=True)]))
     db.commit()
     assert replay(db) == 1
     db.refresh(job)
     assert job.closed_at == closed_at
+    assert job.employment_type is None and job.is_remote is False
     assert db.query(SourceListing).one().closed_at is not None
 
 

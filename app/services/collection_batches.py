@@ -74,7 +74,7 @@ def replay(db, *, max_age_days=0) -> int:
     for _ in range(100):
         # Reacquire one lease after each commit. Selecting 100 locks at once
         # would release 99 of them when the first batch commits.
-        batch = db.query(FetchBoardRun).filter(FetchBoardRun.payload.isnot(None),
+        batch = db.query(FetchBoardRun).filter(FetchBoardRun.has_pending_payload(),
             FetchBoardRun.id.notin_(attempted)).order_by(FetchBoardRun.observed_at).with_for_update(
                 skip_locked=True).first()
         if batch is None:
