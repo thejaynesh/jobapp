@@ -63,7 +63,11 @@ def store(db, data: dict, *, max_age_days=0, now=None, known=None) -> tuple[str,
                     from app.services.job_fetcher import _note_board
                     if not normalized.get("_stale_revision"):
                         _note_board(job, normalized)
-                    if job.identity_key is None:
+                    # Only when no other row holds the key. A cross-post
+                    # stored under it already made this a unique violation on
+                    # both attempts, dropping the posting on every sighting.
+                    if job.identity_key is None and db.query(Job.id).filter(
+                            Job.identity_key == key).first() is None:
                         job.identity_key = key
                     db.flush()
                     if known is not None:

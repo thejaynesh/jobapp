@@ -138,9 +138,33 @@ def watch(db, name, website="", careers_url="", aliases=None):
     return company
 
 
-def sync_pins(db, names):
-    """Existing priorities gain durable watch records without guessing a domain."""
-    return [watch(db, name) for name in names]
+def sync_pins(db, names, previous=()):
+    """
+    Existing priorities gain durable watch records without guessing a domain.
+
+    Only what this save changed is acted on, and only that is returned for
+    research: a name with no record is watched, and one newly added to the
+    list whose employer was paused is watched again, as /companies does it.
+    Re-running `watch` on every pin each save re-watched employers paused
+    since, reset finished research to pending, and queued fifty tasks.
+    """
+    before = {normal_name(name) for name in previous}
+    records = {}
+    for company in db.query(Company).filter(Company.identity_source == "user"):
+        for alias in [company.name, *(company.aliases or [])]:
+            records.setdefault(normal_name(alias), company)
+    changed = []
+    for name in names:
+        key = normal_name(name)
+        company = records.get(key)
+        if company is None:
+            company = records[key] = watch(db, name)
+        elif key in before or company.watched:
+            continue
+        else:
+            company.watched, company.next_refresh_at = True, None
+        changed.append(company)
+    return changed
 
 
 def research(db, company, profile):

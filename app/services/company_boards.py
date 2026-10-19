@@ -190,7 +190,11 @@ def board_slugs(db: Session, ats: str, limit: int) -> list[str]:
         return []
     from sqlalchemy import or_
     from app.models.company import Company
-    watched = CompanyBoard.company_id.in_(db.query(Company.id).filter(Company.watched.is_(True)))
+    # `IN` is NULL, not false, for a board with no company, and Postgres sorts
+    # NULL first under DESC — so every unlinked board outranked the watched
+    # ones. Coalesced, "not watched" is false whatever the reason.
+    watched = func.coalesce(CompanyBoard.company_id.in_(
+        db.query(Company.id).filter(Company.watched.is_(True))), False)
     eligible = (
         db.query(CompanyBoard.slug)
         .filter(CompanyBoard.ats == ats, CompanyBoard.active.is_(True))

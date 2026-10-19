@@ -177,8 +177,18 @@ def _record(stats: dict, source: str, jobs: list[dict], error: str | None = None
     # When this source last reported, for its duration (see `_run_all_adapters`).
     entry["_last"] = time.monotonic()
     if jobs and any(not j.get("_ingested_outcome") for j in jobs):
-        from app.services.sources.base import BoardResult, publish_batch
-        publish_batch(source, "", BoardResult(jobs=jobs, error=error))
+        from app.services.sources.base import BoardResult, cycle_cfg, publish_batch
+        batch = jobs
+        # Aggregator redirect pages wait for the main loop. Stored now, their
+        # URL is "known" by the time `_resolve_apply_links` asks, so the real
+        # apply link was never followed — and without it the posting cannot
+        # meet the employer's own copy, so it was stored as a second job. The
+        # aggregator returns them again next cycle; durability costs nothing.
+        if getattr(cycle_cfg(), "RESOLVE_APPLY_LINKS", False):
+            from app.services.link_resolver import is_interstitial
+            batch = [j for j in jobs if not is_interstitial(j.get("url") or "")]
+        if batch:
+            publish_batch(source, "", BoardResult(jobs=batch, error=error))
 
 
 def _run_combos(
@@ -1801,19 +1811,34 @@ def _fetch_and_save_jobs(
         entry[outcome] += 1
 
     from app.services.collection_ingest import store as store_posting
+
+    def _already_stored(job_data: dict) -> bool:
+        # Stored by its batch, and nothing learned since (a resolved link, the
+        # registry's name for the board) that would merge differently.
+        return bool(job_data.get("_ingested_outcome")
+                    and job_data.get("apply_url") == job_data.get("_ingested_apply_url")
+                    and job_data.get("company") == job_data.get("_ingested_company"))
+
     linked_jobs = []
-    known = None
+    known, known_chunk = None, None
     for index, job_data in enumerate(raw_jobs):
         try:
-            if (job_data.get("_ingested_outcome")
-                    and job_data.get("apply_url") == job_data.get("_ingested_apply_url")
-                    and job_data.get("company") == job_data.get("_ingested_company")):
+            if _already_stored(job_data):
                 outcome = job_data["_ingested_outcome"]
                 counts[outcome] += 1
                 _tally(job_data.get("source") or "unknown", outcome)
                 continue
-            if known is None or index % _LOOKUP_CHUNK == 0:
-                known = _known_postings(db, raw_jobs[index:index + _LOOKUP_CHUNK])
+            # By chunk number, not `index % _LOOKUP_CHUNK == 0`. When the
+            # posting on the boundary was already stored, the refresh never
+            # ran and the rest of the chunk was answered from the last one's
+            # lookup: legacy rows inserted twice, archived postings back as
+            # new. Only what still needs storing is looked up, and locked.
+            chunk = index // _LOOKUP_CHUNK
+            if chunk != known_chunk:
+                start = chunk * _LOOKUP_CHUNK
+                known = _known_postings(db, [j for j in raw_jobs[start:start + _LOOKUP_CHUNK]
+                                             if not _already_stored(j)])
+                known_chunk = chunk
             outcome, job = store_posting(db, job_data, max_age_days=max_age_days, now=now, known=known)
             # Incremental ingestion already committed this sighting. Preserve
             # its original outcome while allowing resolved links/names to merge.
@@ -1829,11 +1854,15 @@ def _fetch_and_save_jobs(
             _tally(job_data.get("source") or "unknown", "dropped")
             logger.error("job_fetcher: dropped %s at %s (%s) from %s: %s",
                          job_data.get("title"), job_data.get("company"), job_data.get("url"), job_data.get("source"), exc)
-        if (index + 1) % _COMMIT_EVERY == 0:
-            from app.services.company_identity import attach_known_companies
-            attach_known_companies(db, linked_jobs)
-            db.commit()
-            linked_jobs = []
+        finally:
+            # Every path, the early `continue` included. Skipping it there held
+            # the chunk's row and advisory locks until the end of the loop,
+            # blocking the batch writers of every other group.
+            if (index + 1) % _COMMIT_EVERY == 0:
+                from app.services.company_identity import attach_known_companies
+                attach_known_companies(db, linked_jobs)
+                db.commit()
+                linked_jobs = []
     if linked_jobs:
         from app.services.company_identity import attach_known_companies
         attach_known_companies(db, linked_jobs)
@@ -2013,6 +2042,11 @@ def _close_vanished(db: Session, sightings: dict) -> int:
             continue
         for listing in db.query(SourceListing).filter(SourceListing.source == source,
                 SourceListing.board == slug, SourceListing.job_id.isnot(None)):
+            # A row its board lists without an id is never among `ids`
+            # (`saw_postings` drops it), so its absence proves nothing. Closing
+            # it here closed it after every read and reopened it on the next.
+            if not listing.external_id:
+                continue
             if listing.external_id not in ids:
                 listing.closed_at = now
                 affected.add(listing.job_id)

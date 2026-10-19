@@ -211,7 +211,15 @@ def fetch_boards_concurrently(
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
             category = "rate_limited" if status == 429 else "not_found" if status in (404, 410) else "unauthorized" if status in (401, 403) else "request_failed"
-            publish_batch(label.lower(), slug, BoardResult(error=str(exc), error_category=category))
+            # A pass that failed outright collected nothing past the saved
+            # position, so a transient failure resumes from it. Publishing no
+            # cursor erased it, and a board whose tail kept hitting a 503
+            # restarted from the first page every time. A client error may be
+            # the position itself, so that one starts over.
+            transient = not isinstance(status, int) or status == 429 or status >= 500
+            cursor = board_cursor(label.lower(), slug) if transient else None
+            publish_batch(label.lower(), slug, BoardResult(error=str(exc), error_category=category,
+                                                           cursor=cursor or None))
             return []
         listed = getattr(_sighting, "ids", None)
         if result.complete is None and listed is not None:

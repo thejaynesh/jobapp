@@ -158,6 +158,9 @@ def outreach_home(request: Request, q: str = "", channel: str = "", page: int = 
             OutreachMessage.subject.icontains(q, autoescape=True)))
     if channel:
         query = query.filter(OutreachMessage.channel == channel)
+    # Across every page and whatever state is shown, within the search. Taken
+    # from the page of 50 it missed anything older, and a state filter emptied it.
+    due = due_follow_ups(db, limit=50, query=query)
     if state in MESSAGE_STATUSES:
         query = query.filter(OutreachMessage.status == state)
     total = query.count()
@@ -190,7 +193,7 @@ def outreach_home(request: Request, q: str = "", channel: str = "", page: int = 
             "awaiting": [m for m in by_status["sent"] if not m.replied_at],
             "replied": by_status["replied"],
             "closed": by_status["bounced"] + by_status["skipped"],
-            "due": [m for m in messages if m.follow_up_due_at and m.follow_up_due_at <= networking.now() and m.status == "sent"],
+            "due": due,
             "no_message_contacts": contactless,
             "send_blocked": sending_blocked_reason(),
             "channels": MESSAGE_CHANNELS,

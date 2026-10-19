@@ -115,11 +115,16 @@ def record_run(
             stats = {
                 "count": sum(outcome.values()), "errors": [], "enabled": True,
             }
+        # A drop is "failed" only when it is all the source produced. Postings
+        # skipped as already known are the source working; counting them as
+        # nothing let one recurring bad row build a failing streak and rest
+        # the whole source.
+        accounted = sum(outcome.get(k, 0) for k in ("inserted", "merged", "skipped", "stale"))
         db.add(FetchSourceRun(
             run_id=run.id,
             source=source,
             enabled=bool(stats.get("enabled", True)),
-            status=("partial" if outcome.get("inserted") or outcome.get("merged") else "failed")
+            status=("partial" if accounted else "failed")
                    if outcome.get("dropped") else classify(stats),
             fetched=stats.get("count", 0),
             inserted=outcome.get("inserted", 0),

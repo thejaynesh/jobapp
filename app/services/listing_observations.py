@@ -58,8 +58,12 @@ def observe(db, job, data: dict, now=None) -> list[str]:
         data["_stale_observation_only"] = older_observation and not before_closure and not older_revision
         return []
     listing.closed_at = None
-    if source in posting_identity.AUTHORITATIVE_SOURCES and (
-            data.get("_listed_open") or job.closed_note == "no longer listed on its board") and (
+    # The board's listing undoes only a closure the board made. Liveness and
+    # the browser close on what the posting page itself says ("no longer
+    # accepting applications"), which a board API can go on listing for days;
+    # reopening those put the job back in the pipeline until the next check.
+    if source in posting_identity.AUTHORITATIVE_SOURCES and data.get("_listed_open") \
+            and job.closed_note == "no longer listed on its board" and (
             not job.closed_at or now >= parse_time(job.closed_at)):
         job.closed_at = None
         job.closed_note = None
@@ -100,6 +104,13 @@ def observe(db, job, data: dict, now=None) -> list[str]:
                 continue  # Pay was handled as one stated unit above.
             incoming = data[field]
             if field in ("title", "company", "location") and not incoming:
+                continue
+            # What this listing said last time and says again is not a
+            # correction. Board readers derive some fields by rule — remote
+            # because "remote" is in the location — so the same False arrived
+            # every cycle over the True extraction had found, and each time
+            # reset the job to new and sent it back through extraction.
+            if field in previous and previous[field] == incoming:
                 continue
             if getattr(job, field) != incoming:
                 setattr(job, field, incoming)

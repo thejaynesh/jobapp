@@ -79,9 +79,10 @@ def answer(question_id: str = Form(...), answer: str = Form(...), question_kind:
 def pins(companies: str = Form(""), db: Session = Depends(get_db)):
     profile = get_or_create_profile(db)
     data = copy.deepcopy(profile.data or {})
+    previous = data.get("plan_pins") or []
     data["plan_pins"] = list(dict.fromkeys(line.strip()[:120] for line in companies.splitlines() if line.strip()))[:50]
     from app.services import company_identity
-    watched = company_identity.sync_pins(db, data["plan_pins"])
+    watched = company_identity.sync_pins(db, data["plan_pins"], previous)
     profile.data = data
     db.commit()
     from app.routers.companies import _queue

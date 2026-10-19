@@ -938,6 +938,12 @@ def draft_message(
     application = application or contact.application
     job = application.job if application else None
     conversation = networking.conversation_for(db, contact)
+    thread = networking.relationship_context(db, contact)
+    # A new person or conversation is created under one global advisory lock,
+    # held to the end of the transaction. Committed here, it is not also held
+    # across the model call, where every other draft, panel and mailbox pass
+    # that needed a new conversation queued behind it for a minute.
+    db.commit()
 
     prior = [m for m in conversation.messages if m.status in ("sent", "replied") and m.channel == channel]
     prior.sort(key=lambda m: m.sent_at or m.created_at)
@@ -949,7 +955,7 @@ def draft_message(
         kind=kind,
         tone=tone,
         feedback=feedback,
-        thread=networking.relationship_context(db, contact),
+        thread=thread,
     )
     if channel == "email" and kind in {"follow_up", "reply", "thank_you"} and prior:
         original = prior[-1].subject or ""
@@ -999,6 +1005,8 @@ def regenerate_message(db, message: OutreachMessage, feedback: str | None = None
         m for m in (contact.messages or [])
         if m.id != message.id and m.status in ("sent", "replied")
     ]
+    thread = networking.relationship_context(db, contact)
+    db.commit()  # Releases the conversation lock before the model call (`draft_message`).
 
     result = compose_message(
         _profile_data(db),
@@ -1008,7 +1016,7 @@ def regenerate_message(db, message: OutreachMessage, feedback: str | None = None
         kind=message.kind,
         tone=message.tone,
         feedback=feedback or message.feedback,
-        thread=networking.relationship_context(db, contact),
+        thread=thread,
     )
     # Generation can take long enough for another tab to send this draft.
     # Recheck under the same row lock used by the sender before replacing it.
@@ -1159,11 +1167,16 @@ def set_message_status(db, message: OutreachMessage, status: str) -> OutreachMes
     return message
 
 
-def due_follow_ups(db, now: datetime | None = None, limit: int = 50) -> list[OutreachMessage]:
-    """Sent messages whose follow-up window has elapsed with no reply."""
+def due_follow_ups(db, now: datetime | None = None, limit: int = 50, query=None) -> list[OutreachMessage]:
+    """
+    Sent messages whose follow-up window has elapsed with no reply.
+
+    `query` narrows it, as the outreach page's search does; otherwise every
+    message is considered.
+    """
     now = now or _now()
     return (
-        db.query(OutreachMessage)
+        (query if query is not None else db.query(OutreachMessage))
         .filter(
             OutreachMessage.status == "sent",
             OutreachMessage.replied_at.is_(None),

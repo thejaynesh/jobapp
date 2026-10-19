@@ -7,26 +7,34 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.engine import Connection
 
-from app.models.company_board import CompanyBoard
 from app.models.source_listing import FetchBoardRun
 from app.services.collection_ingest import store
 
 logger = logging.getLogger(__name__)
 
+# How many times one posting may fail to store before it stops being replayed.
+_INGEST_ATTEMPTS = 3
+
 
 def _consume(db, batch, jobs, *, max_age_days=0, result=None):
     linked = []
     failed = []
+    abandoned = 0
     outcomes = []
-    from app.services.job_fetcher import _known_postings
+    # A batch that already failed ingestion was consumed once, and that pass
+    # recorded the board's yield. Replaying it again recorded the failed rows
+    # alone as the board's whole listing.
+    recorded = batch.error_category == "ingestion"
+    from app.services.job_fetcher import _known_postings, _name_board_jobs
     known = _known_postings(db, jobs)
-    names = {b.slug: b.company for b in db.query(CompanyBoard).filter(
-        CompanyBoard.ats == batch.source, CompanyBoard.company.isnot(None))} if batch.board else {}
+    if batch.board:
+        # Only a company that is the slug, or blank. A registry name written
+        # over one the adapter read (a brand on a multi-brand tenant) was then
+        # pushed onto the stored job too, since board sources are authoritative.
+        _name_board_jobs(db, jobs)
     from app.services.posting_identity import job_key
     for data in sorted(jobs, key=lambda j: job_key(j.get("source") or "", j.get("url") or "",
                         j.get("source_job_id"), j.get("apply_url"), j.get("ats_slug"))):
-        if names.get(data.get("ats_slug")):
-            data["company"] = names[data["ats_slug"]]
         try:
             outcome, job = store(db, data, max_age_days=max_age_days, known=known, now=batch.observed_at)
             outcomes.append((data, outcome))
@@ -36,19 +44,31 @@ def _consume(db, batch, jobs, *, max_age_days=0, result=None):
                 setattr(batch, outcome, (getattr(batch, outcome) or 0) + 1)
         except Exception as exc:
             batch.dropped = (batch.dropped or 0) + 1
-            failed.append(data)
-            logger.warning("collection: could not ingest %s: %s", data.get("url"), exc)
+            attempts = int(data.get("_ingest_attempts") or 0) + 1
+            # A posting the store rejects (no title, a NUL byte) fails the same
+            # way every time, and anything else gets a few more cycles. Kept
+            # for good, they were replayed every cycle, held their run back
+            # from pruning, and a hundred of them crowded out every batch a
+            # replay could still recover.
+            if isinstance(exc, (ValueError, TypeError)) or attempts >= _INGEST_ATTEMPTS:
+                abandoned += 1
+                logger.error("collection: gave up on %s after %d attempt(s): %s",
+                             data.get("url"), attempts, exc)
+            else:
+                failed.append({**data, "_ingest_attempts": attempts})
+                logger.warning("collection: could not ingest %s: %s", data.get("url"), exc)
     if linked:
         from app.services.company_identity import attach_known_companies
         attach_known_companies(db, linked)
     # Only failed rows remain replayable. Successful inserts and this state
     # transition are committed together, including during crash recovery.
     batch.payload = json.loads(json.dumps(failed, default=str)) if failed else None
-    if failed:
-        batch.error = f"{len(failed)} posting(s) could not be stored; queued for replay"
+    if failed or abandoned:
+        batch.error = f"{len(failed) + abandoned} posting(s) could not be stored" + (
+            f"; {len(failed)} queued for replay" if failed else "")
         batch.error_category = "ingestion"
         batch.status = "partial" if linked else "failed"
-    if batch.board:
+    if batch.board and not recorded:
         from app.services.company_boards import record_fetch_results
         from app.services.sources.base import BoardResult
         result = result or BoardResult(jobs=jobs, complete=True if batch.status == "complete" else None,
