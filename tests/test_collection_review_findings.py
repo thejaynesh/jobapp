@@ -277,6 +277,20 @@ def test_a_board_listing_does_not_reopen_a_job_its_page_says_is_filled(db):
     assert unlisted.closed_at is None and unlisted.closed_note is None
 
 
+def test_a_board_row_without_an_id_that_was_closed_reopens_when_listed_again(db):
+    """Rows the vanished-close bug shut have no id, so no `_listed_open` mark."""
+    from app.services.collection_ingest import store
+    from app.services.job_fetcher import VANISHED_NOTE
+    row = {"source": "pinpoint", "source_job_id": None, "ats_slug": "acme",
+           "url": "https://acme.pinpointhq.com/postings/no-id", "title": "Engineer",
+           "company": "Acme", "location": "Remote", "description": "Build things. " * 20}
+    _, job = store(db, dict(row), now=NOW - timedelta(hours=2))
+    job.closed_at, job.closed_note = NOW - timedelta(hours=1), VANISHED_NOTE
+    db.flush()
+    store(db, dict(row), now=NOW)
+    assert job.closed_at is None and job.closed_note is None
+
+
 def test_a_legacy_row_does_not_take_a_key_another_row_holds(db):
     from app.services import posting_identity
     from app.services.collection_ingest import store

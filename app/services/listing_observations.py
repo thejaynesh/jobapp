@@ -62,7 +62,7 @@ def observe(db, job, data: dict, now=None) -> list[str]:
     # the browser close on what the posting page itself says ("no longer
     # accepting applications"), which a board API can go on listing for days;
     # reopening those put the job back in the pipeline until the next check.
-    if source in posting_identity.AUTHORITATIVE_SOURCES and data.get("_listed_open") \
+    if source in posting_identity.AUTHORITATIVE_SOURCES \
             and job.closed_note == "no longer listed on its board" and (
             not job.closed_at or now >= parse_time(job.closed_at)):
         job.closed_at = None
